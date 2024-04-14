@@ -3,6 +3,7 @@
 use std::{env, process};
 
 use inference_documentation::{build_inference_documentation, InferenceDocumentationConfig};
+use inference_proc_macros::inference_spec;
 
 fn main() {
     let config =
@@ -12,4 +13,15 @@ fn main() {
         });
 
     build_inference_documentation(&config);
+}
+
+
+#[inference_spec(main)]
+mod spec {
+    #[inference_fun]    
+    fn main() {
+        inference! {
+            main -> ().
+        };
+    }
 }

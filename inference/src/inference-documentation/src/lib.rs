@@ -6,7 +6,7 @@ use std::{
     io::Write,
     path::{Path, MAIN_SEPARATOR},
 };
-use syn::{parse_file, spanned::Spanned, visit::Visit};
+use syn::{parse_file, spanned::Spanned, visit::Visit, Expr};
 use walkdir::WalkDir;
 
 #[derive(Debug)]
@@ -22,7 +22,6 @@ impl InferenceDocumentationConfig {
         args.next();
         let working_directory = args.next().unwrap_or(String::from("."));
 
-        //conver to absolute path
         let working_directory = match std::fs::canonicalize(&working_directory) {
             Ok(path) => path.to_string_lossy().to_string(),
             Err(_) => return Err("Failed to convert to absolute path"),
@@ -36,7 +35,6 @@ impl InferenceDocumentationConfig {
             .next()
             .unwrap_or(String::from("./inference_documentation_output"));
         if !std::path::Path::new(&output_directory).exists() {
-            //create output_directory
             if let Err(_) = std::fs::create_dir(&output_directory) {
                 return Err("Failed to create output directory");
             }
@@ -83,6 +81,16 @@ impl<'ast> Visit<'ast> for DocstringsGrabber {
                 span_start.line, span_start.column, span_end.line, span_end.column
             ),
         );
+    }
+
+    fn visit_item_mod(&mut self, item_mod: &'ast syn::ItemMod) {
+        for attr in &item_mod.attrs {
+            if attr.path().is_ident("inference_spec") {
+                let precondition: Expr = attr.parse_args().unwrap();
+                println!("{:?}", precondition.span().source_text().unwrap());
+            }
+        }
+
     }
 }
 

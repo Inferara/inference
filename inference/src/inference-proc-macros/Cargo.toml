@@ -1,14 +1,13 @@
 cargo-features = ["edition2024"]
 
 [package]
-name = "inference-documentation"
+name = "inference-proc-macros"
 version = "0.0.1"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+proc-macro = true
 
 [dependencies]
-walkdir = "2.3.1"
 syn ={ version = "2.0.58", features = ["full", "visit"] }
 proc-macro2 = { version = "1.0.79", features = ["span-locations"] }
-inference-proc-macros = { path = "../inference-proc-macros" }
