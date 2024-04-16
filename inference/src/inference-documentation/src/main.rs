@@ -8,7 +8,7 @@
 //! The result will be a set on .md files created in the `inference_documentation_output` directory.
 //! The directory tree structure will be the same as in the source directory.
 //!
-//! Build in Inferara
+//! Build in **Inferara**
 
 #![warn(clippy::all, clippy::pedantic)]
 
@@ -33,10 +33,21 @@ fn main() {
 mod spec {
     use inference_proc_macros::{inference, inference_fun};
 
-    #[inference_fun(main::main)]
-    fn s_main() {
+    #[inference_fun(main)]
+    fn s_main_signature() {
         inference! {
             r#"main -> ()"#
+        };
+    }
+
+    #[inference_fun(main)]
+    fn s_main_formula() {
+        inference! {
+            r#"
+            InferenceDocumentationConfig::from_cmd_line_args env::args
+            | Ok => build_inference_documentation
+            | Err => panic "Problem parsing arguments: *"
+            "#
         };
     }
 }
