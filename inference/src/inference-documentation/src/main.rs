@@ -10,7 +10,7 @@
 //!
 //! Build in **Inferara**
 
-#![warn(clippy::all, clippy::pedantic)]
+#![warn(clippy::pedantic)]
 
 use std::{env, process};
 
@@ -36,14 +36,14 @@ mod spec {
     #[inference_fun(main)]
     fn s_main_signature() {
         inference! {
-            r"main -> ()"
+            "main -> ()"
         };
     }
 
     #[inference_fun(main)]
     fn s_main_formula() {
         inference! {
-            r"
+            "
             InferenceDocumentationConfig::from_cmd_line_args env::args
             | Ok => build_inference_documentation
             | Err => {
