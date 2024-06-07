@@ -1,0 +1,12 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "examples"
+version = "0.0.1"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+inference-proc-macros = { path = "../src/inference-proc-macros" }
+inference-std = { path = "../src/inference-std" }

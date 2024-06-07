@@ -1,4 +1,4 @@
-workspace = { members = ["src/inference-documentation", "src/inference-proc-macros"] }
+workspace = { members = ["src/inference-documentation", "src/inference-proc-macros", "src/inference-std", "examples"] }
 [package]
 name = "inference"
 version = "0.1.0"

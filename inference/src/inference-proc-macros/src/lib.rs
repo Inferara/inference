@@ -10,8 +10,38 @@ pub fn inference(input: TokenStream) -> TokenStream {
     input
 }
 
+#[proc_macro]
+pub fn assert(input: TokenStream) -> TokenStream {
+    input
+}
+
+#[proc_macro]
+pub fn always(input: TokenStream) -> TokenStream {
+    input
+}
+
+#[proc_macro]
+pub fn apply(input: TokenStream) -> TokenStream {
+    input
+}
+
+#[proc_macro]
+pub fn forall(input: TokenStream) -> TokenStream {
+    input
+}
+
 #[proc_macro_attribute]
 pub fn inference_spec(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn inference_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn theorem(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
