@@ -188,7 +188,7 @@ impl ConstantDefinition {
 pub struct FunctionDefinition {
     pub location: Location,
     pub name: Identifier,
-    pub arguments: Vec<Argument>,
+    pub arguments: Option<Vec<Argument>>,
     pub returns: Option<Type>,
     pub body: Block,
 }
@@ -200,7 +200,7 @@ impl FunctionDefinition {
         end_row: usize,
         end_column: usize,
         name: Identifier,
-        arguments: Vec<Argument>,
+        arguments: Option<Vec<Argument>>,
         returns: Option<Type>,
         body: Block,
     ) -> Self {
@@ -602,6 +602,7 @@ impl TypeDefinitionStatement {
 #[derive(Debug)]
 pub enum Expression {
     Assign(AssignExpression),
+    MemberAccess(MemberAccessExpression),
     FunctionCall(FunctionCallExpression),
     PrefixUnary(PrefixUnaryExpression),
     Assert(AssertExpression),
@@ -611,6 +612,7 @@ pub enum Expression {
     Binary(BinaryExpression),
     Literal(Literal),
     Identifier(Identifier),
+    Type(Type),
 }
 
 #[derive(Debug)]
@@ -642,6 +644,39 @@ impl AssignExpression {
             },
             left: Box::new(left),
             right: Box::new(right),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MemberAccessExpression {
+    pub location: Location,
+    pub expression: Box<Expression>,
+    pub name: Identifier,
+}
+
+impl MemberAccessExpression {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        expression: Expression,
+        name: Identifier,
+    ) -> Self {
+        MemberAccessExpression {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            expression: Box::new(expression),
+            name,
         }
     }
 }
@@ -973,7 +1008,7 @@ pub enum Type {
 #[derive(Debug)]
 pub struct SimpleType {
     pub location: Location,
-    pub name: Identifier,
+    pub name: String,
 }
 
 impl SimpleType {
@@ -982,7 +1017,7 @@ impl SimpleType {
         start_column: usize,
         end_row: usize,
         end_column: usize,
-        name: Identifier,
+        name: String,
     ) -> Self {
         SimpleType {
             location: Location {

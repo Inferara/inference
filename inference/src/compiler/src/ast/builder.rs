@@ -5,9 +5,9 @@ use crate::ast::types::{
     BoolLiteral, ConstantDefinition, ContextDefinition, Definition, Expression,
     ExpressionStatement, ExternalFunctionDefinition, FilterStatement, ForStatement,
     FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
-    Location, NumberLiteral, ParenthesizedExpression, Position, PrefixUnaryExpression,
-    QualifiedType, ReturnStatement, SimpleType, SourceFile, Statement, StringLiteral, Type,
-    TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UseDirective,
+    Location, MemberAccessExpression, NumberLiteral, ParenthesizedExpression, Position,
+    PrefixUnaryExpression, QualifiedType, ReturnStatement, SimpleType, SourceFile, Statement,
+    StringLiteral, Type, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UseDirective,
     VariableDefinitionStatement,
 };
 use tree_sitter::Node;
@@ -126,10 +126,22 @@ fn build_constant_definition(node: &Node, code: &[u8]) -> ConstantDefinition {
 fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
-    let arguments = build_arguments(&node.child_by_field_name("arguments").unwrap(), code);
-    let returns = node
-        .child_by_field_name("returns")
-        .map(|n| build_type(&n, code));
+    let mut arguments = None;
+    let mut returns = None;
+
+    let mut cursor = node.walk();
+    let founded_arguments = node
+        .children_by_field_name("argument", &mut cursor)
+        .map(|segment| build_argument(&segment, code));
+    let founded_arguments: Vec<Argument> = founded_arguments.collect();
+    if !founded_arguments.is_empty() {
+        arguments = Some(founded_arguments);
+    }
+
+    if let Some(returns_node) = node.child_by_field_name("returns") {
+        returns = Some(build_type(&returns_node, code));
+    }
+
     let body = build_block(&node.child_by_field_name("body").unwrap(), code);
 
     FunctionDefinition {
@@ -158,7 +170,7 @@ fn build_external_function_definition(node: &Node, code: &[u8]) -> ExternalFunct
     }
 
     if let Some(returns_node) = node.child_by_field_name("returns") {
-        returns = Some(build_type(&returns_node.child(0).unwrap(), code));
+        returns = Some(build_type(&returns_node, code));
     }
 
     ExternalFunctionDefinition {
@@ -172,24 +184,19 @@ fn build_external_function_definition(node: &Node, code: &[u8]) -> ExternalFunct
 fn build_type_definition(node: &Node, code: &[u8]) -> TypeDefinition {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
-    let type_ = build_type(&node.child_by_field_name("type").unwrap(), code);
+    let typeof_expression_node = node.child_by_field_name("typeof_expression").unwrap();
+    let typeof_expression = build_typeof_expression(&typeof_expression_node, code);
+
+    let type_ = Type::Identifier(Identifier {
+        name: typeof_expression.typeref.name,
+        location: typeof_expression.location,
+    });
 
     TypeDefinition {
         location,
         name,
         type_,
     }
-}
-
-fn build_arguments(node: &Node, code: &[u8]) -> Vec<Argument> {
-    let mut arguments = Vec::new();
-    for i in 0..node.child_count() {
-        let child = node.child(i).unwrap();
-        if child.kind() == "argument_declaration" {
-            arguments.push(build_argument(&child, code));
-        }
-    }
-    arguments
 }
 
 fn build_argument(node: &Node, code: &[u8]) -> Argument {
@@ -239,7 +246,7 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
 
 fn build_expression_statement(node: &Node, code: &[u8]) -> ExpressionStatement {
     let location = get_location(node);
-    let expression = build_expression(&node.child_by_field_name("expression").unwrap(), code);
+    let expression = build_expression(&node.child(0).unwrap(), code);
 
     ExpressionStatement {
         location,
@@ -336,6 +343,9 @@ fn build_type_definition_statement(node: &Node, code: &[u8]) -> TypeDefinitionSt
 fn build_expression(node: &Node, code: &[u8]) -> Expression {
     match node.kind() {
         "assign_expression" => Expression::Assign(build_assign_expression(node, code)),
+        "member_access_expression" => {
+            Expression::MemberAccess(build_member_access_expression(node, code))
+        }
         "function_call_expression" => {
             Expression::FunctionCall(build_function_call_expression(node, code))
         }
@@ -353,6 +363,7 @@ fn build_expression(node: &Node, code: &[u8]) -> Expression {
             Expression::Literal(build_literal(node, code))
         }
         "identifier" => Expression::Identifier(build_identifier(node, code)),
+        "generic_name" => Expression::Type(Type::Generic(build_generic_type(node, code))),
         _ => panic!("Unexpected expression type: {}", node.kind()),
     }
 }
@@ -372,6 +383,21 @@ fn build_assign_expression(node: &Node, code: &[u8]) -> AssignExpression {
         location,
         left,
         right,
+    }
+}
+
+fn build_member_access_expression(node: &Node, code: &[u8]) -> MemberAccessExpression {
+    let location = get_location(node);
+    let expression = Box::new(build_expression(
+        &node.child_by_field_name("expression").unwrap(),
+        code,
+    ));
+    let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
+
+    MemberAccessExpression {
+        location,
+        expression,
+        name,
     }
 }
 
@@ -515,7 +541,9 @@ fn build_number_literal(node: &Node, code: &[u8]) -> NumberLiteral {
 fn build_type(node: &Node, code: &[u8]) -> Type {
     let node_kind = node.kind();
     match node_kind {
-        "simple_type" => Type::Simple(build_simple_type(node, code)),
+        "type_i32" | "type_i64" | "type_u32" | "type_u64" | "type_bool" | "type_unit" => {
+            Type::Simple(build_simple_type(node, code))
+        }
         "generic_type" => Type::Generic(build_generic_type(node, code)),
         "qualified_type" => Type::Qualified(build_qualified_type(node, code)),
         "identifier" => Type::Identifier(build_identifier(node, code)),
@@ -525,28 +553,24 @@ fn build_type(node: &Node, code: &[u8]) -> Type {
 
 fn build_simple_type(node: &Node, code: &[u8]) -> SimpleType {
     let location = get_location(node);
-    let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
+    let name = node.utf8_text(code).unwrap().to_string();
 
     SimpleType { location, name }
 }
 
 fn build_generic_type(node: &Node, code: &[u8]) -> GenericType {
     let location = get_location(node);
-    let base = build_identifier(&node.child_by_field_name("base").unwrap(), code);
-    let mut parameters = Vec::new();
+    let base = build_identifier(&node.child_by_field_name("base_type").unwrap(), code);
 
-    for i in 0..node
-        .child_by_field_name("parameters")
-        .unwrap()
-        .child_count()
-    {
-        let child = node
-            .child_by_field_name("parameters")
-            .unwrap()
-            .child(i)
-            .unwrap();
-        parameters.push(build_type(&child, code));
-    }
+    let n2 = node.child(1).unwrap();
+    let n2_kind = n2.kind();
+
+    let mut cursor = n2.walk();
+
+    let types = n2
+        .children_by_field_name("type", &mut cursor)
+        .map(|segment| build_type(&segment, code));
+    let parameters: Vec<Type> = types.collect();
 
     GenericType {
         location,
@@ -572,17 +596,6 @@ fn build_identifier(node: &Node, code: &[u8]) -> Identifier {
     let name = node.utf8_text(code).unwrap().to_string();
 
     Identifier { location, name }
-}
-
-fn build_identifiers(node: &Node, code: &[u8]) -> Vec<Identifier> {
-    let mut identifiers = Vec::new();
-    for i in 0..node.child_count() {
-        let child = node.child(i).unwrap();
-        if child.kind() == "identifier" {
-            identifiers.push(build_identifier(&child, code));
-        }
-    }
-    identifiers
 }
 
 fn get_location(node: &Node) -> Location {
