@@ -8,7 +8,7 @@ use super::types::{
     Location, MemberAccessExpression, NumberLiteral, OperatorKind, ParenthesizedExpression,
     Position, PrefixUnaryExpression, QualifiedType, ReturnStatement, SimpleType, SourceFile,
     Statement, StringLiteral, Type, TypeDefinition, TypeDefinitionStatement, TypeOfExpression,
-    UseDirective, VariableDefinitionStatement,
+    UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
 };
 
 impl SourceFile {
@@ -543,6 +543,7 @@ impl PrefixUnaryExpression {
         end_row: usize,
         end_column: usize,
         expression: Expression,
+        operator: UnaryOperatorKind,
     ) -> Self {
         PrefixUnaryExpression {
             location: Location {
@@ -556,6 +557,7 @@ impl PrefixUnaryExpression {
                 },
             },
             expression: Box::new(expression),
+            operator,
         }
     }
 }

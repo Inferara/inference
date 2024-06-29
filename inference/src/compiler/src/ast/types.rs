@@ -194,9 +194,15 @@ pub struct FunctionCallExpression {
 }
 
 #[derive(Debug)]
+pub enum UnaryOperatorKind {
+    Neg,
+}
+
+#[derive(Debug)]
 pub struct PrefixUnaryExpression {
     pub location: Location,
     pub expression: Box<Expression>,
+    pub operator: UnaryOperatorKind,
 }
 
 #[derive(Debug)]

@@ -8,7 +8,7 @@ use crate::ast::types::{
     Location, MemberAccessExpression, NumberLiteral, OperatorKind, ParenthesizedExpression,
     Position, PrefixUnaryExpression, QualifiedType, ReturnStatement, SimpleType, SourceFile,
     Statement, StringLiteral, Type, TypeDefinition, TypeDefinitionStatement, TypeOfExpression,
-    UseDirective, VariableDefinitionStatement,
+    UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
 };
 use tree_sitter::Node;
 
@@ -431,9 +431,16 @@ fn build_prefix_unary_expression(node: &Node, code: &[u8]) -> PrefixUnaryExpress
     let location = get_location(node);
     let expression = Box::new(build_expression(&node.child(1).unwrap(), code));
 
+    let operator_node = node.child_by_field_name("operator").unwrap();
+    let operator = match operator_node.kind() {
+        "unary_not" => UnaryOperatorKind::Neg,
+        _ => panic!("Unexpected operator node"),
+    };
+
     PrefixUnaryExpression {
         location,
         expression,
+        operator,
     }
 }
 
