@@ -1,0 +1,7 @@
+use inference::std;
+
+fn foo() {}
+
+context A {}
+
+context B {}

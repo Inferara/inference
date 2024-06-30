@@ -16,7 +16,6 @@ pub struct Location {
 pub struct SourceFile {
     pub location: Location,
     pub use_directives: Vec<UseDirective>,
-    pub context_definitions: Vec<ContextDefinition>,
     pub definitions: Vec<Definition>,
 }
 
@@ -43,6 +42,7 @@ pub struct Identifier {
 
 #[derive(Debug)]
 pub enum Definition {
+    Context(ContextDefinition),
     Constant(ConstantDefinition),
     Function(FunctionDefinition),
     ExternalFunction(ExternalFunctionDefinition),

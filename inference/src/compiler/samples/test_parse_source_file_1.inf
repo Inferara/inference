@@ -1,0 +1,104 @@
+use inference::std;
+use inference::std::collections::{ Array, Set };
+use inference::std::types::Address;
+use { sorting_function } from "./sort.rs";
+
+///this is the sort function Inference spec
+context sort_function_context {
+
+    external fn sorting_function (Address, Address) -> Address;
+    type sf = typeof(sorting_function);
+
+    fn constructor() -> some_context {
+        ctx.type = ContextType::Program;
+        ctx.arh = Arch::WASM;
+        ctx.max_curr_mem = 2 ** 16;
+        ctx.mem = Array<u32>::new(ctx.max_curr_mem);
+    }
+
+    fn valid_address(a: Address) -> Address {
+        assert a < ctx.max_curr_mem && !(a % 4);
+        return a;
+        }
+
+        fn count_values(a: Address, b: Address, val : i32) -> u32 {
+        let res : u32 = 0;
+        for (let i : Address = a; i <= b; i.next()) {
+            if (ctx.mem.at(i) == val) {
+            res = res + 1;
+            }
+        }
+        return res;
+    }
+
+    total fn preserving_count(func : sf) {
+        let a: Address;
+        let b: Address;
+
+        filter {
+            a = valid_Address(i32::all());
+            b = valid_Address(i32::all());
+            assert a <= b;
+        }
+
+        let val : i32 = i32::all();
+        
+        let before : u32 = count_values(a, b, val);
+        func(a, b);
+        let after : u32 = count_values(a, b, val);
+        
+        assert before == after;
+    }
+
+    total fn procuring_sorted(func: sf) {
+        let a: Address;
+        let b: Address;
+        let a0: Address;
+        let b0: Address;
+
+        filter {
+            a = valid_Address(i32::all());
+            b = valid_Address(i32::all());
+            assert a <= b;
+        }
+
+        func(a, b);
+
+        filter {
+            a0 = valid_Address(i32::all());
+            b0 = valid_Address(i32::all());
+
+            assert a <= a0;
+            assert a0 < b0;
+            assert b0 <= b;
+        }
+
+        assert ctx.mem.at(a0) <= ctx.mem.at(b0);
+    }
+
+    total fn no_side_effects(func : sf) {
+        let a: Address;
+        let b: Address;
+
+        let c0: Address;
+
+        filter {
+            a = valid_Address(i32::all());
+            b = valid_Address(i32::all());
+            c = valid_Address(i32::all());
+            assert a <= b;
+            assert c < a || c > b;
+        }
+
+        let before : i32 = ctx.mem.at(c);
+        func(a, b);
+        let after : i32 = ctx.mem.at(c);
+
+        assert before == after;
+    }
+
+    fn proof() -> () {
+        apply preserving_count(sort);
+        apply procuring_sorted(sort);
+    }
+}

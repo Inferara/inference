@@ -12,20 +12,24 @@ fn main() {
     }
 
     let source_file_path = env::args().nth(1).unwrap();
-    parse(&source_file_path);
+    parse_file(&source_file_path);
 }
 
-fn parse(source_file_path: &str) {
+fn parse_file(source_file_path: &str) -> ast::types::SourceFile {
+    let text = fs::read_to_string(source_file_path).expect("Error reading source file");
+    parse(&text)
+}
+
+fn parse(source_code: &str) -> ast::types::SourceFile {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&inference_language)
         .expect("Error loading Inference grammar");
-    let text = fs::read_to_string(source_file_path).expect("Error reading source file");
-    let tree = parser.parse(text.clone(), None).unwrap();
-    let code = text.as_bytes();
+    let tree = parser.parse(source_code, None).unwrap();
+    let code = source_code.as_bytes();
     let ast = build_ast(tree.root_node(), code);
-    println!("{:?}", ast);
+    ast
 }
 
 mod test {
@@ -33,9 +37,10 @@ mod test {
     #[test]
     fn test_parse() {
         let current_dir = std::env::current_dir().unwrap();
-        let path = current_dir.join("tests/example.inf");
+        let path = current_dir.join("samples/example.inf");
         let absolute_path = path.canonicalize().unwrap();
 
-        super::parse(absolute_path.to_str().unwrap());
+        let ast = super::parse_file(absolute_path.to_str().unwrap());
+        assert!(!ast.definitions.is_empty());
     }
 }

@@ -28,7 +28,6 @@ pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
 
         match child_kind {
             "use_directive" => build_use_directive(&mut ast, &child, code),
-            "context_definition" => build_context_definition(&mut ast, &child, code),
             _ => {
                 if let Some(definition) = build_definition(&child, code) {
                     ast.add_definition(definition);
@@ -77,7 +76,7 @@ fn build_use_directive(parent: &mut SourceFile, node: &Node, code: &[u8]) {
     });
 }
 
-fn build_context_definition(parent: &mut SourceFile, node: &Node, code: &[u8]) {
+fn build_context_definition(node: &Node, code: &[u8]) -> ContextDefinition {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
     let mut definitions = Vec::new();
@@ -89,16 +88,17 @@ fn build_context_definition(parent: &mut SourceFile, node: &Node, code: &[u8]) {
         }
     }
 
-    parent.add_context_definition(ContextDefinition {
+    ContextDefinition {
         location,
         name,
         definitions,
-    });
+    }
 }
 
 fn build_definition(node: &Node, code: &[u8]) -> Option<Definition> {
     let kind = node.kind();
     match kind {
+        "context_definition" => Some(Definition::Context(build_context_definition(node, code))),
         "constant_definition" => Some(Definition::Constant(build_constant_definition(node, code))),
         "function_definition" => Some(Definition::Function(build_function_definition(node, code))),
         "external_function_definition" => Some(Definition::ExternalFunction(

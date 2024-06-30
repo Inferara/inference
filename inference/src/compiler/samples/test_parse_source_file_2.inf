@@ -1,0 +1,5 @@
+use inference::std;
+
+context A {}
+
+context B {}

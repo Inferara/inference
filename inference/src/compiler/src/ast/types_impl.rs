@@ -16,17 +16,12 @@ impl SourceFile {
         SourceFile {
             location,
             use_directives: Vec::new(),
-            context_definitions: Vec::new(),
             definitions: Vec::new(),
         }
     }
 
     pub fn add_use_directive(&mut self, use_directive: UseDirective) {
         self.use_directives.push(use_directive);
-    }
-
-    pub fn add_context_definition(&mut self, context_definition: ContextDefinition) {
-        self.context_definitions.push(context_definition);
     }
 
     pub fn add_definition(&mut self, definition: Definition) {
