@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 
 mod ast;
+mod wasm_to_coq_translator;
 
 use ast::builder::build_ast;
 use std::{env, fs, process};
