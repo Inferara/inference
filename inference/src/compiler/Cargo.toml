@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 tree-sitter = ">=0.22.6"
 tree-sitter-inference = "0.0.20"
+wasmparser = "0.214.0"
+anyhow = "1.0.44"

@@ -44,4 +44,15 @@ mod test {
         let ast = super::parse_file(absolute_path.to_str().unwrap());
         assert!(!ast.definitions.is_empty());
     }
+
+    #[test]
+    fn test_wasm_to_coq() {
+        let current_dir = std::env::current_dir().unwrap();
+        let path = current_dir.join("samples/webassembly_linear_memory_bg.wasm");
+        let absolute_path = path.canonicalize().unwrap();
+
+        let bytes = std::fs::read(absolute_path).unwrap();
+        let coq = super::wasm_to_coq_translator::translator::translate_bytes(bytes.as_slice());
+        assert!(!coq.is_empty());
+    }
 }
