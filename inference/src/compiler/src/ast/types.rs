@@ -112,6 +112,8 @@ pub enum Statement {
     If(IfStatement),
     VariableDefinition(VariableDefinitionStatement),
     TypeDefinition(TypeDefinitionStatement),
+    Assert(AssertStatement),
+    Verify(VerifyStatement),
 }
 
 #[derive(Debug)]
@@ -168,11 +170,10 @@ pub struct TypeDefinitionStatement {
 #[derive(Debug)]
 pub enum Expression {
     Assign(AssignExpression),
+    ArrayIndexAccess(ArrayIndexAccessExpression),
     MemberAccess(MemberAccessExpression),
     FunctionCall(FunctionCallExpression),
     PrefixUnary(PrefixUnaryExpression),
-    Assert(AssertExpression),
-    Verify(VerifyExpression),
     Parenthesized(ParenthesizedExpression),
     TypeOf(TypeOfExpression),
     Binary(BinaryExpression),
@@ -186,6 +187,13 @@ pub struct AssignExpression {
     pub location: Location,
     pub left: Box<Expression>,
     pub right: Box<Expression>,
+}
+
+#[derive(Debug)]
+pub struct ArrayIndexAccessExpression {
+    pub location: Location,
+    pub array: Box<Expression>,
+    pub index: Box<Expression>,
 }
 
 #[derive(Debug)]
@@ -215,13 +223,13 @@ pub struct PrefixUnaryExpression {
 }
 
 #[derive(Debug)]
-pub struct AssertExpression {
+pub struct AssertStatement {
     pub location: Location,
     pub expression: Box<Expression>,
 }
 
 #[derive(Debug)]
-pub struct VerifyExpression {
+pub struct VerifyStatement {
     pub location: Location,
     pub function_call: Box<FunctionCallExpression>,
 }
@@ -266,9 +274,16 @@ pub struct BinaryExpression {
 
 #[derive(Debug)]
 pub enum Literal {
+    Array(ArrayLiteral),
     Bool(BoolLiteral),
     String(StringLiteral),
     Number(NumberLiteral),
+}
+
+#[derive(Debug)]
+pub struct ArrayLiteral {
+    pub location: Location,
+    pub elements: Vec<Expression>,
 }
 
 #[derive(Debug)]
@@ -291,6 +306,7 @@ pub struct NumberLiteral {
 
 #[derive(Debug)]
 pub enum Type {
+    Array(TypeArray),
     Simple(SimpleType),
     Generic(GenericType),
     Qualified(QualifiedType),
@@ -315,4 +331,11 @@ pub struct QualifiedType {
     pub location: Location,
     pub qualifier: Identifier,
     pub name: Identifier,
+}
+
+#[derive(Debug)]
+pub struct TypeArray {
+    pub location: Location,
+    pub element_type: Box<Type>,
+    pub size: Option<NumberLiteral>,
 }

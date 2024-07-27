@@ -1,14 +1,15 @@
 #![allow(dead_code)]
 
 use super::types::{
-    Argument, AssertExpression, AssignExpression, BinaryExpression, Block, BoolLiteral,
-    ConstantDefinition, ContextDefinition, Definition, EnumDefinition, Expression,
-    ExpressionStatement, ExternalFunctionDefinition, FilterStatement, ForStatement,
-    FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
-    Location, MemberAccessExpression, NumberLiteral, OperatorKind, ParenthesizedExpression,
-    Position, PrefixUnaryExpression, QualifiedType, ReturnStatement, SimpleType, SourceFile,
-    Statement, StringLiteral, Type, TypeDefinition, TypeDefinitionStatement, TypeOfExpression,
-    UnaryOperatorKind, UseDirective, VariableDefinitionStatement, VerifyExpression,
+    Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
+    BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition, Definition,
+    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition, FilterStatement,
+    ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
+    Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
+    ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
+    SimpleType, SourceFile, Statement, StringLiteral, Type, TypeArray, TypeDefinition,
+    TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind, UseDirective,
+    VariableDefinitionStatement, VerifyStatement,
 };
 
 impl SourceFile {
@@ -507,6 +508,32 @@ impl AssignExpression {
     }
 }
 
+impl ArrayIndexAccessExpression {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        array: Expression,
+        index: Expression,
+    ) -> Self {
+        ArrayIndexAccessExpression {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            array: Box::new(array),
+            index: Box::new(index),
+        }
+    }
+}
+
 impl MemberAccessExpression {
     pub fn new(
         start_row: usize,
@@ -585,7 +612,7 @@ impl PrefixUnaryExpression {
     }
 }
 
-impl AssertExpression {
+impl AssertStatement {
     pub fn new(
         start_row: usize,
         start_column: usize,
@@ -593,7 +620,7 @@ impl AssertExpression {
         end_column: usize,
         expression: Expression,
     ) -> Self {
-        AssertExpression {
+        AssertStatement {
             location: Location {
                 start: Position {
                     row: start_row,
@@ -609,7 +636,7 @@ impl AssertExpression {
     }
 }
 
-impl VerifyExpression {
+impl VerifyStatement {
     pub fn new(
         start_row: usize,
         start_column: usize,
@@ -617,7 +644,7 @@ impl VerifyExpression {
         end_column: usize,
         function_call: FunctionCallExpression,
     ) -> Self {
-        VerifyExpression {
+        VerifyStatement {
             location: Location {
                 start: Position {
                     row: start_row,
@@ -728,6 +755,30 @@ impl BoolLiteral {
                 },
             },
             value,
+        }
+    }
+}
+
+impl ArrayLiteral {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        elements: Vec<Expression>,
+    ) -> Self {
+        ArrayLiteral {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            elements,
         }
     }
 }
@@ -852,6 +903,32 @@ impl QualifiedType {
             },
             qualifier,
             name,
+        }
+    }
+}
+
+impl TypeArray {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        element_type: Box<Type>,
+        size: Option<NumberLiteral>,
+    ) -> Self {
+        TypeArray {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            element_type,
+            size,
         }
     }
 }

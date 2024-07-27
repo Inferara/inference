@@ -108,4 +108,14 @@ context sort_function_context {
     verify procuring_sorted(sort);
   }
 
+  const arr : [i32;3] = [1,2,3];
+
+  fn get_first(xs: [i32; 3]) -> i32 {
+    return xs[0];
+  }
+
+  fn concat_ints(xss : [[i64]]) -> [i64] {
+
+  }
+
 }
