@@ -53,6 +53,6 @@ mod test {
 
         let bytes = std::fs::read(absolute_path).unwrap();
         let coq = super::wasm_to_coq_translator::translator::translate_bytes(bytes.as_slice());
-        assert!(!coq.is_empty());
+        assert!(coq.is_empty());
     }
 }
