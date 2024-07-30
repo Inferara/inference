@@ -48,11 +48,12 @@ mod test {
     #[test]
     fn test_wasm_to_coq() {
         let current_dir = std::env::current_dir().unwrap();
-        let path = current_dir.join("samples/webassembly_linear_memory_bg.wasm");
+        let path = current_dir.join("samples/index.wasm");
         let absolute_path = path.canonicalize().unwrap();
 
         let bytes = std::fs::read(absolute_path).unwrap();
         let coq = super::wasm_to_coq_translator::translator::translate_bytes(bytes.as_slice());
-        assert!(coq.is_empty());
+        assert!(!coq.is_empty());
+        println!("{}", coq);
     }
 }

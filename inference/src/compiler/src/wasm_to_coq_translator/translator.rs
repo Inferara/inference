@@ -1,7 +1,7 @@
 use anyhow::Result;
-use std::io::Read;
+use std::{fmt::format, io::Read};
 use wasmparser::{
-    Export, Parser,
+    Export, Import, Parser,
     Payload::{
         CodeSectionEntry, CodeSectionStart, ComponentAliasSection, ComponentCanonicalSection,
         ComponentExportSection, ComponentImportSection, ComponentInstanceSection, ComponentSection,
@@ -10,34 +10,29 @@ use wasmparser::{
         GlobalSection, ImportSection, InstanceSection, MemorySection, ModuleSection, StartSection,
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
+    TypeRef,
 };
 
 pub fn translate_bytes(bytes: &[u8]) -> String {
     let mut data = Vec::new();
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
-    let res = parse(data).unwrap();
-    String::from("")
+    parse(data).unwrap()
 }
 
-fn parse(data: Vec<u8>) -> Result<()> {
+fn parse(data: Vec<u8>) -> Result<String> {
     let parser = Parser::new(0);
+    let mut imports: Vec<Import> = Vec::new();
     let mut exports: Vec<Export> = Vec::new();
 
     for payload in parser.parse_all(&data) {
         match payload? {
             // Sections for WebAssembly modules
-            Version { num, encoding, .. } => {
-                println!("Version section {num} {encoding:?}");
-            }
-            TypeSection(types) => {
-                for ty in types {
-                    println!(" - {:?}", ty?);
-                }
-            }
-            ImportSection(imports) => {
-                for import in imports {
-                    println!(" - {:?}", import?);
+            Version { .. } => {}
+            TypeSection(_) => {}
+            ImportSection(imports_section) => {
+                for import in imports_section {
+                    imports.push(import?);
                 }
             }
             FunctionSection(functions) => {
@@ -46,6 +41,7 @@ fn parse(data: Vec<u8>) -> Result<()> {
                 }
             }
             TableSection(tables) => {
+                println!("Table Section:");
                 for table in tables {
                     println!(" - {table:?}");
                 }
@@ -127,11 +123,36 @@ fn parse(data: Vec<u8>) -> Result<()> {
     let mut coq = String::new();
     coq.push_str("Require Import String List BinInt BinNat.\n");
     coq.push_str("From Exetasis Require Import WasmStructure.\n");
+    for import in imports {
+        coq.push_str(translate_import_section(&import).as_str());
+    }
     for export in exports {
         coq.push_str(translate_export_section(&export).as_str());
     }
+    coq.push('\n');
+    Ok(coq)
+}
 
-    Ok(())
+fn translate_import_section(import: &Import) -> String {
+    let mut res = String::new();
+    let name = String::from(import.name);
+    let module = String::from(import.module);
+    let definition_name = module.clone() + &name.clone().remove(0).to_uppercase().to_string();
+    res.push_str(format!("Definition {definition_name} : WasmImport :=\n").as_str());
+    res.push_str("{|\n");
+    res.push_str(format!("i_module := \"{name}\";\n").as_str());
+    res.push_str(format!("i_name := \"{module}\";\n").as_str());
+    let kind = match import.ty {
+        TypeRef::Func(index) => format!("id_func {index}"),
+        TypeRef::Global(_) => String::from("id_global"),
+        TypeRef::Memory(_) => String::from("id_mem"),
+        TypeRef::Table(_) => String::from("id_table"),
+        TypeRef::Tag(_) => String::from("id_tag"),
+    };
+    res.push_str(format!("i_desc := {kind} |").as_str());
+    res.push_str("}.\n");
+    res.push('\n');
+    res
 }
 
 fn translate_export_section(export: &Export) -> String {
