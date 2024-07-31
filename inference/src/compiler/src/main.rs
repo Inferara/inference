@@ -52,7 +52,7 @@ mod test {
         let absolute_path = path.canonicalize().unwrap();
 
         let bytes = std::fs::read(absolute_path).unwrap();
-        let coq = super::wasm_to_coq_translator::translator::translate_bytes(bytes.as_slice());
+        let coq = super::wasm_to_coq_translator::wasm_parser::translate_bytes(bytes.as_slice());
         assert!(!coq.is_empty());
     }
 }

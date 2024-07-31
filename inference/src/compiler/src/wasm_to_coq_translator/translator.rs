@@ -1,28 +1,28 @@
-use anyhow::Result;
-use std::io::Read;
 use uuid::Uuid;
-use wasmparser::{
-    Export, Import, MemoryType, Parser,
-    Payload::{
-        CodeSectionEntry, CodeSectionStart, ComponentAliasSection, ComponentCanonicalSection,
-        ComponentExportSection, ComponentImportSection, ComponentInstanceSection, ComponentSection,
-        ComponentStartSection, ComponentTypeSection, CoreTypeSection, CustomSection,
-        DataCountSection, DataSection, ElementSection, End, ExportSection, FunctionSection,
-        GlobalSection, ImportSection, InstanceSection, MemorySection, ModuleSection, StartSection,
-        TableSection, TagSection, TypeSection, UnknownSection, Version,
-    },
-    RefType, Table, TypeRef,
-};
+use wasmparser::{Data, Export, Global, Import, MemoryType, RefType, Table, TypeRef, ValType};
 
-struct WasmParseData<'a> {
-    imports: Vec<Import<'a>>,
-    exports: Vec<Export<'a>>,
-    tables: Vec<Table<'a>>,
-    memory_types: Vec<MemoryType>,
+pub(crate) struct WasmParseData<'a> {
+    pub(crate) imports: Vec<Import<'a>>,
+    pub(crate) exports: Vec<Export<'a>>,
+    pub(crate) tables: Vec<Table<'a>>,
+    pub(crate) memory_types: Vec<MemoryType>,
+    pub(crate) globals: Vec<Global<'a>>,
+    pub(crate) data: Vec<Data<'a>>,
 }
 
 impl WasmParseData<'_> {
-    fn translate(&self) -> String {
+    pub(crate) fn new<'a>() -> WasmParseData<'a> {
+        WasmParseData {
+            imports: Vec::new(),
+            exports: Vec::new(),
+            tables: Vec::new(),
+            memory_types: Vec::new(),
+            globals: Vec::new(),
+            data: Vec::new(),
+        }
+    }
+
+    pub(crate) fn translate(&self) -> String {
         let mut coq = String::new();
         coq.push_str("Require Import String List BinInt BinNat.\n");
         coq.push_str("From Exetasis Require Import WasmStructure.\n");
@@ -38,127 +38,15 @@ impl WasmParseData<'_> {
         for memory_type in &self.memory_types {
             coq.push_str(translate_memory_type(memory_type).as_str());
         }
+        for global in &self.globals {
+            coq.push_str(translate_global(global).as_str());
+        }
+        for data in &self.data {
+            coq.push_str(translate_data(data).as_str());
+        }
         coq.push('\n');
         coq
     }
-}
-
-pub fn translate_bytes(bytes: &[u8]) -> String {
-    let mut data = Vec::new();
-    let mut reader = std::io::Cursor::new(bytes);
-    reader.read_to_end(&mut data).unwrap();
-    let parse_data = parse(&data).unwrap();
-    parse_data.translate()
-}
-
-fn parse(data: &[u8]) -> Result<WasmParseData> {
-    let parser = Parser::new(0);
-    let mut wasm_parse_data = WasmParseData {
-        imports: Vec::new(),
-        exports: Vec::new(),
-        tables: Vec::new(),
-        memory_types: Vec::new(),
-    };
-
-    for payload in parser.parse_all(&data) {
-        match payload? {
-            // Sections for WebAssembly modules
-            Version { .. } => {}
-            TypeSection(_) => {}
-            ImportSection(imports_section) => {
-                for import in imports_section {
-                    wasm_parse_data.imports.push(import?);
-                }
-            }
-            FunctionSection(functions) => {
-                println!("Function Section:");
-                for func in functions {
-                    let f = func?;
-                    println!(" - {f:?}");
-                }
-            }
-            TableSection(tables_section) => {
-                for table in tables_section {
-                    wasm_parse_data.tables.push(table?);
-                }
-            }
-            MemorySection(memories) => {
-                for memory in memories {
-                    wasm_parse_data.memory_types.push(memory?);
-                }
-            }
-            TagSection(tags) => {
-                println!("Tag Section:");
-                for tag in tags {
-                    println!(" - {tag:?}");
-                }
-            }
-            GlobalSection(globals) => {
-                println!("Global Section:");
-                for global in globals {
-                    println!(" - {global:?}");
-                }
-            }
-            ExportSection(export_sections) => {
-                for export in export_sections {
-                    wasm_parse_data.exports.push(export?);
-                }
-            }
-            StartSection { .. } => { /* ... */ }
-            ElementSection(elements) => {
-                for element in elements {
-                    if element.is_ok() {
-                        let elem = element.unwrap();
-                        let items = elem.items;
-                        let kind = elem.kind;
-                    }
-                }
-            }
-            DataCountSection { count, .. } => {
-                println!("Data Count Section: {}", count);
-            }
-            DataSection(data) => {
-                println!("Data Section:");
-                for datum in data {
-                    println!(" - {:?}", datum?);
-                }
-            }
-
-            // Here we know how many functions we'll be receiving as
-            // `CodeSectionEntry`, so we can prepare for that, and
-            // afterwards we can parse and handle each function
-            // individually.
-            CodeSectionStart { .. } => { /* ... */ }
-            CodeSectionEntry(body) => {
-                // here we can iterate over `body` to parse the function
-                // and its locals
-            }
-
-            // Sections for WebAssembly components
-            ModuleSection { .. } => { /* ... */ }
-            InstanceSection(_) => { /* ... */ }
-            CoreTypeSection(_) => { /* ... */ }
-            ComponentSection { .. } => { /* ... */ }
-            ComponentInstanceSection(_) => { /* ... */ }
-            ComponentAliasSection(_) => { /* ... */ }
-            ComponentTypeSection(_) => { /* ... */ }
-            ComponentCanonicalSection(_) => { /* ... */ }
-            ComponentStartSection { .. } => { /* ... */ }
-            ComponentImportSection(_) => { /* ... */ }
-            ComponentExportSection(_) => { /* ... */ }
-
-            CustomSection(_) => { /* ... */ }
-
-            // most likely you'd return an error here
-            UnknownSection { id, .. } => { /* ... */ }
-
-            // Once we've reached the end of a parser we either resume
-            // at the parent parser or the payload iterator is at its
-            // end and we're done.
-            End(_) => {}
-        }
-    }
-    Ok(wasm_parse_data)
 }
 
 fn translate_import(import: &Import) -> String {
@@ -230,21 +118,65 @@ fn translate_table(table: &Table) -> String {
 
 fn translate_memory_type(memory_type: &MemoryType) -> String {
     let mut res = String::new();
-    let id = {
-        let uuid = Uuid::new_v4().to_string();
-        let mut parts = uuid.split('-');
-        parts.next().unwrap().to_string()
-    };
+    let id = get_id();
 
     let max = match memory_type.maximum {
         Some(max) => max.to_string(),
         None => "None".to_string(),
     };
 
-    res.push_str(format!("Definition {id}_mem : WasmMemoryType :=\n").as_str());
+    res.push_str(format!("Definition {id}MemType : WasmMemoryType :=\n").as_str());
     res.push_str("{|\n");
     res.push_str(format!("l_min := 4; l_max := {max}\n").as_str());
     res.push_str("|}.\n");
     res.push('\n');
     res
+}
+
+fn translate_global(global: &Global) -> String {
+    let mut res = String::new();
+    let id = get_id();
+
+    let ty = global.ty;
+    let mutability = ty.mutable;
+
+    res.push_str(format!("Definition {id}Global : WasmGlobalType :=\n").as_str());
+    res.push_str("{|\n");
+    res.push_str(format!("gt_mut := {mutability};\n").as_str());
+
+    let val_type = match ty.content_type {
+        ValType::I32 => "vt_num nt_i32",
+        ValType::I64 => "vt_num nt_i64",
+        ValType::F32 => "vt_num nt_f32",
+        ValType::F64 => "vt_num nt_f64",
+        ValType::V128 => "vt_vec vt_v128",
+        ValType::Ref(ref_type) => match ref_type {
+            RefType::FUNCREF => "vt_ref rt_func",
+            RefType::EXTERNREF => "vt_ref rt_extern",
+            _ => "vt_ref _",
+        },
+    };
+
+    res.push_str(format!("gt_valtype := {val_type};\n").as_str());
+    res.push_str("|}.\n");
+    res.push('\n');
+    res
+}
+
+fn translate_data(data: &Data) -> String {
+    let mut res = String::new();
+    let id = get_id();
+
+    res.push_str(format!("Definition {id}Data : WasmData :=\n").as_str());
+    res.push_str("{|\n");
+
+    res.push_str("|}.\n");
+    res.push('\n');
+    res
+}
+
+fn get_id() -> String {
+    let uuid = Uuid::new_v4().to_string();
+    let mut parts = uuid.split('-');
+    parts.next().unwrap().to_string()
 }
