@@ -191,45 +191,92 @@ fn translate_data(data: &Data) -> String {
 
 fn translate_wasm_expression(expression: &ConstExpr) -> String {
     let mut res = String::new();
-    let mut is_in_block = 0;
 
     for operator in expression.get_operators_reader() {
         if operator.is_ok() {
-            is_in_block = match operator.clone().unwrap() {
-                wasmparser::Operator::Block { .. } => is_in_block + 1,
-                wasmparser::Operator::End => is_in_block - 1,
-                _ => is_in_block,
-            };
-
-            if is_in_block > 0 {}
-
-            match operator.unwrap() {
+            let op = operator.unwrap();
+            match op {
                 wasmparser::Operator::Nop => res.push_str("(ci_nop)"),
                 wasmparser::Operator::Unreachable => res.push_str("(ci_unreachable)"),
-                wasmparser::Operator::Block { blockty } => match blockty {
-                    wasmparser::BlockType::Empty => res.push_str("((ci_block "),
-                    wasmparser::BlockType::Type(valtype) => match valtype {
-                        ValType::I32 => res.push_str("((ci_block bt_val nt_i32 "),
-                        ValType::I64 => res.push_str("((ci_block bt_val nt_i64 "),
-                        ValType::F32 => res.push_str("((ci_block bt_val nt_f32 "),
-                        ValType::F64 => res.push_str("((ci_block bt_val nt_f64 "),
-                        ValType::V128 => res.push_str("((ci_block vt_vec vt_v128 "),
-                        ValType::Ref(ref_type) => match ref_type {
-                            RefType::FUNCREF => res.push_str("((ci_block vt_ref rt_func "),
-                            RefType::EXTERNREF => res.push_str("((ci_block vt_ref rt_extern "),
-                            _ => res.push_str("((ci_block vt_ref "),
+                wasmparser::Operator::Block { blockty }
+                | wasmparser::Operator::Loop { blockty }
+                | wasmparser::Operator::If { blockty } => {
+                    let instruction = match op {
+                        wasmparser::Operator::Block { .. } => "ci_block",
+                        wasmparser::Operator::Loop { .. } => "ci_loop",
+                        wasmparser::Operator::If { .. } => "ci_if",
+                        _ => "",
+                    };
+                    match blockty {
+                        wasmparser::BlockType::Empty => {
+                            res.push_str(format!("(({instruction} (").as_str());
+                        }
+                        wasmparser::BlockType::Type(valtype) => match valtype {
+                            ValType::I32 => {
+                                res.push_str(format!("(({instruction} bt_val nt_i32 (").as_str());
+                            }
+                            ValType::I64 => {
+                                res.push_str(format!("(({instruction} bt_val nt_i64 (").as_str());
+                            }
+                            ValType::F32 => {
+                                res.push_str(format!("(({instruction} bt_val nt_f32 (").as_str());
+                            }
+                            ValType::F64 => {
+                                res.push_str(format!("(({instruction} bt_val nt_f64 (").as_str());
+                            }
+                            ValType::V128 => {
+                                res.push_str(format!("(({instruction} vt_vec vt_v128 (").as_str());
+                            }
+                            ValType::Ref(ref_type) => match ref_type {
+                                RefType::FUNCREF => res
+                                    .push_str(format!("(({instruction} vt_ref rt_func (").as_str()),
+                                RefType::EXTERNREF => res.push_str(
+                                    format!("(({instruction} vt_ref rt_extern (").as_str(),
+                                ),
+                                _ => res.push_str(format!("(({instruction} vt_ref (").as_str()),
+                            },
                         },
-                    },
-                    wasmparser::BlockType::FuncType(index) => {
-                        res.push_str(format!("((ci_block bt_idx {index} ").as_str());
+                        wasmparser::BlockType::FuncType(index) => {
+                            res.push_str(format!("((ci_block bt_idx {index} (").as_str());
+                        }
                     }
-                },
+                }
+                wasmparser::Operator::Else | wasmparser::Operator::End => res.push_str(")\n"),
+                wasmparser::Operator::Br { relative_depth } => {
+                    res.push_str(format!("ci_br {relative_depth})\n").as_str());
+                }
+                wasmparser::Operator::BrIf { relative_depth } => {
+                    res.push_str(format!("ci_br_if {relative_depth})\n").as_str());
+                }
+                wasmparser::Operator::BrTable { targets } => {
+                    res.push_str("ci_br_table");
+                    if !targets.is_empty() {
+                        res.push('(');
+                        for target in targets.targets() {
+                            let id = target.unwrap();
+                            res.push_str(format!("{id}").as_str());
+                            res.push_str(" :: ");
+                        }
+                        res.pop();
+                        res.push(')');
+                    }
+                    let default = targets.default();
+                    res.push_str(format!("{default})\n").as_str());
+                }
+                wasmparser::Operator::Return => res.push_str("ci_return\n"),
+                wasmparser::Operator::Call { function_index } => {
+                    res.push_str(format!("ci_call {function_index})\n").as_str());
+                }
+                wasmparser::Operator::CallIndirect {
+                    type_index,
+                    table_index,
+                } => {
+                    res.push_str(format!("ci_call_indirect ({table_index} {type_index})").as_str());
+                }
                 _ => {}
             }
 
-            if is_in_block == 0 {
-                res.push_str(" :: \n");
-            }
+            res.push_str(":: \n");
         }
     }
     res.pop();
