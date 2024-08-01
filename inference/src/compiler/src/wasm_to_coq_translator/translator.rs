@@ -1,5 +1,7 @@
 use uuid::Uuid;
-use wasmparser::{Data, Export, Global, Import, MemoryType, RefType, Table, TypeRef, ValType};
+use wasmparser::{
+    ConstExpr, Data, DataKind, Export, Global, Import, MemoryType, RefType, Table, TypeRef, ValType,
+};
 
 pub(crate) struct WasmParseData<'a> {
     pub(crate) imports: Vec<Import<'a>>,
@@ -167,11 +169,70 @@ fn translate_data(data: &Data) -> String {
     let mut res = String::new();
     let id = get_id();
 
-    res.push_str(format!("Definition {id}Data : WasmData :=\n").as_str());
+    res.push_str(format!("Definition {id}DataSegment : WasmDataSegment :=\n").as_str());
     res.push_str("{|\n");
+
+    let mode = match &data.kind {
+        DataKind::Active {
+            memory_index,
+            offset_expr,
+        } => {
+            let expression = translate_wasm_expression(offset_expr);
+            format!("dms_active {memory_index} {expression}")
+        }
+        DataKind::Passive => "dsm_passive".to_string(),
+    };
+    res.push_str(format!("ds_mode: {mode};\n").as_str());
 
     res.push_str("|}.\n");
     res.push('\n');
+    res
+}
+
+fn translate_wasm_expression(expression: &ConstExpr) -> String {
+    let mut res = String::new();
+    let mut is_in_block = 0;
+
+    for operator in expression.get_operators_reader() {
+        if operator.is_ok() {
+            is_in_block = match operator.clone().unwrap() {
+                wasmparser::Operator::Block { .. } => is_in_block + 1,
+                wasmparser::Operator::End => is_in_block - 1,
+                _ => is_in_block,
+            };
+
+            if is_in_block > 0 {}
+
+            match operator.unwrap() {
+                wasmparser::Operator::Nop => res.push_str("(ci_nop)"),
+                wasmparser::Operator::Unreachable => res.push_str("(ci_unreachable)"),
+                wasmparser::Operator::Block { blockty } => match blockty {
+                    wasmparser::BlockType::Empty => res.push_str("((ci_block "),
+                    wasmparser::BlockType::Type(valtype) => match valtype {
+                        ValType::I32 => res.push_str("((ci_block bt_val nt_i32 "),
+                        ValType::I64 => res.push_str("((ci_block bt_val nt_i64 "),
+                        ValType::F32 => res.push_str("((ci_block bt_val nt_f32 "),
+                        ValType::F64 => res.push_str("((ci_block bt_val nt_f64 "),
+                        ValType::V128 => res.push_str("((ci_block vt_vec vt_v128 "),
+                        ValType::Ref(ref_type) => match ref_type {
+                            RefType::FUNCREF => res.push_str("((ci_block vt_ref rt_func "),
+                            RefType::EXTERNREF => res.push_str("((ci_block vt_ref rt_extern "),
+                            _ => res.push_str("((ci_block vt_ref "),
+                        },
+                    },
+                    wasmparser::BlockType::FuncType(index) => {
+                        res.push_str(format!("((ci_block bt_idx {index} ").as_str());
+                    }
+                },
+                _ => {}
+            }
+
+            if is_in_block == 0 {
+                res.push_str(" :: \n");
+            }
+        }
+    }
+    res.pop();
     res
 }
 
