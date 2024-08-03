@@ -189,6 +189,7 @@ fn translate_data(data: &Data) -> String {
     res
 }
 
+#[allow(clippy::too_many_lines)]
 fn translate_wasm_expression(expression: &ConstExpr) -> String {
     let mut res = String::new();
 
@@ -272,6 +273,106 @@ fn translate_wasm_expression(expression: &ConstExpr) -> String {
                     table_index,
                 } => {
                     res.push_str(format!("ci_call_indirect ({table_index} {type_index})").as_str());
+                }
+                wasmparser::Operator::I32Load { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_load ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Store { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_store ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Store { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_store ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Load8U { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_load8_u ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load8U { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load8_u ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Load8S { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_load8_s ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load8S { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load8_s ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Load16U { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_load16_u ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load16U { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load16_u ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Load16S { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_load16_s ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load16S { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load16_s ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load32U { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load32_u ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Load32S { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_load32_s ({offset}, {align}))\n").as_str());
+                }
+                /*
+                | mi_i32_store8_u (memarg: WasmMemoryImmediate)
+                | mi_i64_store8_u (memarg: WasmMemoryImmediate)
+                | mi_i32_store8_s (memarg: WasmMemoryImmediate)
+                | mi_i64_store8_s (memarg: WasmMemoryImmediate)
+                | mi_i32_store8_u (memarg: WasmMemoryImmediate)
+                | mi_i64_store8_u (memarg: WasmMemoryImmediate)
+                | mi_i32_store8_s (memarg: WasmMemoryImmediate)
+                | mi_i64_store8_s (memarg: WasmMemoryImmediate)
+                | mi_i32_store16_u (memarg: WasmMemoryImmediate)
+                | mi_i64_store16_u (memarg: WasmMemoryImmediate)
+                | mi_i32_store16_s (memarg: WasmMemoryImmediate)
+                | mi_i64_store16_s (memarg: WasmMemoryImmediate)
+                | mi_i64_store32_u (memarg: WasmMemoryImmediate)
+                | mi_i64_store32_s (memarg: WasmMemoryImmediate)
+                 */
+                wasmparser::Operator::MemorySize { mem }
+                | wasmparser::Operator::MemoryGrow { mem }
+                | wasmparser::Operator::MemoryFill { mem } => {
+                    res.push_str(format!("{mem}").as_str());
+                }
+                wasmparser::Operator::MemoryCopy { dst_mem, src_mem } => {
+                    res.push_str(format!("{dst_mem} {src_mem}").as_str());
+                }
+                wasmparser::Operator::MemoryInit { data_index, .. } => {
+                    res.push_str(format!(" mi_memory_init ({data_index})").as_str());
+                }
+                wasmparser::Operator::DataDrop { data_index } => {
+                    res.push_str(format!(" mi_data_drop ({data_index})").as_str());
                 }
                 _ => {}
             }
