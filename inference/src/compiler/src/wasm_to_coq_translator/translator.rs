@@ -1,6 +1,7 @@
 use uuid::Uuid;
 use wasmparser::{
-    ConstExpr, Data, DataKind, Export, Global, Import, MemoryType, RefType, Table, TypeRef, ValType,
+    ConstExpr, Data, DataKind, Element, ElementKind, Export, Global, Import, MemoryType, RefType,
+    Table, TypeRef, ValType,
 };
 
 use super::wasm_parser;
@@ -12,6 +13,7 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) memory_types: Vec<MemoryType>,
     pub(crate) globals: Vec<Global<'a>>,
     pub(crate) data: Vec<Data<'a>>,
+    pub(crate) elements: Vec<Element<'a>>,
 }
 
 impl WasmParseData<'_> {
@@ -23,6 +25,7 @@ impl WasmParseData<'_> {
             memory_types: Vec::new(),
             globals: Vec::new(),
             data: Vec::new(),
+            elements: Vec::new(),
         }
     }
 
@@ -455,6 +458,52 @@ fn translate_wasm_expression(expression: &ConstExpr) -> String {
         }
     }
     res.pop();
+    res
+}
+
+fn translate_element(element: &Element) -> String {
+    let mut res = String::new();
+    let id = get_id();
+
+    res.push_str(format!("Definition {id}ElementSegment : WasmElementSegment :=\n").as_str());
+    res.push_str("{|\n");
+    match &element.kind {
+        ElementKind::Active {
+            table_index,
+            offset_expr,
+        } => {
+            let expression = translate_wasm_expression(offset_expr);
+            let index = table_index.unwrap();
+            res.push_str(format!("es_mode : esm_active ({index} {expression};\n").as_str());
+        }
+        ElementKind::Passive => {
+            res.push_str("es_mode : esm_passive;\n");
+        }
+        ElementKind::Declared => {
+            res.push_str("es_mode : esm_declarative;\n");
+        }
+    }
+
+    match &element.items {
+        wasmparser::ElementItems::Expressions(ref_type, expr) => {
+            match *ref_type {
+                RefType::FUNCREF => {
+                    res.push_str("es_type : rt_func;\n");
+                }
+                RefType::EXTERNREF => {
+                    res.push_str("es_type : rt_extern;\n");
+                }
+                _ => {}
+            }
+            let expression_translated =
+                translate_wasm_expression(&expr.clone().into_iter().next().unwrap().unwrap());
+            res.push_str(format!("es_init : ({expression_translated});\n").as_str());
+        }
+        wasmparser::ElementItems::Functions(_) => {
+            res.push_str("es_type : rt_func;\n");
+        }
+    }
+
     res
 }
 

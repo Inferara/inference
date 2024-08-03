@@ -22,6 +22,7 @@ pub fn translate_bytes(bytes: &[u8]) -> String {
     parse_data.translate()
 }
 
+#[allow(clippy::match_same_arms)]
 fn parse(data: &[u8]) -> Result<WasmParseData> {
     let parser = Parser::new(0);
     let mut wasm_parse_data = WasmParseData::new();
@@ -29,11 +30,16 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
     for payload in parser.parse_all(data) {
         match payload? {
             // Sections for WebAssembly modules
-            Version { .. } => {}
-            TypeSection(_) => { /*
-                 this section is missed because of its relation to the
-                 gc functionality, proposed [here](https://github.com/torch2424/wasm-by-example/blob/master/examples/reading-and-writing-audio/demo/assemblyscript/README.md)
-                  */
+            Version { .. } => {
+                /*
+                    we do not use it
+                */
+            }
+            TypeSection(_) => {
+                /*
+                    this section is missed because of its relation to the
+                    gc functionality, proposed [here](https://github.com/torch2424/wasm-by-example/blob/master/examples/reading-and-writing-audio/demo/assemblyscript/README.md)
+                */
             }
             ImportSection(imports_section) => {
                 for import in imports_section {
@@ -41,6 +47,7 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                 }
             }
             FunctionSection(functions) => {
+                //TODO handle properly
                 println!("Function Section:");
                 for func in functions {
                     let f = func?;
@@ -57,7 +64,7 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                     wasm_parse_data.memory_types.push(memory?);
                 }
             }
-            TagSection(tags) => { /* ignore, see the TypeSection arm */ }
+            TagSection(_) => { /* ignore, see the TypeSection arm */ }
             GlobalSection(globals) => {
                 for global in globals {
                     wasm_parse_data.globals.push(global?);
@@ -69,15 +76,12 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                 }
             }
             StartSection { .. } => {
+                //TODO handle it properly
                 println!("Start section");
             }
             ElementSection(elements) => {
                 for element in elements {
-                    if element.is_ok() {
-                        let elem = element.unwrap();
-                        let items = elem.items;
-                        let kind = elem.kind;
-                    }
+                    wasm_parse_data.elements.push(element?);
                 }
             }
             DataCountSection { count, .. } => {
