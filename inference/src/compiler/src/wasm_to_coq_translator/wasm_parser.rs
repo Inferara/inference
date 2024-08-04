@@ -47,12 +47,9 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                 }
             }
             FunctionSection(functions) => {
-                //TODO handle properly
-                println!("Function Section:");
-                for func in functions {
-                    let f = func?;
-                    println!(" - {f:?}");
-                }
+                functions.into_iter().for_each(|f| {
+                    wasm_parse_data.function_type_indexes.push(f.unwrap());
+                });
             }
             TableSection(tables_section) => {
                 for table in tables_section {
@@ -88,9 +85,8 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                 println!("Data Count Section: {}", count);
             }
             DataSection(data) => {
-                println!("Data Section:");
                 for datum in data {
-                    println!(" - {:?}", datum?);
+                    wasm_parse_data.data.push(datum?);
                 }
             }
 
@@ -102,8 +98,7 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
                 println!("Code section starts");
             }
             CodeSectionEntry(body) => {
-                // here we can iterate over `body` to parse the function
-                // and its locals
+                wasm_parse_data.function_bodies.push(body);
             }
 
             // Sections for WebAssembly components
@@ -122,7 +117,7 @@ fn parse(data: &[u8]) -> Result<WasmParseData> {
             CustomSection(_) => { /* ... */ }
 
             // most likely you'd return an error here
-            UnknownSection { id, .. } => { /* ... */ }
+            UnknownSection { .. } => { /* ... */ }
 
             // Once we've reached the end of a parser we either resume
             // at the parent parser or the payload iterator is at its

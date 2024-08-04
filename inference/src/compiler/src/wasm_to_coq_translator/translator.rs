@@ -1,10 +1,8 @@
 use uuid::Uuid;
 use wasmparser::{
-    ConstExpr, Data, DataKind, Element, ElementKind, Export, Global, Import, MemoryType, RefType,
-    Table, TypeRef, ValType,
+    Data, DataKind, Element, ElementKind, Export, FunctionBody, Global, Import, MemoryType,
+    OperatorsReader, RefType, Table, TypeRef, ValType,
 };
-
-use super::wasm_parser;
 
 pub(crate) struct WasmParseData<'a> {
     pub(crate) imports: Vec<Import<'a>>,
@@ -14,6 +12,8 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) globals: Vec<Global<'a>>,
     pub(crate) data: Vec<Data<'a>>,
     pub(crate) elements: Vec<Element<'a>>,
+    pub(crate) function_type_indexes: Vec<u32>,
+    pub(crate) function_bodies: Vec<FunctionBody<'a>>,
 }
 
 impl WasmParseData<'_> {
@@ -26,6 +26,8 @@ impl WasmParseData<'_> {
             globals: Vec::new(),
             data: Vec::new(),
             elements: Vec::new(),
+            function_type_indexes: Vec::new(),
+            function_bodies: Vec::new(),
         }
     }
 
@@ -51,6 +53,12 @@ impl WasmParseData<'_> {
         for data in &self.data {
             coq.push_str(translate_data(data).as_str());
         }
+        for element in &self.elements {
+            coq.push_str(translate_element(element).as_str());
+        }
+        coq.push_str(
+            translate_functions(&self.function_type_indexes, &self.function_bodies).as_str(),
+        );
         coq.push('\n');
         coq
     }
@@ -182,7 +190,7 @@ fn translate_data(data: &Data) -> String {
             memory_index,
             offset_expr,
         } => {
-            let expression = translate_wasm_expression(offset_expr);
+            let expression = translate_operators_reader(offset_expr.get_operators_reader());
             format!("dms_active {memory_index} {expression}")
         }
         DataKind::Passive => "dsm_passive".to_string(),
@@ -195,10 +203,10 @@ fn translate_data(data: &Data) -> String {
 }
 
 #[allow(clippy::too_many_lines)]
-fn translate_wasm_expression(expression: &ConstExpr) -> String {
+fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
     let mut res = String::new();
 
-    for operator in expression.get_operators_reader() {
+    for operator in operators_reader {
         if operator.is_ok() {
             let op = operator.unwrap();
             match op {
@@ -349,22 +357,26 @@ fn translate_wasm_expression(expression: &ConstExpr) -> String {
                     let align = memarg.align;
                     res.push_str(format!("mi_i64_load32_s ({offset}, {align}))\n").as_str());
                 }
-                /*
-                | mi_i32_store8_u (memarg: WasmMemoryImmediate)
-                | mi_i64_store8_u (memarg: WasmMemoryImmediate)
-                | mi_i32_store8_s (memarg: WasmMemoryImmediate)
-                | mi_i64_store8_s (memarg: WasmMemoryImmediate)
-                | mi_i32_store8_u (memarg: WasmMemoryImmediate)
-                | mi_i64_store8_u (memarg: WasmMemoryImmediate)
-                | mi_i32_store8_s (memarg: WasmMemoryImmediate)
-                | mi_i64_store8_s (memarg: WasmMemoryImmediate)
-                | mi_i32_store16_u (memarg: WasmMemoryImmediate)
-                | mi_i64_store16_u (memarg: WasmMemoryImmediate)
-                | mi_i32_store16_s (memarg: WasmMemoryImmediate)
-                | mi_i64_store16_s (memarg: WasmMemoryImmediate)
-                | mi_i64_store32_u (memarg: WasmMemoryImmediate)
-                | mi_i64_store32_s (memarg: WasmMemoryImmediate)
-                 */
+                wasmparser::Operator::I32Store8 { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_store8 ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Store8 { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_store8 ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I32Store16 { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i32_store16 ({offset}, {align}))\n").as_str());
+                }
+                wasmparser::Operator::I64Store16 { memarg } => {
+                    let offset = memarg.offset;
+                    let align = memarg.align;
+                    res.push_str(format!("mi_i64_store16 ({offset}, {align}))\n").as_str());
+                }
                 wasmparser::Operator::MemorySize { mem }
                 | wasmparser::Operator::MemoryGrow { mem }
                 | wasmparser::Operator::MemoryFill { mem } => {
@@ -472,8 +484,8 @@ fn translate_element(element: &Element) -> String {
             table_index,
             offset_expr,
         } => {
-            let expression = translate_wasm_expression(offset_expr);
-            let index = table_index.unwrap();
+            let expression = translate_operators_reader(offset_expr.get_operators_reader());
+            let index = table_index.unwrap_or(0);
             res.push_str(format!("es_mode : esm_active ({index} {expression};\n").as_str());
         }
         ElementKind::Passive => {
@@ -495,8 +507,12 @@ fn translate_element(element: &Element) -> String {
                 }
                 _ => {}
             }
-            let expression_translated =
-                translate_wasm_expression(&expr.clone().into_iter().next().unwrap().unwrap());
+            let mut expression_translated = String::new();
+            for e in expr.clone() {
+                let expression = translate_operators_reader(e.unwrap().get_operators_reader());
+                expression_translated.push_str(expression.as_str());
+            }
+
             res.push_str(format!("es_init : ({expression_translated});\n").as_str());
         }
         wasmparser::ElementItems::Functions(_) => {
@@ -504,6 +520,44 @@ fn translate_element(element: &Element) -> String {
         }
     }
 
+    res
+}
+
+fn translate_functions(function_type_indexes: &[u32], function_bodies: &[FunctionBody]) -> String {
+    let mut res = String::new();
+    for (index, function_body) in function_bodies.iter().enumerate() {
+        let id = get_id();
+        let type_index = function_type_indexes[index];
+
+        let body = translate_operators_reader(function_body.get_operators_reader().unwrap());
+
+        res.push_str(format!("Definition {id}Function : WasmFunction :=\n").as_str());
+        res.push_str("{|\n");
+        res.push_str(format!("f_typeidx : {type_index};\n").as_str());
+        let mut locals = String::new();
+        if let Ok(locals_reader) = function_body.get_locals_reader() {
+            for local in locals_reader {
+                let (count, val_type) = local.unwrap();
+                let val_type = match val_type {
+                    ValType::I32 => "vt_num nt_i32",
+                    ValType::I64 => "vt_num nt_i64",
+                    ValType::F32 => "vt_num nt_f32",
+                    ValType::F64 => "vt_num nt_f64",
+                    ValType::V128 => "vt_vec vt_v128",
+                    ValType::Ref(ref_type) => match ref_type {
+                        RefType::FUNCREF => "vt_ref rt_func",
+                        RefType::EXTERNREF => "vt_ref rt_extern",
+                        _ => "vt_ref _",
+                    },
+                };
+                locals.push_str(format!("({count}, {val_type}) :: ").as_str());
+            }
+        }
+        res.push_str(format!("f_locals : {type_index};\n").as_str());
+        res.push_str(format!("f_body : ({body});\n").as_str());
+        res.push_str("|}.\n");
+        res.push('\n');
+    }
     res
 }
 

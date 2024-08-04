@@ -54,5 +54,8 @@ mod test {
         let bytes = std::fs::read(absolute_path).unwrap();
         let coq = super::wasm_to_coq_translator::wasm_parser::translate_bytes(bytes.as_slice());
         assert!(!coq.is_empty());
+        //save to file
+        let coq_file_path = current_dir.join("samples/test_wasm_to_coq.v");
+        std::fs::write(coq_file_path, coq).unwrap();
     }
 }
