@@ -252,7 +252,10 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         }
                     }
                 }
-                wasmparser::Operator::Else | wasmparser::Operator::End => res.push_str(")\n"),
+                wasmparser::Operator::Else | wasmparser::Operator::End => {
+                    res.push_str("nil\n");
+                    continue;
+                }
                 wasmparser::Operator::Br { relative_depth } => {
                     res.push_str(format!("ci_br {relative_depth})\n").as_str());
                 }
@@ -475,7 +478,6 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
             res.push_str(":: \n");
         }
     }
-    res.push_str("nil\n");
     res
 }
 
