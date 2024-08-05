@@ -187,11 +187,11 @@ fn translate_data(data: &Data) -> String {
             offset_expr,
         } => {
             let expression = translate_operators_reader(offset_expr.get_operators_reader());
-            format!("dms_active {memory_index} {expression}")
+            format!("(dms_active {memory_index} {expression})")
         }
         DataKind::Passive => "dsm_passive".to_string(),
     };
-    res.push_str(format!("ds_mode: {mode};\n").as_str());
+    res.push_str(format!("ds_mode := {mode};\n").as_str());
 
     res.push_str("|}.\n");
     res.push('\n');
@@ -465,7 +465,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
             res.push_str(":: \n");
         }
     }
-    res.pop();
+    res.push_str("nil\n");
     res
 }
 
