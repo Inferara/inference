@@ -509,7 +509,7 @@ fn translate_element(element: &Element) -> String {
         } => {
             let expression = translate_operators_reader(offset_expr.get_operators_reader());
             let index = table_index.unwrap_or(0);
-            res.push_str(format!("es_mode := esm_active ({index} {expression};\n").as_str());
+            res.push_str(format!("es_mode := esm_active {index} ({expression});\n").as_str());
         }
         ElementKind::Passive => {
             res.push_str("es_mode := esm_passive;\n");
@@ -543,6 +543,7 @@ fn translate_element(element: &Element) -> String {
         }
     }
 
+    res.push_str("|}.\n");
     res
 }
 
