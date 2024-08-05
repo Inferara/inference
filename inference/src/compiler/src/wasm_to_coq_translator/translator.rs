@@ -181,13 +181,23 @@ fn translate_data(data: &Data) -> String {
     res.push_str(format!("Definition DataSegment{id} : WasmDataSegment :=\n").as_str());
     res.push_str("{|\n");
 
+    let mut bytes_list = String::new();
+
+    for byte in data.data {
+        bytes_list.push_str(format!("{byte}").as_str());
+        bytes_list.push_str(" :: ");
+    }
+    bytes_list.push_str("nil");
+
+    res.push_str(format!("ds_init := {bytes_list};\n").as_str());
+
     let mode = match &data.kind {
         DataKind::Active {
             memory_index,
             offset_expr,
         } => {
             let expression = translate_operators_reader(offset_expr.get_operators_reader());
-            format!("dms_active {memory_index} ({expression})")
+            format!("dsm_active {memory_index} ({expression})")
         }
         DataKind::Passive => "dsm_passive".to_string(),
     };
