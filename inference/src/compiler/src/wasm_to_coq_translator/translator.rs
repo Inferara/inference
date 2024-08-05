@@ -184,7 +184,11 @@ fn translate_data(data: &Data) -> String {
     let mut bytes_list = String::new();
 
     for byte in data.data {
-        bytes_list.push_str(format!("{byte}").as_str());
+        if *byte < 0x10 {
+            bytes_list.push_str(format!("x0{byte:}").as_str());
+        } else {
+            bytes_list.push_str(&format!("{byte:#2x?}")[1..]);
+        }
         bytes_list.push_str(" :: ");
     }
     bytes_list.push_str("nil");
