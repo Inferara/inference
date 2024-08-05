@@ -100,7 +100,7 @@ fn translate_export(export: &Export) -> String {
         wasmparser::ExternalKind::Tag => "ed_tag",
     };
     let index = export.index;
-    res.push_str(format!("e_kind := {kind} {index} |").as_str());
+    res.push_str(format!("e_desc := {kind} {index} |").as_str());
     res.push_str("}.\n");
     res.push('\n');
     res
@@ -110,18 +110,14 @@ fn translate_table(table: &Table) -> String {
     let mut res = String::new();
     let ty = table.ty;
     if ty.element_type == RefType::FUNCREF {
-        let id = {
-            let uuid = Uuid::new_v4().to_string();
-            let mut parts = uuid.split('-');
-            parts.next().unwrap().to_string()
-        };
+        let id = get_id();
 
         let max = match ty.maximum {
             Some(max) => max.to_string(),
             None => "None".to_string(),
         };
 
-        res.push_str(format!("Definition {id}_table : WasmTableType :=\n").as_str());
+        res.push_str(format!("Definition Table{id} : WasmTableType :=\n").as_str());
         res.push_str("{|\n");
         res.push_str(format!("tt_limits := {{| l_min := 4; l_max := {max} |}};\n").as_str());
         res.push_str("tt_reftype := rt_func\n");
@@ -140,7 +136,7 @@ fn translate_memory_type(memory_type: &MemoryType) -> String {
         None => "None".to_string(),
     };
 
-    res.push_str(format!("Definition {id}MemType : WasmMemoryType :=\n").as_str());
+    res.push_str(format!("Definition MemType{id} : WasmMemoryType :=\n").as_str());
     res.push_str("{|\n");
     res.push_str(format!("l_min := 4; l_max := {max}\n").as_str());
     res.push_str("|}.\n");
@@ -155,7 +151,7 @@ fn translate_global(global: &Global) -> String {
     let ty = global.ty;
     let mutability = ty.mutable;
 
-    res.push_str(format!("Definition {id}Global : WasmGlobalType :=\n").as_str());
+    res.push_str(format!("Definition Global{id} : WasmGlobalType :=\n").as_str());
     res.push_str("{|\n");
     res.push_str(format!("gt_mut := {mutability};\n").as_str());
 
@@ -182,7 +178,7 @@ fn translate_data(data: &Data) -> String {
     let mut res = String::new();
     let id = get_id();
 
-    res.push_str(format!("Definition {id}DataSegment : WasmDataSegment :=\n").as_str());
+    res.push_str(format!("Definition DataSegment{id} : WasmDataSegment :=\n").as_str());
     res.push_str("{|\n");
 
     let mode = match &data.kind {
@@ -477,7 +473,7 @@ fn translate_element(element: &Element) -> String {
     let mut res = String::new();
     let id = get_id();
 
-    res.push_str(format!("Definition {id}ElementSegment : WasmElementSegment :=\n").as_str());
+    res.push_str(format!("Definition ElementSegment{id} : WasmElementSegment :=\n").as_str());
     res.push_str("{|\n");
     match &element.kind {
         ElementKind::Active {
@@ -486,13 +482,13 @@ fn translate_element(element: &Element) -> String {
         } => {
             let expression = translate_operators_reader(offset_expr.get_operators_reader());
             let index = table_index.unwrap_or(0);
-            res.push_str(format!("es_mode : esm_active ({index} {expression};\n").as_str());
+            res.push_str(format!("es_mode := esm_active ({index} {expression};\n").as_str());
         }
         ElementKind::Passive => {
-            res.push_str("es_mode : esm_passive;\n");
+            res.push_str("es_mode := esm_passive;\n");
         }
         ElementKind::Declared => {
-            res.push_str("es_mode : esm_declarative;\n");
+            res.push_str("es_mode := esm_declarative;\n");
         }
     }
 
@@ -500,10 +496,10 @@ fn translate_element(element: &Element) -> String {
         wasmparser::ElementItems::Expressions(ref_type, expr) => {
             match *ref_type {
                 RefType::FUNCREF => {
-                    res.push_str("es_type : rt_func;\n");
+                    res.push_str("es_type := rt_func;\n");
                 }
                 RefType::EXTERNREF => {
-                    res.push_str("es_type : rt_extern;\n");
+                    res.push_str("es_type := rt_extern;\n");
                 }
                 _ => {}
             }
@@ -513,10 +509,10 @@ fn translate_element(element: &Element) -> String {
                 expression_translated.push_str(expression.as_str());
             }
 
-            res.push_str(format!("es_init : ({expression_translated});\n").as_str());
+            res.push_str(format!("es_init := ({expression_translated});\n").as_str());
         }
         wasmparser::ElementItems::Functions(_) => {
-            res.push_str("es_type : rt_func;\n");
+            res.push_str("es_type := rt_func;\n");
         }
     }
 
@@ -531,9 +527,9 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
 
         let body = translate_operators_reader(function_body.get_operators_reader().unwrap());
 
-        res.push_str(format!("Definition {id}Function : WasmFunction :=\n").as_str());
+        res.push_str(format!("Definition Function{id} : WasmFunction :=\n").as_str());
         res.push_str("{|\n");
-        res.push_str(format!("f_typeidx : {type_index};\n").as_str());
+        res.push_str(format!("f_typeidx := {type_index};\n").as_str());
         let mut locals = String::new();
         if let Ok(locals_reader) = function_body.get_locals_reader() {
             for local in locals_reader {
@@ -553,8 +549,8 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
                 locals.push_str(format!("({count}, {val_type}) :: ").as_str());
             }
         }
-        res.push_str(format!("f_locals : {type_index};\n").as_str());
-        res.push_str(format!("f_body : ({body});\n").as_str());
+        res.push_str(format!("f_locals := {type_index};\n").as_str());
+        res.push_str(format!("f_body := ({body});\n").as_str());
         res.push_str("|}.\n");
         res.push('\n');
     }
