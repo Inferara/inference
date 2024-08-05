@@ -187,7 +187,7 @@ fn translate_data(data: &Data) -> String {
             offset_expr,
         } => {
             let expression = translate_operators_reader(offset_expr.get_operators_reader());
-            format!("(dms_active {memory_index} {expression})")
+            format!("dms_active {memory_index} ({expression})")
         }
         DataKind::Passive => "dsm_passive".to_string(),
     };
@@ -388,10 +388,10 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     res.push_str(format!("mi_data_drop ({data_index})\n").as_str());
                 }
                 wasmparser::Operator::I32Const { value } => {
-                    res.push_str(format!("ni_i32_const ({value})\n").as_str());
+                    res.push_str(format!("(ni_i32_const {value})\n").as_str());
                 }
                 wasmparser::Operator::I64Const { value } => {
-                    res.push_str(format!("ni_i64_const ({value})\n").as_str());
+                    res.push_str(format!("(ni_i64_const {value})\n").as_str());
                 }
                 wasmparser::Operator::I32Clz => res.push_str("ni_i32_clz\n"),
                 wasmparser::Operator::I32Ctz => res.push_str("ni_i32_ctz\n"),
