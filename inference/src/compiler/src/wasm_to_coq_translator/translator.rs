@@ -35,6 +35,7 @@ impl WasmParseData<'_> {
         let mut coq = String::new();
         coq.push_str("Require Import String List BinInt BinNat.\n");
         coq.push_str("From Exetasis Require Import WasmStructure.\n");
+        coq.push_str("Require Import Coq.Init.Byte.\n");
         for import in &self.imports {
             coq.push_str(translate_import(import).as_str());
         }
