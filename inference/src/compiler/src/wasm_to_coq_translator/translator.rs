@@ -203,6 +203,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
     let mut res = String::new();
 
     for operator in operators_reader {
+        let mut skip_extend_list_operator = false;
         if operator.is_ok() {
             let op = operator.unwrap();
             match op {
@@ -388,80 +389,89 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     res.push_str(format!("mi_data_drop ({data_index})\n").as_str());
                 }
                 wasmparser::Operator::I32Const { value } => {
-                    res.push_str(format!("(ni_i32_const {value})\n").as_str());
+                    res.push_str(format!("i_numeric (ni_i32_const {value})\n").as_str());
                 }
                 wasmparser::Operator::I64Const { value } => {
-                    res.push_str(format!("(ni_i64_const {value})\n").as_str());
+                    res.push_str(format!("i_numeric (ni_i64_const {value})\n").as_str());
                 }
-                wasmparser::Operator::I32Clz => res.push_str("ni_i32_clz\n"),
-                wasmparser::Operator::I32Ctz => res.push_str("ni_i32_ctz\n"),
-                wasmparser::Operator::I32Popcnt => res.push_str("ni_i32_popcnt\n"),
-                wasmparser::Operator::I32Add => res.push_str("ni_i32_add\n"),
-                wasmparser::Operator::I32Sub => res.push_str("ni_i32_sub\n"),
-                wasmparser::Operator::I32Mul => res.push_str("ni_i32_mul\n"),
-                wasmparser::Operator::I32DivS => res.push_str("ni_i32_div_s\n"),
-                wasmparser::Operator::I32DivU => res.push_str("ni_i32_div_u\n"),
-                wasmparser::Operator::I32RemS => res.push_str("ni_i32_rem_s\n"),
-                wasmparser::Operator::I32RemU => res.push_str("ni_i32_rem_u\n"),
-                wasmparser::Operator::I32And => res.push_str("ni_i32_and\n"),
-                wasmparser::Operator::I32Or => res.push_str("ni_i32_or\n"),
-                wasmparser::Operator::I32Xor => res.push_str("ni_i32_xor\n"),
-                wasmparser::Operator::I32Shl => res.push_str("ni_i32_shl\n"),
-                wasmparser::Operator::I32ShrS => res.push_str("ni_i32_shr_s\n"),
-                wasmparser::Operator::I32ShrU => res.push_str("ni_i32_shr_u\n"),
-                wasmparser::Operator::I32Rotl => res.push_str("ni_i32_rotl\n"),
-                wasmparser::Operator::I32Rotr => res.push_str("ni_i32_rotr\n"),
-                wasmparser::Operator::I32Eqz => res.push_str("ni_i32_eqz\n"),
-                wasmparser::Operator::I32Eq => res.push_str("ni_i32_eq\n"),
-                wasmparser::Operator::I32Ne => res.push_str("ni_i32_ne\n"),
-                wasmparser::Operator::I32LtS => res.push_str("ni_i32_lt_s\n"),
-                wasmparser::Operator::I32LtU => res.push_str("ni_i32_lt_u\n"),
-                wasmparser::Operator::I32LeS => res.push_str("ni_i32_le_s\n"),
-                wasmparser::Operator::I32LeU => res.push_str("ni_i32_le_u\n"),
-                wasmparser::Operator::I32GtS => res.push_str("ni_i32_gt_s\n"),
-                wasmparser::Operator::I32GtU => res.push_str("ni_i32_gt_u\n"),
-                wasmparser::Operator::I32GeS => res.push_str("ni_i32_ge_s\n"),
-                wasmparser::Operator::I32GeU => res.push_str("ni_i32_ge_u\n"),
-                wasmparser::Operator::I32Extend8S => res.push_str("ni_i32_extend8_s\n"),
-                wasmparser::Operator::I32Extend16S => res.push_str("ni_i32_extend16_s\n"),
-                wasmparser::Operator::I32WrapI64 => res.push_str("ni_i32_wrap_i64\n"),
-                wasmparser::Operator::I64Clz => res.push_str("ni_i64_clz\n"),
-                wasmparser::Operator::I64Ctz => res.push_str("ni_i64_ctz\n"),
-                wasmparser::Operator::I64Popcnt => res.push_str("ni_i64_popcnt\n"),
-                wasmparser::Operator::I64Add => res.push_str("ni_i64_add\n"),
-                wasmparser::Operator::I64Sub => res.push_str("ni_i64_sub\n"),
-                wasmparser::Operator::I64Mul => res.push_str("ni_i64_mul\n"),
-                wasmparser::Operator::I64DivS => res.push_str("ni_i64_div_s\n"),
-                wasmparser::Operator::I64DivU => res.push_str("ni_i64_div_u\n"),
-                wasmparser::Operator::I64RemS => res.push_str("ni_i64_rem_s\n"),
-                wasmparser::Operator::I64RemU => res.push_str("ni_i64_rem_u\n"),
-                wasmparser::Operator::I64And => res.push_str("ni_i64_and\n"),
-                wasmparser::Operator::I64Or => res.push_str("ni_i64_or\n"),
-                wasmparser::Operator::I64Xor => res.push_str("ni_i64_xor\n"),
-                wasmparser::Operator::I64Shl => res.push_str("ni_i64_shl\n"),
-                wasmparser::Operator::I64ShrS => res.push_str("ni_i64_shr_s\n"),
-                wasmparser::Operator::I64ShrU => res.push_str("ni_i64_shr_u\n"),
-                wasmparser::Operator::I64Rotl => res.push_str("ni_i64_rotl\n"),
-                wasmparser::Operator::I64Rotr => res.push_str("ni_i64_rotr\n"),
-                wasmparser::Operator::I64Eqz => res.push_str("ni_i64_eqz\n"),
-                wasmparser::Operator::I64Eq => res.push_str("ni_i64_eq\n"),
-                wasmparser::Operator::I64Ne => res.push_str("ni_i64_ne\n"),
-                wasmparser::Operator::I64LtS => res.push_str("ni_i64_lt_s\n"),
-                wasmparser::Operator::I64LtU => res.push_str("ni_i64_lt_u\n"),
-                wasmparser::Operator::I64LeS => res.push_str("ni_i64_le_s\n"),
-                wasmparser::Operator::I64LeU => res.push_str("ni_i64_le_u\n"),
-                wasmparser::Operator::I64GtS => res.push_str("ni_i64_gt_s\n"),
-                wasmparser::Operator::I64GtU => res.push_str("ni_i64_gt_u\n"),
-                wasmparser::Operator::I64GeS => res.push_str("ni_i64_ge_s\n"),
-                wasmparser::Operator::I64GeU => res.push_str("ni_i64_ge_u\n"),
-                wasmparser::Operator::I64Extend8S => res.push_str("ni_i64_extend8_s\n"),
-                wasmparser::Operator::I64Extend16S => res.push_str("ni_i64_extend16_s\n"),
-                wasmparser::Operator::I64Extend32S => res.push_str("ni_i64_extend32_s\n"),
-                wasmparser::Operator::I64ExtendI32S => res.push_str("ni_i64_extend_i32_s\n"),
-                wasmparser::Operator::I64ExtendI32U => res.push_str("ni_i64_extend_i32_u\n"),
-                _ => {}
+                wasmparser::Operator::I32Clz => res.push_str("i_numeric ni_i32_clz\n"),
+                wasmparser::Operator::I32Ctz => res.push_str("i_numeric ni_i32_ctz\n"),
+                wasmparser::Operator::I32Popcnt => res.push_str("i_numeric ni_i32_popcnt\n"),
+                wasmparser::Operator::I32Add => res.push_str("i_numeric ni_i32_add\n"),
+                wasmparser::Operator::I32Sub => res.push_str("i_numeric ni_i32_sub\n"),
+                wasmparser::Operator::I32Mul => res.push_str("i_numeric ni_i32_mul\n"),
+                wasmparser::Operator::I32DivS => res.push_str("i_numeric ni_i32_div_s\n"),
+                wasmparser::Operator::I32DivU => res.push_str("i_numeric ni_i32_div_u\n"),
+                wasmparser::Operator::I32RemS => res.push_str("i_numeric ni_i32_rem_s\n"),
+                wasmparser::Operator::I32RemU => res.push_str("i_numeric ni_i32_rem_u\n"),
+                wasmparser::Operator::I32And => res.push_str("i_numeric ni_i32_and\n"),
+                wasmparser::Operator::I32Or => res.push_str("i_numeric ni_i32_or\n"),
+                wasmparser::Operator::I32Xor => res.push_str("i_numeric ni_i32_xor\n"),
+                wasmparser::Operator::I32Shl => res.push_str("i_numeric ni_i32_shl\n"),
+                wasmparser::Operator::I32ShrS => res.push_str("i_numeric ni_i32_shr_s\n"),
+                wasmparser::Operator::I32ShrU => res.push_str("i_numeric ni_i32_shr_u\n"),
+                wasmparser::Operator::I32Rotl => res.push_str("i_numeric ni_i32_rotl\n"),
+                wasmparser::Operator::I32Rotr => res.push_str("i_numeric ni_i32_rotr\n"),
+                wasmparser::Operator::I32Eqz => res.push_str("i_numeric ni_i32_eqz\n"),
+                wasmparser::Operator::I32Eq => res.push_str("i_numeric ni_i32_eq\n"),
+                wasmparser::Operator::I32Ne => res.push_str("i_numeric ni_i32_ne\n"),
+                wasmparser::Operator::I32LtS => res.push_str("i_numeric ni_i32_lt_s\n"),
+                wasmparser::Operator::I32LtU => res.push_str("i_numeric ni_i32_lt_u\n"),
+                wasmparser::Operator::I32LeS => res.push_str("i_numeric ni_i32_le_s\n"),
+                wasmparser::Operator::I32LeU => res.push_str("i_numeric ni_i32_le_u\n"),
+                wasmparser::Operator::I32GtS => res.push_str("i_numeric ni_i32_gt_s\n"),
+                wasmparser::Operator::I32GtU => res.push_str("i_numeric ni_i32_gt_u\n"),
+                wasmparser::Operator::I32GeS => res.push_str("i_numeric ni_i32_ge_s\n"),
+                wasmparser::Operator::I32GeU => res.push_str("i_numeric ni_i32_ge_u\n"),
+                wasmparser::Operator::I32Extend8S => res.push_str("i_numeric ni_i32_extend8_s\n"),
+                wasmparser::Operator::I32Extend16S => res.push_str("i_numeric ni_i32_extend16_s\n"),
+                wasmparser::Operator::I32WrapI64 => res.push_str("i_numeric ni_i32_wrap_i64\n"),
+                wasmparser::Operator::I64Clz => res.push_str("i_numeric ni_i64_clz\n"),
+                wasmparser::Operator::I64Ctz => res.push_str("i_numeric ni_i64_ctz\n"),
+                wasmparser::Operator::I64Popcnt => res.push_str("i_numeric ni_i64_popcnt\n"),
+                wasmparser::Operator::I64Add => res.push_str("i_numeric ni_i64_add\n"),
+                wasmparser::Operator::I64Sub => res.push_str("i_numeric ni_i64_sub\n"),
+                wasmparser::Operator::I64Mul => res.push_str("i_numeric ni_i64_mul\n"),
+                wasmparser::Operator::I64DivS => res.push_str("i_numeric ni_i64_div_s\n"),
+                wasmparser::Operator::I64DivU => res.push_str("i_numeric ni_i64_div_u\n"),
+                wasmparser::Operator::I64RemS => res.push_str("i_numeric ni_i64_rem_s\n"),
+                wasmparser::Operator::I64RemU => res.push_str("i_numeric ni_i64_rem_u\n"),
+                wasmparser::Operator::I64And => res.push_str("i_numeric ni_i64_and\n"),
+                wasmparser::Operator::I64Or => res.push_str("i_numeric ni_i64_or\n"),
+                wasmparser::Operator::I64Xor => res.push_str("i_numeric ni_i64_xor\n"),
+                wasmparser::Operator::I64Shl => res.push_str("i_numeric ni_i64_shl\n"),
+                wasmparser::Operator::I64ShrS => res.push_str("i_numeric ni_i64_shr_s\n"),
+                wasmparser::Operator::I64ShrU => res.push_str("i_numeric ni_i64_shr_u\n"),
+                wasmparser::Operator::I64Rotl => res.push_str("i_numeric ni_i64_rotl\n"),
+                wasmparser::Operator::I64Rotr => res.push_str("i_numeric ni_i64_rotr\n"),
+                wasmparser::Operator::I64Eqz => res.push_str("i_numeric ni_i64_eqz\n"),
+                wasmparser::Operator::I64Eq => res.push_str("i_numeric ni_i64_eq\n"),
+                wasmparser::Operator::I64Ne => res.push_str("i_numeric ni_i64_ne\n"),
+                wasmparser::Operator::I64LtS => res.push_str("i_numeric ni_i64_lt_s\n"),
+                wasmparser::Operator::I64LtU => res.push_str("i_numeric ni_i64_lt_u\n"),
+                wasmparser::Operator::I64LeS => res.push_str("i_numeric ni_i64_le_s\n"),
+                wasmparser::Operator::I64LeU => res.push_str("i_numeric ni_i64_le_u\n"),
+                wasmparser::Operator::I64GtS => res.push_str("i_numeric ni_i64_gt_s\n"),
+                wasmparser::Operator::I64GtU => res.push_str("i_numeric ni_i64_gt_u\n"),
+                wasmparser::Operator::I64GeS => res.push_str("i_numeric ni_i64_ge_s\n"),
+                wasmparser::Operator::I64GeU => res.push_str("i_numeric ni_i64_ge_u\n"),
+                wasmparser::Operator::I64Extend8S => res.push_str("i_numeric ni_i64_extend8_s\n"),
+                wasmparser::Operator::I64Extend16S => res.push_str("i_numeric ni_i64_extend16_s\n"),
+                wasmparser::Operator::I64Extend32S => res.push_str("i_numeric ni_i64_extend32_s\n"),
+                wasmparser::Operator::I64ExtendI32S => {
+                    res.push_str("i_numeric ni_i64_extend_i32_s\n");
+                }
+                wasmparser::Operator::I64ExtendI32U => {
+                    res.push_str("i_numeric ni_i64_extend_i32_u\n");
+                }
+                _ => {
+                    skip_extend_list_operator = true;
+                }
             }
 
+            if skip_extend_list_operator {
+                continue;
+            }
             res.push_str(":: \n");
         }
     }
