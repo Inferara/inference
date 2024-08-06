@@ -547,7 +547,8 @@ fn translate_element(element: &Element) -> String {
             }
             res.push_str("es_type := rt_func;\n");
             res.push_str(
-                format!("es_init := (i_reference (ri_ref_func {index_val}) :: nil);\n").as_str(),
+                format!("es_init := (i_reference (ri_ref_func {index_val}) :: nil) :: nil;\n")
+                    .as_str(),
             );
         }
     }
