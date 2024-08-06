@@ -578,7 +578,7 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
         let mut locals = String::new();
         if let Ok(locals_reader) = function_body.get_locals_reader() {
             for local in locals_reader {
-                let (count, val_type) = local.unwrap();
+                let (_, val_type) = local.unwrap();
                 let val_type = match val_type {
                     ValType::I32 => "vt_num nt_i32",
                     ValType::I64 => "vt_num nt_i64",
@@ -591,11 +591,12 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
                         _ => "vt_ref _",
                     },
                 };
-                locals.push_str(format!("({count}, {val_type}) :: ").as_str());
+                locals.push_str(format!("{val_type} :: ").as_str());
             }
         }
-        res.push_str(format!("f_locals := {type_index};\n").as_str());
-        res.push_str(format!("f_body := ({body});\n").as_str());
+        locals.push_str("nil");
+        res.push_str(format!("f_locals := {locals};\n").as_str());
+        res.push_str(format!("f_body := ({body})\n").as_str());
         res.push_str("|}.\n");
         res.push('\n');
     }
