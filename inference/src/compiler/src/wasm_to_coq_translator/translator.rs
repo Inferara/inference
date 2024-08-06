@@ -216,9 +216,10 @@ fn translate_data(data: &Data) -> String {
 #[allow(clippy::too_many_lines)]
 fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
     let mut res = String::new();
-    let mut is_in_block = false;
+    let mut blocks_stack: Vec<(bool, bool)> = Vec::new();
     let total_ops = operators_reader.clone().into_iter().count();
     let mut current_op = 0;
+
     for operator in operators_reader {
         current_op += 1;
         let mut skip_extend_list_operator = false;
@@ -238,63 +239,82 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     };
                     match blockty {
                         wasmparser::BlockType::Empty => {
-                            res.push_str(format!("{instruction} (bt_val None) (").as_str());
+                            res.push_str(format!("{instruction} (bt_val None) ").as_str());
                         }
                         wasmparser::BlockType::Type(valtype) => match valtype {
                             ValType::I32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_i32) (").as_str(),
+                                    format!("i_vector {instruction} bt_val nt_i32").as_str(),
                                 );
                             }
                             ValType::I64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_i64) (").as_str(),
+                                    format!("i_vector {instruction} bt_val nt_i64").as_str(),
                                 );
                             }
                             ValType::F32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_f32) (").as_str(),
+                                    format!("i_vector {instruction} bt_val nt_f32").as_str(),
                                 );
                             }
                             ValType::F64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_f64) (").as_str(),
+                                    format!("i_vector {instruction} bt_val nt_f64").as_str(),
                                 );
                             }
                             ValType::V128 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} vt_vec vt_v128) (").as_str(),
+                                    format!("i_vector {instruction} vt_vec vt_v128").as_str(),
                                 );
                             }
                             ValType::Ref(ref_type) => match ref_type {
                                 RefType::FUNCREF => {
                                     res.push_str(
-                                        format!("i_reference {instruction} vt_ref rt_func) (")
+                                        format!("i_reference {instruction} vt_ref rt_func")
                                             .as_str(),
                                     );
                                 }
                                 RefType::EXTERNREF => res.push_str(
-                                    format!("i_reference {instruction} vt_ref rt_extern) (")
-                                        .as_str(),
+                                    format!("i_reference {instruction} vt_ref rt_extern").as_str(),
                                 ),
-                                _ => res.push_str(
-                                    format!("i_reference {instruction} vt_ref) (").as_str(),
-                                ),
+                                _ => res
+                                    .push_str(format!("i_reference {instruction} vt_ref").as_str()),
                             },
                         },
                         wasmparser::BlockType::FuncType(index) => {
-                            res.push_str(format!("{instruction} bt_idx {index}) (").as_str());
+                            res.push_str(format!("{instruction} bt_idx {index}").as_str());
                         }
                     }
-                    is_in_block = true;
+
+                    blocks_stack.push((instruction == "i_control (ci_if", false));
                     continue;
                 }
-                wasmparser::Operator::Else | wasmparser::Operator::End => {
-                    if is_in_block {
+                wasmparser::Operator::Else => {
+                    let (is_if, is_else) = blocks_stack.pop().unwrap();
+                    if is_if {
+                        res.push_str("nil )( ");
+                        blocks_stack.pop();
+                        blocks_stack.push((true, true));
+                        continue;
+                    }
+                    blocks_stack.push((is_if, is_else));
+                }
+                wasmparser::Operator::End => {
+                    if blocks_stack.is_empty() {
                         res.push_str("nil)\n");
-                        is_in_block = false;
+                        continue;
+                    }
+
+                    let (is_if, is_else) = blocks_stack.pop().unwrap();
+
+                    if is_if {
+                        if is_else {
+                            res.push_str("nil)");
+                        } else {
+                            res.push_str("nil) nil)");
+                        }
                     } else {
-                        res.push_str("nil\n");
+                        res.push_str(")\n");
                     }
 
                     if current_op < total_ops {
