@@ -519,22 +519,6 @@ fn translate_element(element: &Element) -> String {
 
     res.push_str(format!("Definition ElementSegment{id} : WasmElementSegment :=\n").as_str());
     res.push_str("{|\n");
-    match &element.kind {
-        ElementKind::Active {
-            table_index,
-            offset_expr,
-        } => {
-            let expression = translate_operators_reader(offset_expr.get_operators_reader());
-            let index = table_index.unwrap_or(0);
-            res.push_str(format!("es_mode := esm_active {index} ({expression});\n").as_str());
-        }
-        ElementKind::Passive => {
-            res.push_str("es_mode := esm_passive;\n");
-        }
-        ElementKind::Declared => {
-            res.push_str("es_mode := esm_declarative;\n");
-        }
-    }
 
     match &element.items {
         wasmparser::ElementItems::Expressions(ref_type, expr) => {
@@ -555,8 +539,34 @@ fn translate_element(element: &Element) -> String {
 
             res.push_str(format!("es_init := ({expression_translated});\n").as_str());
         }
-        wasmparser::ElementItems::Functions(_) => {
+        wasmparser::ElementItems::Functions(indexes) => {
+            let mut index_val = String::new();
+            for index in indexes.clone() {
+                let index_unwrapped = index.unwrap();
+                index_val.push_str(format!("{index_unwrapped} :: ").as_str());
+            }
+            index_val.push_str("nil");
             res.push_str("es_type := rt_func;\n");
+            res.push_str(
+                format!("es_init := (i_reference (ri_ref_func {index_val}) :: nil);\n").as_str(),
+            );
+        }
+    }
+
+    match &element.kind {
+        ElementKind::Active {
+            table_index,
+            offset_expr,
+        } => {
+            let expression = translate_operators_reader(offset_expr.get_operators_reader());
+            let index = table_index.unwrap_or(0);
+            res.push_str(format!("es_mode := esm_active {index} ({expression})\n").as_str());
+        }
+        ElementKind::Passive => {
+            res.push_str("es_mode := esm_passive\n");
+        }
+        ElementKind::Declared => {
+            res.push_str("es_mode := esm_declarative\n");
         }
     }
 
