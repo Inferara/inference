@@ -543,9 +543,8 @@ fn translate_element(element: &Element) -> String {
             let mut index_val = String::new();
             for index in indexes.clone() {
                 let index_unwrapped = index.unwrap();
-                index_val.push_str(format!("{index_unwrapped} :: ").as_str());
+                index_val.push_str(format!("{index_unwrapped}").as_str());
             }
-            index_val.push_str("nil");
             res.push_str("es_type := rt_func;\n");
             res.push_str(
                 format!("es_init := (i_reference (ri_ref_func {index_val}) :: nil);\n").as_str(),
