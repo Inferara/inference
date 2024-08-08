@@ -289,7 +289,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         }
                     }
 
-                    blocks_stack.push((instruction == "i_control (ci_if ", false));
+                    blocks_stack.push((instruction == "i_control (ci_if", false));
                     continue;
                 }
                 wasmparser::Operator::Else => {
