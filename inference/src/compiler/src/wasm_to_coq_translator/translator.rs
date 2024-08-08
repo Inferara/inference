@@ -242,16 +242,28 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         }
                         wasmparser::BlockType::Type(valtype) => match valtype {
                             ValType::I32 => {
-                                res.push_str(format!("{instruction} (bt_val nt_i32 ").as_str());
+                                res.push_str(
+                                    format!("{instruction} (bt_val (Some (vt_num nt_i32))) ( ")
+                                        .as_str(),
+                                );
                             }
                             ValType::I64 => {
-                                res.push_str(format!("{instruction} (bt_val nt_i64 ").as_str());
+                                res.push_str(
+                                    format!("{instruction} (bt_val (Some (vt_num nt_i64))) ( ")
+                                        .as_str(),
+                                );
                             }
                             ValType::F32 => {
-                                res.push_str(format!("{instruction} (bt_val nt_f32 ").as_str());
+                                res.push_str(
+                                    format!("{instruction} (bt_val (Some (vt_num nt_f32))) ( ")
+                                        .as_str(),
+                                );
                             }
                             ValType::F64 => {
-                                res.push_str(format!("{instruction} (bt_val nt_f64 ").as_str());
+                                res.push_str(
+                                    format!("{instruction} (bt_val (Some (vt_num nt_f64))) ( ")
+                                        .as_str(),
+                                );
                             }
                             ValType::V128 => {
                                 res.push_str(format!("{instruction} (vt_vec vt_v128 ").as_str());
