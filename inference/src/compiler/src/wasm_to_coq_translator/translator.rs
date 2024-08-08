@@ -464,13 +464,17 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     let align = memarg.align;
                     res.push_str(format!("i_memory (mi_i64_store16 {{| mi_offset := {offset}; mi_align := {align} |}})\n").as_str());
                 }
-                wasmparser::Operator::MemorySize { mem }
-                | wasmparser::Operator::MemoryGrow { mem }
-                | wasmparser::Operator::MemoryFill { mem } => {
-                    res.push_str(format!("i_memory {mem}").as_str());
+                wasmparser::Operator::MemorySize { .. } => {
+                    res.push_str("i_memory mi_memory_size\n");
                 }
-                wasmparser::Operator::MemoryCopy { dst_mem, src_mem } => {
-                    res.push_str(format!("i_memory {dst_mem} {src_mem}\n").as_str());
+                wasmparser::Operator::MemoryGrow { .. } => {
+                    res.push_str("i_memory mi_memory_grow\n");
+                }
+                wasmparser::Operator::MemoryFill { .. } => {
+                    res.push_str("i_memory mi_memory_fill\n");
+                }
+                wasmparser::Operator::MemoryCopy { .. } => {
+                    res.push_str("i_memory mi_memory_copy\n");
                 }
                 wasmparser::Operator::MemoryInit { data_index, .. } => {
                     res.push_str(format!("i_memory mi_memory_init ({data_index})\n").as_str());
