@@ -222,7 +222,6 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
 
     for operator in operators_reader {
         current_op += 1;
-        let mut skip_extend_list_operator = false;
         if operator.is_ok() {
             let op = operator.unwrap();
             match op {
@@ -244,50 +243,51 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         wasmparser::BlockType::Type(valtype) => match valtype {
                             ValType::I32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} (bt_val nt_i32").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_i32 ").as_str(),
                                 );
                             }
                             ValType::I64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} (bt_val nt_i64").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_i64 ").as_str(),
                                 );
                             }
                             ValType::F32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} (bt_val nt_f32").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_f32 ").as_str(),
                                 );
                             }
                             ValType::F64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} (bt_val nt_f64").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_f64 ").as_str(),
                                 );
                             }
                             ValType::V128 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} (vt_vec vt_v128").as_str(),
+                                    format!("i_vector {instruction} (vt_vec vt_v128 ").as_str(),
                                 );
                             }
                             ValType::Ref(ref_type) => match ref_type {
                                 RefType::FUNCREF => {
                                     res.push_str(
-                                        format!("i_reference {instruction} (vt_ref rt_func")
+                                        format!("i_reference {instruction} (vt_ref rt_func ")
                                             .as_str(),
                                     );
                                 }
                                 RefType::EXTERNREF => res.push_str(
-                                    format!("i_reference {instruction} (vt_ref rt_extern").as_str(),
+                                    format!("i_reference {instruction} (vt_ref rt_extern ")
+                                        .as_str(),
                                 ),
                                 _ => res.push_str(
-                                    format!("i_reference {instruction} (vt_ref").as_str(),
+                                    format!("i_reference {instruction} (vt_ref ").as_str(),
                                 ),
                             },
                         },
                         wasmparser::BlockType::FuncType(index) => {
-                            res.push_str(format!("{instruction} (bt_idx {index}").as_str());
+                            res.push_str(format!("{instruction} (bt_idx {index} ").as_str());
                         }
                     }
 
-                    blocks_stack.push((instruction == "i_control (ci_if", false));
+                    blocks_stack.push((instruction == "i_control (ci_if ", false));
                     continue;
                 }
                 wasmparser::Operator::Else => {
@@ -298,6 +298,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         continue;
                     }
                     blocks_stack.push((is_if, is_else));
+                    continue;
                 }
                 wasmparser::Operator::End => {
                     if blocks_stack.is_empty() {
@@ -550,13 +551,10 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     res.push_str("i_numeric ni_i64_extend_i32_u\n");
                 }
                 _ => {
-                    skip_extend_list_operator = true;
+                    continue;
                 }
             }
 
-            if skip_extend_list_operator {
-                continue;
-            }
             res.push_str(" :: \n");
         }
     }
