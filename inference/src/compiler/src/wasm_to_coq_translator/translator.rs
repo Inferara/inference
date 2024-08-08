@@ -317,7 +317,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                             res.push_str("nil) nil)");
                         }
                     } else {
-                        res.push_str("nil) nil)\n");
+                        res.push_str("nil))\n");
                     }
 
                     if current_op < total_ops {
