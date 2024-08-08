@@ -239,50 +239,51 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     };
                     match blockty {
                         wasmparser::BlockType::Empty => {
-                            res.push_str(format!("{instruction} (bt_val None) ").as_str());
+                            res.push_str(format!("{instruction} (bt_val None) (").as_str());
                         }
                         wasmparser::BlockType::Type(valtype) => match valtype {
                             ValType::I32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_i32").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_i32").as_str(),
                                 );
                             }
                             ValType::I64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_i64").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_i64").as_str(),
                                 );
                             }
                             ValType::F32 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_f32").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_f32").as_str(),
                                 );
                             }
                             ValType::F64 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} bt_val nt_f64").as_str(),
+                                    format!("i_vector {instruction} (bt_val nt_f64").as_str(),
                                 );
                             }
                             ValType::V128 => {
                                 res.push_str(
-                                    format!("i_vector {instruction} vt_vec vt_v128").as_str(),
+                                    format!("i_vector {instruction} (vt_vec vt_v128").as_str(),
                                 );
                             }
                             ValType::Ref(ref_type) => match ref_type {
                                 RefType::FUNCREF => {
                                     res.push_str(
-                                        format!("i_reference {instruction} vt_ref rt_func")
+                                        format!("i_reference {instruction} (vt_ref rt_func")
                                             .as_str(),
                                     );
                                 }
                                 RefType::EXTERNREF => res.push_str(
-                                    format!("i_reference {instruction} vt_ref rt_extern").as_str(),
+                                    format!("i_reference {instruction} (vt_ref rt_extern").as_str(),
                                 ),
-                                _ => res
-                                    .push_str(format!("i_reference {instruction} vt_ref").as_str()),
+                                _ => res.push_str(
+                                    format!("i_reference {instruction} (vt_ref").as_str(),
+                                ),
                             },
                         },
                         wasmparser::BlockType::FuncType(index) => {
-                            res.push_str(format!("{instruction} bt_idx {index}").as_str());
+                            res.push_str(format!("{instruction} (bt_idx {index}").as_str());
                         }
                     }
 
@@ -293,7 +294,6 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     let (is_if, is_else) = blocks_stack.pop().unwrap();
                     if is_if {
                         res.push_str("nil )( ");
-                        blocks_stack.pop();
                         blocks_stack.push((true, true));
                         continue;
                     }
@@ -301,7 +301,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                 }
                 wasmparser::Operator::End => {
                     if blocks_stack.is_empty() {
-                        res.push_str("nil)\n");
+                        res.push_str("nil\n");
                         continue;
                     }
 
@@ -309,12 +309,13 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
 
                     if is_if {
                         if is_else {
-                            res.push_str("nil)");
+                            res.push_str("nil))");
                         } else {
                             res.push_str("nil) nil)");
                         }
                     } else {
-                        res.push_str(")\n");
+                        res.push_str("nil) nil)\n");
+                        continue;
                     }
 
                     if current_op < total_ops {
@@ -338,10 +339,13 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                             res.push_str(" :: ");
                         }
                         res.pop();
+                        res.pop();
+                        res.pop();
+                        res.pop();
                         res.push(')');
                     }
                     let default = targets.default();
-                    res.push_str(format!("{default})\n").as_str());
+                    res.push_str(format!(" {default}\n").as_str());
                 }
                 wasmparser::Operator::Return => res.push_str("ci_return\n"),
                 wasmparser::Operator::Call { function_index } => {
@@ -553,7 +557,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
             if skip_extend_list_operator {
                 continue;
             }
-            res.push_str(":: \n");
+            res.push_str(" :: \n");
         }
     }
     res
@@ -652,7 +656,7 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
         }
         locals.push_str("nil");
         res.push_str(format!("f_locals := {locals};\n").as_str());
-        res.push_str(format!("f_body := {body})\n").as_str());
+        res.push_str(format!("f_body := {body}\n").as_str());
         res.push_str("|}.\n");
         res.push('\n');
     }
