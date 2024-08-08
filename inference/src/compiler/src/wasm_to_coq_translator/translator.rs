@@ -324,10 +324,10 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     continue;
                 }
                 wasmparser::Operator::Br { relative_depth } => {
-                    res.push_str(format!("ci_br {relative_depth})\n").as_str());
+                    res.push_str(format!("(ci_br {relative_depth})\n").as_str());
                 }
                 wasmparser::Operator::BrIf { relative_depth } => {
-                    res.push_str(format!("ci_br_if {relative_depth})\n").as_str());
+                    res.push_str(format!("(ci_br_if {relative_depth})\n").as_str());
                 }
                 wasmparser::Operator::BrTable { targets } => {
                     res.push_str("ci_br_table");
