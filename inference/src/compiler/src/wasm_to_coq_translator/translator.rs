@@ -326,13 +326,13 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                     continue;
                 }
                 wasmparser::Operator::Br { relative_depth } => {
-                    res.push_str(format!("(ci_br {relative_depth})\n").as_str());
+                    res.push_str(format!("i_control (ci_br {relative_depth})\n").as_str());
                 }
                 wasmparser::Operator::BrIf { relative_depth } => {
-                    res.push_str(format!("(ci_br_if {relative_depth})\n").as_str());
+                    res.push_str(format!("i_control (ci_br_if {relative_depth})\n").as_str());
                 }
                 wasmparser::Operator::BrTable { targets } => {
-                    res.push_str("ci_br_table");
+                    res.push_str("i_control (ci_br_table");
                     if !targets.is_empty() {
                         res.push('(');
                         for target in targets.targets() {
@@ -347,7 +347,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                         res.push(')');
                     }
                     let default = targets.default();
-                    res.push_str(format!(" {default}\n").as_str());
+                    res.push_str(format!(" {default})\n").as_str());
                 }
                 wasmparser::Operator::Return => res.push_str("i_control ci_return\n"),
                 wasmparser::Operator::Call { function_index } => {
