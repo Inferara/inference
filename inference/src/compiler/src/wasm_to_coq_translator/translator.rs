@@ -340,11 +340,7 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
                             res.push_str(format!("{id}").as_str());
                             res.push_str(" :: ");
                         }
-                        res.pop();
-                        res.pop();
-                        res.pop();
-                        res.pop();
-                        res.push(')');
+                        res.push_str("nil)");
                     }
                     let default = targets.default();
                     res.push_str(format!(" {default})\n").as_str());
