@@ -62,84 +62,84 @@ Definition amplifyAudioInBuffer : WasmExport :=
 e_name := "amplifyAudioInBuffer";
 e_desc := ed_func 28 |}.
 
-Definition Table008f4ff9 : WasmTableType :=
+Definition Table3b751d54 : WasmTableType :=
 {|
 tt_limits := {| l_min := 4; l_max := None |};
 tt_reftype := rt_func
 |}.
 
-Definition MemType52012ce6 : WasmMemoryType :=
+Definition MemType4bd369de : WasmMemoryType :=
 {|
 l_min := 4; l_max := None
 |}.
 
-Definition Globaled5a71f6 : WasmGlobalType :=
+Definition Globalb62fd76d : WasmGlobalType :=
 {|
 gt_mut := true;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Globalbd4c3e26 : WasmGlobalType :=
+Definition Globala81f1cbc : WasmGlobalType :=
 {|
 gt_mut := true;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global1e816df6 : WasmGlobalType :=
+Definition Globalbb887d61 : WasmGlobalType :=
 {|
 gt_mut := true;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Globalb8afae24 : WasmGlobalType :=
+Definition Global79f08b94 : WasmGlobalType :=
 {|
 gt_mut := true;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global537b12ac : WasmGlobalType :=
+Definition Global12c86273 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global1ee1130a : WasmGlobalType :=
+Definition Global48de2278 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global1ef6dbaa : WasmGlobalType :=
+Definition Global0c72178e : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Globalc99807f8 : WasmGlobalType :=
+Definition Globale0ffc551 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global7962b7af : WasmGlobalType :=
+Definition Global05f07298 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global6808d2f6 : WasmGlobalType :=
+Definition Global78f036d7 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition Global0cc578dd : WasmGlobalType :=
+Definition Global154a8623 : WasmGlobalType :=
 {|
 gt_mut := false;
 gt_valtype := vt_num nt_i32;
 |}.
 
-Definition DataSegment8c2d2f95 : WasmDataSegment :=
+Definition DataSegment5b657dc5 : WasmDataSegment :=
 {|
 ds_init := x1e :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x1e :: x00 :: x00 :: x00 :: x7e :: x00 :: x6c :: x00 :: x69 :: x00 :: x62 :: x00 :: x2f :: x00 :: x72 :: x00 :: x74 :: x00 :: x2f :: x00 :: x74 :: x00 :: x6c :: x00 :: x73 :: x00 :: x66 :: x00 :: x2e :: x00 :: x74 :: x00 :: x73 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (8))
@@ -148,7 +148,7 @@ nil
 );
 |}.
 
-Definition DataSegment8f370231 : WasmDataSegment :=
+Definition DataSegmentbd3803d9 : WasmDataSegment :=
 {|
 ds_init := x28 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x28 :: x00 :: x00 :: x00 :: x61 :: x00 :: x6c :: x00 :: x6c :: x00 :: x6f :: x00 :: x63 :: x00 :: x61 :: x00 :: x74 :: x00 :: x69 :: x00 :: x6f :: x00 :: x6e :: x00 :: x20 :: x00 :: x74 :: x00 :: x6f :: x00 :: x6f :: x00 :: x20 :: x00 :: x6c :: x00 :: x61 :: x00 :: x72 :: x00 :: x67 :: x00 :: x65 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (56))
@@ -157,7 +157,7 @@ nil
 );
 |}.
 
-Definition DataSegmentabffd69a : WasmDataSegment :=
+Definition DataSegmentb0be773d : WasmDataSegment :=
 {|
 ds_init := x1e :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x1e :: x00 :: x00 :: x00 :: x7e :: x00 :: x6c :: x00 :: x69 :: x00 :: x62 :: x00 :: x2f :: x00 :: x72 :: x00 :: x74 :: x00 :: x2f :: x00 :: x70 :: x00 :: x75 :: x00 :: x72 :: x00 :: x65 :: x00 :: x2e :: x00 :: x74 :: x00 :: x73 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (112))
@@ -166,7 +166,7 @@ nil
 );
 |}.
 
-Definition DataSegment9eff7e53 : WasmDataSegment :=
+Definition DataSegment7bd6895a : WasmDataSegment :=
 {|
 ds_init := x24 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x24 :: x00 :: x00 :: x00 :: x49 :: x00 :: x6e :: x00 :: x64 :: x00 :: x65 :: x00 :: x78 :: x00 :: x20 :: x00 :: x6f :: x00 :: x75 :: x00 :: x74 :: x00 :: x20 :: x00 :: x6f :: x00 :: x66 :: x00 :: x20 :: x00 :: x72 :: x00 :: x61 :: x00 :: x6e :: x00 :: x67 :: x00 :: x65 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (160))
@@ -175,7 +175,7 @@ nil
 );
 |}.
 
-Definition DataSegment77bfaa13 : WasmDataSegment :=
+Definition DataSegmentde9d6f3f : WasmDataSegment :=
 {|
 ds_init := x14 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x01 :: x00 :: x00 :: x00 :: x14 :: x00 :: x00 :: x00 :: x7e :: x00 :: x6c :: x00 :: x69 :: x00 :: x62 :: x00 :: x2f :: x00 :: x72 :: x00 :: x74 :: x00 :: x2e :: x00 :: x74 :: x00 :: x73 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (216))
@@ -184,7 +184,7 @@ nil
 );
 |}.
 
-Definition DataSegment252f89ae : WasmDataSegment :=
+Definition DataSegmentdb09289c : WasmDataSegment :=
 {|
 ds_init := x03 :: x00 :: x00 :: x00 :: x10 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: x10 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: x10 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: x00 :: nil;
 ds_mode := dsm_active 0 (i_numeric (ni_i32_const (256))
@@ -193,7 +193,7 @@ nil
 );
 |}.
 
-Definition ElementSegment5dfd06e6 : WasmElementSegment :=
+Definition ElementSegment3960ee8f : WasmElementSegment :=
 {|
 es_type := rt_func;
 es_init := (i_reference (ri_ref_func 32) :: nil) :: nil;
@@ -202,7 +202,7 @@ es_mode := esm_active 0 (i_numeric (ni_i32_const (0))
 nil
 )
 |}.
-Definition Function8fa24178 : WasmFunction :=
+Definition Function17888b93 : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -422,7 +422,7 @@ nil
 
 |}.
 
-Definition Function787b642c : WasmFunction :=
+Definition Function791f1ac6 : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -824,7 +824,7 @@ nil
 
 |}.
 
-Definition Function7ceb89cc : WasmFunction :=
+Definition Function36e4296e : WasmFunction :=
 {|
 f_typeidx := 2;
 f_locals := vt_num nt_i32 :: nil;
@@ -988,7 +988,7 @@ nil
 
 |}.
 
-Definition Functionc10fb962 : WasmFunction :=
+Definition Function308e2662 : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := vt_num nt_i32 :: nil;
@@ -1153,7 +1153,7 @@ nil
 
 |}.
 
-Definition Function6c48afed : WasmFunction :=
+Definition Function3a420878 : WasmFunction :=
 {|
 f_typeidx := 5;
 f_locals := vt_num nt_i32 :: nil;
@@ -1193,7 +1193,7 @@ nil
 
 |}.
 
-Definition Function45283f14 : WasmFunction :=
+Definition Functionccccb6ed : WasmFunction :=
 {|
 f_typeidx := 0;
 f_locals := vt_num nt_i32 :: nil;
@@ -1394,7 +1394,7 @@ nil
 
 |}.
 
-Definition Function52c9c5b7 : WasmFunction :=
+Definition Function5634b6a3 : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -1449,7 +1449,7 @@ nil
 
 |}.
 
-Definition Function3b07cc6d : WasmFunction :=
+Definition Functionf96e96dc : WasmFunction :=
 {|
 f_typeidx := 6;
 f_locals := vt_num nt_i32 :: nil;
@@ -1578,7 +1578,7 @@ nil
 
 |}.
 
-Definition Functionc3206969 : WasmFunction :=
+Definition Function4d98cffe : WasmFunction :=
 {|
 f_typeidx := 0;
 f_locals := vt_num nt_i32 :: nil;
@@ -1647,7 +1647,7 @@ nil
 
 |}.
 
-Definition Functioncf418d3f : WasmFunction :=
+Definition Function09b600af : WasmFunction :=
 {|
 f_typeidx := 0;
 f_locals := vt_num nt_i32 :: nil;
@@ -1668,7 +1668,7 @@ nil
 
 |}.
 
-Definition Function9a3a6fb2 : WasmFunction :=
+Definition Function754427ea : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -1742,7 +1742,7 @@ nil
 
 |}.
 
-Definition Function1e0ece08 : WasmFunction :=
+Definition Function8b0e33c6 : WasmFunction :=
 {|
 f_typeidx := 5;
 f_locals := nil;
@@ -1759,7 +1759,7 @@ nil
 
 |}.
 
-Definition Functionc9fc983d : WasmFunction :=
+Definition Functiond03a6a3e : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -1797,7 +1797,7 @@ nil
 
 |}.
 
-Definition Function00dd1931 : WasmFunction :=
+Definition Function84b572af : WasmFunction :=
 {|
 f_typeidx := 5;
 f_locals := vt_num nt_i32 :: nil;
@@ -1833,7 +1833,7 @@ nil
 
 |}.
 
-Definition Functionbf7ac083 : WasmFunction :=
+Definition Functionea714fbd : WasmFunction :=
 {|
 f_typeidx := 6;
 f_locals := vt_num nt_i32 :: nil;
@@ -3044,7 +3044,7 @@ nil
 
 |}.
 
-Definition Function54dd6b96 : WasmFunction :=
+Definition Function14852024 : WasmFunction :=
 {|
 f_typeidx := 6;
 f_locals := vt_num nt_i32 :: nil;
@@ -3262,7 +3262,7 @@ nil
 
 |}.
 
-Definition Function8b229043 : WasmFunction :=
+Definition Function79d6a7ec : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := nil;
@@ -3317,7 +3317,7 @@ nil
 
 |}.
 
-Definition Function452e0908 : WasmFunction :=
+Definition Function9ae64ab6 : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := vt_num nt_i32 :: nil;
@@ -3352,7 +3352,7 @@ nil
 
 |}.
 
-Definition Function27b43d0f : WasmFunction :=
+Definition Functionf5ac57b4 : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -3371,7 +3371,7 @@ nil
 
 |}.
 
-Definition Function221390fe : WasmFunction :=
+Definition Function5a3c5f67 : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -3509,7 +3509,7 @@ nil
 
 |}.
 
-Definition Functionbab7f16c : WasmFunction :=
+Definition Function653aea1b : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := nil;
@@ -3526,7 +3526,7 @@ nil
 
 |}.
 
-Definition Functionc274b753 : WasmFunction :=
+Definition Function8d88419f : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -3567,7 +3567,7 @@ nil
 
 |}.
 
-Definition Function74f56776 : WasmFunction :=
+Definition Function784e396c : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := nil;
@@ -3599,7 +3599,7 @@ nil
 
 |}.
 
-Definition Function6d9d1f6c : WasmFunction :=
+Definition Functionc0a99c69 : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -3651,7 +3651,7 @@ nil
 
 |}.
 
-Definition Functiond0b67084 : WasmFunction :=
+Definition Function6c733c99 : WasmFunction :=
 {|
 f_typeidx := 7;
 f_locals := vt_num nt_i32 :: nil;
@@ -3703,7 +3703,7 @@ nil
 
 |}.
 
-Definition Functiond49fef86 : WasmFunction :=
+Definition Functionf0bfa322 : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := vt_num nt_i32 :: nil;
@@ -3849,7 +3849,7 @@ nil
 
 |}.
 
-Definition Function70ada68f : WasmFunction :=
+Definition Functionab3f3adb : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := nil;
@@ -3861,7 +3861,7 @@ nil
 
 |}.
 
-Definition Function3bdb5a31 : WasmFunction :=
+Definition Function80a73a31 : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := vt_num nt_i32 :: nil;
@@ -3919,7 +3919,7 @@ nil
 
 |}.
 
-Definition Functione95fdf13 : WasmFunction :=
+Definition Function9359845a : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := nil;
@@ -3929,7 +3929,7 @@ nil
 
 |}.
 
-Definition Function8a3e3579 : WasmFunction :=
+Definition Functiond6fcee31 : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -4133,7 +4133,7 @@ nil
 
 |}.
 
-Definition Functionfa44f2dc : WasmFunction :=
+Definition Functionccdfa84d : WasmFunction :=
 {|
 f_typeidx := 4;
 f_locals := vt_num nt_i32 :: nil;
@@ -4197,7 +4197,7 @@ nil
 
 |}.
 
-Definition Function85195891 : WasmFunction :=
+Definition Function9fa97c93 : WasmFunction :=
 {|
 f_typeidx := 1;
 f_locals := nil;
@@ -4206,3 +4206,13 @@ f_body := nil
 |}.
 
 
+Definition index : WasmModule :=
+{|
+m_funcs := Function17888b93 :: Function791f1ac6 :: Function36e4296e :: Function308e2662 :: Function3a420878 :: Functionccccb6ed :: Function5634b6a3 :: Functionf96e96dc :: Function4d98cffe :: Function09b600af :: Function754427ea :: Function8b0e33c6 :: Functiond03a6a3e :: Function84b572af :: Functionea714fbd :: Function14852024 :: Function79d6a7ec :: Function9ae64ab6 :: Functionf5ac57b4 :: Function5a3c5f67 :: Function653aea1b :: Function8d88419f :: Function784e396c :: Functionc0a99c69 :: Function6c733c99 :: Functionf0bfa322 :: Functionab3f3adb :: Function80a73a31 :: Function9359845a :: Functiond6fcee31 :: Functionccdfa84d :: Function9fa97c93 :: nil;
+m_tables := Table3b751d54 :: nil;
+m_globals := Globalb62fd76d :: Globala81f1cbc :: Globalbb887d61 :: Global79f08b94 :: Global12c86273 :: Global48de2278 :: Global0c72178e :: Globale0ffc551 :: Global05f07298 :: Global78f036d7 :: Global154a8623 :: nil;
+m_elems := ElementSegment3960ee8f :: nil;
+m_datas := DataSegment5b657dc5 :: DataSegmentbd3803d9 :: DataSegmentb0be773d :: DataSegment7bd6895a :: DataSegmentde9d6f3f :: DataSegmentdb09289c :: nil;
+m_imports := envA :: nil;
+m_exports := memory :: __alloc :: __retain :: __release :: __collect :: __rtti_base :: INPUT_BUFFER_POINTER :: INPUT_BUFFER_SIZE :: OUTPUT_BUFFER_POINTER :: OUTPUT_BUFFER_SIZE :: amplifyAudioInBuffer :: nil;
+|}.

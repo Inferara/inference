@@ -14,18 +14,18 @@ use wasmparser::{
 
 use crate::wasm_to_coq_translator::translator::WasmParseData;
 
-pub fn translate_bytes(bytes: &[u8]) -> String {
+pub fn translate_bytes(mod_name: String, bytes: &[u8]) -> String {
     let mut data = Vec::new();
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
-    let parse_data = parse(&data).unwrap();
+    let parse_data = parse(mod_name, &data).unwrap();
     parse_data.translate()
 }
 
 #[allow(clippy::match_same_arms)]
-fn parse(data: &[u8]) -> Result<WasmParseData> {
+fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
     let parser = Parser::new(0);
-    let mut wasm_parse_data = WasmParseData::new();
+    let mut wasm_parse_data = WasmParseData::new(mod_name);
 
     for payload in parser.parse_all(data) {
         match payload? {

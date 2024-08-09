@@ -5,6 +5,8 @@ use wasmparser::{
 };
 
 pub(crate) struct WasmParseData<'a> {
+    mod_name: String,
+
     pub(crate) imports: Vec<Import<'a>>,
     pub(crate) exports: Vec<Export<'a>>,
     pub(crate) tables: Vec<Table<'a>>,
@@ -17,8 +19,9 @@ pub(crate) struct WasmParseData<'a> {
 }
 
 impl WasmParseData<'_> {
-    pub(crate) fn new<'a>() -> WasmParseData<'a> {
+    pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
         WasmParseData {
+            mod_name,
             imports: Vec::new(),
             exports: Vec::new(),
             tables: Vec::new(),
@@ -36,36 +39,121 @@ impl WasmParseData<'_> {
         coq.push_str("Require Import String List BinInt BinNat.\n");
         coq.push_str("From Exetasis Require Import WasmStructure.\n");
         coq.push_str("Require Import Coq.Init.Byte.\n");
+        let mut created_imports = Vec::new();
         for import in &self.imports {
-            coq.push_str(translate_import(import).as_str());
+            let (definition_name, res) = translate_import(import);
+            coq.push_str(res.as_str());
+            created_imports.push(definition_name);
         }
+        let mut created_exports = Vec::new();
         for export in &self.exports {
-            coq.push_str(translate_export(export).as_str());
+            let (name, res) = translate_export(export);
+            coq.push_str(res.as_str());
+            created_exports.push(name);
         }
+        let mut created_tables = Vec::new();
         for table in &self.tables {
-            coq.push_str(translate_table(table).as_str());
+            let (name, res) = translate_table(table);
+            coq.push_str(res.as_str());
+            created_tables.push(name);
         }
+        let mut created_memory_types = Vec::new();
         for memory_type in &self.memory_types {
-            coq.push_str(translate_memory_type(memory_type).as_str());
+            let (name, res) = translate_memory_type(memory_type);
+            coq.push_str(res.as_str());
+            created_memory_types.push(name);
         }
+        let mut created_globals = Vec::new();
         for global in &self.globals {
-            coq.push_str(translate_global(global).as_str());
+            let (name, res) = translate_global(global);
+            coq.push_str(res.as_str());
+            created_globals.push(name);
         }
+        let mut created_data_segments = Vec::new();
         for data in &self.data {
-            coq.push_str(translate_data(data).as_str());
+            let (name, res) = translate_data_segment(data);
+            coq.push_str(res.as_str());
+            created_data_segments.push(name);
         }
+        let mut created_elements = Vec::new();
         for element in &self.elements {
-            coq.push_str(translate_element(element).as_str());
+            let (name, res) = translate_element(element);
+            coq.push_str(res.as_str());
+            created_elements.push(name);
         }
-        coq.push_str(
-            translate_functions(&self.function_type_indexes, &self.function_bodies).as_str(),
-        );
+
+        let (created_functions, res) =
+            translate_functions(&self.function_type_indexes, &self.function_bodies);
+        coq.push_str(res.as_str());
         coq.push('\n');
+
+        let module_name = &self.mod_name;
+        coq.push_str(format!("Definition {module_name} : WasmModule :=\n").as_str());
+        coq.push_str("{|\n");
+        //let mut types = String::new();
+        //TODO  m_types := partitionFT :: sortFT :: nil;
+
+        let mut funcs = String::new();
+        for func in created_functions {
+            funcs.push_str(format!("{func} :: ").as_str());
+        }
+        funcs.push_str("nil;\n");
+        coq.push_str(format!("m_funcs := {funcs}").as_str());
+
+        let mut tables = String::new();
+        for table in created_tables {
+            tables.push_str(format!("{table} :: ").as_str());
+        }
+        tables.push_str("nil;\n");
+        coq.push_str(format!("m_tables := {tables}").as_str());
+
+        //let mut mems = String::new();
+        //TODO m_mems := {| l_min := 1; l_max := None |} :: nil;
+
+        let mut globals = String::new();
+        for global in created_globals {
+            globals.push_str(format!("{global} :: ").as_str());
+        }
+        globals.push_str("nil;\n");
+        coq.push_str(format!("m_globals := {globals}").as_str());
+
+        let mut elems = String::new();
+        for elem in created_elements {
+            elems.push_str(format!("{elem} :: ").as_str());
+        }
+        elems.push_str("nil;\n");
+        coq.push_str(format!("m_elems := {elems}").as_str());
+
+        let mut datas = String::new();
+        for data in created_data_segments {
+            datas.push_str(format!("{data} :: ").as_str());
+        }
+
+        datas.push_str("nil;\n");
+        coq.push_str(format!("m_datas := {datas}").as_str());
+
+        //TODO m_start := None;
+
+        let mut imports = String::new();
+        for import in created_imports {
+            imports.push_str(format!("{import} :: ").as_str());
+        }
+        imports.push_str("nil;\n");
+        coq.push_str(format!("m_imports := {imports}").as_str());
+
+        let mut exports = String::new();
+        for export in created_exports {
+            exports.push_str(format!("{export} :: ").as_str());
+        }
+        exports.push_str("nil;\n");
+        coq.push_str(format!("m_exports := {exports}").as_str());
+
+        coq.push_str("|}.");
         coq
     }
 }
 
-fn translate_import(import: &Import) -> String {
+fn translate_import(import: &Import) -> (String, String) {
     let mut res = String::new();
     let name = String::from(import.name);
     let module = String::from(import.module);
@@ -84,10 +172,10 @@ fn translate_import(import: &Import) -> String {
     res.push_str(format!("i_desc := {kind} |").as_str());
     res.push_str("}.\n");
     res.push('\n');
-    res
+    (definition_name, res)
 }
 
-fn translate_export(export: &Export) -> String {
+fn translate_export(export: &Export) -> (String, String) {
     let mut res = String::new();
     let name = export.name;
     res.push_str(format!("Definition {name} : WasmExport :=\n").as_str());
@@ -104,55 +192,59 @@ fn translate_export(export: &Export) -> String {
     res.push_str(format!("e_desc := {kind} {index} |").as_str());
     res.push_str("}.\n");
     res.push('\n');
-    res
+    (name.to_owned(), res)
 }
 
-fn translate_table(table: &Table) -> String {
+fn translate_table(table: &Table) -> (String, String) {
     let mut res = String::new();
     let ty = table.ty;
+    let mut name = String::new();
     if ty.element_type == RefType::FUNCREF {
         let id = get_id();
+        name = format!("Table{id}");
 
         let max = match ty.maximum {
             Some(max) => max.to_string(),
             None => "None".to_string(),
         };
 
-        res.push_str(format!("Definition Table{id} : WasmTableType :=\n").as_str());
+        res.push_str(format!("Definition {name} : WasmTableType :=\n").as_str());
         res.push_str("{|\n");
         res.push_str(format!("tt_limits := {{| l_min := 4; l_max := {max} |}};\n").as_str());
         res.push_str("tt_reftype := rt_func\n");
         res.push_str("|}.\n");
     }
     res.push('\n');
-    res
+    (name, res)
 }
 
-fn translate_memory_type(memory_type: &MemoryType) -> String {
+fn translate_memory_type(memory_type: &MemoryType) -> (String, String) {
     let mut res = String::new();
     let id = get_id();
+    let name = format!("MemType{id}");
 
     let max = match memory_type.maximum {
         Some(max) => max.to_string(),
         None => "None".to_string(),
     };
 
-    res.push_str(format!("Definition MemType{id} : WasmMemoryType :=\n").as_str());
+    res.push_str(format!("Definition {name} : WasmMemoryType :=\n").as_str());
     res.push_str("{|\n");
     res.push_str(format!("l_min := 4; l_max := {max}\n").as_str());
     res.push_str("|}.\n");
     res.push('\n');
-    res
+    (name, res)
 }
 
-fn translate_global(global: &Global) -> String {
+fn translate_global(global: &Global) -> (String, String) {
     let mut res = String::new();
     let id = get_id();
+    let name = format!("Global{id}");
 
     let ty = global.ty;
     let mutability = ty.mutable;
 
-    res.push_str(format!("Definition Global{id} : WasmGlobalType :=\n").as_str());
+    res.push_str(format!("Definition {name} : WasmGlobalType :=\n").as_str());
     res.push_str("{|\n");
     res.push_str(format!("gt_mut := {mutability};\n").as_str());
 
@@ -172,14 +264,15 @@ fn translate_global(global: &Global) -> String {
     res.push_str(format!("gt_valtype := {val_type};\n").as_str());
     res.push_str("|}.\n");
     res.push('\n');
-    res
+    (name, res)
 }
 
-fn translate_data(data: &Data) -> String {
+fn translate_data_segment(data: &Data) -> (String, String) {
     let mut res = String::new();
     let id = get_id();
+    let name = format!("DataSegment{id}");
 
-    res.push_str(format!("Definition DataSegment{id} : WasmDataSegment :=\n").as_str());
+    res.push_str(format!("Definition {name} : WasmDataSegment :=\n").as_str());
     res.push_str("{|\n");
 
     let mut bytes_list = String::new();
@@ -210,7 +303,7 @@ fn translate_data(data: &Data) -> String {
 
     res.push_str("|}.\n");
     res.push('\n');
-    res
+    (name, res)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -565,11 +658,12 @@ fn translate_operators_reader(operators_reader: OperatorsReader) -> String {
     res
 }
 
-fn translate_element(element: &Element) -> String {
+fn translate_element(element: &Element) -> (String, String) {
     let mut res = String::new();
     let id = get_id();
+    let name = format!("ElementSegment{id}");
 
-    res.push_str(format!("Definition ElementSegment{id} : WasmElementSegment :=\n").as_str());
+    res.push_str(format!("Definition {name} : WasmElementSegment :=\n").as_str());
     res.push_str("{|\n");
 
     match &element.items {
@@ -623,18 +717,23 @@ fn translate_element(element: &Element) -> String {
     }
 
     res.push_str("|}.\n");
-    res
+    (name, res)
 }
 
-fn translate_functions(function_type_indexes: &[u32], function_bodies: &[FunctionBody]) -> String {
+fn translate_functions(
+    function_type_indexes: &[u32],
+    function_bodies: &[FunctionBody],
+) -> (Vec<String>, String) {
     let mut res = String::new();
+    let mut function_names = Vec::new();
     for (index, function_body) in function_bodies.iter().enumerate() {
         let id = get_id();
+        let name = format!("Function{id}");
         let type_index = function_type_indexes[index];
 
         let body = translate_operators_reader(function_body.get_operators_reader().unwrap());
 
-        res.push_str(format!("Definition Function{id} : WasmFunction :=\n").as_str());
+        res.push_str(format!("Definition {name} : WasmFunction :=\n").as_str());
         res.push_str("{|\n");
         res.push_str(format!("f_typeidx := {type_index};\n").as_str());
         let mut locals = String::new();
@@ -661,8 +760,9 @@ fn translate_functions(function_type_indexes: &[u32], function_bodies: &[Functio
         res.push_str(format!("f_body := {body}\n").as_str());
         res.push_str("|}.\n");
         res.push('\n');
+        function_names.push(name);
     }
-    res
+    (function_names, res)
 }
 
 fn get_id() -> String {
