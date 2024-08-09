@@ -15,3 +15,5 @@ Cargo.lock
 
 *_output/
 .vscode/
+
+*.v
