@@ -1,11 +1,13 @@
 use uuid::Uuid;
 use wasmparser::{
-    Data, DataKind, Element, ElementKind, Export, FunctionBody, Global, Import, MemoryType,
-    OperatorsReader, RefType, Table, TypeRef, ValType,
+    CompositeInnerType, Data, DataKind, Element, ElementKind, Export, FunctionBody, Global, Import,
+    MemoryType, OperatorsReader, RecGroup, RefType, Table, TypeRef, ValType,
 };
 
 pub(crate) struct WasmParseData<'a> {
     mod_name: String,
+
+    pub(crate) start_function: Option<u32>,
 
     pub(crate) imports: Vec<Import<'a>>,
     pub(crate) exports: Vec<Export<'a>>,
@@ -14,6 +16,7 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) globals: Vec<Global<'a>>,
     pub(crate) data: Vec<Data<'a>>,
     pub(crate) elements: Vec<Element<'a>>,
+    pub(crate) function_types: Vec<RecGroup>,
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
 }
@@ -22,6 +25,7 @@ impl WasmParseData<'_> {
     pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
+            start_function: None,
             imports: Vec::new(),
             exports: Vec::new(),
             tables: Vec::new(),
@@ -29,11 +33,13 @@ impl WasmParseData<'_> {
             globals: Vec::new(),
             data: Vec::new(),
             elements: Vec::new(),
+            function_types: Vec::new(),
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn translate(&self) -> String {
         let mut coq = String::new();
         coq.push_str("Require Import String List BinInt BinNat.\n");
@@ -82,16 +88,27 @@ impl WasmParseData<'_> {
             created_elements.push(name);
         }
 
+        let mut created_function_types = Vec::new();
+        for rec_group in &self.function_types {
+            let (name, res) = translate_rec_group(rec_group);
+            coq.push_str(res.as_str());
+            created_function_types.push(name);
+        }
+
         let (created_functions, res) =
             translate_functions(&self.function_type_indexes, &self.function_bodies);
         coq.push_str(res.as_str());
-        coq.push('\n');
 
         let module_name = &self.mod_name;
         coq.push_str(format!("Definition {module_name} : WasmModule :=\n").as_str());
         coq.push_str("{|\n");
-        //let mut types = String::new();
-        //TODO  m_types := partitionFT :: sortFT :: nil;
+
+        let mut types = String::new();
+        for ty in created_function_types {
+            types.push_str(format!("{ty} :: ").as_str());
+        }
+        types.push_str("nil;\n");
+        coq.push_str(format!("m_types := {types}").as_str());
 
         let mut funcs = String::new();
         for func in created_functions {
@@ -107,8 +124,12 @@ impl WasmParseData<'_> {
         tables.push_str("nil;\n");
         coq.push_str(format!("m_tables := {tables}").as_str());
 
-        //let mut mems = String::new();
-        //TODO m_mems := {| l_min := 1; l_max := None |} :: nil;
+        let mut mems = String::new();
+        for mem in created_memory_types {
+            mems.push_str(format!("{mem} :: ").as_str());
+        }
+        mems.push_str("nil;\n");
+        coq.push_str(format!("m_mems := {mems}").as_str());
 
         let mut globals = String::new();
         for global in created_globals {
@@ -132,7 +153,11 @@ impl WasmParseData<'_> {
         datas.push_str("nil;\n");
         coq.push_str(format!("m_datas := {datas}").as_str());
 
-        //TODO m_start := None;
+        if let Some(start_function) = self.start_function {
+            coq.push_str(format!("m_start := Some({start_function});\n").as_str());
+        } else {
+            coq.push_str("m_start := None;\n");
+        }
 
         let mut imports = String::new();
         for import in created_imports {
@@ -716,7 +741,45 @@ fn translate_element(element: &Element) -> (String, String) {
         }
     }
 
-    res.push_str("|}.\n");
+    res.push_str("|}.\n\n");
+    (name, res)
+}
+
+fn translate_rec_group(rec_group: &RecGroup) -> (String, String) {
+    let mut res = String::new();
+    let id = get_id();
+    let name = format!("FuncionType{id}");
+    res.push_str(format!("Definition {name} : WasmFuncionType :=\n").as_str());
+    res.push_str("{|\n");
+
+    for ty in rec_group.types() {
+        match &ty.composite_type.inner {
+            CompositeInnerType::Func(ft) => {
+                let mut params_str = String::new();
+                for param in ft.params() {
+                    let sp = stringify_val_type(*param);
+                    params_str.push_str(format!("{sp} :: ").as_str());
+                }
+                params_str.push_str("nil;\n");
+                res.push_str(format!("ft_params := {params_str}").as_str());
+
+                let mut results_str = String::new();
+                for result in ft.results() {
+                    let sp = stringify_val_type(*result);
+                    results_str.push_str(format!("{sp} :: ").as_str());
+                }
+                results_str.push_str("nil;\n");
+                res.push_str(format!("ft_results := {results_str}").as_str());
+            }
+            CompositeInnerType::Array(_) => {
+                //TODO
+            }
+            CompositeInnerType::Struct(_) => {
+                //TODO
+            }
+        }
+    }
+    res.push_str("|}.\n\n");
     (name, res)
 }
 
@@ -757,7 +820,7 @@ fn translate_functions(
         }
         locals.push_str("nil");
         res.push_str(format!("f_locals := {locals};\n").as_str());
-        res.push_str(format!("f_body := {body}\n").as_str());
+        res.push_str(format!("f_body := {body}").as_str());
         res.push_str("|}.\n");
         res.push('\n');
         function_names.push(name);
@@ -769,4 +832,20 @@ fn get_id() -> String {
     let uuid = Uuid::new_v4().to_string();
     let mut parts = uuid.split('-');
     parts.next().unwrap().to_string()
+}
+
+fn stringify_val_type(val_type: ValType) -> String {
+    match val_type {
+        ValType::I32 => "vt_num nt_i32",
+        ValType::I64 => "vt_num nt_i64",
+        ValType::F32 => "vt_num nt_f32",
+        ValType::F64 => "vt_num nt_f64",
+        ValType::V128 => "vt_vec vt_v128",
+        ValType::Ref(ref_type) => match ref_type {
+            RefType::FUNCREF => "vt_ref rt_func",
+            RefType::EXTERNREF => "vt_ref rt_extern",
+            _ => "vt_ref _",
+        },
+    }
+    .to_string()
 }

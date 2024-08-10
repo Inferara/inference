@@ -35,11 +35,10 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
                     we do not use it
                 */
             }
-            TypeSection(_) => {
-                /*
-                    this section is missed because of its relation to the
-                    gc functionality, proposed [here](https://github.com/torch2424/wasm-by-example/blob/master/examples/reading-and-writing-audio/demo/assemblyscript/README.md)
-                */
+            TypeSection(type_section) => {
+                for ty in type_section {
+                    wasm_parse_data.function_types.push(ty?);
+                }
             }
             ImportSection(imports_section) => {
                 for import in imports_section {
@@ -72,9 +71,8 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
                     wasm_parse_data.exports.push(export?);
                 }
             }
-            StartSection { .. } => {
-                //TODO handle it properly
-                println!("Start section");
+            StartSection { func, .. } => {
+                wasm_parse_data.start_function = Some(func);
             }
             ElementSection(elements) => {
                 for element in elements {
@@ -114,7 +112,9 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(_) => { /* ... */ }
+            CustomSection(custom_section_reader) => {
+                println!("Custom section");
+            }
 
             // most likely you'd return an error here
             UnknownSection { .. } => { /* ... */ }
