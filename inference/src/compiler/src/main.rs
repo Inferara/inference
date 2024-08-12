@@ -35,6 +35,8 @@ fn parse(source_code: &str) -> ast::types::SourceFile {
 
 mod test {
 
+    use walrus::Module;
+
     #[test]
     fn test_parse() {
         let current_dir = std::env::current_dir().unwrap();
@@ -48,7 +50,7 @@ mod test {
     #[test]
     fn test_wasm_to_coq() {
         let current_dir = std::env::current_dir().unwrap();
-        let path = current_dir.join("samples/index.wasm");
+        let path = current_dir.join("samples/audio_bg.wasm");
         let absolute_path = path.canonicalize().unwrap();
 
         let bytes = std::fs::read(absolute_path).unwrap();
@@ -59,5 +61,16 @@ mod test {
         //save to file
         let coq_file_path = current_dir.join("samples/test_wasm_to_coq.v");
         std::fs::write(coq_file_path, coq).unwrap();
+    }
+
+    #[test]
+    fn test_walrys() {
+        let current_dir = std::env::current_dir().unwrap();
+        let path = current_dir.join("samples/audio_bg.wasm");
+        let absolute_path = path.canonicalize().unwrap();
+        let mut module = Module::from_file(absolute_path).unwrap();
+        for func in module.funcs.iter() {
+            println!("{} : {:?}", func.id().index(), func.name);
+        }
     }
 }

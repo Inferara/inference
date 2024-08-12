@@ -269,8 +269,9 @@ fn translate_global(global: &Global) -> (String, String) {
     let ty = global.ty;
     let mutability = ty.mutable;
 
-    res.push_str(format!("Definition {name} : WasmGlobalType :=\n").as_str());
+    res.push_str(format!("Definition {name} : WasmGlobal :=\n").as_str());
     res.push_str("{|\n");
+    res.push_str("g_type := {|\n");
     res.push_str(format!("gt_mut := {mutability};\n").as_str());
 
     let val_type = match ty.content_type {
@@ -286,7 +287,11 @@ fn translate_global(global: &Global) -> (String, String) {
         },
     };
 
-    res.push_str(format!("gt_valtype := {val_type};\n").as_str());
+    res.push_str(format!("gt_valtype := {val_type}\n").as_str());
+    res.push_str("|};\n");
+
+    let init_expr = translate_operators_reader(global.init_expr.get_operators_reader());
+    res.push_str(format!("g_init := {init_expr}\n").as_str());
     res.push_str("|}.\n");
     res.push('\n');
     (name, res)
