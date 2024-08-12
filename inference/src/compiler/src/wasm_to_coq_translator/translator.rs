@@ -310,8 +310,8 @@ fn translate_data_segment(data: &Data) -> (String, String) {
     let mut bytes_list = String::new();
 
     for byte in data.data {
-        if *byte < 10 {
-            bytes_list.push_str(format!("x0{byte:}").as_str());
+        if *byte < 0x10 {
+            bytes_list.push_str(format!("x0{byte:x}").as_str());
         } else {
             bytes_list.push_str(&format!("{byte:#2x?}")[1..]);
         }
