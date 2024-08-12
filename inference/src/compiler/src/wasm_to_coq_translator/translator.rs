@@ -235,7 +235,9 @@ fn translate_table(table: &Table) -> (String, String) {
 
         res.push_str(format!("Definition {name} : WasmTableType :=\n").as_str());
         res.push_str("{|\n");
-        res.push_str(format!("tt_limits := {{| l_min := 4; l_max := Some({max}) |}};\n").as_str());
+        res.push_str(
+            format!("tt_limits := {{| l_min := 4; l_max := Some({max}%N) |}};\n").as_str(),
+        );
         res.push_str("tt_reftype := rt_func\n");
         res.push_str("|}.\n");
     }
@@ -308,7 +310,7 @@ fn translate_data_segment(data: &Data) -> (String, String) {
     let mut bytes_list = String::new();
 
     for byte in data.data {
-        if *byte < 0x10 {
+        if *byte < 10 {
             bytes_list.push_str(format!("x0{byte:}").as_str());
         } else {
             bytes_list.push_str(&format!("{byte:#2x?}")[1..]);
