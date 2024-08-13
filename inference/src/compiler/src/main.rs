@@ -40,6 +40,7 @@ use ast::builder::build_ast;
 use clap::Parser;
 use cli::parser::Cli;
 use std::{fs, path::Path, process};
+use walkdir::WalkDir;
 
 /// Inference compiler entry point
 ///
@@ -77,7 +78,36 @@ fn parse(source_code: &str) -> ast::types::SourceFile {
     ast
 }
 
-fn wasm_to_coq(path: &Path) -> String {
+fn wasm_to_coq(path: &Path) {
+    if path.is_file() {
+        wasm_to_coq_file(path, None);
+    } else {
+        for entry in WalkDir::new(path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            let f_name = entry.file_name().to_string_lossy();
+
+            if f_name.ends_with(".wasm") {
+                wasm_to_coq_file(
+                    entry.path(),
+                    Some(
+                        entry
+                            .path()
+                            .strip_prefix(path)
+                            .ok()
+                            .unwrap()
+                            .parent()
+                            .unwrap(),
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn wasm_to_coq_file(path: &Path, sub_path: Option<&Path>) -> String {
     let absolute_path = path.canonicalize().unwrap();
     let filename = path
         .file_name()
@@ -95,8 +125,12 @@ fn wasm_to_coq(path: &Path) -> String {
     );
     assert!(!coq.is_empty(), "Failed to parse {filename} to .v");
     let current_dir = std::env::current_dir().unwrap();
-    let coq_file_path = current_dir.join(format!("out/{filename}.v"));
-    fs::create_dir_all("out").unwrap();
+    let target_dir = match sub_path {
+        Some(sp) => current_dir.join("out").join(sp),
+        None => current_dir.join("out"),
+    };
+    let coq_file_path = target_dir.join(format!("{filename}.v"));
+    fs::create_dir_all(target_dir).unwrap();
     std::fs::write(coq_file_path.clone(), coq).unwrap();
     coq_file_path.to_str().unwrap().to_owned()
 }

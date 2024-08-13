@@ -11,7 +11,7 @@
             "preLaunchTask": "BuildCompiler",
             "program": "${workspaceFolder}/inference/target/debug/compiler",
             "args": [
-                "${workspaceFolder}/inference/src/compiler/samples/audio_bg.wasm",
+                "${workspaceFolder}/inference/src/compiler/samples",
                 "--wasm"
             ],
             "cwd": "${workspaceFolder}"
