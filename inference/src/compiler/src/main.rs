@@ -1,19 +1,28 @@
 #![warn(clippy::pedantic)]
 
 mod ast;
+mod cli;
 mod wasm_to_coq_translator;
 
 use ast::builder::build_ast;
-use std::{env, fs, process};
+use clap::Parser;
+use cli::parser::Cli;
+use std::{fs, path::Path, process};
 
+/// Inference compiler entry point
+///
 fn main() {
-    if env::args().len() != 1 {
-        eprintln!("One argument is expected: the source file path");
+    let args = Cli::parse();
+    if !args.path.exists() {
+        eprintln!("Error: path not found");
         process::exit(1);
     }
 
-    let source_file_path = env::args().nth(1).unwrap();
-    parse_file(&source_file_path);
+    if args.wasm {
+        wasm_to_coq(&args.path);
+    } else {
+        parse_file(args.path.to_str().unwrap());
+    }
 }
 
 fn parse_file(source_file_path: &str) -> ast::types::SourceFile {
@@ -33,6 +42,31 @@ fn parse(source_code: &str) -> ast::types::SourceFile {
     ast
 }
 
+fn wasm_to_coq(path: &Path) -> String {
+    let absolute_path = path.canonicalize().unwrap();
+    let filename = path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split('.')
+        .next()
+        .unwrap();
+
+    let bytes = std::fs::read(absolute_path).unwrap();
+    let coq = wasm_to_coq_translator::wasm_parser::translate_bytes(
+        filename.to_string(),
+        bytes.as_slice(),
+    );
+    assert!(!coq.is_empty(), "Failed to parse {filename} to .v");
+    let current_dir = std::env::current_dir().unwrap();
+    let coq_file_path = current_dir.join(format!("out/{filename}.v"));
+    fs::create_dir_all("out").unwrap();
+    std::fs::write(coq_file_path.clone(), coq).unwrap();
+    coq_file_path.to_str().unwrap().to_owned()
+}
+
+#[allow(unused_imports)]
 mod test {
 
     use walrus::Module;
@@ -68,7 +102,7 @@ mod test {
         let current_dir = std::env::current_dir().unwrap();
         let path = current_dir.join("samples/audio_bg.wasm");
         let absolute_path = path.canonicalize().unwrap();
-        let mut module = Module::from_file(absolute_path).unwrap();
+        let module = Module::from_file(absolute_path).unwrap();
         for func in module.funcs.iter() {
             println!("{} : {:?}", func.id().index(), func.name);
         }

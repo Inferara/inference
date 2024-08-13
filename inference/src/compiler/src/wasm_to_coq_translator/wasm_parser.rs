@@ -92,9 +92,7 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
             // `CodeSectionEntry`, so we can prepare for that, and
             // afterwards we can parse and handle each function
             // individually.
-            CodeSectionStart { .. } => {
-                println!("Code section starts");
-            }
+            CodeSectionStart { .. } => {}
             CodeSectionEntry(body) => {
                 wasm_parse_data.function_bodies.push(body);
             }
@@ -112,9 +110,7 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(custom_section_reader) => {
-                println!("Custom section");
-            }
+            CustomSection(_) => {}
 
             // most likely you'd return an error here
             UnknownSection { .. } => { /* ... */ }

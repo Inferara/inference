@@ -1,2 +1,2 @@
-pub mod translator;
-pub mod wasm_parser;
+pub(crate) mod translator;
+pub(crate) mod wasm_parser;
