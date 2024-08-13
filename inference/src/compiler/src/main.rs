@@ -1,5 +1,37 @@
 #![warn(clippy::pedantic)]
 
+//! # Inference Compiler
+//!
+//! This is the entry point for the Inference compiler, which provides functionality to parse and
+//! translate `.inf` source files into Coq code (`.v` files).
+//!
+//! ## Modules
+//!
+//! - `ast`: Contains types and builders for constructing the AST from parsed source `.inf` files.
+//! - `cli`: Contains the command-line interface (CLI) parsing logic using the `clap` crate.
+//! - `wasm_to_coq_translator`: Handles the translation of WebAssembly (`.wasm`) files to Coq code (`.v` files).
+//!
+//! ## Main Functionality
+//!
+//! The main function parses command-line arguments to determine the operation mode:
+//!
+//! - If the `--wasm` flag is provided, the program will translate the specified `.wasm` file into `.v` code.
+//! - Otherwise, the program will parse the specified `.inf` source file and generate an AST.
+//!
+//! ### Functions
+//!
+//! - `main`: The entry point of the program. Handles argument parsing and dispatches to the appropriate function
+//!   based on the provided arguments. It handles parses specified in the first CLI argument
+//!   and saves the request to the `out/` directory.
+//!
+//! ### Tests
+//!
+//! The `test` module contains unit tests to validate the core functionality of the compiler:
+//!
+//! - `test_parse`: Tests the parsing of a `.inf` source file into an AST.
+//! - `test_wasm_to_coq`: Tests the translation of a WebAssembly (`.wasm`) file into Coq code.
+//! - `test_walrys`: Demonstrates reading a WebAssembly (`.wasm`) file using the `walrus` crate, and prints function IDs and names.
+
 mod ast;
 mod cli;
 mod wasm_to_coq_translator;
@@ -11,6 +43,9 @@ use std::{fs, path::Path, process};
 
 /// Inference compiler entry point
 ///
+/// This function parses the command-line arguments to determine whether to parse an `.inf` source file
+/// or translate a `.wasm` file into Coq code. Depending on the `--wasm` flag, it either invokes the
+/// `wasm_to_coq` function or the `parse_file` function.
 fn main() {
     let args = Cli::parse();
     if !args.path.exists() {
