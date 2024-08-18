@@ -14,7 +14,7 @@
                 "${workspaceFolder}/inference/src/compiler/samples",
                 "--wasm"
             ],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
         }
     ]
 }

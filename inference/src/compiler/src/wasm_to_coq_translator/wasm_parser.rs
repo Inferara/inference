@@ -64,7 +64,7 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
                     wasm_parse_data.memory_types.push(memory?);
                 }
             }
-            TagSection(_) => { /* ignore, see the TypeSection arm */ }
+            TagSection(_) => {}
             GlobalSection(globals) => {
                 for global in globals {
                     wasm_parse_data.globals.push(global?);
