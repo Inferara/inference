@@ -7,9 +7,9 @@ use crate::ast::types::{
     ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
     Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
     ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
-    SimpleType, SourceFile, Statement, StringLiteral, Type, TypeArray, TypeDefinition,
-    TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind, UseDirective,
-    VariableDefinitionStatement, VerifyStatement,
+    SimpleType, SourceFile, Statement, StringLiteral, StructDefinition, StructField, Type,
+    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind,
+    UseDirective, VariableDefinitionStatement, VerifyStatement,
 };
 use tree_sitter::Node;
 
@@ -121,6 +121,7 @@ fn build_definition(node: &Node, code: &[u8]) -> Option<Definition> {
     let kind = node.kind();
     match kind {
         "context_definition" => Some(Definition::Context(build_context_definition(node, code))),
+        "struct_definition" => Some(Definition::Struct(build_struct_definition(node, code))),
         "enum_definition" => Some(Definition::Enum(build_enum_definition(node, code))),
         "constant_definition" => Some(Definition::Constant(build_constant_definition(node, code))),
         "function_definition" => Some(Definition::Function(build_function_definition(node, code))),
@@ -129,6 +130,46 @@ fn build_definition(node: &Node, code: &[u8]) -> Option<Definition> {
         )),
         "type_definition_statement" => Some(Definition::Type(build_type_definition(node, code))),
         _ => None,
+    }
+}
+
+fn build_struct_definition(node: &Node, code: &[u8]) -> StructDefinition {
+    let location = get_location(node);
+    let name = build_identifier(&node.child_by_field_name("struct_name").unwrap(), code);
+    let mut fields = Vec::new();
+
+    let mut cursor = node.walk();
+    let founded_fields = node
+        .children_by_field_name("field", &mut cursor)
+        .map(|segment| build_struct_field(&segment, code));
+    let founded_fields: Vec<StructField> = founded_fields.collect();
+    if !founded_fields.is_empty() {
+        fields = founded_fields;
+    }
+
+    cursor = node.walk();
+    let founded_methods = node
+        .children_by_field_name("method", &mut cursor)
+        .map(|segment| build_function_definition(&segment, code));
+    let methods: Vec<FunctionDefinition> = founded_methods.collect();
+
+    StructDefinition {
+        location,
+        name,
+        fields,
+        methods,
+    }
+}
+
+fn build_struct_field(node: &Node, code: &[u8]) -> StructField {
+    let location = get_location(node);
+    let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
+    let type_ = build_type(&node.child_by_field_name("type").unwrap(), code);
+
+    StructField {
+        location,
+        name,
+        type_,
     }
 }
 

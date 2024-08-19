@@ -158,6 +158,11 @@ mod test {
 
         let ast = super::parse_file(absolute_path.to_str().unwrap());
         assert!(!ast.definitions.is_empty());
+        // std::fs::write(
+        //     current_dir.join("samples/test_parse.intast"),
+        //     format!("{ast:#?}"),
+        // )
+        // .unwrap();
     }
 
     #[test]

@@ -9,6 +9,25 @@ enum Arch {
   ARM
 }
 
+struct Pizza {
+	toppings : [PizzaTopping; 5];
+}
+
+struct Pizza1 {
+	toppings : [PizzaTopping; 5];
+	numSlices : i32;
+	thinCrust : bool;
+}
+
+struct Identity {
+  field : T;
+
+  fn getField() -> T {
+    return ctx.field;
+  }
+
+}
+
 ///this is the sort function Inference spec
 context sort_function_context {
 

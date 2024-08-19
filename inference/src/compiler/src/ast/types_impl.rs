@@ -7,9 +7,9 @@ use super::types::{
     ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
     Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
     ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
-    SimpleType, SourceFile, Statement, StringLiteral, Type, TypeArray, TypeDefinition,
-    TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind, UseDirective,
-    VariableDefinitionStatement, VerifyStatement,
+    SimpleType, SourceFile, Statement, StringLiteral, StructDefinition, StructField, Type,
+    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind,
+    UseDirective, VariableDefinitionStatement, VerifyStatement,
 };
 
 impl SourceFile {
@@ -80,6 +80,60 @@ impl ContextDefinition {
             },
             name,
             definitions,
+        }
+    }
+}
+
+impl StructDefinition {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        name: Identifier,
+        fields: Vec<StructField>,
+        methods: Vec<FunctionDefinition>,
+    ) -> Self {
+        StructDefinition {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            name,
+            fields,
+            methods,
+        }
+    }
+}
+
+impl StructField {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        name: Identifier,
+        type_: Type,
+    ) -> Self {
+        StructField {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            name,
+            type_,
         }
     }
 }

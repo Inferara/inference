@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tree-sitter = ">=0.22.6"
-tree-sitter-inference = "0.0.20"
+tree-sitter-inference = "0.0.21"
 wasmparser = "0.215.0"
 anyhow = "1.0.44"
 walrus = "0.21.1"

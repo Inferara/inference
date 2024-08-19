@@ -35,6 +35,21 @@ pub struct ContextDefinition {
 }
 
 #[derive(Debug)]
+pub struct StructDefinition {
+    pub location: Location,
+    pub name: Identifier,
+    pub fields: Vec<StructField>,
+    pub methods: Vec<FunctionDefinition>,
+}
+
+#[derive(Debug)]
+pub struct StructField {
+    pub location: Location,
+    pub name: Identifier,
+    pub type_: Type,
+}
+
+#[derive(Debug)]
 pub struct EnumDefinition {
     pub location: Location,
     pub name: Identifier,
@@ -50,6 +65,7 @@ pub struct Identifier {
 #[derive(Debug)]
 pub enum Definition {
     Context(ContextDefinition),
+    Struct(StructDefinition),
     Enum(EnumDefinition),
     Constant(ConstantDefinition),
     Function(FunctionDefinition),
