@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-mod test {
+pub(crate) mod test {
 
     use super::super::{parse_inf_file, wasm_to_coq_translator::wasm_parser};
     use walrus::Module;
@@ -42,7 +42,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn get_test_data_path() -> std::path::PathBuf {
+    pub(crate) fn get_test_data_path() -> std::path::PathBuf {
         let current_dir = std::env::current_dir().unwrap();
         current_dir
             .parent()

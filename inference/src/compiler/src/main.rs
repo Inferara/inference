@@ -36,7 +36,7 @@
 
 mod ast;
 mod cli;
-mod main_tests;
+pub(crate) mod main_tests;
 mod rust_to_wasm_compiler;
 mod wasm_to_coq_translator;
 

@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod tests {
 
+    use crate::main_tests::test::get_test_data_path;
     use crate::{ast::types::Definition, parse_inference};
 
     fn read_sample_by_name(name: &str) -> String {
-        let current_dir = std::env::current_dir().unwrap();
-        let path = current_dir.join(format!("samples/{name}.inf"));
+        let test_data_dir = get_test_data_path();
+        let path = test_data_dir.join(format!("inf/{name}.inf"));
         let absolute_path = path.canonicalize().unwrap();
         std::fs::read_to_string(absolute_path).unwrap()
     }
