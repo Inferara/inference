@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
 
-    use crate::{ast::types::Definition, parse};
+    use crate::{ast::types::Definition, parse_inference};
 
     fn read_sample_by_name(name: &str) -> String {
         let current_dir = std::env::current_dir().unwrap();
@@ -13,7 +13,7 @@ mod tests {
     #[test]
     fn test_parse_source_file_1() {
         let source_code = read_sample_by_name("test_parse_source_file_1");
-        let ast = parse(source_code.as_str());
+        let ast = parse_inference(source_code.as_str());
 
         assert_eq!(ast.location.start.row, 0);
         assert_eq!(ast.location.start.column, 0);
@@ -31,7 +31,7 @@ mod tests {
     #[test]
     fn test_parse_source_file_2() {
         let source_code = read_sample_by_name("test_parse_source_file_2");
-        let ast = parse(source_code.as_str());
+        let ast = parse_inference(source_code.as_str());
 
         assert_eq!(ast.location.start.row, 0);
         assert_eq!(ast.location.start.column, 0);
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn test_parse_source_file_3() {
         let source_code = read_sample_by_name("test_parse_source_file_3");
-        let ast = parse(source_code.as_str());
+        let ast = parse_inference(source_code.as_str());
 
         assert_eq!(ast.location.start.row, 0);
         assert_eq!(ast.location.start.column, 0);

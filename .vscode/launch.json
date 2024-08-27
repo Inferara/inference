@@ -7,12 +7,24 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug",
+            "name": "Debug wasm key",
             "preLaunchTask": "BuildCompiler",
             "program": "${workspaceFolder}/inference/target/debug/compiler",
             "args": [
-                "${workspaceFolder}/inference/src/compiler/samples",
+                "${workspaceFolder}/test_data/wasm/",
                 "--wasm"
+            ],
+            "cwd": "${workspaceFolder}",
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug rust key",
+            "preLaunchTask": "BuildCompiler",
+            "program": "${workspaceFolder}/inference/target/debug/compiler",
+            "args": [
+                "${workspaceFolder}/test_data/rust/lib.rs",
+                "--rust"
             ],
             "cwd": "${workspaceFolder}",
         }

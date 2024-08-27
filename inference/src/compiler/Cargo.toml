@@ -6,11 +6,12 @@ edition = "2021"
 [dependencies]
 tree-sitter = ">=0.22.6"
 tree-sitter-inference = "0.0.21"
-wasmparser = "0.215.0"
+wasmparser = "0.216.0"
 anyhow = "1.0.44"
 walrus = "0.21.1"
 clap = { version = "4.5.15", features = ["derive"] }
 walkdir = "2.5.0"
+tempfile = "3"
 
 [dependencies.uuid]
 version = "1.10.0"

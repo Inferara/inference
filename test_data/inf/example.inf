@@ -4,9 +4,9 @@ use inference::std::types::Address;
 use { sorting_function } from "./sort.rs";
 
 enum Arch {
-  WASM,
+  Wasm,
   X86,
-  ARM
+  Arm
 }
 
 struct Pizza {

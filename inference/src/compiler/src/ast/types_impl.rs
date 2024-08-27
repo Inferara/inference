@@ -480,6 +480,7 @@ impl IfStatement {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 impl VariableDefinitionStatement {
     pub fn new(
         start_row: usize,

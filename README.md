@@ -29,3 +29,9 @@ Format on save
     "editor.formatOnSave": true
 }
 ```
+
+## Requirements
+
+### wasm-pack
+
+wasm-pack is used to compile rust as IR to wasm. See installation instructions [here](https://rustwasm.github.io/wasm-pack/installer/).
