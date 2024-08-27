@@ -826,6 +826,38 @@ fn translate_operators_reader(
                 wasmparser::Operator::ElemDrop { elem_index } => {
                     res.push_str(format!("i_table (ti_elem_drop {elem_index})\n").as_str());
                 }
+                wasmparser::Operator::Drop => res.push_str("i_parametric (pi_drop)\n"),
+                wasmparser::Operator::Select => res.push_str("i_parametric (pi_select)\n"),
+                wasmparser::Operator::TypedSelect { ty } => match ty {
+                    ValType::I32 => {
+                        res.push_str("i_parametric (pi_select (vt_num nt_i32))\n");
+                    }
+                    ValType::I64 => {
+                        res.push_str("i_parametric (pi_select (vt_num nt_i64))\n");
+                    }
+                    ValType::F32 => {
+                        res.push_str("i_parametric (pi_select (vt_num nt_f32))\n");
+                    }
+                    ValType::F64 => {
+                        res.push_str("i_parametric (pi_select (vt_num nt_f64))\n");
+                    }
+                    ValType::V128 => {
+                        res.push_str("i_parametric (pi_select (vt_vec vt_v128))\n");
+                    }
+                    ValType::Ref(ref_type) => match ref_type {
+                        RefType::FUNCREF => {
+                            res.push_str("i_parametric (pi_select (vt_ref rt_func))\n");
+                        }
+                        RefType::EXTERNREF => {
+                            res.push_str("i_parametric (pi_select (vt_ref rt_extern))\n");
+                        }
+                        _ => {
+                            return Err(WasmModuleParseError::UnsupportedOperation(
+                                format!("Failed to translate operator: {op:?}").to_string(),
+                            ));
+                        }
+                    },
+                },
                 _ => {
                     return Err(WasmModuleParseError::UnsupportedOperation(
                         format!("Failed to translate operator: {op:?}").to_string(),

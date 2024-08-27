@@ -48,6 +48,8 @@ use std::{fs, path::Path, process};
 use walkdir::WalkDir;
 use wasm_to_coq_translator::translator::WasmModuleParseError;
 
+use walrus::Module;
+
 /// Inference compiler entry point
 ///
 /// This function parses the command-line arguments to determine whether to parse an `.inf` source file
@@ -98,6 +100,12 @@ fn rust_to_wasm(path: &Path) {
     }
 
     let bytes = compile_rust_to_wasm(path);
+
+    let module = Module::from_buffer(&bytes.clone()).unwrap();
+    for func in module.funcs.iter() {
+        println!("{} : {:?}", func.id().index(), func.name);
+    }
+
     let file_name = path
         .file_name()
         .unwrap()
