@@ -32,8 +32,7 @@ pub(crate) mod test {
 
     #[test]
     fn test_walrys() {
-        let current_dir = std::env::current_dir().unwrap();
-        let path = current_dir.join("samples/audio_bg.wasm");
+        let path = get_test_data_path().join("wasm").join("comments.0.wasm");
         let absolute_path = path.canonicalize().unwrap();
         let module = Module::from_file(absolute_path).unwrap();
         for func in module.funcs.iter() {
@@ -45,11 +44,11 @@ pub(crate) mod test {
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {
         let current_dir = std::env::current_dir().unwrap();
         current_dir
-            .parent()
+            .parent() // compiler
             .unwrap()
-            .parent()
+            .parent() // src
             .unwrap()
-            .parent()
+            .parent() // inference
             .unwrap()
             .join("test_data")
     }

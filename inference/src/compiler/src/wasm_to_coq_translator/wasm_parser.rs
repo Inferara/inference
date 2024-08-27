@@ -21,7 +21,7 @@ pub fn translate_bytes(mod_name: &String, bytes: &[u8]) -> Result<String, WasmMo
     match parse(mod_name.clone(), &data) {
         Ok(parse_data) => parse_data.translate(),
         Err(e) => Err(WasmModuleParseError::UnsupportedOperation(
-            format!("\t{e} (module name: {mod_name})").to_string(), //FIXME why does it fail for some files?
+            format!("\t{e} (module name: {mod_name})").to_string(),
         )),
     }
 }
@@ -112,7 +112,9 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(_) => {}
+            CustomSection(custom_section) => {
+                println!("Custom section: {custom_section:?}");
+            }
 
             // most likely you'd return an error here
             UnknownSection { .. } => { /* ... */ }
