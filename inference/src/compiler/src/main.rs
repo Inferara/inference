@@ -26,11 +26,7 @@
 //!
 //! ### Tests
 //!
-//! The `test` module contains unit tests to validate the core functionality of the compiler:
-//!
-//! - `test_parse`: Tests the parsing of a `.inf` source file into an AST.
-//! - `test_wasm_to_coq`: Tests the translation of a WebAssembly (`.wasm`) file into Coq code.
-//! - `test_walrys`: Demonstrates reading a WebAssembly (`.wasm`) file using the `walrus` crate, and prints function IDs and names.
+//! The `test` suite is located in the `main_tests` module and contains tests for the main functionality
 
 mod ast;
 mod cli;
