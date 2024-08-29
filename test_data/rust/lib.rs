@@ -1,3 +1,6 @@
+#![no_main]
+#![no_std]
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]

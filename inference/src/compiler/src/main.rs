@@ -10,14 +10,12 @@
 //! - `ast`: Contains types and builders for constructing the AST from parsed source `.inf` files.
 //! - `cli`: Contains the command-line interface (CLI) parsing logic using the `clap` crate.
 //! - `wasm_to_coq_translator`: Handles the translation of WebAssembly (`.wasm`) files to Coq code (`.v` files).
-//! - `rust_to_wasm_compiler`: Handles the compilation of Rust files to WebAssembly (`.wasm`) files.
 //!
 //! ## Main Functionality
 //!
 //! The main function parses command-line arguments to determine the operation mode:
 //!
 //! - If the `--wasm` flag is provided, the program will translate the specified `.wasm` file into `.v` code.
-//! - If the `--rust` flag is provided, the program will compile the specified Rust file into a `.wasm` file.
 //! - Otherwise, the program will parse the specified `.inf` source file and generate an AST.
 //!
 //! ### Functions
@@ -37,18 +35,14 @@
 mod ast;
 mod cli;
 pub(crate) mod main_tests;
-mod rust_to_wasm_compiler;
 mod wasm_to_coq_translator;
 
 use ast::builder::build_ast;
 use clap::Parser;
 use cli::parser::Cli;
-use rust_to_wasm_compiler::wasm_pack_helper::compile_rust_to_wasm;
 use std::{fs, path::Path, process};
 use walkdir::WalkDir;
 use wasm_to_coq_translator::translator::WasmModuleParseError;
-
-use walrus::Module;
 
 /// Inference compiler entry point
 ///
@@ -64,8 +58,6 @@ fn main() {
 
     if args.wasm {
         wasm_to_coq(&args.path);
-    } else if args.rust {
-        rust_to_wasm(&args.path);
     } else {
         parse_inf_file(args.path.to_str().unwrap());
     }
@@ -86,33 +78,6 @@ fn parse_inference(source_code: &str) -> ast::types::SourceFile {
     let code = source_code.as_bytes();
     let ast = build_ast(tree.root_node(), code);
     ast
-}
-
-fn rust_to_wasm(path: &Path) {
-    if !path.is_file() {
-        eprintln!("Error: path is not a file");
-        std::process::exit(1);
-    }
-
-    if !path.exists() {
-        eprintln!("Error: path does not exist");
-        std::process::exit(1);
-    }
-
-    let bytes = compile_rust_to_wasm(path);
-
-    let module = Module::from_buffer(&bytes.clone()).unwrap();
-    for func in module.funcs.iter() {
-        println!("{} : {:?}", func.id().index(), func.name);
-    }
-
-    let file_name = path
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .replace('.', "_");
-    wasm_bytes_to_coq_file(&bytes, None, &file_name).unwrap();
 }
 
 fn wasm_to_coq(path: &Path) {

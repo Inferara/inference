@@ -2,7 +2,6 @@
 pub(crate) mod test {
 
     use super::super::{parse_inf_file, wasm_to_coq_translator::wasm_parser};
-    use walrus::Module;
 
     #[test]
     fn test_parse() {
@@ -28,16 +27,6 @@ pub(crate) mod test {
         assert!(coq.is_ok());
         let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
         std::fs::write(coq_file_path, coq.unwrap()).unwrap();
-    }
-
-    #[test]
-    fn test_walrys() {
-        let path = get_test_data_path().join("wasm").join("comments.0.wasm");
-        let absolute_path = path.canonicalize().unwrap();
-        let module = Module::from_file(absolute_path).unwrap();
-        for func in module.funcs.iter() {
-            println!("{} : {:?}", func.id().index(), func.name);
-        }
     }
 
     #[allow(dead_code)]
