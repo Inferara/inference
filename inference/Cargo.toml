@@ -4,7 +4,3 @@ name = "inference"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-cargo-watch = "8.5.2" #cargo watch -q -c -w src/ -x 'run q'

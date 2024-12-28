@@ -113,6 +113,15 @@ pub struct Argument {
 }
 
 #[derive(Debug)]
+pub enum BlockType {
+    Block(Block),
+    Assume(AssumeStatement),
+    Forall(ForallStatement),
+    Exists(ExistsStatement),
+    Unique(UniqueStatement),
+}
+
+#[derive(Debug)]
 pub struct Block {
     pub location: Location,
     pub statements: Vec<Statement>,
@@ -123,13 +132,15 @@ pub enum Statement {
     Block(Block),
     Expression(ExpressionStatement),
     Return(ReturnStatement),
-    Filter(FilterStatement),
+    Assume(AssumeStatement),
+    Forall(ForallStatement),
+    Exists(ExistsStatement),
+    Unique(UniqueStatement),
     For(ForStatement),
     If(IfStatement),
     VariableDefinition(VariableDefinitionStatement),
     TypeDefinition(TypeDefinitionStatement),
     Assert(AssertStatement),
-    Verify(VerifyStatement),
 }
 
 #[derive(Debug)]
@@ -145,7 +156,25 @@ pub struct ReturnStatement {
 }
 
 #[derive(Debug)]
-pub struct FilterStatement {
+pub struct AssumeStatement {
+    pub location: Location,
+    pub block: Block,
+}
+
+#[derive(Debug)]
+pub struct ForallStatement {
+    pub location: Location,
+    pub block: Block,
+}
+
+#[derive(Debug)]
+pub struct ExistsStatement {
+    pub location: Location,
+    pub block: Block,
+}
+
+#[derive(Debug)]
+pub struct UniqueStatement {
     pub location: Location,
     pub block: Block,
 }
@@ -245,12 +274,6 @@ pub struct AssertStatement {
 }
 
 #[derive(Debug)]
-pub struct VerifyStatement {
-    pub location: Location,
-    pub function_call: Box<FunctionCallExpression>,
-}
-
-#[derive(Debug)]
 pub struct ParenthesizedExpression {
     pub location: Location,
     pub expression: Box<Expression>,
@@ -278,6 +301,12 @@ pub enum OperatorKind {
     Le,
     Gt,
     Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug)]
@@ -294,6 +323,7 @@ pub enum Literal {
     Bool(BoolLiteral),
     String(StringLiteral),
     Number(NumberLiteral),
+    Unit(UnitLiteral),
 }
 
 #[derive(Debug)]
@@ -318,6 +348,11 @@ pub struct StringLiteral {
 pub struct NumberLiteral {
     pub location: Location,
     pub value: i64,
+}
+
+#[derive(Debug)]
+pub struct UnitLiteral {
+    pub location: Location,
 }
 
 #[derive(Debug)]

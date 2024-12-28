@@ -2,16 +2,18 @@
 
 use crate::ast::types::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition, Definition,
-    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition, FilterStatement,
+    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition,
+    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
     Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
     ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
     SimpleType, SourceFile, Statement, StringLiteral, StructDefinition, StructField, Type,
     TypeArray, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind,
-    UseDirective, VariableDefinitionStatement, VerifyStatement,
+    UseDirective, VariableDefinitionStatement,
 };
 use tree_sitter::Node;
+
+use super::types::{ExistsStatement, ForallStatement, UniqueStatement, UnitLiteral};
 
 pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
     assert!(
@@ -297,7 +299,10 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
         "block" => Statement::Block(build_block(node, code)),
         "expression_statement" => Statement::Expression(build_expression_statement(node, code)),
         "return_statement" => Statement::Return(build_return_statement(node, code)),
-        "filter_statement" => Statement::Filter(build_filter_statement(node, code)),
+        "assume_statement" => Statement::Assume(build_assume_statement(node, code)),
+        "forall_statement" => Statement::Forall(build_forall_statement(node, code)),
+        "exists_statement" => Statement::Exists(build_exists_statement(node, code)),
+        "unique_statement" => Statement::Unique(build_unique_statement(node, code)),
         "for_statement" => Statement::For(build_for_statement(node, code)),
         "if_statement" => Statement::If(build_if_statement(node, code)),
         "variable_definition_statement" => {
@@ -307,7 +312,6 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
             Statement::TypeDefinition(build_type_definition_statement(node, code))
         }
         "assert_statement" => Statement::Assert(build_assert_statement(node, code)),
-        "verify_statement" => Statement::Verify(build_verify_statement(node, code)),
         _ => panic!("Unexpected statement type: {}", node.kind()),
     }
 }
@@ -332,11 +336,32 @@ fn build_return_statement(node: &Node, code: &[u8]) -> ReturnStatement {
     }
 }
 
-fn build_filter_statement(node: &Node, code: &[u8]) -> FilterStatement {
+fn build_assume_statement(node: &Node, code: &[u8]) -> AssumeStatement {
     let location = get_location(node);
     let block = build_block(&node.child(1).unwrap(), code);
 
-    FilterStatement { location, block }
+    AssumeStatement { location, block }
+}
+
+fn build_forall_statement(node: &Node, code: &[u8]) -> ForallStatement {
+    let location = get_location(node);
+    let block = build_block(&node.child(1).unwrap(), code);
+
+    ForallStatement { location, block }
+}
+
+fn build_exists_statement(node: &Node, code: &[u8]) -> ExistsStatement {
+    let location = get_location(node);
+    let block = build_block(&node.child(1).unwrap(), code);
+
+    ExistsStatement { location, block }
+}
+
+fn build_unique_statement(node: &Node, code: &[u8]) -> UniqueStatement {
+    let location = get_location(node);
+    let block = build_block(&node.child(1).unwrap(), code);
+
+    UniqueStatement { location, block }
 }
 
 fn build_for_statement(node: &Node, code: &[u8]) -> ForStatement {
@@ -535,19 +560,6 @@ fn build_assert_statement(node: &Node, code: &[u8]) -> AssertStatement {
     }
 }
 
-fn build_verify_statement(node: &Node, code: &[u8]) -> VerifyStatement {
-    let location = get_location(node);
-    let function_call = Box::new(build_function_call_expression(
-        &node.child(1).unwrap(),
-        code,
-    ));
-
-    VerifyStatement {
-        location,
-        function_call,
-    }
-}
-
 fn build_parenthesized_expression(node: &Node, code: &[u8]) -> ParenthesizedExpression {
     let location = get_location(node);
     let expression = Box::new(build_expression(&node.child(1).unwrap(), code));
@@ -609,6 +621,7 @@ fn build_literal(node: &Node, code: &[u8]) -> Literal {
         "bool_literal" => Literal::Bool(build_bool_literal(node, code)),
         "string_literal" => Literal::String(build_string_literal(node, code)),
         "number_literal" => Literal::Number(build_number_literal(node, code)),
+        "unit_literal" => Literal::Unit(build_unit_literal(node, code)),
         _ => panic!("Unexpected literal type: {}", node.kind()),
     }
 }
@@ -647,6 +660,12 @@ fn build_number_literal(node: &Node, code: &[u8]) -> NumberLiteral {
     let value = node.utf8_text(code).unwrap().parse::<i64>().unwrap();
 
     NumberLiteral { location, value }
+}
+
+fn build_unit_literal(node: &Node, _: &[u8]) -> UnitLiteral {
+    let location = get_location(node);
+
+    UnitLiteral { location }
 }
 
 fn build_type(node: &Node, code: &[u8]) -> Type {

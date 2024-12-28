@@ -2,14 +2,14 @@
 
 use super::types::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition, Definition,
-    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition, FilterStatement,
+    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition,
+    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
     Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
     ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
     SimpleType, SourceFile, Statement, StringLiteral, StructDefinition, StructField, Type,
     TypeArray, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind,
-    UseDirective, VariableDefinitionStatement, VerifyStatement,
+    UseDirective, VariableDefinitionStatement,
 };
 
 impl SourceFile {
@@ -397,7 +397,7 @@ impl ReturnStatement {
     }
 }
 
-impl FilterStatement {
+impl AssumeStatement {
     pub fn new(
         start_row: usize,
         start_column: usize,
@@ -405,7 +405,7 @@ impl FilterStatement {
         end_column: usize,
         block: Block,
     ) -> Self {
-        FilterStatement {
+        AssumeStatement {
             location: Location {
                 start: Position {
                     row: start_row,
@@ -691,29 +691,6 @@ impl AssertStatement {
     }
 }
 
-impl VerifyStatement {
-    pub fn new(
-        start_row: usize,
-        start_column: usize,
-        end_row: usize,
-        end_column: usize,
-        function_call: FunctionCallExpression,
-    ) -> Self {
-        VerifyStatement {
-            location: Location {
-                start: Position {
-                    row: start_row,
-                    column: start_column,
-                },
-                end: Position {
-                    row: end_row,
-                    column: end_column,
-                },
-            },
-            function_call: Box::new(function_call),
-        }
-    }
-}
 impl ParenthesizedExpression {
     pub fn new(
         start_row: usize,

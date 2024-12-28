@@ -975,7 +975,9 @@ fn translate_rec_group(rec_group: &RecGroup) -> (String, String) {
                 results_str.push_str("nil;\n");
                 res.push_str(format!("ft_results := {results_str}").as_str());
             }
-            CompositeInnerType::Array(_) | CompositeInnerType::Struct(_) => {
+            CompositeInnerType::Array(_)
+            | CompositeInnerType::Struct(_)
+            | CompositeInnerType::Cont(_) => {
                 //TODO
             }
         }

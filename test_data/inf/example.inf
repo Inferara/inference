@@ -1,140 +1,636 @@
-use inference::std;
-use inference::std::collections::{ Array, Set };
-use inference::std::types::Address;
-use { sorting_function } from "./sort.rs";
-
+///Constant
+const MAX_MEM : i64 = 1000;
+const X : i32 = -1;
+const UNIT : () = ();
+const arr : [i32;3] = [1,2,3];
+const EMPTY_BOARD : [[bool; 3]; 3] =
+  [ [false, false, false]
+  , [false, false, false]
+  , [false, false, false]
+  ];
+///Enum
 enum Arch {
   Wasm,
-  X86,
-  Arm
+  Evm
+}
+///Expression
+fn valid_Address(a: Address) -> Address {
+  a = !a;
+  return a;
 }
 
-struct Pizza {
+fn get_first(xs: [i32; 3]) -> i32 {
+  return xs[0];
+}
+///Function
+fn func() -> i32 {}
+fn func() {}
+fn func(x: i32) -> i32 {}
+fn func(x: i32, y: i32) -> i32 {}
+fn func() -> i32 {
+  return 0;
+}
+fn func() -> bool {
+  return true;
+}
+fn constructor() -> some_spec {
+}
+fn add(a : i32, b : i32) -> i32 {
+  return a + b;
+}
+fn add(a : i32, b : i32) -> i32 forall {
+  return a + b;
+}
+fn procuring_sorted(func: sf) -> () forall {
+  assume {
+    a = valid_Address();
+    b = valid_Address();
+    assert(a <= b);
+  }
+}
+fn func() -> () {
+  return ();
+}
+fn concatInts(xss : [[i64]]) -> [i64] {}
+fn func() -> () {
+  unique {
+      let a: i32 = 0;
+  }
+}
+///Spec
+spec some_spec {}
+spec some_spec {
+  external fn sorting_function (Address, Address) -> Address;
+}
+spec some_spec {
+  type sf = sorting_function;
+}
+///Struct
+struct pizza {
 	toppings : [PizzaTopping; 5];
 }
-
-struct Pizza1 {
+struct pizza {
 	toppings : [PizzaTopping; 5];
 	numSlices : i32;
 	thinCrust : bool;
 }
-
-struct Identity {
-  field : T;
-
-  fn getField() -> T {
-    return ctx.field;
-  }
-
+struct identity {
+	field : T;
 }
-
-///this is the sort function Inference spec
-context sort_function_context {
-
-  external fn sorting_function (Address, Address) -> Address;
-  type sf = typeof(sorting_function);
-
-  fn constructor() -> some_context {
-    ctx.type = ContextType::Program;
-    ctx.arh = Arch::WASM;
-    ctx.max_curr_mem = 2 ** 16;
-    ctx.mem = Array<u32>::new(ctx.max_curr_mem);
+struct Pair {
+	fst : A;
+	snd : B;
+}
+struct identity {
+  field : T;
+  fn getField() -> T {
+    return field;
   }
-
-  fn valid_Address(a: Address) -> Address {
-    assert a < ctx.max_curr_mem && !(a % 4);
-    return a;
+}
+///Use
+use inference::std;
+use inference::std::algorithms::sort;
+use { sort } from "./sort.rs";
+use { sort, hash } from "./sort.rs";
+use inference::std::algorithms::{sort,hash};
+///Binary Expression
+fn spec_assign() -> () {
+  self.type = ABC;
+}
+fn assign_from_fn_call() -> () {
+  self.type = get_type();
+}
+fn return_fn_call_with_param() -> Type {
+  return get_type(1);
+}
+fn fn_call_with_multiple_params() -> () {
+  get_type(1, true, a, get_name("abc"));
+}
+fn constructor() -> some_spec {
+  self.type = specType::Program;
+  self.arh = Arch::WASM;
+  self.max_curr_mem = 2 ** 16;
+}
+fn constructor() -> some_spec {
+  self.mem = Array<u32>::new();
+}
+fn constructor() -> some_spec {
+  self.mem = Array<i64>::new(10);
+}
+fn constructor() -> some_spec {
+  self.mem = Array<u64>::new(10, a, false, get_name("abc"), "str", Array<i32>::new(10 * 2));
+}
+fn valid_Address(a: Address) -> Address {
+  assert (a < self.max_curr_mem && (a % 4));
+  return a;
+}
+fn valid_Address(a: Address) -> Address {
+  assert (a < self.max_curr_mem && !(a % 4) && !a);
+  return a;
+}
+fn main() -> i32 {
+  return -1 - -2;
+}
+///Assert
+fn valid_Address(a: Address) -> Address {
+  assert (a < 0);
+  return a;
+}
+fn proof() -> () {
+  assert a < 0;
+}
+///If-Else
+fn main() {
+  let number : i32 = 3;
+  if number < 5 {
+      print("condition was true");
+  } else {
+      print("condition was false");
   }
-
-  fn count_values(a: Address, b: Address, val : i32) -> u32 {
-    let res : u32 = 0;
-    for (let i : Address = a; i <= b; i.next()) {
-      if (ctx.mem.at(i) == val) {
-        res = res + 1;
+}
+fn main() {
+  let number : i32 = 3;
+  if number < 5 {
+      print("condition was true");
+  }
+}
+///Loop
+fn main() {
+  loop true {
+    println("hello");
+  }
+}
+fn main() {
+  loop {
+    println("hello");
+  }
+}
+fn main() {
+  let mut i : i32 = -10;
+  loop i {
+      i = i + 1;
+      println("test");
+    }
+}
+fn sum_all(xs: [i32; 10]) -> i32 {
+  let pos : i32 = 0;
+  let mut accumulator: i32 = 0;
+  loop 10 {
+    accumulator = accumulator + xs[pos];
+    pos = pos + 1;
+  }
+  return accumulator;
+}
+///Variable Declaration
+fn proof() -> () {
+  let a: Address = 0;
+}
+fn proof() -> () {
+  let a: i32 = @;
+}
+///Variable Definition
+fn test() {
+  let mem : [i32];
+}
+fn test() {
+  let 3d_array : [[[u32]]];
+}
+fn test() {
+  let x : [Optional<someNamespace::String>; 4];
+}
+fn test() {
+  let params : [i32; 3] = [100, MAX_MEM, 0, red_color];
+}
+///Misc
+spec BasicConcepts {
+  external fn sum(a: i32, b: i32) -> i32;
+  external fn sub(i32, i32) -> i32;
+  fn sum_sub_spec() forall {
+      let a: i32 = @;
+      let b: i32 = @;
+      assert(sum(a, b) == a + b);
+      assert(sub(a, b) == a - b);
+  }
+  fn proof() {
+      sum_sub_spec();
+  }
+}
+fn foo() {
+  assume {
+      let x: u32 = @;
+      forall {
+          let y: u32 = @;
+          foobar(param1 : @, param2: 5);
+          ///<do some checking for x and y>
       }
+  }
+}
+spec Constants {
+  const a: i32 = 10;
+  const b: bool = true;
+  const c: u32 = 0;
+  fn define_local_constants() {
+      const d: i32 = 10;
+      const e: bool = true;
+      const f: u32 = 0;
+  }
+}
+spec Definitions {
+  const MAX_SIZE: u32 = 100;
+}
+fn sum(a: u32, b: u32) -> u32 {
+  return a + b;
+}
+spec Definitions {
+  external fn external_function(a: u32, b: u32) -> u32;
+}
+spec Definitions {
+  type Address = u32;
+}
+spec AuctionSpec {  
+  const MAX_BID: u64 = 1000;
+  const MIN_BID: u64 = 100;
+  struct Bid {
+    bidder: Address;
+    amount: u64;
+  }
+  enum AuctionState {
+    Open,
+    Closed
+  }
+  fn is_valid_bid(bid: Bid) -> bool {
+    return bid.amount >= MIN_BID && bid.amount <= MAX_BID;
+  }
+  fn is_auction_open(state: AuctionState) -> bool {
+    return state == AuctionState::Open;
+  }
+}
+enum Arch {
+  WASM,
+  EVM
+}
+enum specType {
+  Program,
+  Contract
+}
+struct Account {
+  address: Address;
+  balance: u64;
+  fn can_withdraw(amount: u64) -> bool {
+    return self.balance >= amount;
+  }
+}
+use inference::std::algorithms::sort;
+use { sort, hash } from "./sort.0.wasm";
+use inference::std::algorithms::{sort, hash};
+fn example() -> u32 {
+  let a: u32 = 42;
+  let b: u32 = a;
+  return b;
+}
+struct Account {
+  address: Address;
+  balance: u64;
+}
+fn get_balance(account: Account) -> u64 {
+  return account.balance;
+}
+fn get_element(arr: [u32; 10], index: u32) -> u32 {
+  return arr[index];
+}
+fn sum(a: u32, b: u32) -> u32 {
+  return a + b;
+}
+fn example() -> u32 {
+  let x: u32 = sum(1, 2);
+  let y: u32 = sum(a: 1, b: 2);
+  let z: u32 = sum(@, @);
+  return sum(a: @, b: @);
+}
+fn example() -> u32 {
+  return (1 + 2) * 3;
+}
+fn example() -> i32 {
+  let a: i32 = -42;
+  return a;
+}
+fn example() -> u32 {
+  let a: i32 = 2 ** 5;
+  let b: i32 = 7 * 8;
+  let c: i32 = 10 % 3;
+  let d: i32 = 2 + 4;
+  let e: i32 = 5 - 3;
+  let f: bool = 5 < 3;
+  let g: bool = 5 <= 3;
+  let h: bool = 5 == 3;
+  let i: bool = 5 != 3;
+  let j: bool = 5 > 3;
+  let k: bool = 5 >= 3;
+  let l: bool = true && false;
+  let m: bool = true || false;
+  let n: i32 = 5 << 2;
+  let o: i32 = 5 >> 2;
+  let p: i32 = 5 ^ 2;
+  let q: i32 = 5 | 2;
+  let r: i32 = 5 & 2;
+  return 1 + 2 * 3;
+}
+fn sum(a: u32, b: u32) -> u32 {
+  return a + b;
+}
+spec Bridge {
+  /// Spec-specific functions
+}
+external fn ideal_hash(b: [u8;100]) -> [u8;32];
+spec Hasher {
+    fn hash_verifier() forall {
+        let data1: [u8;100] = @;
+        let result_1: [u8;32] = ideal_hash(data1);
+        let data2: [u8;100] = @;
+        let result_2: [u8;32] = ideal_hash(data2);
+        if data1 == data2 {
+            assert(result_1 == result_2);
+        } else {
+            assert(result_1 != result_2);
+        }
     }
-    return res;
-  }
-
-  total fn preserving_count(func : sf) {
-    let undef a: Address;
-    let undef b: Address;
-
-    filter {
-      a = valid_Address(i32::all());
-      b = valid_Address(i32::all());
-      assert a <= b;
+    fn proof() {
+        hash_verifier();
     }
-
-    let val : i32 = i32::all();
-    
-    let before : u32 = count_values(a, b, val);
-    func(a, b);
-    let after : u32 = count_values(a, b, val);
-    
-    assert before == after;
+}
+fn bubble_sort(arr: [i32;10], compare_function: fn(left: i32, right: i32) -> i32) -> () {
+  let n: i32 = 10;
+  let i: i32 = 0;
+  loop n {
+      i = i + 1;
+      let j: i32 = 0;
+      loop n - i - 1 {
+          j = j + 1;
+          if compare_function(arr[j], arr[j + 1]) > 0 {
+              let temp: i32 = arr[j];
+              arr[j] = arr[j + 1];
+              arr[j + 1] = temp;
+          }
+      }
   }
-
-  total fn procuring_sorted(func: sf) {
-    let undef a: Address;
-    let undef b: Address;
-    let undef a0: Address;
-    let undef b0: Address;
-
-    filter {
-      a = valid_Address(i32::all());
-      b = valid_Address(i32::all());
-      assert a <= b;
+}
+use { hash } from "./cryptography.0.wasm";
+spec HashContext {
+    type HashFunction = fn([u8; 100]) -> [u8; 32];
+    fn verify_hash_transitivity(hash_f: HashFunction) -> () {
+        let data1: [u8; 100] = @;
+        let result_1: [u8; 32] = hash_f(data1);
+        let data2: [u8; 100] = @;
+        let result_2: [u8; 32] = hash_f(data2);
+        if data1 == data2 {
+            assert(result_1 == result_2);
+        } else {
+            assert(result_1 != result_2);
+        }
     }
-
-    func(a, b);
-
-    filter {
-      a0 = valid_Address(i32::all());
-      b0 = valid_Address(i32::all());
-
-      assert a <= a0;
-      assert a0 < b0;
-      assert b0 <= b;
+    fn verify_hash() -> () forall {
+        verify_hash_transitivity(hash);
     }
-
-    assert ctx.mem.at(a0) <= ctx.mem.at(b0);
+}
+fn add(a: i32, b: i32) -> i32 {
+  return a + b;
+}
+fn subtract(a: i32, b: i32) -> i32 {
+  return a - b;
+}
+fn example() {
+  let plus: fn(i32, i32) -> i32 = add;
+  let minus: fn(i32, i32) -> i32 = subtract;
+  assert (plus == minus);
+}
+fn main() {
+  forall {
+      /// Here computation splits into 2^32 subpaths,
+      /// with `x` holding distinct value on each
+      let x: u32 = @;
+      /// Here each computation splits further, independently
+      /// checking both required properties for every possible
+      /// value of `x` on separate execution paths.
+      if @ { check_foo(x); }
+      else { check_bar(x); }
   }
-
-  total fn no_side_effects(func : sf) {
-    let undef a: Address;
-    let undef b: Address;
-
-    let undef c0: Address;
-
-    filter {
-      a = valid_Address(i32::all());
-      b = valid_Address(i32::all());
-      c = valid_Address(i32::all());
-      assert a <= b;
-      assert c < a || c > b;
-    }
-
-    let before : i32 = ctx.mem.at(c);
-    func(a, b);
-    let after : i32 = ctx.mem.at(c);
-
-    assert before == after;
+  /// This point is reached iff both functions terminate
+  /// successfully on every possible input value.
+  print("Success!");
+}
+fn main() {
+  exists {
+      /// Here computation splits into 2^32 subpaths,
+      /// with `x` holding distinct value on each
+      let x: u32 = @;
+      /// Here each computation splits further, independently
+      /// checking both required properties for every possible
+      /// value of `x` on separate execution paths.
+      if @ { check_foo(x); }
+      else { check_bar(x); }
   }
-
-  fn proof() -> () {
-    verify preserving_count(sort);
-    verify procuring_sorted(sort);
+  /// This point is reached iff one of the functions terminate
+  /// successfully on at least one possible input value.
+  print("Success!");
+}
+fn main() {
+  forall {
+      /// Here computation splits into 2^32 subpaths,
+      /// with `x` holding distinct value on each
+      let x: u32 = @;
+      /// Here we filter only execution paths, where given
+      /// precondition is met, indicated by successfull termination
+      /// of function.
+      assume { check_foo(x); }
+      /// Here we check given implication of precondition above
+      check_bar(x);
   }
-
-  const arr : [i32;3] = [1,2,3];
-
-  fn get_first(xs: [i32; 3]) -> i32 {
-    return xs[0];
+  /// This point is reached iff every value of x that successfully
+  /// pass through `check_foo` also successfully pass through
+  /// `check_bar`.
+  print("Success!");
+}
+fn main() {
+  let x: i32 = @;
+  assert(x + 1 > x);
+  let user_input: bool = @;
+  if user_input {
+      /// Handle true case
+  } else {
+      /// Handle false case
   }
-
-  fn concat_ints(xss : [[i64]]) -> [i64] {
-
+  let mut choice: i32 = @;
+  choice = choice % 3;
+  if (choice == 0) {
+      /// Handle case 0
+  } else if (choice == 1) {
+      /// Handle case 1
+  } else {
+      /// Handle case 2
   }
-
+}
+fn main() {
+  let a: u32 = 42;
+  let _ident : i64 = 42;
+}
+fn main() {
+  let a: spec::AuctionSpec = spec::AuctionSpec::new();
+}
+struct Account {
+  address: u32;
+  fn new(addr: u32) -> Account {
+      self.address = addr;
+  }
+}
+fn main() {
+  let a: Account = Account::new(42);
+  let b: u32 = a.address;
+}
+fn main() {
+  let a: bool = true;
+  let b: bool = false;
+  let d: unit = ();
+}
+fn add(a: u32, b: u32) -> u32 {
+  return a + b;
+}
+fn curly_braces_example() {
+  /// code block
+}
+fn block_braces_example(a: u32, b: u32) -> u32 {
+  return a + b;
+}
+fn square_braces_example() {
+  let a: () = ();
+  let b: [u32; 3] = [1, 2, 3];
+  let c: u32 = a[0];
+}
+fn triangular_braces_example<T>(a: T) {
+  /// code block
+}
+fn foo<T>(a: T) {
+  /// code block
+}
+fn foo() {
+  /// This is the function body block
+}
+fn bar() {
+  let flag: bool = true;
+  if flag {
+      /// This is the 'if' block
+  } else {
+      /// This is the 'else' block
+  }
+  let i: i32 = 10;
+  loop i {
+      /// This is the loop block
+  }
+}
+fn foo() -> i32 {
+  let res: i32 = 0;
+  return res;
+}
+fn foo(i: i32) -> () forall {
+  assume {
+      assert i > 0;
+  }
+  /// This is equivalent to:
+  if !(i > 0) {
+      /// Terminate the function or handle the case accordingly
+      return ();
+  }
+}
+fn loop_example() {
+  loop 10 {
+      /// This block will be executed 10 times
+  }
+  loop 0 {
+      /// This block will not be executed
+  }
+  let i: i32 = 10;
+  loop i {
+      /// This block will be executed 10 times
+      /// Modifying 'i' inside the loop is not allowed
+  }
+}
+fn infinite_loop_example() forall {
+  assume {
+      loop () {
+          /// Infinite loop body
+          break;
+      }
+  }
+}
+fn foo() {
+  let flag: bool = true;
+  if flag {
+      /// This block will be executed
+  } else {
+      /// This block will not be executed
+  }
+}
+fn foo() {
+  let x: i32 = 10;
+  let y: i32 = @;
+  /// 'y' can be any possible i32 value
+}
+type Address = u32;
+fn foo() {
+  let flag: u32 = 0;
+  assert(flag <= 0);
+}
+fn foo() {
+  let a: () = ();
+}
+fn foo() {
+  let a: bool = true;
+  let b: bool = (1 == 2); /// false
+}
+fn foo() {
+  let a: i8 = (2 ** 7) - 1;       /// 127
+  let b: i16 = (2 ** 15) - 1;     /// 32,767
+  let c: i32 = (2 ** 31) - 1;     /// 2,147,483,647
+  let d: i64 = (2 ** 63) - 1;     /// 9,223,372,036,854,775,807
+}
+fn foo() {
+  let a: u8 = (2 ** 8) - 1;       /// 255
+  let b: u16 = (2 ** 16) - 1;     /// 65,535
+  let c: u32 = (2 ** 32) - 1;     /// 4,294,967,295
+  let d: u64 = (2 ** 64) - 1;     /// 18,446,744,073,709,551,615
+}
+fn foo() {
+  let a: [i32; 3] = [1, 2, 3];
+}
+fn foo() {
+  let a: i32 = 42;
+  let b: bool = true;
+}
+fn foo() {
+  let a: [i32; 3] = [1, 2, 3];
+  let b: [bool; 2] = [true, false];
+}
+fn foo() {
+  let len: u32 = @;
+  let arr: [i32; len] = @;
+}
+fn foo() {
+  let a: i32 = 42;
+  let mut b: bool = true;
+  let mut i: i32 = 10;
+  let mut acc: i32 = 0; 
+  loop i {
+      i = i + 1;
+      b = i % 2 == 0;
+      if b {        
+          let c: i32 = a * 2;
+          acc = acc + c;
+      }
+  }
+}
+fn inverse_bool_array(mut bool_arr: [bool; 10]) {
+  let mut i: i32 = 0;
+  loop 10 {
+      bool_arr[i] = !bool_arr[i];
+      i = i + 1;
+  }
 }

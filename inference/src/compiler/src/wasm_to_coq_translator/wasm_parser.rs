@@ -123,6 +123,7 @@ fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
             // at the parent parser or the payload iterator is at its
             // end and we're done.
             End(_) => {}
+            _ => todo!(),
         }
     }
     Ok(wasm_parse_data)
