@@ -1,19 +1,24 @@
 #![warn(clippy::pedantic)]
 
+use std::collections::HashMap;
+
 use crate::ast::types::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, ContextDefinition,
-    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
-    ForStatement, FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement,
-    Literal, Location, MemberAccessExpression, NumberLiteral, OperatorKind,
-    ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedType, ReturnStatement,
-    SimpleType, SourceFile, Statement, StringLiteral, StructDefinition, StructField, Type,
-    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeOfExpression, UnaryOperatorKind,
+    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, Definition,
+    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
+    FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
+    Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
+    ParenthesizedExpression, Position, PrefixUnaryExpression, ReturnStatement, SimpleType,
+    SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
+    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
     UseDirective, VariableDefinitionStatement,
 };
 use tree_sitter::Node;
 
-use super::types::{ExistsStatement, ForallStatement, UniqueStatement, UnitLiteral};
+use super::types::{
+    ExistsStatement, ForallStatement, QualifiedName, UniqueStatement, UnitLiteral,
+    UzumakiExpression,
+};
 
 pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
     assert!(
@@ -79,7 +84,7 @@ fn build_use_directive(parent: &mut SourceFile, node: &Node, code: &[u8]) {
     });
 }
 
-fn build_context_definition(node: &Node, code: &[u8]) -> ContextDefinition {
+fn build_spec_definition(node: &Node, code: &[u8]) -> SpecDefinition {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
     let mut definitions = Vec::new();
@@ -91,7 +96,7 @@ fn build_context_definition(node: &Node, code: &[u8]) -> ContextDefinition {
         }
     }
 
-    ContextDefinition {
+    SpecDefinition {
         location,
         name,
         definitions,
@@ -122,7 +127,7 @@ fn build_enum_definition(node: &Node, code: &[u8]) -> EnumDefinition {
 fn build_definition(node: &Node, code: &[u8]) -> Option<Definition> {
     let kind = node.kind();
     match kind {
-        "context_definition" => Some(Definition::Context(build_context_definition(node, code))),
+        "spec_definition" => Some(Definition::Spec(build_spec_definition(node, code))),
         "struct_definition" => Some(Definition::Struct(build_struct_definition(node, code))),
         "enum_definition" => Some(Definition::Enum(build_enum_definition(node, code))),
         "constant_definition" => Some(Definition::Constant(build_constant_definition(node, code))),
@@ -252,13 +257,7 @@ fn build_external_function_definition(node: &Node, code: &[u8]) -> ExternalFunct
 fn build_type_definition(node: &Node, code: &[u8]) -> TypeDefinition {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
-    let typeof_expression_node = node.child_by_field_name("typeof_expression").unwrap();
-    let typeof_expression = build_typeof_expression(&typeof_expression_node, code);
-
-    let type_ = Type::Identifier(Identifier {
-        name: typeof_expression.typeref.name,
-        location: typeof_expression.location,
-    });
+    let type_ = build_type(&node.child_by_field_name("type").unwrap(), code);
 
     TypeDefinition {
         location,
@@ -283,7 +282,7 @@ fn build_block(node: &Node, code: &[u8]) -> Block {
     let location = get_location(node);
     let mut statements = Vec::new();
 
-    for i in 0..node.child_count() {
+    for i in 1..node.child_count() - 1 {
         let child = node.child(i).unwrap();
         statements.push(build_statement(&child, code));
     }
@@ -303,7 +302,7 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
         "forall_statement" => Statement::Forall(build_forall_statement(node, code)),
         "exists_statement" => Statement::Exists(build_exists_statement(node, code)),
         "unique_statement" => Statement::Unique(build_unique_statement(node, code)),
-        "for_statement" => Statement::For(build_for_statement(node, code)),
+        "loop_statement" => Statement::Loop(build_loop_statement(node, code)),
         "if_statement" => Statement::If(build_if_statement(node, code)),
         "variable_definition_statement" => {
             Statement::VariableDefinition(build_variable_definition_statement(node, code))
@@ -312,7 +311,14 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
             Statement::TypeDefinition(build_type_definition_statement(node, code))
         }
         "assert_statement" => Statement::Assert(build_assert_statement(node, code)),
-        _ => panic!("Unexpected statement type: {}", node.kind()),
+        "constant_definition" => {
+            Statement::ConstantDefinition(build_constant_definition(node, code))
+        }
+        _ => panic!(
+            "Unexpected statement type: {}, {}",
+            node.kind(),
+            get_location(node)
+        ),
     }
 }
 
@@ -364,27 +370,19 @@ fn build_unique_statement(node: &Node, code: &[u8]) -> UniqueStatement {
     UniqueStatement { location, block }
 }
 
-fn build_for_statement(node: &Node, code: &[u8]) -> ForStatement {
+fn build_loop_statement(node: &Node, code: &[u8]) -> LoopStatement {
     let location = get_location(node);
-    let initializer = node
-        .child_by_field_name("initializer")
-        .map(|n| build_variable_definition_statement(&n, code));
     let condition = node
         .child_by_field_name("condition")
-        .map(|n| build_expression(&n, code));
-    let update = node
-        .child_by_field_name("update")
         .map(|n| build_expression(&n, code));
     let body = Box::new(build_statement(
         &node.child_by_field_name("body").unwrap(),
         code,
     ));
 
-    ForStatement {
+    LoopStatement {
         location,
-        initializer,
         condition,
-        update,
         body,
     }
 }
@@ -454,11 +452,11 @@ fn build_expression(node: &Node, code: &[u8]) -> Expression {
         "parenthesized_expression" => {
             Expression::Parenthesized(build_parenthesized_expression(node, code))
         }
-        "typeof_expression" => Expression::TypeOf(build_typeof_expression(node, code)),
         "binary_expression" => Expression::Binary(build_binary_expression(node, code)),
-        "bool_literal" | "string_literal" | "number_literal" | "array_literal" => {
+        "bool_literal" | "string_literal" | "number_literal" | "array_literal" | "unit_literal" => {
             Expression::Literal(build_literal(node, code))
         }
+        "uzumaki_keyword" => Expression::Uzumaki(build_uzumaki_expression(node, code)),
         _ => Expression::Type(build_type(node, code)),
     }
 }
@@ -515,15 +513,28 @@ fn build_function_call_expression(node: &Node, code: &[u8]) -> FunctionCallExpre
         code,
     ));
     let mut arguments = None;
-
+    let mut argument_name_expression_map: Vec<(Identifier, Expression)> = vec![];
     let mut cursor = node.walk();
-    let founded_arguments = node
-        .children_by_field_name("argument", &mut cursor)
-        .map(|segment| build_expression(&segment, code));
-    let founded_arguments: Vec<Expression> = founded_arguments.collect();
+    let mut argument_name = None;
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "argument_name" => {
+                argument_name = Some(build_identifier(&child, code));
+            }
+            "argument" => {
+                let argument_expression = build_expression(&child, code);
+                if let Some(name) = argument_name.take() {
+                    argument_name_expression_map.push((name, argument_expression));
+                } else {
+                    argument_name_expression_map.push((Identifier::default(), argument_expression));
+                }
+            }
+            _ => {}
+        }
+    }
 
-    if !founded_arguments.is_empty() {
-        arguments = Some(founded_arguments);
+    if !argument_name_expression_map.is_empty() {
+        arguments = Some(argument_name_expression_map);
     }
 
     FunctionCallExpression {
@@ -570,13 +581,6 @@ fn build_parenthesized_expression(node: &Node, code: &[u8]) -> ParenthesizedExpr
     }
 }
 
-fn build_typeof_expression(node: &Node, code: &[u8]) -> TypeOfExpression {
-    let location = get_location(node);
-    let typeref = build_identifier(&node.child_by_field_name("typeref").unwrap(), code);
-
-    TypeOfExpression { location, typeref }
-}
-
 fn build_binary_expression(node: &Node, code: &[u8]) -> BinaryExpression {
     let location = get_location(node);
     let left = Box::new(build_expression(
@@ -585,7 +589,8 @@ fn build_binary_expression(node: &Node, code: &[u8]) -> BinaryExpression {
     ));
 
     let operator_node = node.child_by_field_name("operator").unwrap();
-    let operator = match operator_node.kind() {
+    let operator_kind = operator_node.kind();
+    let operator = match operator_kind {
         "pow_operator" => OperatorKind::Pow,
         "and_operator" => OperatorKind::And,
         "or_operator" => OperatorKind::Or,
@@ -599,7 +604,12 @@ fn build_binary_expression(node: &Node, code: &[u8]) -> BinaryExpression {
         "not_equals_operator" => OperatorKind::Ne,
         "greater_equal_operator" => OperatorKind::Ge,
         "greater_operator" => OperatorKind::Gt,
-        _ => panic!("Unexpected operator node"),
+        "shift_left_operator" => OperatorKind::Shl,
+        "shift_right_operator" => OperatorKind::Shr,
+        "bit_xor_operator" => OperatorKind::BitXor,
+        "bit_and_operator" => OperatorKind::BitAnd,
+        "bit_or_operator" => OperatorKind::BitOr,
+        _ => panic!("Unexpected operator node: {operator_kind}"),
     };
 
     let right = Box::new(build_expression(
@@ -672,13 +682,16 @@ fn build_type(node: &Node, code: &[u8]) -> Type {
     let node_kind = node.kind();
     match node_kind {
         "type_array" => Type::Array(build_type_array(node, code)),
-        "type_i32" | "type_i64" | "type_u32" | "type_u64" | "type_bool" | "type_unit" => {
-            Type::Simple(build_simple_type(node, code))
-        }
+        "type_i8" | "type_i32" | "type_i64" | "type_u8" | "type_u32" | "type_u64" | "type_bool"
+        | "type_unit" => Type::Simple(build_simple_type(node, code)),
         "generic_type" | "generic_name" => Type::Generic(build_generic_type(node, code)),
-        "qualified_type" | "qualified_name" => Type::Qualified(build_qualified_type(node, code)),
+        "type_qualified_name" => Type::QualifiedType(build_type_qualified_name(node, code)),
+        "qualified_name" => Type::QualifiedName(build_qualified_name(node, code)),
         "identifier" => Type::Identifier(build_identifier(node, code)),
-        _ => panic!("Unexpected type: {}", node.kind()),
+        _ => {
+            let location = get_location(node);
+            panic!("Unexpected type: {node_kind}, {location}")
+        }
     }
 }
 
@@ -723,16 +736,34 @@ fn build_generic_type(node: &Node, code: &[u8]) -> GenericType {
     }
 }
 
-fn build_qualified_type(node: &Node, code: &[u8]) -> QualifiedType {
+fn build_type_qualified_name(node: &Node, code: &[u8]) -> TypeQualifiedName {
+    let location = get_location(node);
+    let alias = build_identifier(&node.child_by_field_name("alias").unwrap(), code);
+    let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
+
+    TypeQualifiedName {
+        location,
+        alias,
+        name,
+    }
+}
+
+fn build_qualified_name(node: &Node, code: &[u8]) -> QualifiedName {
     let location = get_location(node);
     let qualifier = build_identifier(&node.child_by_field_name("qualifier").unwrap(), code);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
 
-    QualifiedType {
+    QualifiedName {
         location,
         qualifier,
         name,
     }
+}
+
+fn build_uzumaki_expression(node: &Node, _: &[u8]) -> UzumakiExpression {
+    let location = get_location(node);
+
+    UzumakiExpression { location }
 }
 
 fn build_identifier(node: &Node, code: &[u8]) -> Identifier {

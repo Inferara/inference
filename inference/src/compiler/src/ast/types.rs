@@ -1,15 +1,24 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone)]
+use core::fmt;
+use std::fmt::{Display, Formatter};
+
+#[derive(Debug, Default, Clone, Hash, Eq, PartialEq)]
 pub struct Position {
     pub row: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, Hash, Eq, PartialEq)]
 pub struct Location {
     pub start: Position,
     pub end: Position,
+}
+
+impl Display for Location {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}:{}", self.start.row, self.start.column)
+    }
 }
 
 #[derive(Debug)]
@@ -28,7 +37,7 @@ pub struct UseDirective {
 }
 
 #[derive(Debug)]
-pub struct ContextDefinition {
+pub struct SpecDefinition {
     pub location: Location,
     pub name: Identifier,
     pub definitions: Vec<Definition>,
@@ -56,7 +65,7 @@ pub struct EnumDefinition {
     pub variants: Vec<Identifier>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone, Hash, Eq, PartialEq)]
 pub struct Identifier {
     pub location: Location,
     pub name: String,
@@ -64,7 +73,7 @@ pub struct Identifier {
 
 #[derive(Debug)]
 pub enum Definition {
-    Context(ContextDefinition),
+    Spec(SpecDefinition),
     Struct(StructDefinition),
     Enum(EnumDefinition),
     Constant(ConstantDefinition),
@@ -136,11 +145,12 @@ pub enum Statement {
     Forall(ForallStatement),
     Exists(ExistsStatement),
     Unique(UniqueStatement),
-    For(ForStatement),
+    Loop(LoopStatement),
     If(IfStatement),
     VariableDefinition(VariableDefinitionStatement),
     TypeDefinition(TypeDefinitionStatement),
     Assert(AssertStatement),
+    ConstantDefinition(ConstantDefinition),
 }
 
 #[derive(Debug)]
@@ -180,11 +190,9 @@ pub struct UniqueStatement {
 }
 
 #[derive(Debug)]
-pub struct ForStatement {
+pub struct LoopStatement {
     pub location: Location,
-    pub initializer: Option<VariableDefinitionStatement>,
     pub condition: Option<Expression>,
-    pub update: Option<Expression>,
     pub body: Box<Statement>,
 }
 
@@ -220,11 +228,11 @@ pub enum Expression {
     FunctionCall(FunctionCallExpression),
     PrefixUnary(PrefixUnaryExpression),
     Parenthesized(ParenthesizedExpression),
-    TypeOf(TypeOfExpression),
     Binary(BinaryExpression),
     Literal(Literal),
     Identifier(Identifier),
     Type(Type),
+    Uzumaki(UzumakiExpression),
 }
 
 #[derive(Debug)]
@@ -252,7 +260,12 @@ pub struct MemberAccessExpression {
 pub struct FunctionCallExpression {
     pub location: Location,
     pub function: Box<Expression>,
-    pub arguments: Option<Vec<Expression>>,
+    pub arguments: Option<Vec<(Identifier, Expression)>>,
+}
+
+#[derive(Debug)]
+pub struct UzumakiExpression {
+    pub location: Location,
 }
 
 #[derive(Debug)]
@@ -277,12 +290,6 @@ pub struct AssertStatement {
 pub struct ParenthesizedExpression {
     pub location: Location,
     pub expression: Box<Expression>,
-}
-
-#[derive(Debug)]
-pub struct TypeOfExpression {
-    pub location: Location,
-    pub typeref: Identifier,
 }
 
 #[derive(Debug)]
@@ -360,7 +367,8 @@ pub enum Type {
     Array(TypeArray),
     Simple(SimpleType),
     Generic(GenericType),
-    Qualified(QualifiedType),
+    QualifiedName(QualifiedName),
+    QualifiedType(TypeQualifiedName),
     Identifier(Identifier),
 }
 
@@ -378,9 +386,16 @@ pub struct GenericType {
 }
 
 #[derive(Debug)]
-pub struct QualifiedType {
+pub struct QualifiedName {
     pub location: Location,
     pub qualifier: Identifier,
+    pub name: Identifier,
+}
+
+#[derive(Debug)]
+pub struct TypeQualifiedName {
+    pub location: Location,
+    pub alias: Identifier,
     pub name: Identifier,
 }
 
