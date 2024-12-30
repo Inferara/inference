@@ -2,10 +2,10 @@
 
 use super::types::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, Definition,
-    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
-    FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
-    Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
+    AssumeStatement, BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition,
+    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
+    FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
+    Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
     ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedName, ReturnStatement,
     SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition,
     StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName,
@@ -448,6 +448,23 @@ impl LoopStatement {
     }
 }
 
+impl BreakStatement {
+    pub fn new(start_row: usize, start_column: usize, end_row: usize, end_column: usize) -> Self {
+        BreakStatement {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+        }
+    }
+}
+
 impl IfStatement {
     pub fn new(
         start_row: usize,
@@ -885,6 +902,32 @@ impl GenericType {
     }
 }
 
+impl FunctionType {
+    pub fn new(
+        start_row: usize,
+        start_column: usize,
+        end_row: usize,
+        end_column: usize,
+        arguments: Vec<Type>,
+        returns: Box<Type>,
+    ) -> Self {
+        FunctionType {
+            location: Location {
+                start: Position {
+                    row: start_row,
+                    column: start_column,
+                },
+                end: Position {
+                    row: end_row,
+                    column: end_column,
+                },
+            },
+            arguments,
+            returns,
+        }
+    }
+}
+
 impl QualifiedName {
     pub fn new(
         start_row: usize,
@@ -944,7 +987,7 @@ impl TypeArray {
         end_row: usize,
         end_column: usize,
         element_type: Box<Type>,
-        size: Option<NumberLiteral>,
+        size: Option<Box<Expression>>,
     ) -> Self {
         TypeArray {
             location: Location {

@@ -146,6 +146,7 @@ pub enum Statement {
     Exists(ExistsStatement),
     Unique(UniqueStatement),
     Loop(LoopStatement),
+    Break(BreakStatement),
     If(IfStatement),
     VariableDefinition(VariableDefinitionStatement),
     TypeDefinition(TypeDefinitionStatement),
@@ -197,6 +198,11 @@ pub struct LoopStatement {
 }
 
 #[derive(Debug)]
+pub struct BreakStatement {
+    pub location: Location,
+}
+
+#[derive(Debug)]
 pub struct IfStatement {
     pub location: Location,
     pub condition: Expression,
@@ -222,16 +228,16 @@ pub struct TypeDefinitionStatement {
 
 #[derive(Debug)]
 pub enum Expression {
-    Assign(AssignExpression),
-    ArrayIndexAccess(ArrayIndexAccessExpression),
-    MemberAccess(MemberAccessExpression),
-    FunctionCall(FunctionCallExpression),
-    PrefixUnary(PrefixUnaryExpression),
-    Parenthesized(ParenthesizedExpression),
-    Binary(BinaryExpression),
+    Assign(Box<AssignExpression>),
+    ArrayIndexAccess(Box<ArrayIndexAccessExpression>),
+    MemberAccess(Box<MemberAccessExpression>),
+    FunctionCall(Box<FunctionCallExpression>),
+    PrefixUnary(Box<PrefixUnaryExpression>),
+    Parenthesized(Box<ParenthesizedExpression>),
+    Binary(Box<BinaryExpression>),
     Literal(Literal),
     Identifier(Identifier),
-    Type(Type),
+    Type(Box<Type>),
     Uzumaki(UzumakiExpression),
 }
 
@@ -364,11 +370,12 @@ pub struct UnitLiteral {
 
 #[derive(Debug)]
 pub enum Type {
-    Array(TypeArray),
+    Array(Box<TypeArray>),
     Simple(SimpleType),
     Generic(GenericType),
+    Function(FunctionType),
     QualifiedName(QualifiedName),
-    QualifiedType(TypeQualifiedName),
+    Qualified(TypeQualifiedName),
     Identifier(Identifier),
 }
 
@@ -383,6 +390,13 @@ pub struct GenericType {
     pub location: Location,
     pub base: Identifier,
     pub parameters: Vec<Type>,
+}
+
+#[derive(Debug)]
+pub struct FunctionType {
+    pub location: Location,
+    pub arguments: Vec<Type>,
+    pub returns: Box<Type>,
 }
 
 #[derive(Debug)]
@@ -403,5 +417,5 @@ pub struct TypeQualifiedName {
 pub struct TypeArray {
     pub location: Location,
     pub element_type: Box<Type>,
-    pub size: Option<NumberLiteral>,
+    pub size: Option<Box<Expression>>,
 }

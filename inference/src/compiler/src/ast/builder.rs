@@ -1,23 +1,21 @@
 #![warn(clippy::pedantic)]
 
-use std::collections::HashMap;
-
 use crate::ast::types::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
     AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, Definition,
     EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
-    Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
-    ParenthesizedExpression, Position, PrefixUnaryExpression, ReturnStatement, SimpleType,
-    SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
-    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
-    UseDirective, VariableDefinitionStatement,
+    Location, LoopStatement, MemberAccessExpression, OperatorKind, ParenthesizedExpression,
+    Position, PrefixUnaryExpression, ReturnStatement, SimpleType, SourceFile, SpecDefinition,
+    Statement, StringLiteral, StructDefinition, StructField, Type, TypeArray, TypeDefinition,
+    TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind, UseDirective,
+    VariableDefinitionStatement,
 };
 use tree_sitter::Node;
 
 use super::types::{
-    ExistsStatement, ForallStatement, QualifiedName, UniqueStatement, UnitLiteral,
-    UzumakiExpression,
+    BreakStatement, ExistsStatement, ForallStatement, FunctionType, NumberLiteral, QualifiedName,
+    UniqueStatement, UnitLiteral, UzumakiExpression,
 };
 
 pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
@@ -311,6 +309,7 @@ fn build_statement(node: &Node, code: &[u8]) -> Statement {
             Statement::TypeDefinition(build_type_definition_statement(node, code))
         }
         "assert_statement" => Statement::Assert(build_assert_statement(node, code)),
+        "break_statement" => Statement::Break(build_break_statement(node, code)),
         "constant_definition" => {
             Statement::ConstantDefinition(build_constant_definition(node, code))
         }
@@ -436,28 +435,28 @@ fn build_type_definition_statement(node: &Node, code: &[u8]) -> TypeDefinitionSt
 fn build_expression(node: &Node, code: &[u8]) -> Expression {
     let node_kind = node.kind();
     match node_kind {
-        "assign_expression" => Expression::Assign(build_assign_expression(node, code)),
+        "assign_expression" => Expression::Assign(Box::new(build_assign_expression(node, code))),
         "array_index_access_expression" => {
-            Expression::ArrayIndexAccess(build_array_index_access_expression(node, code))
+            Expression::ArrayIndexAccess(Box::new(build_array_index_access_expression(node, code)))
         }
         "member_access_expression" => {
-            Expression::MemberAccess(build_member_access_expression(node, code))
+            Expression::MemberAccess(Box::new(build_member_access_expression(node, code)))
         }
         "function_call_expression" => {
-            Expression::FunctionCall(build_function_call_expression(node, code))
+            Expression::FunctionCall(Box::new(build_function_call_expression(node, code)))
         }
         "prefix_unary_expression" => {
-            Expression::PrefixUnary(build_prefix_unary_expression(node, code))
+            Expression::PrefixUnary(Box::new(build_prefix_unary_expression(node, code)))
         }
         "parenthesized_expression" => {
-            Expression::Parenthesized(build_parenthesized_expression(node, code))
+            Expression::Parenthesized(Box::new(build_parenthesized_expression(node, code)))
         }
-        "binary_expression" => Expression::Binary(build_binary_expression(node, code)),
+        "binary_expression" => Expression::Binary(Box::new(build_binary_expression(node, code))),
         "bool_literal" | "string_literal" | "number_literal" | "array_literal" | "unit_literal" => {
             Expression::Literal(build_literal(node, code))
         }
         "uzumaki_keyword" => Expression::Uzumaki(build_uzumaki_expression(node, code)),
-        _ => Expression::Type(build_type(node, code)),
+        _ => Expression::Type(Box::new(build_type(node, code))),
     }
 }
 
@@ -571,6 +570,11 @@ fn build_assert_statement(node: &Node, code: &[u8]) -> AssertStatement {
     }
 }
 
+fn build_break_statement(node: &Node, _: &[u8]) -> BreakStatement {
+    let location = get_location(node);
+    BreakStatement { location }
+}
+
 fn build_parenthesized_expression(node: &Node, code: &[u8]) -> ParenthesizedExpression {
     let location = get_location(node);
     let expression = Box::new(build_expression(&node.child(1).unwrap(), code));
@@ -667,7 +671,11 @@ fn build_string_literal(node: &Node, code: &[u8]) -> StringLiteral {
 
 fn build_number_literal(node: &Node, code: &[u8]) -> NumberLiteral {
     let location = get_location(node);
-    let value = node.utf8_text(code).unwrap().parse::<i64>().unwrap();
+    let value = node
+        .utf8_text(code)
+        .unwrap()
+        .parse::<i64>()
+        .unwrap_or_else(|_| panic!("Failed to parse number literal: {location}"));
 
     NumberLiteral { location, value }
 }
@@ -681,12 +689,13 @@ fn build_unit_literal(node: &Node, _: &[u8]) -> UnitLiteral {
 fn build_type(node: &Node, code: &[u8]) -> Type {
     let node_kind = node.kind();
     match node_kind {
-        "type_array" => Type::Array(build_type_array(node, code)),
-        "type_i8" | "type_i32" | "type_i64" | "type_u8" | "type_u32" | "type_u64" | "type_bool"
-        | "type_unit" => Type::Simple(build_simple_type(node, code)),
+        "type_array" => Type::Array(Box::new(build_type_array(node, code))),
+        "type_i8" | "type_i16" | "type_i32" | "type_i64" | "type_u8" | "type_u16" | "type_u32"
+        | "type_u64" | "type_bool" | "type_unit" => Type::Simple(build_simple_type(node, code)),
         "generic_type" | "generic_name" => Type::Generic(build_generic_type(node, code)),
-        "type_qualified_name" => Type::QualifiedType(build_type_qualified_name(node, code)),
+        "type_qualified_name" => Type::Qualified(build_type_qualified_name(node, code)),
         "qualified_name" => Type::QualifiedName(build_qualified_name(node, code)),
+        "type_fn" => Type::Function(build_function_type(node, code)),
         "identifier" => Type::Identifier(build_identifier(node, code)),
         _ => {
             let location = get_location(node);
@@ -700,7 +709,7 @@ fn build_type_array(node: &Node, code: &[u8]) -> TypeArray {
     let element_type = build_type(&node.child_by_field_name("type").unwrap(), code);
     let size = node
         .child_by_field_name("length")
-        .map(|n| build_number_literal(&n, code));
+        .map(|n| Box::new(build_expression(&n, code)));
 
     TypeArray {
         location,
@@ -733,6 +742,31 @@ fn build_generic_type(node: &Node, code: &[u8]) -> GenericType {
         location,
         base,
         parameters,
+    }
+}
+
+fn build_function_type(node: &Node, code: &[u8]) -> FunctionType {
+    let location = get_location(node);
+    let mut arguments = Vec::new();
+    let mut cursor = node.walk();
+
+    let founded_arguments = node
+        .children_by_field_name("argument", &mut cursor)
+        .map(|segment| build_type(&segment, code));
+    let founded_arguments: Vec<Type> = founded_arguments.collect();
+    if !founded_arguments.is_empty() {
+        arguments = founded_arguments;
+    }
+
+    let returns = Box::new(build_type(
+        &node.child_by_field_name("returns").unwrap(),
+        code,
+    ));
+
+    FunctionType {
+        location,
+        arguments,
+        returns,
     }
 }
 
