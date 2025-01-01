@@ -1,6 +1,7 @@
 {
     "rust-analyzer.linkedProjects": [
         "./infc_compiler/Cargo.toml",
-        "./infc/Cargo.toml"
+        "./infc/Cargo.toml",
+        "./tests/Cargo.toml"
     ]
 }

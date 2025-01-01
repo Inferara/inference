@@ -49,8 +49,10 @@ fn main() {
         process::exit(1);
     }
 
-    if args.wasm {
-        wasm_to_coq(&args.path);
+    if args.output.is_some() && args.out.unwrap() == "coq" {
+        if args.path.ends_with(".wasm") {
+            wasm_to_coq(&args.path);
+        }
     } else {
         parse_inf_file(args.path.to_str().unwrap());
     }
