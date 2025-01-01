@@ -18,30 +18,37 @@ use super::types::{
     UniqueStatement, UnitLiteral, UzumakiExpression,
 };
 
+/// Builds the AST from the root node and source code.
+///
+/// # Panics
+///
+/// This function will panioc if the `root` node is not of type `source_file`.
+/// This function will panic if the `source_file` is malformed and a valid AST cannot be constructed.
+#[must_use]
 pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
     assert!(
         root.kind() == "source_file",
-        "Expected a root node of type {}",
-        "source_file"
+        "Expected a root node of type `source_file`"
     );
 
     let location = get_location(&root);
     let mut ast = SourceFile::new(location);
 
     for i in 0..root.child_count() {
-        let child = root.child(i).unwrap();
-        let child_kind = child.kind();
+        if let Some(child) = root.child(i) {
+            let child_kind = child.kind();
 
-        match child_kind {
-            "use_directive" => build_use_directive(&mut ast, &child, code),
-            _ => {
-                if let Some(definition) = build_definition(&child, code) {
-                    ast.add_definition(definition);
-                } else {
-                    panic!("{}", format!("Unexpected child of type {child_kind}"));
+            match child_kind {
+                "use_directive" => build_use_directive(&mut ast, &child, code),
+                _ => {
+                    if let Some(definition) = build_definition(&child, code) {
+                        ast.add_definition(definition);
+                    } else {
+                        panic!("{}", format!("Unexpected child of type {child_kind}"));
+                    }
                 }
-            }
-        };
+            };
+        }
     }
     ast
 }

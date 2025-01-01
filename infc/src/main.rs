@@ -73,9 +73,9 @@ fn parse_inference(source_code: &str) -> SourceFile {
     build_ast(root_node, code)
 }
 
-fn generate_wasm_s_expression(source_file: &SourceFile) -> String {
-    wat_codegen::wat_generator::generate_for_source_file(source_file)
-}
+// fn generate_wasm_s_expression(source_file: &SourceFile) -> String {
+//     wat_codegen::wat_generator::generate_for_source_file(source_file)
+// }
 
 fn wasm_to_coq(path: &Path) {
     if path.is_file() {
