@@ -103,11 +103,11 @@ mod function_tests {
         };
 
         let wat = generate_for_function_definition(&function, 0);
-        let expected = "(func (export \"add\") (param i32 i32) (result i32)
-    local.get 0
-    local.get 1
+        let expected = "(func (export \"add\") (param $a i32) (param $b i32) (result i32)
+    local.get $a
+    local.get $b
     i32.add
-  )";
-        assert_eq!(wat, expected);
+)";
+        assert_eq!(wat.trim(), expected);
     }
 }

@@ -1,5 +1,10 @@
 #![warn(clippy::pedantic)]
-use crate::ast::types::{Definition, FunctionDefinition, SourceFile, Type};
+use std::result;
+
+use crate::ast::types::{
+    BinaryExpression, Block, Definition, Expression, FunctionDefinition, Identifier, OperatorKind,
+    SourceFile, Statement, Type,
+};
 
 pub(crate) fn generate_for_source_file(source_file: &SourceFile) -> String {
     let mut result = String::new();
@@ -39,40 +44,101 @@ pub(crate) fn generate_for_function_definition(
 ) -> String {
     let spaces = generate_indentation(indent);
     let mut result = String::new();
-    let parameters_len = function.parameters.as_ref().map_or(0, std::vec::Vec::len);
+
+    let function_export = generate_function_export(function);
+    let function_parameters = generate_function_parameters(function);
+    let function_result = generate_function_result(function);
+
     result.push_str(&format!(
-        "{}(func (export {}) (param {})\n",
-        spaces, function.name.name, parameters_len
+        "{spaces}(func {function_export} {function_parameters} {function_result}\n",
     ));
-    if function.parameters.is_some() {
-        for parameter in function.parameters.as_ref().unwrap() {
+
+    result.push_str(generate_for_block(&function.body, indent + 1).as_str());
+
+    if function.is_void() {
+        result.push_str("i32.const 0");
+    }
+    result.push_str(")\n");
+    result
+}
+
+fn generate_function_export(function: &FunctionDefinition) -> String {
+    format!("(export \"{}\")", function.name())
+}
+
+fn generate_function_parameters(function: &FunctionDefinition) -> String {
+    let mut result = String::new();
+    if let Some(parameters) = &function.parameters {
+        for parameter in parameters {
             result.push_str(&format!(
-                "{}(param ${} {})\n",
-                spaces,
-                parameter.name.name,
+                "(param ${} {}) ",
+                parameter.name(),
                 generate_for_type(&parameter.type_, 0)
             ));
         }
     }
-    if function.returns.is_some() {
-        result.push_str(&format!(
-            "{}(result {})\n",
-            spaces,
-            generate_for_type(function.returns.as_ref().unwrap(), 0)
-        ));
-        result.push_str(&format!(
-            "{}(local ${} {})\n",
-            spaces,
-            function.name.name,
-            generate_for_type(function.returns.as_ref().unwrap(), 0)
-        ));
-    } else {
-        result.push_str(&format!("{}(local ${} i32)\n", spaces, function.name.name));
+    if !result.is_empty() {
+        result.pop();
     }
-
-    result.push_str(&format!("{spaces}(nop)\n",));
-    result.push_str(")\n");
     result
+}
+
+fn generate_function_result(function: &FunctionDefinition) -> String {
+    if let Some(returns) = &function.returns {
+        format!("(result {})", generate_for_type(returns, 0))
+    } else {
+        "(result i32)".to_string()
+    }
+}
+
+fn generate_for_block(block: &Block, indent: u32) -> String {
+    let mut result = String::new();
+    for statement in &block.statements {
+        match statement {
+            Statement::Return(return_statement) => {
+                result.push_str(&generate_for_expression(
+                    &return_statement.expression,
+                    indent,
+                ));
+            }
+            Statement::Expression(expression) => {
+                result.push_str(&generate_for_expression(&expression.expression, indent));
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+fn generate_for_binary_expression(bin_expr: &BinaryExpression, indent: u32) -> String {
+    let mut result = String::new();
+    let left = generate_for_expression(&bin_expr.left, indent);
+    let right = generate_for_expression(&bin_expr.right, indent);
+    let operator = generate_for_bin_expr_operator(&bin_expr.operator, indent);
+    let indentation = generate_indentation(indent);
+    result.push_str(format!("{}{}\n", indentation, left).as_str());
+    result.push_str(format!("{}{}\n", indentation, right).as_str());
+    result.push_str(format!("{}{}\n", indentation, operator).as_str());
+    result
+}
+
+fn generate_for_expression(expr: &Expression, indent: u32) -> String {
+    let indentation = generate_indentation(indent);
+    match expr {
+        Expression::Binary(bin_expr) => generate_for_binary_expression(bin_expr, indent),
+        Expression::Identifier(identifier) => {
+            format!("{}local.get ${}", indentation, identifier.name.clone())
+        }
+        _ => String::new(),
+    }
+}
+
+fn generate_for_bin_expr_operator(operator: &OperatorKind, indent: u32) -> String {
+    let indentation = generate_indentation(indent);
+    match operator {
+        OperatorKind::Add => format!("{indentation}i32.add"),
+        _ => String::new(),
+    }
 }
 
 fn generate_for_type(type_: &Type, _: u32) -> String {

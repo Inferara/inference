@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 
 use super::types::{
-    Parameter, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    AssumeStatement, BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition,
-    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
+    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AssumeStatement,
+    BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition,
+    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
     Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
-    ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedName, ReturnStatement,
-    SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition,
-    StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName,
-    UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
+    Parameter, ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedName,
+    ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral,
+    StructDefinition, StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement,
+    TypeQualifiedName, UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
 };
 
 impl SourceFile {
@@ -245,6 +245,18 @@ impl FunctionDefinition {
             body,
         }
     }
+
+    pub fn name(&self) -> &str {
+        &self.name.name
+    }
+
+    pub fn has_parameters(&self) -> bool {
+        self.parameters.is_some() && !self.parameters.as_ref().unwrap().is_empty()
+    }
+
+    pub fn is_void(&self) -> bool {
+        self.returns.is_none()
+    }
 }
 
 impl ExternalFunctionDefinition {
@@ -324,6 +336,10 @@ impl Parameter {
             name,
             type_,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name.name
     }
 }
 
