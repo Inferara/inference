@@ -31,8 +31,8 @@
 mod parser;
 use clap::Parser;
 use infc_compiler::ast::{builder::build_ast, types::SourceFile};
+use infc_compiler::wasm_to_coq_translator;
 use infc_compiler::wasm_to_coq_translator::translator::WasmModuleParseError;
-use infc_compiler::{wasm_to_coq_translator, wat_codegen};
 use parser::Cli;
 use std::{fs, path::Path, process};
 use walkdir::WalkDir;
