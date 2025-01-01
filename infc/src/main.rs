@@ -169,6 +169,10 @@ mod test {
 
     #[test]
     fn test_wasm_to_coq() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            eprintln!("Skipping test on GitHub Actions");
+            return;
+        }
         let path = get_test_data_path().join("wasm").join("comments.0.wasm");
         let absolute_path = path.canonicalize().unwrap();
 

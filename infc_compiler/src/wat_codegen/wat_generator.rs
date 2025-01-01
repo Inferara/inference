@@ -1,11 +1,12 @@
 #![warn(clippy::pedantic)]
-use std::result;
 
 use crate::ast::types::{
-    BinaryExpression, Block, Definition, Expression, FunctionDefinition, Identifier, OperatorKind,
-    SourceFile, Statement, Type,
+    BinaryExpression, Block, Definition, Expression, FunctionDefinition, OperatorKind, SourceFile,
+    Statement, Type,
 };
 
+#[must_use]
+#[allow(clippy::single_match)]
 pub fn generate_for_source_file(source_file: &SourceFile) -> String {
     let mut result = String::new();
     for definition in &source_file.definitions {
@@ -19,6 +20,7 @@ pub fn generate_for_source_file(source_file: &SourceFile) -> String {
     result
 }
 
+#[allow(clippy::single_match)]
 fn generate_for_spec(spec: &crate::ast::types::SpecDefinition, indent: u32) -> String {
     let mut result = String::new();
     let spaces = generate_indentation(indent);
@@ -116,9 +118,9 @@ fn generate_for_binary_expression(bin_expr: &BinaryExpression, indent: u32) -> S
     let right = generate_for_expression(&bin_expr.right, indent);
     let operator = generate_for_bin_expr_operator(&bin_expr.operator, indent);
     let indentation = generate_indentation(indent);
-    result.push_str(format!("{}{}\n", indentation, left).as_str());
-    result.push_str(format!("{}{}\n", indentation, right).as_str());
-    result.push_str(format!("{}{}\n", indentation, operator).as_str());
+    result.push_str(format!("{indentation}{left}\n").as_str());
+    result.push_str(format!("{indentation}{right}\n").as_str());
+    result.push_str(format!("{indentation}{operator}\n").as_str());
     result
 }
 
@@ -156,7 +158,6 @@ fn generate_indentation(indent: u32) -> String {
 #[cfg(test)]
 mod tests {
     use types::*;
-    use wat_generator::generate_for_function_definition;
     use wat_generator::generate_indentation;
 
     use super::*;
