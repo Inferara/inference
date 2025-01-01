@@ -30,6 +30,7 @@
 
 mod ast;
 mod cli;
+mod wasm_codegen;
 mod wasm_to_coq_translator;
 
 use ast::builder::build_ast;
@@ -73,6 +74,10 @@ fn parse_inference(source_code: &str) -> ast::types::SourceFile {
     let code = source_code.as_bytes();
     let root_node = tree.root_node();
     build_ast(root_node, code)
+}
+
+fn generate_wasm_s_expression(source_file: &ast::types::SourceFile) -> String {
+    wasm_codegen::wat_generator::generate_for_source_file(source_file)
 }
 
 fn wasm_to_coq(path: &Path) {

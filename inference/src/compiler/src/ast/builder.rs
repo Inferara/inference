@@ -1,13 +1,13 @@
 #![warn(clippy::pedantic)]
 
 use crate::ast::types::{
-    Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
-    AssumeStatement, BinaryExpression, Block, BoolLiteral, ConstantDefinition, Definition,
-    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
-    FunctionCallExpression, FunctionDefinition, GenericType, Identifier, IfStatement, Literal,
-    Location, LoopStatement, MemberAccessExpression, OperatorKind, ParenthesizedExpression,
-    Position, PrefixUnaryExpression, ReturnStatement, SimpleType, SourceFile, SpecDefinition,
-    Statement, StringLiteral, StructDefinition, StructField, Type, TypeArray, TypeDefinition,
+    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AssumeStatement,
+    BinaryExpression, Block, BoolLiteral, ConstantDefinition, Definition, EnumDefinition,
+    Expression, ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression,
+    FunctionDefinition, GenericType, Identifier, IfStatement, Literal, Location, LoopStatement,
+    MemberAccessExpression, OperatorKind, Parameter, ParenthesizedExpression, Position,
+    PrefixUnaryExpression, ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement,
+    StringLiteral, StructDefinition, StructField, Type, TypeArray, TypeDefinition,
     TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind, UseDirective,
     VariableDefinitionStatement,
 };
@@ -203,7 +203,7 @@ fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
         let founded_arguments = argument_list_node
             .children_by_field_name("argument", &mut cursor)
             .map(|segment| build_argument(&segment, code));
-        let founded_arguments: Vec<Argument> = founded_arguments.collect();
+        let founded_arguments: Vec<Parameter> = founded_arguments.collect();
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
@@ -218,7 +218,7 @@ fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
     FunctionDefinition {
         location,
         name,
-        arguments,
+        parameters: arguments,
         returns,
         body,
     }
@@ -264,12 +264,12 @@ fn build_type_definition(node: &Node, code: &[u8]) -> TypeDefinition {
     }
 }
 
-fn build_argument(node: &Node, code: &[u8]) -> Argument {
+fn build_argument(node: &Node, code: &[u8]) -> Parameter {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
     let type_ = build_type(&node.child_by_field_name("type").unwrap(), code);
 
-    Argument {
+    Parameter {
         location,
         name,
         type_,
@@ -747,7 +747,7 @@ fn build_generic_type(node: &Node, code: &[u8]) -> GenericType {
 
 fn build_function_type(node: &Node, code: &[u8]) -> FunctionType {
     let location = get_location(node);
-    let mut arguments = Vec::new();
+    let mut arguments = None;
     let mut cursor = node.walk();
 
     let founded_arguments = node
@@ -755,7 +755,7 @@ fn build_function_type(node: &Node, code: &[u8]) -> FunctionType {
         .map(|segment| build_type(&segment, code));
     let founded_arguments: Vec<Type> = founded_arguments.collect();
     if !founded_arguments.is_empty() {
-        arguments = founded_arguments;
+        arguments = Some(founded_arguments);
     }
 
     let returns = Box::new(build_type(
@@ -765,7 +765,7 @@ fn build_function_type(node: &Node, code: &[u8]) -> FunctionType {
 
     FunctionType {
         location,
-        arguments,
+        parameters: arguments,
         returns,
     }
 }

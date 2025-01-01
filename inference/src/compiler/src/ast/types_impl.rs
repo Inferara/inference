@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use super::types::{
-    Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
+    Parameter, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
     AssumeStatement, BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition,
     Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
@@ -224,7 +224,7 @@ impl FunctionDefinition {
         end_row: usize,
         end_column: usize,
         name: Identifier,
-        arguments: Option<Vec<Argument>>,
+        arguments: Option<Vec<Parameter>>,
         returns: Option<Type>,
         body: Block,
     ) -> Self {
@@ -240,7 +240,7 @@ impl FunctionDefinition {
                 },
             },
             name,
-            arguments,
+            parameters: arguments,
             returns,
             body,
         }
@@ -301,7 +301,7 @@ impl TypeDefinition {
     }
 }
 
-impl Argument {
+impl Parameter {
     pub fn new(
         start_row: usize,
         start_column: usize,
@@ -310,7 +310,7 @@ impl Argument {
         name: Identifier,
         type_: Type,
     ) -> Self {
-        Argument {
+        Parameter {
             location: Location {
                 start: Position {
                     row: start_row,
@@ -908,7 +908,7 @@ impl FunctionType {
         start_column: usize,
         end_row: usize,
         end_column: usize,
-        arguments: Vec<Type>,
+        parameters: Option<Vec<Type>>,
         returns: Box<Type>,
     ) -> Self {
         FunctionType {
@@ -922,7 +922,7 @@ impl FunctionType {
                     column: end_column,
                 },
             },
-            arguments,
+            parameters,
             returns,
         }
     }

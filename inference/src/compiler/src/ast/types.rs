@@ -94,7 +94,7 @@ pub struct ConstantDefinition {
 pub struct FunctionDefinition {
     pub location: Location,
     pub name: Identifier,
-    pub arguments: Option<Vec<Argument>>,
+    pub parameters: Option<Vec<Parameter>>,
     pub returns: Option<Type>,
     pub body: Block,
 }
@@ -115,7 +115,7 @@ pub struct TypeDefinition {
 }
 
 #[derive(Debug)]
-pub struct Argument {
+pub struct Parameter {
     pub location: Location,
     pub name: Identifier,
     pub type_: Type,
@@ -395,7 +395,7 @@ pub struct GenericType {
 #[derive(Debug)]
 pub struct FunctionType {
     pub location: Location,
-    pub arguments: Vec<Type>,
+    pub parameters: Option<Vec<Type>>,
     pub returns: Box<Type>,
 }
 
