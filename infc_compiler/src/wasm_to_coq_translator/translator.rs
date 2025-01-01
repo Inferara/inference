@@ -6,7 +6,7 @@ use wasmparser::{
 };
 
 #[derive(Debug)]
-pub(crate) enum WasmModuleParseError {
+pub enum WasmModuleParseError {
     UnsupportedOperation(String),
 }
 

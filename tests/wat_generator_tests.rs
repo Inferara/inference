@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod function_tests {
-    use crate::{ast::types::*, wasm_codegen::wat_generator::generate_for_function_definition};
 
     #[test]
     #[allow(clippy::too_many_lines)]

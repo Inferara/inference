@@ -28,17 +28,14 @@
 //!
 //! The `test` suite is located in the `main_tests` module and contains tests for the main functionality
 
-mod ast;
-mod cli;
-mod wasm_codegen;
-mod wasm_to_coq_translator;
-
-use ast::builder::build_ast;
+mod parser;
 use clap::Parser;
-use cli::parser::Cli;
+use infc_compiler::ast::{builder::build_ast, types::SourceFile};
+use infc_compiler::wasm_to_coq_translator::translator::WasmModuleParseError;
+use infc_compiler::{wasm_to_coq_translator, wat_codegen};
+use parser::Cli;
 use std::{fs, path::Path, process};
 use walkdir::WalkDir;
-use wasm_to_coq_translator::translator::WasmModuleParseError;
 
 /// Inference compiler entry point
 ///
@@ -59,12 +56,12 @@ fn main() {
     }
 }
 
-fn parse_inf_file(source_file_path: &str) -> ast::types::SourceFile {
+fn parse_inf_file(source_file_path: &str) -> SourceFile {
     let text = fs::read_to_string(source_file_path).expect("Error reading source file");
     parse_inference(&text)
 }
 
-fn parse_inference(source_code: &str) -> ast::types::SourceFile {
+fn parse_inference(source_code: &str) -> SourceFile {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -76,8 +73,8 @@ fn parse_inference(source_code: &str) -> ast::types::SourceFile {
     build_ast(root_node, code)
 }
 
-fn generate_wasm_s_expression(source_file: &ast::types::SourceFile) -> String {
-    wasm_codegen::wat_generator::generate_for_source_file(source_file)
+fn generate_wasm_s_expression(source_file: &SourceFile) -> String {
+    wat_codegen::wat_generator::generate_for_source_file(source_file)
 }
 
 fn wasm_to_coq(path: &Path) {
@@ -154,18 +151,14 @@ fn wasm_bytes_to_coq_file(
     Ok(coq_file_path.to_str().unwrap().to_owned())
 }
 
-#[allow(unused_imports)]
-pub(crate) mod test {
-
-    use wasm_to_coq_translator::wasm_parser;
-
-    use super::*;
+#[cfg(test)]
+mod test {
 
     #[test]
     fn test_parse() {
         let path = get_test_data_path().join("inf").join("example.inf");
         let absolute_path = path.canonicalize().unwrap();
-        let ast = parse_inf_file(absolute_path.to_str().unwrap());
+        let ast = crate::parse_inf_file(absolute_path.to_str().unwrap());
         assert!(!ast.definitions.is_empty());
         // std::fs::write(
         //     current_dir.join(""),
@@ -181,7 +174,10 @@ pub(crate) mod test {
 
         let bytes = std::fs::read(absolute_path).unwrap();
         let mod_name = String::from("index");
-        let coq = wasm_parser::translate_bytes(&mod_name, bytes.as_slice());
+        let coq = crate::wasm_to_coq_translator::wasm_parser::translate_bytes(
+            &mod_name,
+            bytes.as_slice(),
+        );
         assert!(coq.is_ok());
         let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
         std::fs::write(coq_file_path, coq.unwrap()).unwrap();
@@ -191,10 +187,6 @@ pub(crate) mod test {
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {
         let current_dir = std::env::current_dir().unwrap();
         current_dir
-            .parent() // compiler
-            .unwrap()
-            .parent() // src
-            .unwrap()
             .parent() // inference
             .unwrap()
             .join("test_data")

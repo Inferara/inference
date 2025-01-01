@@ -7,7 +7,7 @@
             "type": "shell",
             "args": [],
             "options": {
-                "cwd": "${workspaceFolder}/inference/src/compiler/"
+                "cwd": "${workspaceFolder}/infc"
             },
             "group": "build"
         }

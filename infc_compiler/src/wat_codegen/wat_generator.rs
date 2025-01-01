@@ -6,7 +6,7 @@ use crate::ast::types::{
     SourceFile, Statement, Type,
 };
 
-pub(crate) fn generate_for_source_file(source_file: &SourceFile) -> String {
+pub fn generate_for_source_file(source_file: &SourceFile) -> String {
     let mut result = String::new();
     for definition in &source_file.definitions {
         match definition {
@@ -161,7 +161,7 @@ mod tests {
 
     use super::*;
     use crate::ast::*;
-    use crate::wasm_codegen::*;
+    use crate::wat_codegen::*;
 
     #[test]
     fn test_generate_indentation() {
