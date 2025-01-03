@@ -377,9 +377,9 @@ mod tests {
 
         let wat = generate_for_function_definition(&function, 0);
         let expected = "(func (export \"add\") (param $a i32) (param $b i32) (result i32)
-    local.get $a
-    local.get $b
-    i32.add
+  local.get $a
+  local.get $b
+  i32.add
 )";
         assert_eq!(wat.trim(), expected);
     }

@@ -319,7 +319,9 @@ fn build_block_statements(node: &Node, code: &[u8]) -> Vec<Statement> {
 
 fn build_statement(node: &Node, code: &[u8]) -> Statement {
     match node.kind() {
-        "block" => Statement::Block(build_block(node, code)),
+        "block" | "forall_block" | "assume_block" | "exists_block" | "unique_block" => {
+            Statement::Block(build_block(node, code))
+        }
         "expression_statement" => Statement::Expression(build_expression_statement(node, code)),
         "return_statement" => Statement::Return(build_return_statement(node, code)),
         "loop_statement" => Statement::Loop(build_loop_statement(node, code)),
