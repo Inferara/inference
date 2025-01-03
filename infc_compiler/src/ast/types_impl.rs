@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 
 use super::types::{
-    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AssumeStatement,
-    BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition,
-    EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
-    FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
-    Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
-    Parameter, ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedName,
-    ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral,
-    StructDefinition, StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement,
-    TypeQualifiedName, UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
+    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
+    Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition,
+    Expression, ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression,
+    FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, Location,
+    LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind, Parameter,
+    ParenthesizedExpression, Position, PrefixUnaryExpression, QualifiedName, ReturnStatement,
+    SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition,
+    StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName,
+    UnaryOperatorKind, UseDirective, VariableDefinitionStatement,
 };
 
 impl SourceFile {
@@ -226,7 +226,7 @@ impl FunctionDefinition {
         name: Identifier,
         arguments: Option<Vec<Parameter>>,
         returns: Option<Type>,
-        body: Block,
+        body: BlockType,
     ) -> Self {
         FunctionDefinition {
             location: Location {
@@ -413,30 +413,6 @@ impl ReturnStatement {
     }
 }
 
-impl AssumeStatement {
-    pub fn new(
-        start_row: usize,
-        start_column: usize,
-        end_row: usize,
-        end_column: usize,
-        block: Block,
-    ) -> Self {
-        AssumeStatement {
-            location: Location {
-                start: Position {
-                    row: start_row,
-                    column: start_column,
-                },
-                end: Position {
-                    row: end_row,
-                    column: end_column,
-                },
-            },
-            block,
-        }
-    }
-}
-
 impl LoopStatement {
     #![allow(clippy::too_many_arguments)]
     pub fn new(
@@ -445,7 +421,7 @@ impl LoopStatement {
         end_row: usize,
         end_column: usize,
         condition: Option<Expression>,
-        body: Statement,
+        body: BlockType,
     ) -> Self {
         LoopStatement {
             location: Location {
@@ -459,7 +435,7 @@ impl LoopStatement {
                 },
             },
             condition,
-            body: Box::new(body),
+            body,
         }
     }
 }
@@ -488,8 +464,8 @@ impl IfStatement {
         end_row: usize,
         end_column: usize,
         condition: Expression,
-        if_arm: Block,
-        else_arm: Option<Block>,
+        if_arm: BlockType,
+        else_arm: Option<BlockType>,
     ) -> Self {
         IfStatement {
             location: Location {
@@ -537,6 +513,10 @@ impl VariableDefinitionStatement {
             value,
             is_undef,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name.name
     }
 }
 
@@ -850,7 +830,8 @@ impl NumberLiteral {
         start_column: usize,
         end_row: usize,
         end_column: usize,
-        value: i64,
+        value: String,
+        type_: Type,
     ) -> Self {
         NumberLiteral {
             location: Location {
@@ -864,6 +845,7 @@ impl NumberLiteral {
                 },
             },
             value,
+            type_,
         }
     }
 }
