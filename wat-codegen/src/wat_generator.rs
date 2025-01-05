@@ -1,8 +1,8 @@
 #![warn(clippy::pedantic)]
 
-use crate::ast::types::{
+use inference_ast::types::{
     BinaryExpression, BlockType, Definition, Expression, FunctionDefinition, Literal, OperatorKind,
-    SourceFile, Statement, Type, VariableDefinitionStatement,
+    SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
 };
 
 #[must_use]
@@ -29,7 +29,7 @@ pub fn generate_for_source_file(source_file: &SourceFile) -> String {
 }
 
 #[allow(clippy::single_match)]
-fn generate_for_spec(spec: &crate::ast::types::SpecDefinition, indent: u32) -> String {
+fn generate_for_spec(spec: &SpecDefinition, indent: u32) -> String {
     let mut result = String::new();
     let spaces = generate_indentation(indent);
     result.push_str(&format!("{spaces}(module\n"));
@@ -249,12 +249,8 @@ fn generate_indentation(indent: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use types::*;
-    use wat_generator::generate_indentation;
-
     use super::*;
-    use crate::ast::*;
-    use crate::wat_codegen::*;
+    use inference_ast::types::*;
 
     #[test]
     fn test_generate_indentation() {

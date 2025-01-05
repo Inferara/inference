@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 
-use crate::ast::types::{
+use crate::types::{
     ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
     Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition, Expression,
     ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression, FunctionDefinition,

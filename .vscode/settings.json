@@ -1,7 +1,11 @@
 {
     "rust-analyzer.linkedProjects": [
-        "./infc_compiler/Cargo.toml",
-        "./infc/Cargo.toml",
-        "./tests/Cargo.toml"
+        "./inference/Cargo.toml",
+        "./ast/Cargo.toml",
+        "./cli/Cargo.toml",
+        "./wasm-coq-translator/Cargo.toml",
+        "./wat-codegen/Cargo.toml",
+        "./tests/Cargo.toml",
+        "./playground-server/Cargo.toml"
     ]
 }

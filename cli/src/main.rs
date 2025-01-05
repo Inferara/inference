@@ -30,9 +30,8 @@
 
 mod parser;
 use clap::Parser;
-use infc_compiler::ast::{builder::build_ast, types::SourceFile};
-use infc_compiler::wasm_to_coq_translator;
-use infc_compiler::wasm_to_coq_translator::translator::WasmModuleParseError;
+use inference_ast::{builder::build_ast, types::SourceFile};
+use inference_wasm_coq_translator::translator::WasmModuleParseError;
 use parser::Cli;
 use std::{fs, path::Path, process};
 use walkdir::WalkDir;
@@ -134,7 +133,8 @@ fn wasm_bytes_to_coq_file(
     sub_path: Option<&Path>,
     filename: &String,
 ) -> Result<String, String> {
-    let coq = wasm_to_coq_translator::wasm_parser::translate_bytes(filename, bytes.as_slice());
+    let coq =
+        inference_wasm_coq_translator::wasm_parser::translate_bytes(filename, bytes.as_slice());
 
     if let Err(e) = coq {
         let WasmModuleParseError::UnsupportedOperation(error_message) = e;
@@ -180,7 +180,7 @@ mod test {
 
         let bytes = std::fs::read(absolute_path).unwrap();
         let mod_name = String::from("index");
-        let coq = crate::wasm_to_coq_translator::wasm_parser::translate_bytes(
+        let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
             &mod_name,
             bytes.as_slice(),
         );

@@ -1,7 +1,10 @@
 [package]
-name = "inference-tests"
+name = "inference-ast"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
+
+[dependencies]
+tree-sitter = ">=0.22.6"

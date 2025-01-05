@@ -7,46 +7,14 @@ on:
   pull_request:
     branches:
       - main
-# change to repeat for two directories ./infc_compiler and ./infc
 jobs:
-  build_infc_compiler:
-    name: Build and test infc_compiler
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - nightly
-    defaults:
-      run:
-        working-directory: ./infc_compiler
-    steps:
-      - name: Setup Rust
-        uses: actions/checkout@v4.1.3
-      - name: Update Rust
-        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - name: Install clippy nightly
-        run: rustup component add clippy-preview
-      - name: Install Cargo audit
-        run: cargo install cargo-audit
-      - name: Build
-        run: cargo build --verbose
-      - name: Test
-        run: cargo test --verbose
-      - name: Clippy
-        run: cargo clippy --verbose -- -D warnings
-      - name: Audit
-        run: cargo audit
-
-  build_infc:
+  build:
     name: Build and test infc
     runs-on: ubuntu-latest
     strategy:
       matrix:
         toolchain:
           - nightly
-    defaults:
-      run:
-        working-directory: ./infc
     steps:
       - name: Setup Rust
         uses: actions/checkout@v4.1.3

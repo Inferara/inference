@@ -1,0 +1,16 @@
+[package]
+name = "inrence-cli"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+clap = { version = "4.5.15", features = ["derive"] }
+walkdir = "2.5.0"
+tempfile = "3"
+tree-sitter.workspace = true
+tree-sitter-inference.workspace = true
+inference-ast.workspace = true
+inference-wasm-coq-translator.workspace = true
