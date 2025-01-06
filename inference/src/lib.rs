@@ -1,3 +1,5 @@
+//! Inference is a programming language that is designed to be easy to learn and use.
+
 pub fn compile_to_wat(source_code: &str) -> String {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
@@ -9,4 +11,9 @@ pub fn compile_to_wat(source_code: &str) -> String {
     let root_node = tree.root_node();
     let ast = inference_ast::builder::build_ast(root_node, code);
     inference_wat_codegen::wat_generator::generate_for_source_file(&ast)
+}
+
+pub fn compile_to_wasm(source_code: &str) -> Vec<u8> {
+    let wat = compile_to_wat(source_code);
+    wat::parse_str(wat).unwrap()
 }
