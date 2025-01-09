@@ -17,8 +17,11 @@ struct Response {
 
 fn parse_inf_file(input: &str) -> Response {
     let wat = compile_to_wat(input);
-    let wasm = wat_to_wasm(&wat);
     let errors = vec![];
+    let (wasm, errors) = match wat_to_wasm(&wat) {
+        Ok(wasm) => (wasm, errors),
+        Err(e) => (vec![], vec![e.to_string()]),
+    };
     Response { wat, wasm, errors }
 }
 

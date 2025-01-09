@@ -48,10 +48,7 @@ fn generate_for_spec(spec: &SpecDefinition, indent: u32) -> String {
     result
 }
 
-pub(crate) fn generate_for_function_definition(
-    function: &FunctionDefinition,
-    indent: u32,
-) -> String {
+fn generate_for_function_definition(function: &FunctionDefinition, indent: u32) -> String {
     let indentation = generate_indentation(indent);
     let mut result = String::new();
 

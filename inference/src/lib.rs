@@ -1,5 +1,12 @@
+#![warn(clippy::pedantic)]
 //! Inference is a programming language that is designed to be easy to learn and use.
 
+/// Compiles the given source code to WebAssembly Text format (WAT).
+///
+/// # Panics
+///
+/// This function will panic if there is an error loading the Inference grammar.
+#[must_use]
 pub fn compile_to_wat(source_code: &str) -> String {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
@@ -13,11 +20,34 @@ pub fn compile_to_wat(source_code: &str) -> String {
     inference_wat_codegen::wat_generator::generate_for_source_file(&ast)
 }
 
-pub fn wat_to_wasm(wat: &str) -> Vec<u8> {
-    wat::parse_str(wat).unwrap()
+/// Converts WebAssembly Text format (WAT) to WebAssembly binary format (WASM).
+///
+/// # Panics
+///
+/// This function will panic if the WAT string cannot be parsed.
+/// Converts WebAssembly Text format (WAT) to WebAssembly binary format (WASM).
+///
+/// # Errors
+///
+/// This function will return an error if the WAT string cannot be parsed or if there is an error during the encoding process.
+#[must_use = "The result should be used to avoid unnecessary computations"]
+pub fn wat_to_wasm(wat: &str) -> anyhow::Result<Vec<u8>> {
+    let buf = inf_wast::parser::ParseBuffer::new(wat)?;
+    let mut module = inf_wast::parser::parse::<inf_wast::Wat>(&buf)?;
+    let wasm = module.encode()?;
+    Ok(wasm)
 }
 
-pub fn compile_to_wasm(source_code: &str) -> Vec<u8> {
+/// Compiles the given source code to WebAssembly binary format (WASM).
+///
+/// # Errors
+///
+/// This function will return an error if the WAT string cannot be parsed or if there is an error during the compilation process.
+///
+/// # Panics
+///
+/// This function will panic if the WAT string cannot be parsed.
+pub fn compile_to_wasm(source_code: &str) -> anyhow::Result<Vec<u8>> {
     let wat = compile_to_wat(source_code);
-    wat::parse_str(wat).unwrap()
+    wat_to_wasm(&wat)
 }

@@ -7,7 +7,8 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-wat = "1.222.0"
+inf-wast = "0.0.1"
+anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
 inference-ast.workspace = true
