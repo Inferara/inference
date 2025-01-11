@@ -84,7 +84,18 @@ fn generate_for_function_definition(function: &FunctionDefinition) -> Vec<String
         result.push(format!("(result {})", generate_for_type(returns)));
     }
 
-    result.extend(generate_for_block(&function.body));
+    let mut block = generate_for_block(&function.body);
+    let mut locals = Vec::new();
+    let mut i = 0;
+    while i < block.len() {
+        if block[i].starts_with("(local ") {
+            locals.push(block.remove(i));
+        } else {
+            i += 1;
+        }
+    }
+    result.extend(locals);
+    result.extend(block);
     result.push(r_brace());
     result
 }
@@ -179,6 +190,7 @@ fn generate_for_expression(expr: &Expression) -> Vec<String> {
             result.push(format!("local.get ${}", identifier.name.clone()));
         }
         Expression::Literal(literal) => result.push(generate_for_literal(literal)),
+        Expression::Uzumaki(_) => result.push(String::from("i32.uzumaki")),
         _ => result.push(format!("{expr:?} expression type is not supported yet")),
     }
     result
@@ -201,9 +213,8 @@ fn generate_for_variable_definition(
     let variable_type = generate_for_type(&variable_definition.type_);
     result.push(format!("(local ${variable_name} {variable_type})"));
     if let Some(value) = &variable_definition.value {
-        result.push(format!("(local.set ${variable_name}"));
         result.extend(generate_for_expression(value));
-        result.push(r_brace());
+        result.push(format!("local.set ${variable_name}"));
     }
     result
 }
@@ -222,7 +233,7 @@ fn generate_for_literal(literal: &Literal) -> String {
         Literal::Number(number) => {
             let literal_value = &number.value;
             let type_ = generate_for_type(&number.type_);
-            format!("{type_}.const {literal_value}")
+            format!("({type_}.const {literal_value})")
         }
         _ => format!("{literal:?} literal is not supported yet"),
     }
