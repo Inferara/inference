@@ -667,23 +667,13 @@ fn build_number_literal(node: &Node, code: &[u8]) -> NumberLiteral {
     let location = get_location(node);
     let value = node.utf8_text(code).unwrap().to_string();
 
-    //determine number literal type based on value
-    let type_ = if value.starts_with('-') {
-        Type::Simple(SimpleType {
-            location: Location::default(),
-            name: "i32".to_string(),
-        })
-    } else {
-        Type::Simple(SimpleType {
-            location: Location::default(),
-            name: "u32".to_string(),
-        })
-    };
-
     NumberLiteral {
         location,
         value,
-        type_,
+        type_: Type::Simple(SimpleType {
+            location: Location::default(),
+            name: "i32".to_string(),
+        }),
     }
 }
 

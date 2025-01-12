@@ -1,62 +1,25 @@
 #![no_std]
-#![warn(clippy::pedantic)]
+
 extern crate alloc;
 
 use alloc::{
+    borrow::ToOwned,
     string::{String, ToString},
     vec::Vec,
 };
+use core::iter::Peekable;
+use core::slice::Iter;
 
-/// A library for pretty-formatting WAT (WebAssembly text) files.
-///
-/// # Note about `no_std`
-/// This code uses `alloc` to provide `String`, `Vec`, and other heap-allocated
-/// structures. It does not rely on the standard library (`std`), so it should
-/// be compatible with `no_std` environments that provide an allocator.
-///
-/// # Examples
-///
-/// ```ignore
-/// // These examples use `println!`, which is part of `std`.
-/// // If you're in a `no_std` environment, remove or rewrite them accordingly.
-///
-/// /// use wat_fmt::{format, format_with_indent};
-///
-/// let unformatted = "(module (func (param i32) (result i32) (i32.add (i32.const 1)(i32.const 2))))";
-///
-/// // Use default indentation (2 spaces):
-/// let pretty_default = format(unformatted);
-/// // println!("{}", pretty_default);
-///
-/// // Use custom indentation (4 spaces):
-/// let pretty_4_spaces = format_with_indent(unformatted, 4);
-/// // println!("{}", pretty_4_spaces);
-/// ```
-///
-/// Pretty-format a WAT string using a default indentation of 2 spaces.
-///
-/// # Arguments
-/// * `input` - A string slice containing unformatted or poorly formatted WAT code.
-///
-/// # Returns
-/// * A new `String` containing the pretty-formatted WAT code.
-#[must_use]
+/// Formats a WAT string with an indentation of 2 spaces.
 pub fn format(input: &str) -> String {
     format_with_indent(input, 2)
 }
 
-/// Pretty-format a WAT string using a configurable indentation level.
-///
-/// # Arguments
-/// * `input` - A string slice containing unformatted or poorly formatted WAT code.
-/// * `indent_size` - The number of spaces used per indentation level.
-///
-/// # Returns
-/// * A new `String` containing the pretty-formatted WAT code.
-#[must_use]
+/// Formats a WAT string using a configurable indentation level.
 pub fn format_with_indent(input: &str, indent_size: usize) -> String {
     let tokens = tokenize(input);
-    format_tokens(&tokens, indent_size)
+    let mut tokens_iter = tokens.iter().peekable();
+    format_module(&mut tokens_iter, 0, indent_size)
 }
 
 /// Splits the input into tokens (parentheses and sequences of non-whitespace, non-parenthesis chars).
@@ -64,103 +27,286 @@ fn tokenize(input: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
 
-    // A simple tokenizer that separates '(', ')' and sequences of other characters
     for c in input.chars() {
         match c {
             '(' | ')' => {
-                // If we were building a token, push it before the parenthesis
                 if !current.trim().is_empty() {
                     tokens.push(current.trim().to_string());
                 }
                 current.clear();
-                // Push the parenthesis as a separate token
                 tokens.push(c.to_string());
             }
             ' ' | '\n' | '\r' | '\t' => {
-                // Whitespace boundary: push current token if it's non-empty
                 if !current.trim().is_empty() {
                     tokens.push(current.trim().to_string());
                 }
                 current.clear();
             }
             _ => {
-                // Keep building the current token
                 current.push(c);
             }
         }
     }
-    // If there's any leftover token, push it
     if !current.trim().is_empty() {
         tokens.push(current.trim().to_string());
     }
     tokens
 }
 
-/// Formats tokens into a multiline string with proper indentation.
-fn format_tokens(tokens: &[String], indent_size: usize) -> String {
+fn format_module(
+    tokens_iter: &mut Peekable<Iter<String>>,
+    current_indent: usize,
+    indent_size: usize,
+) -> String {
     let mut result = String::new();
-    let mut current_indent = 0;
-    let mut start_of_line = true;
-    let mut block_just_opened = false;
-
-    let block_open_names = [
-        "module", "func", "block", "loop", "if", "else", "then", "forall", "exists", "unique",
-        "assume",
-    ];
-    let mut blocks_stack: Vec<String> = Vec::new();
-
-    for token in tokens {
+    while let Some(token) = tokens_iter.peek().cloned() {
         match token.as_str() {
             "(" => {
-                // Write a newline + indent before '(' if not at start of line
-                if !start_of_line {
-                    result.push('\n');
+                tokens_iter.next(); // Consume '('
+                if let Some(next_token) = tokens_iter.peek() {
+                    match next_token.as_str() {
+                        "module" => {
+                            tokens_iter.next(); // consume "module"
+                            result.push_str("(module\n");
+                            result.push_str(&format_module_children(
+                                tokens_iter,
+                                current_indent + 1,
+                                indent_size,
+                            ));
+                        }
+                        _ => {
+                            // The module is probably malformed so we fallback to the default s-expressions formatter
+                            todo!("Format the module as a sequence of s-expressions");
+                        }
+                    }
                 }
-                // Expand capacity for spaces
-                for _ in 0..(current_indent * indent_size) {
-                    result.push(' ');
-                }
-                result.push('(');
-                current_indent += 1;
-                start_of_line = false; // Just wrote '('
-                block_just_opened = true;
             }
             ")" => {
-                let current_block = blocks_stack.pop().unwrap_or_default();
-                if block_open_names.contains(&current_block.as_str()) {
-                    // Decrease indent before writing ')'
-                    current_indent = current_indent.saturating_sub(1);
-                    result.push('\n');
-                    for _ in 0..(current_indent * indent_size) {
-                        result.push(' ');
-                    }
-                    result.push(')');
-                    start_of_line = false; // Just wrote ')'
-                } else {
-                    result.push(')');
+                result.push('\n');
+                tokens_iter.next(); // Consume ')'
+                result.push(')');
+                if tokens_iter.peek().is_some() {
+                    panic!(
+                        "Unexpected token after module closing parenthesis {:?}",
+                        tokens_iter.peek()
+                    );
                 }
             }
             _ => {
-                // Normal token
-                if block_just_opened {
-                    block_just_opened = false;
-                    result.push_str(token);
-                    blocks_stack.push(token.clone());
-                } else {
-                    // If it's the start of a line, indent; otherwise, add a space
-                    if start_of_line {
-                        for _ in 0..(current_indent * indent_size) {
-                            result.push(' ');
+                // The module is probably malformed so we fallback to the default s-expressions formatter
+                todo!("Format the module as a sequence of s-expressions");
+            }
+        }
+    }
+    result
+}
+
+fn format_module_children(
+    tokens_iter: &mut Peekable<Iter<String>>,
+    current_indent: usize,
+    indent_size: usize,
+) -> String {
+    let mut result = String::new();
+    let mut depth = 0;
+    while let Some(token) = tokens_iter.peek().cloned() {
+        match token.as_str() {
+            "(" => {
+                depth += 1;
+                tokens_iter.next(); // Consume '('
+                if let Some(next_token) = tokens_iter.peek() {
+                    match next_token.as_str() {
+                        "func" => {
+                            tokens_iter.next(); // consume "func"
+                            result.push('\n');
+                            fill_indentation(&mut result, current_indent, indent_size);
+                            result.push_str("(func");
+                            result.push_str(&format_func_signature(tokens_iter));
+                            result.push_str(&format_block(
+                                tokens_iter,
+                                current_indent,
+                                indent_size,
+                            ));
+                            // result.push_str(tokens_iter.next().unwrap()); // Consume ')'
                         }
-                    } else {
-                        result.push(' ');
+                        _ => {
+                            // The function is probably malformed so we fallback
+                            // to the default s-expressions formatter
+                            todo!("Format the module function as a sequence of s-expressions");
+                        }
                     }
-                    result.push_str(token);
-                    start_of_line = false;
                 }
+            }
+            ")" => {
+                depth -= 1;
+                if depth < 0 {
+                    break;
+                }
+                tokens_iter.next(); // Consume ')'
+                fill_indentation(&mut result, current_indent, indent_size);
+                result.push_str(")\n");
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+fn format_func_signature(tokens_iter: &mut Peekable<Iter<String>>) -> String {
+    let mut result = String::new();
+    while let Some(token) = tokens_iter.peek().cloned() {
+        match token.as_str() {
+            "(" => {
+                let mut lookahead = tokens_iter.clone();
+                lookahead.next(); // Consume '('
+                if let Some(next_token) = lookahead.peek() {
+                    match next_token.as_str() {
+                        "export" | "param" | "result" => {
+                            tokens_iter.next(); // consume sub_token
+                            result.push(' ');
+                            result.push('(');
+                            result.push_str(&format_inline_group(tokens_iter));
+                        }
+                        _ => {
+                            break;
+                        }
+                    }
+                }
+            }
+            ")" => {
+                tokens_iter.next(); // Consume ')'
+                result.push(')');
+                return result;
+            }
+            _ => {
+                break;
+                // todo!("Format the function signature as a sequence of s-expressions");
+            }
+        }
+    }
+    result
+}
+
+fn format_block(
+    tokens_iter: &mut Peekable<Iter<String>>,
+    current_indent: usize,
+    indent_size: usize,
+) -> String {
+    let mut result = String::new();
+    while let Some(token) = tokens_iter.peek().cloned() {
+        result.push('\n');
+        match token.as_str() {
+            "(" => {
+                let mut lookahead = tokens_iter.clone();
+                lookahead.next(); // Consume '('
+                if let Some(sub_token) = lookahead.peek() {
+                    match sub_token.as_str() {
+                        "loop" | "if" | "forall" | "exists" | "assume" | "unique" => {
+                            fill_indentation(&mut result, current_indent + 1, indent_size);
+                            tokens_iter.next(); // consume "("
+                            let block_type = tokens_iter.next().unwrap(); // e.g. "loop"
+                            result.push('(');
+                            result.push_str(block_type);
+                            result.push_str(&format_block(
+                                tokens_iter,
+                                current_indent + 2,
+                                indent_size,
+                            ));
+                        }
+                        "local" => {
+                            fill_indentation(&mut result, current_indent + 1, indent_size);
+                            result.push('(');
+                            tokens_iter.next(); // consume "("
+                            result.push_str(&format_inline_group(tokens_iter));
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            ")" => {
+                break;
+            }
+            "i32.uzumaki" | "i64.uzumaki" | "i32.add" | "i64.add" => {
+                format_single_token(
+                    &mut result,
+                    tokens_iter.next().unwrap().to_owned(),
+                    current_indent + 1,
+                    indent_size,
+                );
+            }
+            "local.set" | "local.get" | "i32.const" | "i64.const" => {
+                format_instruction_with_operands(
+                    &mut result,
+                    tokens_iter,
+                    current_indent,
+                    indent_size,
+                    1,
+                );
+            }
+            _ => {
+                todo!("Unexpected token in function body: {:?}", token);
+            }
+        }
+    }
+    result
+}
+
+fn format_instruction_with_operands(
+    result: &mut String,
+    tokens_iter: &mut Peekable<Iter<String>>,
+    current_indent: usize,
+    indent_size: usize,
+    operands: usize,
+) {
+    fill_indentation(result, current_indent + 1, indent_size);
+    result.push_str(tokens_iter.next().unwrap());
+    for _ in 0..operands {
+        result.push(' ');
+        format_single_token(result, tokens_iter.next().unwrap().to_owned(), 0, 0);
+    }
+}
+
+fn format_single_token(
+    result: &mut String,
+    token: String,
+    current_indent: usize,
+    indent_size: usize,
+) {
+    fill_indentation(result, current_indent, indent_size);
+    result.push_str(&token);
+}
+
+fn format_inline_group(tokens_iter: &mut Peekable<Iter<String>>) -> String {
+    let mut out = String::new();
+    let mut depth = 1;
+
+    for token in tokens_iter {
+        match token.as_str() {
+            "(" => {
+                depth += 1;
+                out.push('(');
+            }
+            ")" => {
+                depth -= 1;
+                out.push(')');
+                if depth == 0 {
+                    out.pop(); // remove the last ')'
+                    out.pop(); // remove the last ' '
+                    out.push(')');
+                    break;
+                }
+            }
+            _ => {
+                out.push_str(token);
+                out.push(' ');
             }
         }
     }
 
-    result
+    out
+}
+
+fn fill_indentation(result: &mut String, current_indent: usize, indent_size: usize) {
+    for _ in 0..(current_indent * indent_size) {
+        result.push(' ');
+    }
 }
