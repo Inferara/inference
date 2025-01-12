@@ -233,7 +233,7 @@ fn generate_for_literal(literal: &Literal) -> String {
         Literal::Number(number) => {
             let literal_value = &number.value;
             let type_ = generate_for_type(&number.type_);
-            format!("({type_}.const {literal_value})")
+            format!("{type_}.const {literal_value}")
         }
         _ => format!("{literal:?} literal is not supported yet"),
     }
