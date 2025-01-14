@@ -22,7 +22,7 @@ use super::types::BlockType;
 /// This function will panioc if the `root` node is not of type `source_file`.
 /// This function will panic if the `source_file` is malformed and a valid AST cannot be constructed.
 #[must_use]
-pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
+pub fn build_ast(root: Node, code: &[u8]) -> anyhow::Result<SourceFile> {
     assert!(
         root.kind() == "source_file",
         "Expected a root node of type `source_file`"
@@ -47,7 +47,7 @@ pub fn build_ast(root: Node, code: &[u8]) -> SourceFile {
             };
         }
     }
-    ast
+    Ok(ast)
 }
 
 fn build_use_directive(parent: &mut SourceFile, node: &Node, code: &[u8]) {

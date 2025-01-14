@@ -8,3 +8,4 @@ repository = { workspace = true }
 
 [dependencies]
 tree-sitter = ">=0.22.6"
+anyhow.workspace = true

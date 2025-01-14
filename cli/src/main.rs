@@ -71,7 +71,7 @@ fn parse_inference(source_code: &str) -> SourceFile {
     let tree = parser.parse(source_code, None).unwrap();
     let code = source_code.as_bytes();
     let root_node = tree.root_node();
-    build_ast(root_node, code)
+    build_ast(root_node, code).expect("Error building AST")
 }
 
 // fn generate_wasm_s_expression(source_file: &SourceFile) -> String {

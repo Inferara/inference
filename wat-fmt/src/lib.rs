@@ -225,6 +225,7 @@ fn format_block(
                                 indent_size,
                             ));
                         }
+                        // instructions with > 1 operands
                         "local" => {
                             fill_indentation(&mut result, current_indent + 1, indent_size);
                             result.push('(');
