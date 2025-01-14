@@ -1,6 +1,5 @@
 #![no_std]
 
-
 extern crate alloc;
 
 use alloc::{
@@ -8,10 +7,6 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::iter::Peekable;
-use core::slice::Iter;
-
-/// Formats a WAT string with an indentation of 2 spaces.
 use core::iter::Peekable;
 use core::slice::Iter;
 
@@ -24,8 +19,6 @@ pub fn format(input: &str) -> String {
 /// Formats a WAT string using a configurable indentation level.
 pub fn format_with_indent(input: &str, indent_size: usize) -> String {
     let tokens = tokenize(input);
-    let mut tokens_iter = tokens.iter().peekable();
-    format_module(&mut tokens_iter, 0, indent_size)
     let mut tokens_iter = tokens.iter().peekable();
     format_module(&mut tokens_iter, 0, indent_size)
 }
@@ -61,11 +54,6 @@ fn tokenize(input: &str) -> Vec<String> {
     tokens
 }
 
-fn format_module(
-    tokens_iter: &mut Peekable<Iter<String>>,
-    current_indent: usize,
-    indent_size: usize,
-) -> String {
 fn format_module(
     tokens_iter: &mut Peekable<Iter<String>>,
     current_indent: usize,
