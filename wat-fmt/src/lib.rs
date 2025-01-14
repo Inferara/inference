@@ -16,7 +16,6 @@ pub fn format(input: &str) -> String {
 }
 
 /// Formats a WAT string using a configurable indentation level.
-/// Formats a WAT string using a configurable indentation level.
 pub fn format_with_indent(input: &str, indent_size: usize) -> String {
     let tokens = tokenize(input);
     let mut tokens_iter = tokens.iter().peekable();
@@ -213,7 +212,6 @@ fn format_block(
                                 indent_size,
                             ));
                         }
-                        // instructions with > 1 operands
                         "local" => {
                             fill_indentation(&mut result, current_indent + 1, indent_size);
                             result.push('(');
