@@ -1,5 +1,7 @@
 #![warn(clippy::pedantic)]
 
+use std::any;
+
 use crate::types::{
     ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
     Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition, Expression,
@@ -38,10 +40,10 @@ pub fn build_ast(root: Node, code: &[u8]) -> anyhow::Result<SourceFile> {
             match child_kind {
                 "use_directive" => build_use_directive(&mut ast, &child, code),
                 _ => {
-                    if let Some(definition) = build_definition(&child, code) {
+                    if let Ok(definition) = build_definition(&child, code) {
                         ast.add_definition(definition);
                     } else {
-                        panic!("{}", format!("Unexpected child of type {child_kind}"));
+                        return Err(anyhow::anyhow!("Unexpected child of type {child_kind}"));
                     }
                 }
             };
@@ -93,7 +95,7 @@ fn build_spec_definition(node: &Node, code: &[u8]) -> SpecDefinition {
 
     for i in 0..node.child_count() {
         let child = node.child(i).unwrap();
-        if let Some(definition) = build_definition(&child, code) {
+        if let Ok(definition) = build_definition(&child, code) {
             definitions.push(definition);
         }
     }
@@ -126,23 +128,26 @@ fn build_enum_definition(node: &Node, code: &[u8]) -> EnumDefinition {
     }
 }
 
-fn build_definition(node: &Node, code: &[u8]) -> Option<Definition> {
+fn build_definition(node: &Node, code: &[u8]) -> anyhow::Result<Definition> {
     let kind = node.kind();
     match kind {
-        "spec_definition" => Some(Definition::Spec(build_spec_definition(node, code))),
-        "struct_definition" => Some(Definition::Struct(build_struct_definition(node, code))),
-        "enum_definition" => Some(Definition::Enum(build_enum_definition(node, code))),
-        "constant_definition" => Some(Definition::Constant(build_constant_definition(node, code))),
-        "function_definition" => Some(Definition::Function(build_function_definition(node, code))),
-        "external_function_definition" => Some(Definition::ExternalFunction(
+        "spec_definition" => Ok(Definition::Spec(build_spec_definition(node, code))),
+        "struct_definition" => {
+            let struct_definition = build_struct_definition(node, code)?;
+            Ok(Definition::Struct(struct_definition))
+        }
+        "enum_definition" => Ok(Definition::Enum(build_enum_definition(node, code))),
+        "constant_definition" => Ok(Definition::Constant(build_constant_definition(node, code))),
+        "function_definition" => Ok(Definition::Function(build_function_definition(node, code)?)),
+        "external_function_definition" => Ok(Definition::ExternalFunction(
             build_external_function_definition(node, code),
         )),
-        "type_definition_statement" => Some(Definition::Type(build_type_definition(node, code))),
-        _ => None,
+        "type_definition_statement" => Ok(Definition::Type(build_type_definition(node, code))),
+        _ => Err(anyhow::anyhow!("Unexpected definition type: {}", kind)),
     }
 }
 
-fn build_struct_definition(node: &Node, code: &[u8]) -> StructDefinition {
+fn build_struct_definition(node: &Node, code: &[u8]) -> anyhow::Result<StructDefinition> {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("struct_name").unwrap(), code);
     let mut fields = Vec::new();
@@ -160,14 +165,14 @@ fn build_struct_definition(node: &Node, code: &[u8]) -> StructDefinition {
     let founded_methods = node
         .children_by_field_name("method", &mut cursor)
         .map(|segment| build_function_definition(&segment, code));
-    let methods: Vec<FunctionDefinition> = founded_methods.collect();
+    let methods: Vec<FunctionDefinition> = founded_methods.collect::<Result<Vec<_>, _>>()?;
 
-    StructDefinition {
+    Ok(StructDefinition {
         location,
         name,
         fields,
         methods,
-    }
+    })
 }
 
 fn build_struct_field(node: &Node, code: &[u8]) -> StructField {
@@ -196,7 +201,7 @@ fn build_constant_definition(node: &Node, code: &[u8]) -> ConstantDefinition {
     }
 }
 
-fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
+fn build_function_definition(node: &Node, code: &[u8]) -> anyhow::Result<FunctionDefinition> {
     let location = get_location(node);
     let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
     let mut arguments = None;
@@ -207,7 +212,7 @@ fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
         let founded_arguments = argument_list_node
             .children_by_field_name("argument", &mut cursor)
             .map(|segment| build_argument(&segment, code));
-        let founded_arguments: Vec<Parameter> = founded_arguments.collect();
+        let founded_arguments: Vec<Parameter> = founded_arguments.collect::<Result<Vec<_>, _>>()?;
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
@@ -216,15 +221,17 @@ fn build_function_definition(node: &Node, code: &[u8]) -> FunctionDefinition {
     if let Some(returns_node) = node.child_by_field_name("returns") {
         returns = Some(build_type(&returns_node, code));
     }
-    let body = build_block(&node.child_by_field_name("body").unwrap(), code);
-
-    FunctionDefinition {
-        location,
-        name,
-        parameters: arguments,
-        returns,
-        body,
+    if let Some(body_node) = node.child_by_field_name("body") {
+        let body = build_block(&body_node, code)?;
+        return Ok(FunctionDefinition {
+            location,
+            name,
+            parameters: arguments,
+            returns,
+            body,
+        });
     }
+    Err(anyhow::anyhow!("Function body is missing"))
 }
 
 fn build_external_function_definition(node: &Node, code: &[u8]) -> ExternalFunctionDefinition {
@@ -267,81 +274,90 @@ fn build_type_definition(node: &Node, code: &[u8]) -> TypeDefinition {
     }
 }
 
-fn build_argument(node: &Node, code: &[u8]) -> Parameter {
+fn build_argument(node: &Node, code: &[u8]) -> anyhow::Result<Parameter> {
     let location = get_location(node);
-    let name = build_identifier(&node.child_by_field_name("name").unwrap(), code);
-    let type_ = build_type(&node.child_by_field_name("type").unwrap(), code);
-
-    Parameter {
-        location,
-        name,
-        type_,
+    if let Some(name_node) = node.child_by_field_name("name") {
+        let name = build_identifier(&name_node, code);
+        if let Some(type_node) = node.child_by_field_name("type") {
+            let type_ = build_type(&type_node, code);
+            Ok(Parameter {
+                location,
+                name,
+                type_,
+            })
+        } else {
+            Err(anyhow::anyhow!("Argument type is missing"))
+        }
+    } else {
+        Err(anyhow::anyhow!("Argument name is missing"))
     }
 }
 
-fn build_block(node: &Node, code: &[u8]) -> BlockType {
+fn build_block(node: &Node, code: &[u8]) -> anyhow::Result<BlockType> {
     let location = get_location(node);
 
     match node.kind() {
-        "block" => BlockType::Block(Block {
+        "block" => Ok(BlockType::Block(Block {
             location,
-            statements: build_block_statements(node, code),
-        }),
-        "assume_block" => BlockType::Assume(Block {
+            statements: build_block_statements(node, code)?,
+        })),
+        "assume_block" => Ok(BlockType::Assume(Block {
             location,
-            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code),
-        }),
-        "forall_block" => BlockType::Forall(Block {
+            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code)?,
+        })),
+        "forall_block" => Ok(BlockType::Forall(Block {
             location,
-            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code),
-        }),
-        "exists_block" => BlockType::Exists(Block {
+            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code)?,
+        })),
+        "exists_block" => Ok(BlockType::Exists(Block {
             location,
-            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code),
-        }),
-        "unique_block" => BlockType::Unique(Block {
+            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code)?,
+        })),
+        "unique_block" => Ok(BlockType::Unique(Block {
             location,
-            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code),
-        }),
-        _ => panic!("Unexpected block type: {}", node.kind()),
+            statements: build_block_statements(&node.child_by_field_name("body").unwrap(), code)?,
+        })),
+        _ => Err(anyhow::anyhow!("Unexpected block type: {}", node.kind())),
     }
 }
 
-fn build_block_statements(node: &Node, code: &[u8]) -> Vec<Statement> {
+fn build_block_statements(node: &Node, code: &[u8]) -> anyhow::Result<Vec<Statement>> {
     let mut statements = Vec::new();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        statements.push(build_statement(&child, code));
+        statements.push(build_statement(&child, code)?);
     }
 
-    statements
+    Ok(statements)
 }
 
-fn build_statement(node: &Node, code: &[u8]) -> Statement {
+fn build_statement(node: &Node, code: &[u8]) -> anyhow::Result<Statement> {
     match node.kind() {
         "block" | "forall_block" | "assume_block" | "exists_block" | "unique_block" => {
-            Statement::Block(build_block(node, code))
+            Ok(Statement::Block(build_block(node, code)?))
         }
-        "expression_statement" => Statement::Expression(build_expression_statement(node, code)),
-        "return_statement" => Statement::Return(build_return_statement(node, code)),
-        "loop_statement" => Statement::Loop(build_loop_statement(node, code)),
-        "if_statement" => Statement::If(build_if_statement(node, code)),
-        "variable_definition_statement" => {
-            Statement::VariableDefinition(build_variable_definition_statement(node, code))
-        }
-        "type_definition_statement" => {
-            Statement::TypeDefinition(build_type_definition_statement(node, code))
-        }
-        "assert_statement" => Statement::Assert(build_assert_statement(node, code)),
-        "break_statement" => Statement::Break(build_break_statement(node, code)),
-        "constant_definition" => {
-            Statement::ConstantDefinition(build_constant_definition(node, code))
-        }
-        _ => panic!(
+        "expression_statement" => Ok(Statement::Expression(build_expression_statement(
+            node, code,
+        ))),
+        "return_statement" => Ok(Statement::Return(build_return_statement(node, code))),
+        "loop_statement" => Ok(Statement::Loop(build_loop_statement(node, code)?)),
+        "if_statement" => Ok(Statement::If(build_if_statement(node, code)?)),
+        "variable_definition_statement" => Ok(Statement::VariableDefinition(
+            build_variable_definition_statement(node, code),
+        )),
+        "type_definition_statement" => Ok(Statement::TypeDefinition(
+            build_type_definition_statement(node, code),
+        )),
+        "assert_statement" => Ok(Statement::Assert(build_assert_statement(node, code))),
+        "break_statement" => Ok(Statement::Break(build_break_statement(node, code))),
+        "constant_definition" => Ok(Statement::ConstantDefinition(build_constant_definition(
+            node, code,
+        ))),
+        _ => Err(anyhow::anyhow!(
             "Unexpected statement type: {}, {}",
             node.kind(),
             get_location(node)
-        ),
+        )),
     }
 }
 
@@ -365,34 +381,42 @@ fn build_return_statement(node: &Node, code: &[u8]) -> ReturnStatement {
     }
 }
 
-fn build_loop_statement(node: &Node, code: &[u8]) -> LoopStatement {
+fn build_loop_statement(node: &Node, code: &[u8]) -> anyhow::Result<LoopStatement> {
     let location = get_location(node);
     let condition = node
         .child_by_field_name("condition")
         .map(|n| build_expression(&n, code));
-    let body = build_block(&node.child_by_field_name("body").unwrap(), code);
-
-    LoopStatement {
-        location,
-        condition,
-        body,
+    if let Some(body_block) = node.child_by_field_name("body") {
+        let body = build_block(&body_block, code)?;
+        return Ok(LoopStatement {
+            location,
+            condition,
+            body,
+        });
     }
+    Err(anyhow::anyhow!("Loop body is missing"))
 }
 
-fn build_if_statement(node: &Node, code: &[u8]) -> IfStatement {
+fn build_if_statement(node: &Node, code: &[u8]) -> anyhow::Result<IfStatement> {
     let location = get_location(node);
-    let condition = build_expression(&node.child_by_field_name("condition").unwrap(), code);
-    let if_arm = build_block(&node.child_by_field_name("if_arm").unwrap(), code);
-    let else_arm = node
-        .child_by_field_name("else_arm")
-        .map(|n| build_block(&n, code));
-
-    IfStatement {
-        location,
-        condition,
-        if_arm,
-        else_arm,
+    if let Some(condition_node) = node.child_by_field_name("condition") {
+        let condition = build_expression(&condition_node, code);
+        if let Some(if_arm_node) = node.child_by_field_name("if_arm") {
+            let if_arm = build_block(&if_arm_node, code)?;
+            let else_arm = node
+                .child_by_field_name("else_arm")
+                .map(|n| build_block(&n, code))
+                .transpose()?;
+            return Ok(IfStatement {
+                location,
+                condition,
+                if_arm,
+                else_arm,
+            });
+        }
+        return Err(anyhow::anyhow!("If arm is missing"));
     }
+    Err(anyhow::anyhow!("If condition is missing"))
 }
 
 fn build_variable_definition_statement(node: &Node, code: &[u8]) -> VariableDefinitionStatement {

@@ -18,13 +18,20 @@ struct Response {
 }
 
 fn parse_inf_file(input: &str) -> Response {
-    let mut wat = String::new();
     let mut wasm = vec![];
     let mut errors = vec![];
 
-    compile_to_wat(input)
-        .map(|w| wat = w)
-        .unwrap_or_else(|e| errors.push(e.to_string()));
+    let wat = match compile_to_wat(input) {
+        Ok(w) => w,
+        Err(e) => {
+            errors.push(e.to_string());
+            return Response {
+                wat: String::new(),
+                wasm,
+                errors,
+            };
+        }
+    };
 
     if !wat.is_empty() {
         wat_to_wasm(&wat)

@@ -42,19 +42,19 @@ pub fn generate_string_for_source_file(source_file: &SourceFile) -> String {
 #[allow(clippy::single_match)]
 pub fn generate_for_source_file(source_file: &SourceFile) -> Vec<String> {
     let mut result = Vec::new();
-    result.push(s_module());
     for definition in &source_file.definitions {
         match definition {
             Definition::Spec(spec) => {
                 result.extend(generate_for_spec(spec));
             }
             Definition::Function(function) => {
+                result.push(s_module());
                 result.extend(generate_for_function_definition(function));
+                result.push(r_brace());
             }
             _ => {}
         }
     }
-    result.push(r_brace());
     result
 }
 
