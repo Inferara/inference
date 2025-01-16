@@ -61,3 +61,18 @@ pub fn compile_to_wasm(source_code: &str) -> anyhow::Result<Vec<u8>> {
     let wat = compile_to_wat(source_code)?;
     wat_to_wasm(&wat)
 }
+
+/// Translates WebAssembly binary format (WASM) to Coq format.
+///
+/// # Errors
+///
+/// This function will return an error if the translation process fails.
+pub fn wasm_to_coq(wasm: &Vec<u8>) -> anyhow::Result<String> {
+    if let Ok(v) =
+        inference_wasm_coq_translator::wasm_parser::translate_bytes(&String::new(), wasm.as_slice())
+    {
+        Ok(v)
+    } else {
+        Err(anyhow::anyhow!("Error translating WebAssembly to V"))
+    }
+}

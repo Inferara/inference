@@ -1,6 +1,6 @@
 use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
-use inference::{compile_to_wat, wat_to_wasm};
+use inference::{compile_to_wat, wasm_to_coq, wat_to_wasm};
 use serde::{Deserialize, Serialize};
 
 use wat_fmt::format;
@@ -14,11 +14,13 @@ struct CompileRequest {
 struct Response {
     wat: String,
     wasm: Vec<u8>,
+    v: String,
     errors: Vec<String>,
 }
 
 fn parse_inf_file(input: &str) -> Response {
     let mut wasm = vec![];
+    let mut v = String::new();
     let mut errors = vec![];
 
     let wat = match compile_to_wat(input) {
@@ -27,7 +29,8 @@ fn parse_inf_file(input: &str) -> Response {
             errors.push(e.to_string());
             return Response {
                 wat: String::new(),
-                wasm,
+                wasm: vec![],
+                v: String::new(),
                 errors,
             };
         }
@@ -37,13 +40,22 @@ fn parse_inf_file(input: &str) -> Response {
         wat_to_wasm(&wat)
             .map(|w| wasm = w)
             .unwrap_or_else(|e| errors.push(e.to_string()));
+        wasm_to_coq(&wasm)
+            .map(|v_str| v = v_str)
+            .unwrap_or_else(|e| errors.push(e.to_string()));
 
         let wat = format(&wat);
-        Response { wat, wasm, errors }
+        Response {
+            wat,
+            wasm,
+            v,
+            errors,
+        }
     } else {
         Response {
             wat: String::new(),
             wasm: vec![],
+            v,
             errors,
         }
     }

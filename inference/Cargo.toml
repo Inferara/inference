@@ -13,3 +13,4 @@ tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
 inference-ast.workspace = true
 inference-wat-codegen.workspace = true
+inference-wasm-coq-translator.workspace = true

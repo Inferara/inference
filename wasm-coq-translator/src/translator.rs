@@ -2,7 +2,7 @@ use uuid::Uuid;
 use wasmparser::{
     AbstractHeapType, CompositeInnerType, Data, DataKind, Element, ElementKind, Export,
     FunctionBody, Global, HeapType, Import, MemoryType, OperatorsReader, RecGroup, RefType, Table,
-    TypeRef, ValType,
+    TableType, TypeRef, ValType,
 };
 
 #[derive(Debug)]
@@ -231,26 +231,62 @@ impl WasmParseData<'_> {
     }
 }
 
-fn translate_import(import: &Import) -> (String, String) {
-    let mut res = String::new();
-    let name = String::from(import.name);
-    let module = String::from(import.module);
-    let definition_name = module.clone() + &name.clone().remove(0).to_uppercase().to_string();
-    res.push_str(format!("Definition {definition_name} : WasmImport :=\n").as_str());
-    res.push_str("{|\n");
-    res.push_str(format!("i_module := \"{name}\";\n").as_str());
-    res.push_str(format!("i_name := \"{module}\";\n").as_str());
-    let kind = match import.ty {
-        TypeRef::Func(index) => format!("id_func {index}"),
-        TypeRef::Global(_) => String::from("id_global"), //TODO
-        TypeRef::Memory(_) => String::from("id_mem"),    //TODO
-        TypeRef::Table(_) => String::from("id_table"),   //TODO
-        TypeRef::Tag(_) => String::from("id_tag"),
+fn translate_import(import: &Import) -> Vec<String> {
+    let mut res = Vec::new();
+    match import.ty {
+        TypeRef::Func(index) => res.push(format!("MID_func {index}")),
+        TypeRef::Global(global_type) => res.push("MID_global".to_string()),
+        TypeRef::Memory(memory_type) => res.push("MID_mem".to_string()),
+        TypeRef::Table(table_type) => {
+            let table_type_translated = translate_table_type(&table_type);
+            res.push(format!("MID_table {table_type_translated}"));
+        }
+        TypeRef::Tag(_) => {
+            //unsupported
+        }
+    }
+    // let name = String::from(import.name);
+    // let module = String::from(import.module);
+    // let definition_name = module.clone() + &name.clone().remove(0).to_uppercase().to_string();
+    // res.push_str(format!("Definition {definition_name} : WasmImport :=\n").as_str());
+    // res.push_str("{|\n");
+    // res.push_str(format!("i_module := \"{name}\";\n").as_str());
+    // res.push_str(format!("i_name := \"{module}\";\n").as_str());
+    // let kind = match import.ty {
+    //     TypeRef::Func(index) => format!("id_func {index}"),
+    //     TypeRef::Global(_) => String::from("id_global"), //TODO
+    //     TypeRef::Memory(_) => String::from("id_mem"),    //TODO
+    //     TypeRef::Table(_) => String::from("id_table"),   //TODO
+    //     TypeRef::Tag(_) => String::from("id_tag"),
+    // };
+    // res.push_str(format!("i_desc := {kind} |").as_str());
+    // res.push_str("}.\n");
+    // res.push('\n');
+    // (definition_name, res)
+    res
+}
+
+const RLB: &str = "{|";
+const RRB: &str = "{|";
+
+fn translate_table_type(table_type: &TableType) -> String {
+    let lim_min = table_type.initial.to_string();
+    let lim_max = match table_type.maximum {
+        Some(max) => max.to_string(),
+        None => "None".to_string(),
     };
-    res.push_str(format!("i_desc := {kind} |").as_str());
-    res.push_str("}.\n");
-    res.push('\n');
-    (definition_name, res)
+    let ref_type = translate_ref_type(&table_type.element_type);
+    format!("{RLB} tt_limits := {RLB} lim_min := {lim_min}; lim_max := {lim_max} {RRB}; tt_elem_type := {ref_type} {RRB}",)
+}
+
+fn translate_ref_type(ref_type: &RefType) -> String {
+    if *ref_type == RefType::FUNCREF {
+        String::from("T_funcref")
+    } else if *ref_type == RefType::EXTERNREF {
+        String::from("T_externref")
+    } else {
+        String::from("UNSUPPORTED REF TYPE")
+    }
 }
 
 fn translate_export(export: &Export) -> (String, String) {
