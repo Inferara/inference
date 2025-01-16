@@ -40,6 +40,7 @@ fn parse_inf_file(input: &str) -> Response {
         wat_to_wasm(&wat)
             .map(|w| wasm = w)
             .unwrap_or_else(|e| errors.push(e.to_string()));
+      
         wasm_to_coq(&wasm)
             .map(|v_str| v = v_str)
             .unwrap_or_else(|e| errors.push(e.to_string()));
