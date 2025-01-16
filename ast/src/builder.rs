@@ -1,7 +1,5 @@
 #![warn(clippy::pedantic)]
 
-use std::any;
-
 use crate::types::{
     ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
     Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition, Expression,
@@ -23,7 +21,11 @@ use super::types::BlockType;
 ///
 /// This function will panioc if the `root` node is not of type `source_file`.
 /// This function will panic if the `source_file` is malformed and a valid AST cannot be constructed.
-#[must_use]
+/// Builds the AST from the root node and source code.
+///
+/// # Errors
+///
+/// This function will return an error if the `source_file` is malformed and a valid AST cannot be constructed.
 pub fn build_ast(root: Node, code: &[u8]) -> anyhow::Result<SourceFile> {
     assert!(
         root.kind() == "source_file",
