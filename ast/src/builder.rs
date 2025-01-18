@@ -1,7 +1,5 @@
 #![warn(clippy::pedantic)]
 
-use std::any;
-
 use crate::types::{
     ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
     Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition, Expression,
