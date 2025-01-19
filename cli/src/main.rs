@@ -122,7 +122,7 @@ fn wasm_to_coq_file(
     path: &Path,
     sub_path: Option<&Path>,
     filename: &String,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let absolute_path = path.canonicalize().unwrap();
     let bytes = std::fs::read(absolute_path).unwrap();
     wasm_bytes_to_coq_file(&bytes, sub_path, filename)
@@ -132,15 +132,9 @@ fn wasm_bytes_to_coq_file(
     bytes: &Vec<u8>,
     sub_path: Option<&Path>,
     filename: &String,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let coq =
-        inference_wasm_coq_translator::wasm_parser::translate_bytes(filename, bytes.as_slice());
-
-    if let Err(e) = coq {
-        let WasmModuleParseError::UnsupportedOperation(error_message) = e;
-        let error = format!("Error: {error_message}");
-        return Err(error);
-    }
+        inference_wasm_coq_translator::wasm_parser::translate_bytes(filename, bytes.as_slice())?;
 
     let current_dir = std::env::current_dir().unwrap();
     let target_dir = match sub_path {
@@ -149,7 +143,7 @@ fn wasm_bytes_to_coq_file(
     };
     let coq_file_path = target_dir.join(format!("{filename}.v"));
     fs::create_dir_all(target_dir).unwrap();
-    std::fs::write(coq_file_path.clone(), coq.unwrap()).unwrap();
+    std::fs::write(coq_file_path.clone(), coq).unwrap();
     Ok(coq_file_path.to_str().unwrap().to_owned())
 }
 

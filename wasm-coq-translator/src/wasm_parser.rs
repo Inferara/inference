@@ -14,15 +14,13 @@ use wasmparser::{
 
 use crate::translator::{WasmModuleParseError, WasmParseData};
 
-pub fn translate_bytes(mod_name: &String, bytes: &[u8]) -> Result<String, WasmModuleParseError> {
+pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut data = Vec::new();
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
-    match parse(mod_name.clone(), &data) {
+    match parse(mod_name.to_string(), &data) {
         Ok(parse_data) => parse_data.translate(),
-        Err(e) => Err(WasmModuleParseError::UnsupportedOperation(
-            format!("\t{e} (module name: {mod_name})").to_string(),
-        )),
+        Err(e) => Err(anyhow::anyhow!(e.to_string())),
     }
 }
 

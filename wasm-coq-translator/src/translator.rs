@@ -1108,6 +1108,8 @@ Notation "$VN v" := (AI_basic (BI_const_num v)) (at level 60).
 Notation "$VV v" := (AI_basic (BI_const_vec v)) (at level 60).
 */
 
+use std::fmt::format;
+
 use uuid::Uuid;
 use wasmparser::{
     AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementKind, Export,
@@ -1673,16 +1675,46 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
             let memarg = parse_memarg(&memarg)?;
             format!("BI_load T_f64 None {memarg}")
         }
-        Operator::I32Load8S { memarg } => todo!(),
-        Operator::I32Load8U { memarg } => todo!(),
-        Operator::I32Load16S { memarg } => todo!(),
-        Operator::I32Load16U { memarg } => todo!(),
-        Operator::I64Load8S { memarg } => todo!(),
-        Operator::I64Load8U { memarg } => todo!(),
-        Operator::I64Load16S { memarg } => todo!(),
-        Operator::I64Load16U { memarg } => todo!(),
-        Operator::I64Load32S { memarg } => todo!(),
-        Operator::I64Load32U { memarg } => todo!(),
+        Operator::I32Load8S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg}")
+        }
+        Operator::I32Load8U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg}")
+        }
+        Operator::I32Load16S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg}")
+        }
+        Operator::I32Load16U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg}")
+        }
+        Operator::I64Load8S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg}")
+        }
+        Operator::I64Load8U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg}")
+        }
+        Operator::I64Load16S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg}")
+        }
+        Operator::I64Load16U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+        }
+        Operator::I64Load32S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg}")
+        }
+        Operator::I64Load32U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg}")
+        }
         Operator::I32Store { memarg } => {
             let memarg = parse_memarg(&memarg)?;
             format!("BI_store T_i32 None {memarg}")
@@ -1699,11 +1731,26 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
             let memarg = parse_memarg(&memarg)?;
             format!("BI_store T_f64 None {memarg}")
         }
-        Operator::I32Store8 { memarg } => todo!(),
-        Operator::I32Store16 { memarg } => todo!(),
-        Operator::I64Store8 { memarg } => todo!(),
-        Operator::I64Store16 { memarg } => todo!(),
-        Operator::I64Store32 { memarg } => todo!(),
+        Operator::I32Store8 { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store T_i32 (Some Tp_i8) {memarg}")
+        }
+        Operator::I32Store16 { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store T_i32 (Some Tp_i16) {memarg}")
+        }
+        Operator::I64Store8 { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store T_i64 (Some Tp_i8) {memarg}")
+        }
+        Operator::I64Store16 { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store T_i64 (Some Tp_i16) {memarg}")
+        }
+        Operator::I64Store32 { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store T_i64 (Some Tp_i32) {memarg}")
+        }
         Operator::MemorySize { mem } => todo!(),
         Operator::MemoryGrow { mem } => todo!(),
         Operator::I32Const { value } => format!("BI_const_num (VAL_int32 {value})"),
@@ -1922,10 +1969,13 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         Operator::I64TruncSatF32U => todo!(),
         Operator::I64TruncSatF64S => todo!(),
         Operator::I64TruncSatF64U => todo!(),
-        Operator::MemoryInit { data_index, mem } => todo!(),
-        Operator::DataDrop { data_index } => todo!(),
-        Operator::MemoryCopy { dst_mem, src_mem } => todo!(),
-        Operator::MemoryFill { mem } => todo!(),
+        Operator::MemoryInit { data_index, mem: _ } => format!("BI_memory_init {data_index}"),
+        Operator::DataDrop { data_index } => format!("BI_data_drop {data_index}"),
+        Operator::MemoryCopy {
+            dst_mem: _,
+            src_mem: _,
+        } => "BI_memory_copy".to_string(),
+        Operator::MemoryFill { mem: _ } => "BI_memory_fill".to_string(),
         Operator::TableInit { elem_index, table } => todo!(),
         Operator::ElemDrop { elem_index } => todo!(),
         Operator::TableCopy {
@@ -2082,52 +2132,152 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
           | LVA_zero: zero_type_vec -> load_vec_arg
           | LVA_splat: width_vec -> load_vec_arg
           .
+
+          BI_load_vec : load_vec_arg -> memarg -> basic_instruction
                          */
-        Operator::V128Load { memarg } => todo!(),
-        Operator::V128Load8x8S { memarg } => todo!(),
-        Operator::V128Load8x8U { memarg } => todo!(),
-        Operator::V128Load16x4S { memarg } => todo!(),
-        Operator::V128Load16x4U { memarg } => todo!(),
-        Operator::V128Load32x2S { memarg } => todo!(),
-        Operator::V128Load32x2U { memarg } => todo!(),
-        Operator::V128Load8Splat { memarg } => todo!(),
-        Operator::V128Load16Splat { memarg } => todo!(),
-        Operator::V128Load32Splat { memarg } => todo!(),
-        Operator::V128Load64Splat { memarg } => todo!(),
-        Operator::V128Load32Zero { memarg } => todo!(),
-        Operator::V128Load64Zero { memarg } => todo!(),
-        Operator::V128Store { memarg } => todo!(),
-        Operator::V128Load8Lane { memarg, lane } => todo!(),
-        Operator::V128Load16Lane { memarg, lane } => todo!(),
-        Operator::V128Load32Lane { memarg, lane } => todo!(),
-        Operator::V128Load64Lane { memarg, lane } => todo!(),
-        Operator::V128Store8Lane { memarg, lane } => todo!(),
-        Operator::V128Store16Lane { memarg, lane } => todo!(),
-        Operator::V128Store32Lane { memarg, lane } => todo!(),
-        Operator::V128Store64Lane { memarg, lane } => todo!(),
-        Operator::V128Const { value } => todo!(),
+        Operator::V128Load { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+        }
+        Operator::V128Load8x8S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) {memarg}")
+        }
+        Operator::V128Load8x8U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) {memarg}")
+        }
+        Operator::V128Load16x4S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) {memarg}")
+        }
+        Operator::V128Load16x4U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+        }
+        Operator::V128Load32x2S { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) {memarg}")
+        }
+        Operator::V128Load32x2U { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) {memarg}")
+        }
+        Operator::V128Load8Splat { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_splat Twv_8 {memarg}")
+        }
+        Operator::V128Load16Splat { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_splat Twv_16 {memarg}")
+        }
+        Operator::V128Load32Splat { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_splat Twv_32 {memarg}")
+        }
+        Operator::V128Load64Splat { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_splat Twv_64 {memarg}")
+        }
+        Operator::V128Load32Zero { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_zero Tztv_32 {memarg}")
+        }
+        Operator::V128Load64Zero { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_load_vec LVA_zero Tztv_64 {memarg}")
+        }
+        Operator::V128Store { memarg } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_64 {memarg} 0")
+        }
+        Operator::V128Load8Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
+        }
+        Operator::V128Load16Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
+        }
+        Operator::V128Load32Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
+        }
+        Operator::V128Load64Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
+        }
+        Operator::V128Store8Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
+        }
+        Operator::V128Store16Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
+        }
+        Operator::V128Store32Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
+        }
+        Operator::V128Store64Lane { memarg, lane } => {
+            let memarg = parse_memarg(&memarg)?;
+            format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
+        }
+        Operator::V128Const { value } => {
+            let value = value.i128();
+            format!("BI_const_vec {value}")
+        }
         Operator::I8x16Shuffle { lanes } => todo!(),
-        Operator::I8x16ExtractLaneS { lane } => todo!(),
-        Operator::I8x16ExtractLaneU { lane } => todo!(),
-        Operator::I8x16ReplaceLane { lane } => todo!(),
-        Operator::I16x8ExtractLaneS { lane } => todo!(),
-        Operator::I16x8ExtractLaneU { lane } => todo!(),
-        Operator::I16x8ReplaceLane { lane } => todo!(),
-        Operator::I32x4ExtractLane { lane } => todo!(),
-        Operator::I32x4ReplaceLane { lane } => todo!(),
-        Operator::I64x2ExtractLane { lane } => todo!(),
-        Operator::I64x2ReplaceLane { lane } => todo!(),
-        Operator::F32x4ExtractLane { lane } => todo!(),
-        Operator::F32x4ReplaceLane { lane } => todo!(),
-        Operator::F64x2ExtractLane { lane } => todo!(),
-        Operator::F64x2ReplaceLane { lane } => todo!(),
+        Operator::I8x16ExtractLaneS { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_8_16) (Some SX_S) {lane}")
+        }
+        Operator::I8x16ExtractLaneU { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_8_16) (Some SX_U) {lane}")
+        }
+        //BI_replace_vec: shape_vec -> laneidx -> basic_instruction
+        Operator::I8x16ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_ishape SVI_8_16) {lane}")
+        }
+        Operator::I16x8ExtractLaneS { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_16_8) (Some SX_S) {lane}")
+        }
+        Operator::I16x8ExtractLaneU { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_16_8) (Some SX_U) {lane}")
+        }
+        Operator::I16x8ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_ishape SVI_16_8) {lane}")
+        }
+        Operator::I32x4ExtractLane { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_32_4) (Some SX_S) {lane}")
+        }
+        Operator::I32x4ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_ishape SVI_32_4) {lane}")
+        }
+        Operator::I64x2ExtractLane { lane } => {
+            format!("BI_extract_vec (SV_ishape SVI_64_2) (Some SX_S) {lane}")
+        }
+        Operator::I64x2ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_ishape SVI_64_2) {lane}")
+        }
+        Operator::F32x4ExtractLane { lane } => {
+            format!("BI_extract_vec (SV_fshape SVF_32_4) None {lane}")
+        }
+        Operator::F32x4ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_fshape SVF_32_4) {lane}")
+        }
+        Operator::F64x2ExtractLane { lane } => {
+            format!("BI_extract_vec (SV_fshape SVF_64_2) None {lane}")
+        }
+        Operator::F64x2ReplaceLane { lane } => {
+            format!("BI_replace_vec (SV_fshape SVF_64_2) {lane}")
+        }
         Operator::I8x16Swizzle => todo!(),
-        Operator::I8x16Splat => todo!(),
-        Operator::I16x8Splat => todo!(),
-        Operator::I32x4Splat => todo!(),
-        Operator::I64x2Splat => todo!(),
-        Operator::F32x4Splat => todo!(),
-        Operator::F64x2Splat => todo!(),
+        Operator::I8x16Splat => "BI_load_vec LVA_splat Twv_8".to_string(),
+        Operator::I16x8Splat => "BI_load_vec LVA_splat Twv_16".to_string(),
+        Operator::I32x4Splat => "BI_load_vec LVA_splat Twv_32".to_string(),
+        Operator::I64x2Splat => "BI_load_vec LVA_splat Twv_64".to_string(),
+        Operator::F32x4Splat => "BI_load_vec LVA_splat Twv_32".to_string(),
+        Operator::F64x2Splat => "BI_load_vec LVA_splat Twv_64".to_string(),
         Operator::I8x16Eq => todo!(),
         Operator::I8x16Ne => todo!(),
         Operator::I8x16LtS => todo!(),
@@ -2348,156 +2498,161 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         Operator::Delegate { relative_depth } => todo!(),
         Operator::CatchAll => todo!(),
         Operator::GlobalAtomicGet {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicSet {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwAdd {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwSub {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwAnd {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwOr {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwXor {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwXchg {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::GlobalAtomicRmwCmpxchg {
-            ordering,
-            global_index,
-        } => todo!(),
-        Operator::TableAtomicGet {
-            ordering,
-            table_index,
-        } => todo!(),
-        Operator::TableAtomicSet {
-            ordering,
-            table_index,
-        } => todo!(),
-        Operator::TableAtomicRmwXchg {
-            ordering,
-            table_index,
-        } => todo!(),
-        Operator::TableAtomicRmwCmpxchg {
-            ordering,
-            table_index,
-        } => todo!(),
-        Operator::StructAtomicGet {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicGetS {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicGetU {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicSet {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwAdd {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwSub {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwAnd {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwOr {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwXor {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwXchg {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructAtomicRmwCmpxchg {
-            ordering,
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::ArrayAtomicGet {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicGetS {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicGetU {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicSet {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwAdd {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwSub {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwAnd {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwOr {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwXor {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwXchg {
-            ordering,
-            array_type_index,
-        } => todo!(),
-        Operator::ArrayAtomicRmwCmpxchg {
-            ordering,
-            array_type_index,
-        } => todo!(),
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicSet {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwAdd {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwSub {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwAnd {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwOr {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwXor {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwXchg {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::GlobalAtomicRmwCmpxchg {
+            ordering: _,
+            global_index: _,
+        }
+        | Operator::TableAtomicGet {
+            ordering: _,
+            table_index: _,
+        }
+        | Operator::TableAtomicSet {
+            ordering: _,
+            table_index: _,
+        }
+        | Operator::TableAtomicRmwXchg {
+            ordering: _,
+            table_index: _,
+        }
+        | Operator::TableAtomicRmwCmpxchg {
+            ordering: _,
+            table_index: _,
+        }
+        | Operator::StructAtomicGet {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicGetS {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicGetU {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicSet {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwAdd {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwSub {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwAnd {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwOr {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwXor {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwXchg {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::StructAtomicRmwCmpxchg {
+            ordering: _,
+            struct_type_index: _,
+            field_index: _,
+        }
+        | Operator::ArrayAtomicGet {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicGetS {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicGetU {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicSet {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwAdd {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwSub {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwAnd {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwOr {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwXor {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwXchg {
+            ordering: _,
+            array_type_index: _,
+        }
+        | Operator::ArrayAtomicRmwCmpxchg {
+            ordering: _,
+            array_type_index: _,
+        } => {
+            return Err(anyhow::anyhow!(
+                "Atomic instruction {:?} are not supported",
+                operator
+            ))
+        }
         Operator::RefI31Shared => todo!(),
         Operator::CallRef { type_index } => todo!(),
         Operator::ReturnCallRef { type_index } => todo!(),
@@ -2527,9 +2682,6 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         Operator::I64Sub128 => todo!(),
         Operator::I64MulWideS => todo!(),
         Operator::I64MulWideU => todo!(),
-        Operator::Unreachable => todo!(),
-        Operator::Nop => todo!(),
-        Operator::Block { blockty } => todo!(),
         _ => return Err(anyhow::anyhow!("Operator {:?} not recognized", operator)),
     };
     Ok(operator.to_string())
