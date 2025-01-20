@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::io::Read;
 use wasmparser::{
     Parser,
@@ -12,7 +11,7 @@ use wasmparser::{
     },
 };
 
-use crate::translator::{WasmModuleParseError, WasmParseData};
+use crate::translator::WasmParseData;
 
 pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut data = Vec::new();
@@ -25,7 +24,7 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
 }
 
 #[allow(clippy::match_same_arms)]
-fn parse(mod_name: String, data: &[u8]) -> Result<WasmParseData> {
+fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
     let parser = Parser::new(0);
     let mut wasm_parse_data = WasmParseData::new(mod_name);
 

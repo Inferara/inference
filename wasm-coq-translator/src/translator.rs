@@ -1112,26 +1112,10 @@ use std::fmt::format;
 
 use uuid::Uuid;
 use wasmparser::{
-    AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementKind, Export,
-    FunctionBody, Global, HeapType, Import, MemoryType, Operator, OperatorsReader, RecGroup,
-    RefType, Table, TableType, TypeRef, ValType,
+    AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
+    ElementKind, Export, FuncType, FunctionBody, Global, HeapType, Import, MemoryType, Operator,
+    OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef, ValType,
 };
-
-#[derive(Debug)]
-pub enum WasmModuleParseError {
-    UnsupportedOperation(String),
-}
-
-impl WasmModuleParseError {
-    fn add_string_to_reported_error(
-        info: &String,
-        error: WasmModuleParseError,
-    ) -> WasmModuleParseError {
-        let WasmModuleParseError::UnsupportedOperation(error_message) = error;
-        let ret_err = format!("{info}\n\t{error_message}").to_string();
-        WasmModuleParseError::UnsupportedOperation(ret_err)
-    }
-}
 
 pub(crate) struct WasmParseData<'a> {
     mod_name: String,
@@ -1253,36 +1237,42 @@ impl WasmParseData<'_> {
                 Err(e) => errors.push(e),
             }
         }
-        // let mut created_elements = Vec::new();
-        // for element in &self.elements {
-        //     match translate_element(element) {
-        //         Ok((name, res)) => {
-        //             res.push_str(res.as_str());
-        //             created_elements.push(name);
-        //         }
-        //         Err(e) => {
-        //             return Err(self.add_module_name_to_reported_error(e));
-        //         }
-        //     }
-        // }
+        let mut created_elements = Vec::new();
+        for element in &self.elements {
+            match translate_element(element) {
+                Ok(translated_element) => {
+                    res.push_str(translated_element.as_str());
+                    created_elements.push(translated_element);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
 
-        // let mut created_function_types = Vec::new();
-        // for rec_group in &self.function_types {
-        //     let (name, res) = translate_rec_group(rec_group);
-        //     res.push_str(res.as_str());
-        //     created_function_types.push(name);
-        // }
+        let mut created_function_types = Vec::new();
+        for rec_group in &self.function_types {
+            match translate_function_type(rec_group) {
+                Ok(translated_function_type) => {
+                    res.push_str(translated_function_type.as_str());
+                    created_function_types.push(translated_function_type);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
 
-        // let created_functions =
-        //     match translate_functions(&self.function_type_indexes, &self.function_bodies) {
-        //         Ok((names, res)) => {
-        //             res.push_str(res.as_str());
-        //             names
-        //         }
-        //         Err(e) => {
-        //             return Err(self.add_module_name_to_reported_error(e));
-        //         }
-        //     };
+        let created_functions =
+            match translate_functions(&self.function_type_indexes, &self.function_bodies) {
+                Ok((names, res)) => {
+                    res.push_str(res.as_str());
+                    names
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            };
 
         // let module_name = &self.mod_name;
         // res.push_str(format!("Definition {module_name} : WasmModule :=\n").as_str());
@@ -1406,12 +1396,15 @@ fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
 //Inductive value_type
 fn translate_value_type(val_type: &ValType) -> anyhow::Result<String> {
     let res = match val_type {
-        ValType::I32 => "T_num",
-        ValType::I64 => "T_num",
-        ValType::F32 => "T_num",
-        ValType::F64 => "T_num",
-        ValType::V128 => return Err(anyhow::anyhow!("T_vec is not supported")),
-        ValType::Ref(_) => return Err(anyhow::anyhow!("T_ref is not supported")),
+        ValType::I32 => "T_num T_i32",
+        ValType::I64 => "T_num T_i64",
+        ValType::F32 => "T_num T_f32",
+        ValType::F64 => "T_num T_f64",
+        ValType::V128 => "T_vec T_v128",
+        ValType::Ref(ref_type) => {
+            let ref_type_translated = translate_ref_type(ref_type)?;
+            return Ok(format!("T_ref {ref_type_translated}"));
+        }
     };
     Ok(res.to_string())
 }
@@ -1590,7 +1583,7 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
         BlockType::Empty => String::new(),
         BlockType::FuncType(index) => format!("BT_id {index}"),
         BlockType::Type(valtype) => {
-            let valtype = translate_value_type(&valtype)?;
+            let valtype = translate_value_type(valtype)?;
             format!("BT_valtype {valtype}")
         }
     };
@@ -1598,11 +1591,12 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
 }
 
 //Record memarg
-fn parse_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
+fn translate_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
     let mut res = String::new();
+    let id = get_id();
     let memarg_offset = memarg.offset.to_string();
     let memarg_align = memarg.align.to_string();
-    res.push_str(format!("Definition memarg : memarg :=\n").as_str());
+    res.push_str(format!("Definition memarg_{id} : memarg :=\n").as_str());
     res.push_str(RLB);
     res.push_str(format!("memarg_offset := {memarg_offset};\n").as_str());
     res.push_str(format!("memarg_align := {memarg_align}\n").as_str());
@@ -1610,6 +1604,114 @@ fn parse_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
     res.push_str(".\n");
     Ok(res)
 }
+
+//Record module_element
+fn translate_element(element: &Element) -> anyhow::Result<String> {
+    let mut res = String::new();
+    let id = get_id();
+    let module_elemmode = match &element.kind {
+        ElementKind::Active {
+            table_index,
+            offset_expr,
+        } => {
+            let tableidx = table_index.unwrap_or_default();
+            let mut expr = String::new();
+            for operator in offset_expr.get_operators_reader() {
+                let op = operator?;
+                let translated_op = translate_basic_instruction(op)?;
+                expr.push_str(translated_op.as_str());
+                expr.push_str("::");
+            }
+            expr.push_str("nil");
+            format!("ME_active {tableidx} ({expr})")
+        }
+        ElementKind::Passive => "ME_passive".to_string(),
+        ElementKind::Declared => "ME_declared".to_string(),
+    };
+    let modelem_type: String;
+    let modelem_init = match &element.items {
+        ElementItems::Expressions(reftype, elements) => {
+            modelem_type = translate_ref_type(reftype)?;
+            let mut expr_list = String::new();
+            for result in elements.clone().into_iter_with_offsets() {
+                let (_, expr_reader) = result?;
+                let mut expr = String::new();
+                for operator in expr_reader.get_operators_reader() {
+                    let op = operator?;
+                    let translated_op = translate_basic_instruction(op)?;
+                    expr.push_str(translated_op.as_str());
+                    expr.push_str("::");
+                }
+                expr.push_str("nil");
+                expr_list.push_str(expr.as_str());
+                expr_list.push_str("::");
+            }
+            format!("ME_expressions ({expr_list})")
+        }
+        ElementItems::Functions(elements) => {
+            modelem_type = "T_funcref".to_string();
+            let mut indexes = String::new();
+            for result in elements.clone().into_iter_with_offsets() {
+                let (_, index) = result?;
+                indexes.push_str(format!("{index}").as_str());
+                indexes.push_str("::");
+            }
+            indexes.push_str("nil");
+            format!("ME_functions {indexes}")
+        }
+    };
+    res.push_str(format!("Definition element_{id} : module_element :=\n").as_str());
+    res.push_str(RLB);
+    res.push_str(format!("modelem_type := {modelem_type}\n").as_str());
+    res.push_str(format!("modelem_init := {modelem_init}\n").as_str());
+    res.push_str(format!("module_elemmode := {module_elemmode}\n").as_str());
+    res.push_str(RRB);
+    res.push_str(".\n");
+    Ok(res)
+}
+
+//Inductive function_type
+fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
+    let mut res = String::new();
+    let id = get_id();
+    for ty in rec_group.types() {
+        match &ty.composite_type.inner {
+            CompositeInnerType::Func(ft) => {
+                let mut params_str = String::new();
+                for param in ft.params() {
+                    let val_type = translate_value_type(param)?;
+                    params_str.push_str(format!("{val_type} :: ").as_str());
+                }
+                params_str.push_str("nil;\n");
+
+                let mut results_str = String::new();
+                for result in ft.results() {
+                    let val_type = translate_value_type(result)?;
+                    results_str.push_str(format!("{val_type} :: ").as_str());
+                }
+                results_str.push_str("nil;\n");
+
+                res.push_str(format!("Definition ft_{id} : function_type :=\n").as_str());
+                res.push_str(RLB);
+                res.push_str(format!("ft_params := {params_str}").as_str());
+                res.push_str(format!("ft_results := {results_str}").as_str());
+                res.push_str(RRB);
+                res.push_str(".\n");
+            }
+            CompositeInnerType::Array(_)
+            | CompositeInnerType::Struct(_)
+            | CompositeInnerType::Cont(_) => {
+                //TODO
+            }
+        }
+    }
+    Ok(res)
+}
+
+fn translate_functions(
+    function_type_indexes: &[u32],
+    function_bodies: &[FunctionBody],
+)
 
 //Inductive basic_instruction
 fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
@@ -1660,99 +1762,109 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}"),
         Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}"),
         Operator::I32Load { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 None {memarg}")
         }
         Operator::I64Load { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 None {memarg}")
         }
         Operator::F32Load { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_f32 None {memarg}")
         }
         Operator::F64Load { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_f64 None {memarg}")
         }
         Operator::I32Load8S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I32Load8U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I32Load16S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I32Load16U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load8S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I64Load8U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I64Load16S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I64Load16U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load32S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg}")
         }
         Operator::I64Load32U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg}")
         }
         Operator::I32Store { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i32 None {memarg}")
         }
         Operator::I64Store { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i64 None {memarg}")
         }
         Operator::F32Store { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_f32 None {memarg}")
         }
         Operator::F64Store { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_f64 None {memarg}")
         }
         Operator::I32Store8 { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i32 (Some Tp_i8) {memarg}")
         }
         Operator::I32Store16 { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i32 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store8 { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i64 (Some Tp_i8) {memarg}")
         }
         Operator::I64Store16 { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i64 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store32 { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store T_i64 (Some Tp_i32) {memarg}")
         }
-        Operator::MemorySize { mem } => todo!(),
-        Operator::MemoryGrow { mem } => todo!(),
+        Operator::MemorySize { mem } => {
+            if mem > 0 {
+                return Err(anyhow::anyhow!("Memory index is not supported"));
+            }
+            "BI_memory_size".to_string()
+        }
+        Operator::MemoryGrow { mem } => {
+            if mem > 0 {
+                return Err(anyhow::anyhow!("Memory index is not supported"));
+            }
+            "BI_memory_grow".to_string()
+        }
         Operator::I32Const { value } => format!("BI_const_num (VAL_int32 {value})"),
         Operator::I64Const { value } => format!("BI_const_num (VAL_int64 {value})"),
         Operator::F32Const { value } => {
@@ -2069,158 +2181,92 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
                 operator
             ))
         }
-        /*
-                        Inductive shape_vec_i: Set :=
-                  | SVI_8_16
-                  | SVI_16_8
-                  | SVI_32_4
-                  | SVI_64_2
-                  .
-
-                Inductive shape_vec_f: Set :=
-                  | SVF_32_4
-                  | SVF_64_2
-                  .
-
-                Inductive shape_vec : Set := (* shape *)
-                  | SV_ishape: shape_vec_i -> shape_vec
-                  | SV_fshape: shape_vec_f -> shape_vec
-                  .
-
-                  Inductive unop_vec : Set :=
-          | VUO_not
-          .
-
-        Inductive binop_vec : Set :=
-          | VBO_and
-          .
-
-        Inductive ternop_vec : Set :=
-          | VTO_bitselect
-          .
-
-        Inductive test_vec : Set :=
-          | VT_any_true
-          .
-
-        Inductive shift_vec : Set :=
-          | VSH_any_true
-          .
-
-        Definition laneidx := u8.
-
-        Inductive packed_type_vec :=
-          | Tptv_8_8
-          | Tptv_16_4
-          | Tptv_32_2
-        .
-
-        Inductive zero_type_vec :=
-          | Tztv_32
-          | Tztv_64
-        .
-
-        Inductive width_vec :=
-          | Twv_8
-          | Twv_16
-          | Twv_32
-          | Twv_64
-          .
-
-        Inductive load_vec_arg :=
-          | LVA_packed: packed_type_vec -> sx -> load_vec_arg
-          | LVA_zero: zero_type_vec -> load_vec_arg
-          | LVA_splat: width_vec -> load_vec_arg
-          .
-
-          BI_load_vec : load_vec_arg -> memarg -> basic_instruction
-                         */
         Operator::V128Load { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::V128Load8x8S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::V128Load8x8U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::V128Load16x4S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::V128Load16x4U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::V128Load32x2S { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) {memarg}")
         }
         Operator::V128Load32x2U { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) {memarg}")
         }
         Operator::V128Load8Splat { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_splat Twv_8 {memarg}")
         }
         Operator::V128Load16Splat { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_splat Twv_16 {memarg}")
         }
         Operator::V128Load32Splat { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_splat Twv_32 {memarg}")
         }
         Operator::V128Load64Splat { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_splat Twv_64 {memarg}")
         }
         Operator::V128Load32Zero { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_zero Tztv_32 {memarg}")
         }
         Operator::V128Load64Zero { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_load_vec LVA_zero Tztv_64 {memarg}")
         }
         Operator::V128Store { memarg } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_64 {memarg} 0")
         }
         Operator::V128Load8Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
         }
         Operator::V128Load16Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
         }
         Operator::V128Load32Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
         }
         Operator::V128Load64Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
         }
         Operator::V128Store8Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
         }
         Operator::V128Store16Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
         }
         Operator::V128Store32Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
         }
         Operator::V128Store64Lane { memarg, lane } => {
-            let memarg = parse_memarg(&memarg)?;
+            let memarg = translate_memarg(&memarg)?;
             format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
         }
         Operator::V128Const { value } => {
