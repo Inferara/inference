@@ -40,7 +40,7 @@ fn parse_inf_file(input: &str) -> Response {
         wat_to_wasm(&wat)
             .map(|w| wasm = w)
             .unwrap_or_else(|e| errors.push(e.to_string()));
-      
+
         wasm_to_coq(&wasm)
             .map(|v_str| v = v_str)
             .unwrap_or_else(|e| errors.push(e.to_string()));
@@ -85,4 +85,25 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", 8080))?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_parse_inf_file() {
+        let input = r#"
+        fn main() {
+            let x: i32 = 10;
+            let y: i32 = 20;
+            let z: i32 = x + y;
+        }
+        "#;
+        let result = parse_inf_file(input);
+        // assert_eq!(result.errors.len(), 0);
+        // assert_eq!(result.wat.len(), 0);
+        // assert_eq!(result.v.len(), 0);
+        // assert_eq!(result.wasm.len(), 0);
+    }
 }

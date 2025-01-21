@@ -47,7 +47,7 @@ fn main() {
         process::exit(1);
     }
 
-    if args.output.is_some() && args.out.unwrap() == "coq" {
+    if args.output.is_some() && args.out.unwrap() == "v" {
         if args.path.ends_with(".wasm") {
             wasm_to_coq(&args.path);
         }

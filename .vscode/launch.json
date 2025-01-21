@@ -7,24 +7,27 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug wasm key",
+            "name": "Debug CLI",
             "preLaunchTask": "BuildCompiler",
             "program": "${workspaceFolder}/cli",
             "args": [
                 "${workspaceFolder}/test_data/wasm/",
-                "--wasm"
+                "-o",
+                "",
+                "-g",
+                "v"
             ],
             "cwd": "${workspaceFolder}",
         },
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug rust key",
+            "name": "Debug wasm key",
             "preLaunchTask": "BuildCompiler",
             "program": "${workspaceFolder}/cli",
             "args": [
-                "${workspaceFolder}/test_data/rust/lib.rs",
-                "--rust"
+                "${workspaceFolder}/test_data/wasm/",
+                "--wasm"
             ],
             "cwd": "${workspaceFolder}",
         },

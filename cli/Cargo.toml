@@ -1,5 +1,5 @@
 [package]
-name = "inrence-cli"
+name = "inference-cli"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -7,7 +7,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-clap = { version = "4.5.26", features = ["derive"] }
+clap = { version = "4.5.27", features = ["derive"] }
 walkdir = "2.5.0"
 tempfile = "3"
 anyhow.workspace = true
