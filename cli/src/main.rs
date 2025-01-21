@@ -31,7 +31,6 @@
 mod parser;
 use clap::Parser;
 use inference_ast::{builder::build_ast, types::SourceFile};
-use inference_wasm_coq_translator::translator::WasmModuleParseError;
 use parser::Cli;
 use std::{fs, path::Path, process};
 use walkdir::WalkDir;
