@@ -596,18 +596,18 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
         wasmparser::Operator::Block { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("(BI_block {blockty}")
+            format!("BI_block ({blockty}) (")
         }
         Operator::Loop { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("(BI_loop {blockty}")
+            format!("BI_loop ({blockty}) (")
         }
         Operator::If { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("(BI_if {blockty}")
+            format!("BI_if ({blockty}) (")
         }
         Operator::Else => "nil) (".to_string(),
-        Operator::End => "nil) :: ".to_string(),
+        Operator::End => "nil) ::".to_string(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}"),
         Operator::BrTable { targets } => {
