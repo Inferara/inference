@@ -390,7 +390,7 @@ fn translate_expr(operators_reader: OperatorsReader) -> anyhow::Result<String> {
         let op = operator?;
         let translated_op = translate_basic_instruction(op)?;
         res.push_str(translated_op.as_str());
-        res.push_str(" :: \n");
+        res.push_str("\n");
     }
     res.push_str("nil");
     Ok(res)
@@ -582,7 +582,7 @@ fn translate_functions(
         res.push_str(RLB);
         res.push_str(format!("modfunc_type := {modfunc_type};\n").as_str());
         res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
-        res.push_str(format!("modfunc_body := {modfunc_body}\n").as_str());
+        res.push_str(format!("modfunc_body := (\n{modfunc_body}").as_str());
         res.push_str(RRB);
         res.push_str(".\n");
     }
