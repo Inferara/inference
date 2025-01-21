@@ -197,8 +197,8 @@ impl WasmParseData<'_> {
     }
 }
 
-const RLB: &str = "{|";
-const RRB: &str = "{|";
+const RLB: &str = "{|\n";
+const RRB: &str = "|}\n";
 
 //Inductive reference_type
 fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
