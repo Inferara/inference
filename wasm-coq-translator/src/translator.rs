@@ -207,7 +207,7 @@ fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
     } else if *ref_type == RefType::EXTERNREF {
         Ok(String::from("T_externref"))
     } else {
-        Err(anyhow::anyhow!("UNSUPPORTED REF TYPE"))
+        Err(anyhow::anyhow!("Unsupported reference type {:?}", ref_type))
     }
 }
 
@@ -390,7 +390,7 @@ fn translate_expr(operators_reader: OperatorsReader) -> anyhow::Result<String> {
         let op = operator?;
         let translated_op = translate_basic_instruction(op)?;
         res.push_str(translated_op.as_str());
-        res.push_str("::");
+        res.push_str(" :: \n");
     }
     res.push_str("nil");
     Ok(res)
@@ -480,9 +480,9 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
     };
     res.push_str(format!("Definition element_{id} : module_element :=\n").as_str());
     res.push_str(RLB);
-    res.push_str(format!("modelem_type := {modelem_type}\n").as_str());
-    res.push_str(format!("modelem_init := {modelem_init}\n").as_str());
-    res.push_str(format!("module_elemmode := {module_elemmode}\n").as_str());
+    res.push_str(format!("modelem_type := {modelem_type};\n").as_str());
+    res.push_str(format!("modelem_init := {modelem_init};\n").as_str());
+    res.push_str(format!("module_elemmode := {module_elemmode};\n").as_str());
     res.push_str(RRB);
     res.push_str(".\n");
     Ok(res)
@@ -541,7 +541,7 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
 
                 res.push_str(format!("Definition ft_{id} : function_type :=\n").as_str());
                 res.push_str(RLB);
-                res.push_str(format!("ft_params := {params_str}").as_str());
+                res.push_str(format!("ft_params := {params_str};").as_str());
                 res.push_str(format!("ft_results := {results_str}").as_str());
                 res.push_str(RRB);
                 res.push_str(".\n");
@@ -581,7 +581,7 @@ fn translate_functions(
         res.push_str(format!("Definition func_{id} : module_func :=\n").as_str());
         res.push_str(RLB);
         res.push_str(format!("modfunc_type := {modfunc_type};\n").as_str());
-        res.push_str(format!("modfunc_locals := {modfunc_locals}\n").as_str());
+        res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
         res.push_str(format!("modfunc_body := {modfunc_body}\n").as_str());
         res.push_str(RRB);
         res.push_str(".\n");
