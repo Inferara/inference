@@ -108,7 +108,7 @@ impl WasmParseData<'_> {
         }
         let mut created_globals = String::new();
         for global in &self.globals {
-            created_globals.push('(');
+            created_globals.push('(');оператором
             match translate_global(global) {
                 Ok(translated_global) => {
                     created_globals.push_str(translated_global.as_str());
@@ -582,7 +582,7 @@ fn translate_functions(
         res.push_str(RLB);
         res.push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
         res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
-        res.push_str(format!("modfunc_body := (\n{modfunc_body}").as_str());
+        res.push_str(format!("modfunc_body :=\n{modfunc_body};").as_str());
         res.push_str(RRB);
         res.push_str(".\n");
     }
