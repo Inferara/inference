@@ -1,6 +1,6 @@
 use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
-use inference::{compile_to_wat, wasm_to_coq, wat_to_wasm};
+use inference::{compile_to_wat, wasm_to_v, wat_to_wasm};
 use serde::{Deserialize, Serialize};
 
 use wat_fmt::format;
@@ -41,7 +41,7 @@ fn parse_inf_file(input: &str) -> Response {
             .map(|w| wasm = w)
             .unwrap_or_else(|e| errors.push(e.to_string()));
 
-        wasm_to_coq(&wasm)
+        wasm_to_v(&wasm)
             .map(|v_str| v = v_str)
             .unwrap_or_else(|e| errors.push(e.to_string()));
 

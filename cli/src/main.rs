@@ -30,10 +30,13 @@
 
 mod parser;
 use clap::Parser;
-use inference_ast::{builder::build_ast, types::SourceFile};
+use inference::{compile_to_wat, wasm_to_v, wat_to_wasm};
 use parser::Cli;
-use std::{fs, path::Path, process};
-use walkdir::WalkDir;
+use std::{
+    fs,
+    path::PathBuf,
+    process::{self},
+};
 
 /// Inference compiler entry point
 ///
@@ -47,140 +50,84 @@ fn main() {
         process::exit(1);
     }
 
-    if args.output.is_some() && args.out.unwrap() == "v" {
-        if args.path.ends_with(".wasm") {
-            wasm_to_coq(&args.path);
-        }
-    } else {
-        parse_inf_file(args.path.to_str().unwrap());
-    }
-}
-
-fn parse_inf_file(source_file_path: &str) -> SourceFile {
-    let text = fs::read_to_string(source_file_path).expect("Error reading source file");
-    parse_inference(&text)
-}
-
-fn parse_inference(source_code: &str) -> SourceFile {
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .expect("Error loading Inference grammar");
-    let tree = parser.parse(source_code, None).unwrap();
-    let code = source_code.as_bytes();
-    let root_node = tree.root_node();
-    build_ast(root_node, code).expect("Error building AST")
-}
-
-// fn generate_wasm_s_expression(source_file: &SourceFile) -> String {
-//     wat_codegen::wat_generator::generate_for_source_file(source_file)
-// }
-
-fn wasm_to_coq(path: &Path) {
-    if path.is_file() {
-        let filename = path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .replace(".wasm", "")
-            .replace('.', "_");
-        if let Err(e) = wasm_to_coq_file(path, None, &filename) {
-            eprintln!("{e}");
-        }
-    } else {
-        for entry in WalkDir::new(path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-        {
-            let f_name = entry.file_name().to_string_lossy();
-
-            if f_name.ends_with(".wasm") {
-                if let Err(e) = wasm_to_coq_file(
-                    entry.path(),
-                    Some(
-                        entry
-                            .path()
-                            .strip_prefix(path)
-                            .ok()
-                            .unwrap()
-                            .parent()
-                            .unwrap(),
-                    ),
-                    &f_name.replace(".wasm", "").replace('.', "_"),
-                ) {
-                    eprintln!("{e}");
-                }
+    let output_path = match args.output {
+        Some(path) => {
+            if !path.exists() {
+                fs::create_dir_all(&path).expect("Error creating output directory");
             }
+            path
         }
-    }
-}
-
-fn wasm_to_coq_file(
-    path: &Path,
-    sub_path: Option<&Path>,
-    filename: &String,
-) -> anyhow::Result<String> {
-    let absolute_path = path.canonicalize().unwrap();
-    let bytes = std::fs::read(absolute_path).unwrap();
-    wasm_bytes_to_coq_file(&bytes, sub_path, filename)
-}
-
-fn wasm_bytes_to_coq_file(
-    bytes: &Vec<u8>,
-    sub_path: Option<&Path>,
-    filename: &String,
-) -> anyhow::Result<String> {
-    let coq =
-        inference_wasm_coq_translator::wasm_parser::translate_bytes(filename, bytes.as_slice())?;
-
-    let current_dir = std::env::current_dir().unwrap();
-    let target_dir = match sub_path {
-        Some(sp) => current_dir.join("out").join(sp),
-        None => current_dir.join("out"),
+        None => PathBuf::from("out"),
     };
-    let coq_file_path = target_dir.join(format!("{filename}.v"));
-    fs::create_dir_all(target_dir).unwrap();
-    std::fs::write(coq_file_path.clone(), coq).unwrap();
-    Ok(coq_file_path.to_str().unwrap().to_owned())
+    let generate = match args.generate {
+        Some(g) => match g.as_str().to_lowercase().as_str() {
+            "wat" => "wat",
+            "wasm" => "wasm",
+            "f" | "full" => "f",
+            _ => "v",
+        },
+        None => "v",
+    };
+    let source_code = fs::read_to_string(args.path).expect("Error reading source file");
+    let wat = compile_to_wat(source_code.as_str()).unwrap();
+    if generate == "wat" {
+        let wat_file_path = output_path.join("out.wat");
+        fs::write(wat_file_path.clone(), wat).expect("Error writing WAT file");
+        println!("WAT generated at: {}", wat_file_path.to_str().unwrap());
+        process::exit(0);
+    }
+    let wasm = wat_to_wasm(wat.as_str()).unwrap();
+    if generate == "wasm" {
+        let wasm_file_path = output_path.join("out.wasm");
+        fs::write(wasm_file_path.clone(), wasm).expect("Error writing WASM file");
+        println!("WASM generated at: {}", wasm_file_path.to_str().unwrap());
+        process::exit(0);
+    }
+    let v = wasm_to_v(&wasm).unwrap();
+    if generate == "v" {
+        let v_file_path = output_path.join("out.v");
+        fs::write(v_file_path.clone(), v).expect("Error writing V file");
+        println!("V generated at: {}", v_file_path.to_str().unwrap());
+        process::exit(0);
+    }
+    if generate == "f" {
+        let v_file_path = output_path.join("out.v");
+        fs::write(v_file_path.clone(), v).expect("Error writing V file");
+        println!("V generated at: {}", v_file_path.to_str().unwrap());
+        let wat_file_path = output_path.join("out.wat");
+        fs::write(wat_file_path.clone(), wat).expect("Error writing WAT file");
+        println!("WAT generated at: {}", wat_file_path.to_str().unwrap());
+        let wasm_file_path = output_path.join("out.wasm");
+        fs::write(wasm_file_path.clone(), wasm).expect("Error writing WASM file");
+        println!("WASM generated at: {}", wasm_file_path.to_str().unwrap());
+        process::exit(0);
+    }
+    eprintln!("Error: invalid generate option");
+    process::exit(1);
 }
 
 #[cfg(test)]
 mod test {
 
-    #[test]
-    fn test_parse() {
-        let path = get_test_data_path().join("inf").join("example.inf");
-        let absolute_path = path.canonicalize().unwrap();
-        let ast = crate::parse_inf_file(absolute_path.to_str().unwrap());
-        assert!(!ast.definitions.is_empty());
-        // std::fs::write(
-        //     current_dir.join(""),
-        //     format!("{ast:#?}"),
-        // )
-        // .unwrap();
-    }
+    // #[test]
+    // fn test_wasm_to_coq() {
+    //     if std::env::var("GITHUB_ACTIONS").is_ok() {
+    //         eprintln!("Skipping test on GitHub Actions");
+    //         return;
+    //     }
+    //     let path = get_test_data_path().join("wasm").join("comments.0.wasm");
+    //     let absolute_path = path.canonicalize().unwrap();
 
-    #[test]
-    fn test_wasm_to_coq() {
-        if std::env::var("GITHUB_ACTIONS").is_ok() {
-            eprintln!("Skipping test on GitHub Actions");
-            return;
-        }
-        let path = get_test_data_path().join("wasm").join("comments.0.wasm");
-        let absolute_path = path.canonicalize().unwrap();
-
-        let bytes = std::fs::read(absolute_path).unwrap();
-        let mod_name = String::from("index");
-        let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
-            &mod_name,
-            bytes.as_slice(),
-        );
-        assert!(coq.is_ok());
-        let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
-        std::fs::write(coq_file_path, coq.unwrap()).unwrap();
-    }
+    //     let bytes = std::fs::read(absolute_path).unwrap();
+    //     let mod_name = String::from("index");
+    //     let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
+    //         &mod_name,
+    //         bytes.as_slice(),
+    //     );
+    //     assert!(coq.is_ok());
+    //     let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
+    //     std::fs::write(coq_file_path, coq.unwrap()).unwrap();
+    // }
 
     #[allow(dead_code)]
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {

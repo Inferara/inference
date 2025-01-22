@@ -67,7 +67,7 @@ pub fn compile_to_wasm(source_code: &str) -> anyhow::Result<Vec<u8>> {
 /// # Errors
 ///
 /// This function will return an error if the translation process fails.
-pub fn wasm_to_coq(wasm: &Vec<u8>) -> anyhow::Result<String> {
+pub fn wasm_to_v(wasm: &Vec<u8>) -> anyhow::Result<String> {
     if let Ok(v) =
         inference_wasm_coq_translator::wasm_parser::translate_bytes(&String::new(), wasm.as_slice())
     {

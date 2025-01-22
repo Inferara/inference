@@ -9,25 +9,23 @@
             "request": "launch",
             "name": "Debug CLI",
             "preLaunchTask": "BuildCompiler",
-            "program": "${workspaceFolder}/cli",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=inference-cli",
+                    "--package=inference-cli"
+                ],
+                "filter": {
+                    "name": "inference-cli",
+                    "kind": "bin"
+                }
+            },
             "args": [
-                "${workspaceFolder}/test_data/wasm/",
-                "-o",
-                "",
+                "${workspaceFolder}/cli/test.inf",
                 "-g",
-                "v"
-            ],
-            "cwd": "${workspaceFolder}",
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug wasm key",
-            "preLaunchTask": "BuildCompiler",
-            "program": "${workspaceFolder}/cli",
-            "args": [
-                "${workspaceFolder}/test_data/wasm/",
-                "--wasm"
+                "f",
+                "-o",
+                "~/Downloads/inf-test/"
             ],
             "cwd": "${workspaceFolder}",
         },

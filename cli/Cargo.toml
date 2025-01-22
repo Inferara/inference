@@ -13,5 +13,4 @@ tempfile = "3"
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
-inference-ast.workspace = true
-inference-wasm-coq-translator.workspace = true
+inference.workspace = true
