@@ -390,7 +390,7 @@ fn translate_expr(operators_reader: OperatorsReader) -> anyhow::Result<String> {
         let op = operator?;
         let translated_op = translate_basic_instruction(op)?;
         res.push_str(translated_op.as_str());
-        res.push_str("\n");
+        res.push_str(" ::\n");
     }
     res.push_str("nil");
     Ok(res)
@@ -580,7 +580,7 @@ fn translate_functions(
 
         res.push_str(format!("Definition func_{id} : module_func :=\n").as_str());
         res.push_str(RLB);
-        res.push_str(format!("modfunc_type := {modfunc_type};\n").as_str());
+        res.push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
         res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
         res.push_str(format!("modfunc_body := (\n{modfunc_body}").as_str());
         res.push_str(RRB);
@@ -592,8 +592,8 @@ fn translate_functions(
 //Inductive basic_instruction
 fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
     let operator = match operator {
-        wasmparser::Operator::Nop => "BI_nop ::".to_string(),
-        wasmparser::Operator::Unreachable => "BI_unreachable ::".to_string(),
+        wasmparser::Operator::Nop => "BI_nop".to_string(),
+        wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
         wasmparser::Operator::Block { blockty } => {
             let blockty = translate_block_type(&blockty)?;
             format!("BI_block ({blockty}) (")
@@ -607,12 +607,12 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
             format!("BI_if ({blockty}) (")
         }
         Operator::Else => "nil) (".to_string(),
-        Operator::End => "nil) ::".to_string(),
-        Operator::Br { relative_depth } => format!("BI_br {relative_depth} ::"),
-        Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth} ::"),
+        Operator::End => "nil)".to_string(),
+        Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
+        Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}"),
         Operator::BrTable { targets } => {
             if targets.is_empty() {
-                "BI_br_table ::".to_string()
+                "BI_br_table".to_string()
             } else {
                 let mut labelidx = String::new();
                 for target in targets.targets() {
@@ -621,259 +621,259 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
                     labelidx.push_str(" :: ");
                 }
                 labelidx.push_str("nil");
-                format!("BI_br_table ({labelidx}) ::")
+                format!("BI_br_table ({labelidx})")
             }
         }
-        Operator::Return => "BI_return ::".to_string(),
-        Operator::Call { function_index } => format!("BI_call {function_index} ::"),
+        Operator::Return => "BI_return".to_string(),
+        Operator::Call { function_index } => format!("BI_call {function_index}"),
         Operator::CallIndirect {
             type_index,
             table_index,
-        } => format!("BI_call_indirect {type_index} {table_index} ::"),
-        Operator::Drop => "BI_drop ::".to_string(),
-        Operator::Select => "BI_select None ::".to_string(),
-        Operator::LocalGet { local_index } => format!("BI_local_get {local_index} ::"),
-        Operator::LocalSet { local_index } => format!("BI_local_set {local_index} ::"),
-        Operator::LocalTee { local_index } => format!("BI_local_tee {local_index} ::"),
-        Operator::GlobalGet { global_index } => format!("BI_global_get {global_index} ::"),
-        Operator::GlobalSet { global_index } => format!("BI_global_set {global_index} ::"),
+        } => format!("BI_call_indirect {type_index} {table_index}"),
+        Operator::Drop => "BI_drop".to_string(),
+        Operator::Select => "BI_select None".to_string(),
+        Operator::LocalGet { local_index } => format!("BI_local_get {local_index}"),
+        Operator::LocalSet { local_index } => format!("BI_local_set {local_index}"),
+        Operator::LocalTee { local_index } => format!("BI_local_tee {local_index}"),
+        Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}"),
+        Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}"),
         Operator::I32Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i32 None {memarg} ::")
+            format!("BI_load T_i32 None {memarg}")
         }
         Operator::I64Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 None {memarg} ::")
+            format!("BI_load T_i64 None {memarg}")
         }
         Operator::F32Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_f32 None {memarg} ::")
+            format!("BI_load T_f32 None {memarg}")
         }
         Operator::F64Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_f64 None {memarg} ::")
+            format!("BI_load T_f64 None {memarg}")
         }
         Operator::I32Load8S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg} ::")
+            format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I32Load8U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg} ::")
+            format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I32Load16S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg} ::")
+            format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I32Load16U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg} ::")
+            format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load8S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I64Load8U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I64Load16S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I64Load16U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load32S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg}")
         }
         Operator::I64Load32U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg} ::")
+            format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg}")
         }
         Operator::I32Store { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i32 None {memarg} ::")
+            format!("BI_store T_i32 None {memarg}")
         }
         Operator::I64Store { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i64 None {memarg} ::")
+            format!("BI_store T_i64 None {memarg}")
         }
         Operator::F32Store { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_f32 None {memarg} ::")
+            format!("BI_store T_f32 None {memarg}")
         }
         Operator::F64Store { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_f64 None {memarg} ::")
+            format!("BI_store T_f64 None {memarg}")
         }
         Operator::I32Store8 { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i32 (Some Tp_i8) {memarg} ::")
+            format!("BI_store T_i32 (Some Tp_i8) {memarg}")
         }
         Operator::I32Store16 { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i32 (Some Tp_i16) {memarg} ::")
+            format!("BI_store T_i32 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store8 { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i64 (Some Tp_i8) {memarg} ::")
+            format!("BI_store T_i64 (Some Tp_i8) {memarg}")
         }
         Operator::I64Store16 { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i64 (Some Tp_i16) {memarg} ::")
+            format!("BI_store T_i64 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store32 { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store T_i64 (Some Tp_i32) {memarg} ::")
+            format!("BI_store T_i64 (Some Tp_i32) {memarg}")
         }
         Operator::MemorySize { mem } => {
             if mem > 0 {
                 return Err(anyhow::anyhow!("Memory index is not supported"));
             }
-            "BI_memory_size ::".to_string()
+            "BI_memory_size".to_string()
         }
         Operator::MemoryGrow { mem } => {
             if mem > 0 {
                 return Err(anyhow::anyhow!("Memory index is not supported"));
             }
-            "BI_memory_grow ::".to_string()
+            "BI_memory_grow".to_string()
         }
-        Operator::I32Const { value } => format!("BI_const_num (VAL_int32 {value}) ::"),
-        Operator::I64Const { value } => format!("BI_const_num (VAL_int64 {value}) ::"),
+        Operator::I32Const { value } => format!("BI_const_num (VAL_int32 {value})"),
+        Operator::I64Const { value } => format!("BI_const_num (VAL_int64 {value})"),
         Operator::F32Const { value } => {
             let val = value.bits();
-            format!("BI_const_num (VAL_float32 {val}) ::")
+            format!("BI_const_num (VAL_float32 {val})")
         }
         Operator::F64Const { value } => {
             let val = value.bits();
-            format!("BI_const_num (VAL_float64 {val}) ::")
+            format!("BI_const_num (VAL_float64 {val})")
         }
-        Operator::I32Eqz => "BI_testop T_i32 TO_eqz ::".to_string(),
-        Operator::I32Eq => "BI_relop T_i32 Relop_i ROI_eq ::".to_string(),
-        Operator::I32Ne => "BI_relop T_i32 Relop_i ROI_ne ::".to_string(),
-        Operator::I32LtS => "BI_relop T_i32 Relop_i ROI_lt SX_S ::".to_string(),
-        Operator::I32LtU => "BI_relop T_i32 Relop_i ROI_lt SX_U ::".to_string(),
-        Operator::I32GtS => "BI_relop T_i32 Relop_i ROI_gt SX_S ::".to_string(),
-        Operator::I32GtU => "BI_relop T_i32 Relop_i ROI_gt SX_U ::".to_string(),
-        Operator::I32LeS => "BI_relop T_i32 Relop_i ROI_le SX_S ::".to_string(),
-        Operator::I32LeU => "BI_relop T_i32 Relop_i ROI_le SX_U ::".to_string(),
-        Operator::I32GeS => "BI_relop T_i32 Relop_i ROI_ge SX_S ::".to_string(),
-        Operator::I32GeU => "BI_relop T_i32 Relop_i ROI_ge SX_U ::".to_string(),
-        Operator::I64Eqz => "BI_testop T_i64 TO_eqz ::".to_string(),
-        Operator::I64Eq => "BI_relop T_i64 Relop_i ROI_eq ::".to_string(),
-        Operator::I64Ne => "BI_relop T_i64 Relop_i ROI_ne ::".to_string(),
-        Operator::I64LtS => "BI_relop T_i64 Relop_i ROI_lt SX_S ::".to_string(),
-        Operator::I64LtU => "BI_relop T_i64 Relop_i ROI_lt SX_U ::".to_string(),
-        Operator::I64GtS => "BI_relop T_i64 Relop_i ROI_gt SX_S ::".to_string(),
-        Operator::I64GtU => "BI_relop T_i64 Relop_i ROI_gt SX_U ::".to_string(),
-        Operator::I64LeS => "BI_relop T_i64 Relop_i ROI_le SX_S ::".to_string(),
-        Operator::I64LeU => "BI_relop T_i64 Relop_i ROI_le SX_U ::".to_string(),
-        Operator::I64GeS => "BI_relop T_i64 Relop_i ROI_ge SX_S ::".to_string(),
-        Operator::I64GeU => "BI_relop T_i64 Relop_i ROI_ge SX_U ::".to_string(),
-        Operator::F32Eq => "BI_relop T_f32 relop_f ROI_eq ::".to_string(),
-        Operator::F32Ne => "BI_relop T_f32 relop_f ROI_ne ::".to_string(),
-        Operator::F32Lt => "BI_relop T_f32 relop_f ROI_lt ::".to_string(),
-        Operator::F32Gt => "BI_relop T_f32 relop_f ROI_gt ::".to_string(),
-        Operator::F32Le => "BI_relop T_f32 relop_f ROI_le ::".to_string(),
-        Operator::F32Ge => "BI_relop T_f32 relop_f ROI_ge ::".to_string(),
-        Operator::F64Eq => "BI_relop T_f64 relop_f ROI_eq ::".to_string(),
-        Operator::F64Ne => "BI_relop T_f64 relop_f ROI_ne ::".to_string(),
-        Operator::F64Lt => "BI_relop T_f64 relop_f ROI_lt ::".to_string(),
-        Operator::F64Gt => "BI_relop T_f64 relop_f ROI_gt ::".to_string(),
-        Operator::F64Le => "BI_relop T_f64 relop_f ROI_le ::".to_string(),
-        Operator::F64Ge => "BI_relop T_f64 relop_f ROI_ge ::".to_string(),
-        Operator::I32Clz => "BI_unop T_i32 Unop_i UOI_clz ::".to_string(),
-        Operator::I32Ctz => "BI_unop T_i32 Unop_i UOI_ctz ::".to_string(),
-        Operator::I32Popcnt => "BI_unop T_i32 Unop_i UOI_popcnt ::".to_string(),
-        Operator::I32Add => "BI_binop T_i32 binop_i BOI_add ::".to_string(),
-        Operator::I32Sub => "BI_binop T_i32 binop_i BOI_sub ::".to_string(),
-        Operator::I32Mul => "BI_binop T_i32 binop_i BOI_mul ::".to_string(),
-        Operator::I32DivS => "BI_binop T_i32 binop_i BOI_div SX_S ::".to_string(),
-        Operator::I32DivU => "BI_binop T_i32 binop_i BOI_div SX_U ::".to_string(),
-        Operator::I32RemS => "BI_binop T_i32 binop_i BOI_rem SX_S ::".to_string(),
-        Operator::I32RemU => "BI_binop T_i32 binop_i BOI_rem SX_U ::".to_string(),
-        Operator::I32And => "BI_binop T_i32 binop_i BOI_and ::".to_string(),
-        Operator::I32Or => "BI_binop T_i32 binop_i BOI_or ::".to_string(),
-        Operator::I32Xor => "BI_binop T_i32 binop_i BOI_xor ::".to_string(),
-        Operator::I32Shl => "BI_binop T_i32 binop_i BOI_shl ::".to_string(),
-        Operator::I32ShrS => "BI_binop T_i32 binop_i BOI_shr SX_S ::".to_string(),
-        Operator::I32ShrU => "BI_binop T_i32 binop_i BOI_shr SX_U ::".to_string(),
-        Operator::I32Rotl => "BI_binop T_i32 binop_i BOI_rotl ::".to_string(),
-        Operator::I32Rotr => "BI_binop T_i32 binop_i BOI_rotr ::".to_string(),
-        Operator::I64Clz => "BI_unop T_i64 Unop_i UOI_clz ::".to_string(),
-        Operator::I64Ctz => "BI_unop T_i64 Unop_i UOI_ctz ::".to_string(),
-        Operator::I64Popcnt => "BI_unop T_i64 Unop_i UOI_popcnt ::".to_string(),
-        Operator::I64Add => "BI_binop T_i64 binop_i BOI_add ::".to_string(),
-        Operator::I64Sub => "BI_binop T_i64 binop_i BOI_sub ::".to_string(),
-        Operator::I64Mul => "BI_binop T_i64 binop_i BOI_mul ::".to_string(),
-        Operator::I64DivS => "BI_binop T_i64 binop_i BOI_div SX_S ::".to_string(),
-        Operator::I64DivU => "BI_binop T_i64 binop_i BOI_div SX_U ::".to_string(),
-        Operator::I64RemS => "BI_binop T_i64 binop_i BOI_rem SX_S ::".to_string(),
-        Operator::I64RemU => "BI_binop T_i64 binop_i BOI_rem SX_U ::".to_string(),
-        Operator::I64And => "BI_binop T_i64 binop_i BOI_and ::".to_string(),
-        Operator::I64Or => "BI_binop T_i64 binop_i BOI_or ::".to_string(),
-        Operator::I64Xor => "BI_binop T_i64 binop_i BOI_xor ::".to_string(),
-        Operator::I64Shl => "BI_binop T_i64 binop_i BOI_shl ::".to_string(),
-        Operator::I64ShrS => "BI_binop T_i64 binop_i BOI_shr SX_S ::".to_string(),
-        Operator::I64ShrU => "BI_binop T_i64 binop_i BOI_shr SX_U ::".to_string(),
-        Operator::I64Rotl => "BI_binop T_i64 binop_i BOI_rotl ::".to_string(),
-        Operator::I64Rotr => "BI_binop T_i64 binop_i BOI_rotr ::".to_string(),
-        Operator::F32Abs => "BI_unop T_f32 Unop_f UOF_abs ::".to_string(),
-        Operator::F32Neg => "BI_unop T_f32 Unop_f UOF_neg ::".to_string(),
-        Operator::F32Ceil => "BI_unop T_f32 Unop_f UOF_ceil ::".to_string(),
-        Operator::F32Floor => "BI_unop T_f32 Unop_f UOF_floor ::".to_string(),
-        Operator::F32Trunc => "BI_unop T_f32 Unop_f UOF_trunc ::".to_string(),
-        Operator::F32Nearest => "BI_unop T_f32 Unop_f UOF_nearest ::".to_string(),
-        Operator::F32Sqrt => "BI_unop T_f32 Unop_f UOF_sqrt ::".to_string(),
-        Operator::F32Add => "BI_binop T_f32 binop_f BOF_add ::".to_string(),
-        Operator::F32Sub => "BI_binop T_f32 binop_f BOF_sub ::".to_string(),
-        Operator::F32Mul => "BI_binop T_f32 binop_f BOF_mul ::".to_string(),
-        Operator::F32Div => "BI_binop T_f32 binop_f BOF_div ::".to_string(),
-        Operator::F32Min => "BI_binop T_f32 binop_f BOF_min ::".to_string(),
-        Operator::F32Max => "BI_binop T_f32 binop_f BOF_max ::".to_string(),
-        Operator::F32Copysign => "BI_binop T_f32 binop_f BOF_copysign ::".to_string(),
-        Operator::F64Abs => "BI_unop T_f64 Unop_f UOF_abs ::".to_string(),
-        Operator::F64Neg => "BI_unop T_f64 Unop_f UOF_neg ::".to_string(),
-        Operator::F64Ceil => "BI_unop T_f64 Unop_f UOF_ceil ::".to_string(),
-        Operator::F64Floor => "BI_unop T_f64 Unop_f UOF_floor ::".to_string(),
-        Operator::F64Trunc => "BI_unop T_f64 Unop_f UOF_trunc ::".to_string(),
-        Operator::F64Nearest => "BI_unop T_f64 Unop_f UOF_nearest ::".to_string(),
-        Operator::F64Sqrt => "BI_unop T_f64 Unop_f UOF_sqrt ::".to_string(),
-        Operator::F64Add => "BI_binop T_f64 binop_f BOF_add ::".to_string(),
-        Operator::F64Sub => "BI_binop T_f64 binop_f BOF_sub ::".to_string(),
-        Operator::F64Mul => "BI_binop T_f64 binop_f BOF_mul ::".to_string(),
-        Operator::F64Div => "BI_binop T_f64 binop_f BOF_div ::".to_string(),
-        Operator::F64Min => "BI_binop T_f64 binop_f BOF_min ::".to_string(),
-        Operator::F64Max => "BI_binop T_f64 binop_f BOF_max ::".to_string(),
-        Operator::F64Copysign => "BI_binop T_f64 binop_f BOF_copysign ::".to_string(),
-        Operator::I32WrapI64 => "BI_cvtop T_i32 CVO_wrap T_i64 None ::".to_string(),
-        Operator::I32TruncF32S => "BI_cvtop T_i32 CVO_trunc T_f32 (Some SX_S) ::".to_string(),
-        Operator::I32TruncF32U => "BI_cvtop T_i32 CVO_trunc T_f32 (Some SX_U) ::".to_string(),
-        Operator::I32TruncF64S => "BI_cvtop T_i32 CVO_trunc T_f64 (Some SX_S) ::".to_string(),
-        Operator::I32TruncF64U => "BI_cvtop T_i32 CVO_trunc T_f64 (Some SX_U) ::".to_string(),
-        Operator::I64ExtendI32S => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S) ::".to_string(),
-        Operator::I64ExtendI32U => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U) ::".to_string(),
-        Operator::I64TruncF32S => "BI_cvtop T_i64 CVO_trunc T_f32 (Some SX_S) ::".to_string(),
-        Operator::I64TruncF32U => "BI_cvtop T_i64 CVO_trunc T_f32 (Some SX_U) ::".to_string(),
-        Operator::I64TruncF64S => "BI_cvtop T_i64 CVO_trunc T_f64 (Some SX_S) ::".to_string(),
-        Operator::I64TruncF64U => "BI_cvtop T_i64 CVO_trunc T_f64 (Some SX_U) ::".to_string(),
-        Operator::F32ConvertI32S => "BI_cvtop T_f32 CVO_convert T_i32 (Some SX_S) ::".to_string(),
-        Operator::F32ConvertI32U => "BI_cvtop T_f32 CVO_convert T_i32 (Some SX_U) ::".to_string(),
-        Operator::F32ConvertI64S => "BI_cvtop T_f32 CVO_convert T_i64 (Some SX_S) ::".to_string(),
-        Operator::F32ConvertI64U => "BI_cvtop T_f32 CVO_convert T_i64 (Some SX_U) ::".to_string(),
-        Operator::F32DemoteF64 => "BI_cvtop T_f32 CVO_demote T_f64 None ::".to_string(),
-        Operator::F64ConvertI32S => "BI_cvtop T_f64 CVO_convert T_i32 (Some SX_S) ::".to_string(),
-        Operator::F64ConvertI32U => "BI_cvtop T_f64 CVO_convert T_i32 (Some SX_U) ::".to_string(),
-        Operator::F64ConvertI64S => "BI_cvtop T_f64 CVO_convert T_i64 (Some SX_S) ::".to_string(),
-        Operator::F64ConvertI64U => "BI_cvtop T_f64 CVO_convert T_i64 (Some SX_U) ::".to_string(),
-        Operator::F64PromoteF32 => "BI_cvtop T_f64 CVO_promote T_f32 None ::".to_string(),
-        Operator::I32ReinterpretF32 => "BI_cvtop T_i32 CVO_reinterpret T_f32 None ::".to_string(),
-        Operator::I64ReinterpretF64 => "BI_cvtop T_i64 CVO_reinterpret T_f64 None ::".to_string(),
-        Operator::F32ReinterpretI32 => "BI_cvtop T_f32 CVO_reinterpret T_i32 None ::".to_string(),
-        Operator::F64ReinterpretI64 => "BI_cvtop T_f64 CVO_reinterpret T_i64 None ::".to_string(),
+        Operator::I32Eqz => "BI_testop T_i32 TO_eqz".to_string(),
+        Operator::I32Eq => "BI_relop T_i32 Relop_i ROI_eq".to_string(),
+        Operator::I32Ne => "BI_relop T_i32 Relop_i ROI_ne".to_string(),
+        Operator::I32LtS => "BI_relop T_i32 Relop_i ROI_lt SX_S".to_string(),
+        Operator::I32LtU => "BI_relop T_i32 Relop_i ROI_lt SX_U".to_string(),
+        Operator::I32GtS => "BI_relop T_i32 Relop_i ROI_gt SX_S".to_string(),
+        Operator::I32GtU => "BI_relop T_i32 Relop_i ROI_gt SX_U".to_string(),
+        Operator::I32LeS => "BI_relop T_i32 Relop_i ROI_le SX_S".to_string(),
+        Operator::I32LeU => "BI_relop T_i32 Relop_i ROI_le SX_U".to_string(),
+        Operator::I32GeS => "BI_relop T_i32 Relop_i ROI_ge SX_S".to_string(),
+        Operator::I32GeU => "BI_relop T_i32 Relop_i ROI_ge SX_U".to_string(),
+        Operator::I64Eqz => "BI_testop T_i64 TO_eqz".to_string(),
+        Operator::I64Eq => "BI_relop T_i64 Relop_i ROI_eq".to_string(),
+        Operator::I64Ne => "BI_relop T_i64 Relop_i ROI_ne".to_string(),
+        Operator::I64LtS => "BI_relop T_i64 Relop_i ROI_lt SX_S".to_string(),
+        Operator::I64LtU => "BI_relop T_i64 Relop_i ROI_lt SX_U".to_string(),
+        Operator::I64GtS => "BI_relop T_i64 Relop_i ROI_gt SX_S".to_string(),
+        Operator::I64GtU => "BI_relop T_i64 Relop_i ROI_gt SX_U".to_string(),
+        Operator::I64LeS => "BI_relop T_i64 Relop_i ROI_le SX_S".to_string(),
+        Operator::I64LeU => "BI_relop T_i64 Relop_i ROI_le SX_U".to_string(),
+        Operator::I64GeS => "BI_relop T_i64 Relop_i ROI_ge SX_S".to_string(),
+        Operator::I64GeU => "BI_relop T_i64 Relop_i ROI_ge SX_U".to_string(),
+        Operator::F32Eq => "BI_relop T_f32 relop_f ROI_eq".to_string(),
+        Operator::F32Ne => "BI_relop T_f32 relop_f ROI_ne".to_string(),
+        Operator::F32Lt => "BI_relop T_f32 relop_f ROI_lt".to_string(),
+        Operator::F32Gt => "BI_relop T_f32 relop_f ROI_gt".to_string(),
+        Operator::F32Le => "BI_relop T_f32 relop_f ROI_le".to_string(),
+        Operator::F32Ge => "BI_relop T_f32 relop_f ROI_ge".to_string(),
+        Operator::F64Eq => "BI_relop T_f64 relop_f ROI_eq".to_string(),
+        Operator::F64Ne => "BI_relop T_f64 relop_f ROI_ne".to_string(),
+        Operator::F64Lt => "BI_relop T_f64 relop_f ROI_lt".to_string(),
+        Operator::F64Gt => "BI_relop T_f64 relop_f ROI_gt".to_string(),
+        Operator::F64Le => "BI_relop T_f64 relop_f ROI_le".to_string(),
+        Operator::F64Ge => "BI_relop T_f64 relop_f ROI_ge".to_string(),
+        Operator::I32Clz => "BI_unop T_i32 Unop_i UOI_clz".to_string(),
+        Operator::I32Ctz => "BI_unop T_i32 Unop_i UOI_ctz".to_string(),
+        Operator::I32Popcnt => "BI_unop T_i32 Unop_i UOI_popcnt".to_string(),
+        Operator::I32Add => "BI_binop T_i32 binop_i BOI_add".to_string(),
+        Operator::I32Sub => "BI_binop T_i32 binop_i BOI_sub".to_string(),
+        Operator::I32Mul => "BI_binop T_i32 binop_i BOI_mul".to_string(),
+        Operator::I32DivS => "BI_binop T_i32 binop_i BOI_div SX_S".to_string(),
+        Operator::I32DivU => "BI_binop T_i32 binop_i BOI_div SX_U".to_string(),
+        Operator::I32RemS => "BI_binop T_i32 binop_i BOI_rem SX_S".to_string(),
+        Operator::I32RemU => "BI_binop T_i32 binop_i BOI_rem SX_U".to_string(),
+        Operator::I32And => "BI_binop T_i32 binop_i BOI_and".to_string(),
+        Operator::I32Or => "BI_binop T_i32 binop_i BOI_or".to_string(),
+        Operator::I32Xor => "BI_binop T_i32 binop_i BOI_xor".to_string(),
+        Operator::I32Shl => "BI_binop T_i32 binop_i BOI_shl".to_string(),
+        Operator::I32ShrS => "BI_binop T_i32 binop_i BOI_shr SX_S".to_string(),
+        Operator::I32ShrU => "BI_binop T_i32 binop_i BOI_shr SX_U".to_string(),
+        Operator::I32Rotl => "BI_binop T_i32 binop_i BOI_rotl".to_string(),
+        Operator::I32Rotr => "BI_binop T_i32 binop_i BOI_rotr".to_string(),
+        Operator::I64Clz => "BI_unop T_i64 Unop_i UOI_clz".to_string(),
+        Operator::I64Ctz => "BI_unop T_i64 Unop_i UOI_ctz".to_string(),
+        Operator::I64Popcnt => "BI_unop T_i64 Unop_i UOI_popcnt".to_string(),
+        Operator::I64Add => "BI_binop T_i64 binop_i BOI_add".to_string(),
+        Operator::I64Sub => "BI_binop T_i64 binop_i BOI_sub".to_string(),
+        Operator::I64Mul => "BI_binop T_i64 binop_i BOI_mul".to_string(),
+        Operator::I64DivS => "BI_binop T_i64 binop_i BOI_div SX_S".to_string(),
+        Operator::I64DivU => "BI_binop T_i64 binop_i BOI_div SX_U".to_string(),
+        Operator::I64RemS => "BI_binop T_i64 binop_i BOI_rem SX_S".to_string(),
+        Operator::I64RemU => "BI_binop T_i64 binop_i BOI_rem SX_U".to_string(),
+        Operator::I64And => "BI_binop T_i64 binop_i BOI_and".to_string(),
+        Operator::I64Or => "BI_binop T_i64 binop_i BOI_or".to_string(),
+        Operator::I64Xor => "BI_binop T_i64 binop_i BOI_xor".to_string(),
+        Operator::I64Shl => "BI_binop T_i64 binop_i BOI_shl".to_string(),
+        Operator::I64ShrS => "BI_binop T_i64 binop_i BOI_shr SX_S".to_string(),
+        Operator::I64ShrU => "BI_binop T_i64 binop_i BOI_shr SX_U".to_string(),
+        Operator::I64Rotl => "BI_binop T_i64 binop_i BOI_rotl".to_string(),
+        Operator::I64Rotr => "BI_binop T_i64 binop_i BOI_rotr".to_string(),
+        Operator::F32Abs => "BI_unop T_f32 Unop_f UOF_abs".to_string(),
+        Operator::F32Neg => "BI_unop T_f32 Unop_f UOF_neg".to_string(),
+        Operator::F32Ceil => "BI_unop T_f32 Unop_f UOF_ceil".to_string(),
+        Operator::F32Floor => "BI_unop T_f32 Unop_f UOF_floor".to_string(),
+        Operator::F32Trunc => "BI_unop T_f32 Unop_f UOF_trunc".to_string(),
+        Operator::F32Nearest => "BI_unop T_f32 Unop_f UOF_nearest".to_string(),
+        Operator::F32Sqrt => "BI_unop T_f32 Unop_f UOF_sqrt".to_string(),
+        Operator::F32Add => "BI_binop T_f32 binop_f BOF_add".to_string(),
+        Operator::F32Sub => "BI_binop T_f32 binop_f BOF_sub".to_string(),
+        Operator::F32Mul => "BI_binop T_f32 binop_f BOF_mul".to_string(),
+        Operator::F32Div => "BI_binop T_f32 binop_f BOF_div".to_string(),
+        Operator::F32Min => "BI_binop T_f32 binop_f BOF_min".to_string(),
+        Operator::F32Max => "BI_binop T_f32 binop_f BOF_max".to_string(),
+        Operator::F32Copysign => "BI_binop T_f32 binop_f BOF_copysign".to_string(),
+        Operator::F64Abs => "BI_unop T_f64 Unop_f UOF_abs".to_string(),
+        Operator::F64Neg => "BI_unop T_f64 Unop_f UOF_neg".to_string(),
+        Operator::F64Ceil => "BI_unop T_f64 Unop_f UOF_ceil".to_string(),
+        Operator::F64Floor => "BI_unop T_f64 Unop_f UOF_floor".to_string(),
+        Operator::F64Trunc => "BI_unop T_f64 Unop_f UOF_trunc".to_string(),
+        Operator::F64Nearest => "BI_unop T_f64 Unop_f UOF_nearest".to_string(),
+        Operator::F64Sqrt => "BI_unop T_f64 Unop_f UOF_sqrt".to_string(),
+        Operator::F64Add => "BI_binop T_f64 binop_f BOF_add".to_string(),
+        Operator::F64Sub => "BI_binop T_f64 binop_f BOF_sub".to_string(),
+        Operator::F64Mul => "BI_binop T_f64 binop_f BOF_mul".to_string(),
+        Operator::F64Div => "BI_binop T_f64 binop_f BOF_div".to_string(),
+        Operator::F64Min => "BI_binop T_f64 binop_f BOF_min".to_string(),
+        Operator::F64Max => "BI_binop T_f64 binop_f BOF_max".to_string(),
+        Operator::F64Copysign => "BI_binop T_f64 binop_f BOF_copysign".to_string(),
+        Operator::I32WrapI64 => "BI_cvtop T_i32 CVO_wrap T_i64 None".to_string(),
+        Operator::I32TruncF32S => "BI_cvtop T_i32 CVO_trunc T_f32 (Some SX_S)".to_string(),
+        Operator::I32TruncF32U => "BI_cvtop T_i32 CVO_trunc T_f32 (Some SX_U)".to_string(),
+        Operator::I32TruncF64S => "BI_cvtop T_i32 CVO_trunc T_f64 (Some SX_S)".to_string(),
+        Operator::I32TruncF64U => "BI_cvtop T_i32 CVO_trunc T_f64 (Some SX_U)".to_string(),
+        Operator::I64ExtendI32S => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_S)".to_string(),
+        Operator::I64ExtendI32U => "BI_cvtop T_i64 CVO_extend T_i32 (Some SX_U)".to_string(),
+        Operator::I64TruncF32S => "BI_cvtop T_i64 CVO_trunc T_f32 (Some SX_S)".to_string(),
+        Operator::I64TruncF32U => "BI_cvtop T_i64 CVO_trunc T_f32 (Some SX_U)".to_string(),
+        Operator::I64TruncF64S => "BI_cvtop T_i64 CVO_trunc T_f64 (Some SX_S)".to_string(),
+        Operator::I64TruncF64U => "BI_cvtop T_i64 CVO_trunc T_f64 (Some SX_U)".to_string(),
+        Operator::F32ConvertI32S => "BI_cvtop T_f32 CVO_convert T_i32 (Some SX_S)".to_string(),
+        Operator::F32ConvertI32U => "BI_cvtop T_f32 CVO_convert T_i32 (Some SX_U)".to_string(),
+        Operator::F32ConvertI64S => "BI_cvtop T_f32 CVO_convert T_i64 (Some SX_S)".to_string(),
+        Operator::F32ConvertI64U => "BI_cvtop T_f32 CVO_convert T_i64 (Some SX_U)".to_string(),
+        Operator::F32DemoteF64 => "BI_cvtop T_f32 CVO_demote T_f64 None".to_string(),
+        Operator::F64ConvertI32S => "BI_cvtop T_f64 CVO_convert T_i32 (Some SX_S)".to_string(),
+        Operator::F64ConvertI32U => "BI_cvtop T_f64 CVO_convert T_i32 (Some SX_U)".to_string(),
+        Operator::F64ConvertI64S => "BI_cvtop T_f64 CVO_convert T_i64 (Some SX_S)".to_string(),
+        Operator::F64ConvertI64U => "BI_cvtop T_f64 CVO_convert T_i64 (Some SX_U)".to_string(),
+        Operator::F64PromoteF32 => "BI_cvtop T_f64 CVO_promote T_f32 None".to_string(),
+        Operator::I32ReinterpretF32 => "BI_cvtop T_i32 CVO_reinterpret T_f32 None".to_string(),
+        Operator::I64ReinterpretF64 => "BI_cvtop T_i64 CVO_reinterpret T_f64 None".to_string(),
+        Operator::F32ReinterpretI32 => "BI_cvtop T_f32 CVO_reinterpret T_i32 None".to_string(),
+        Operator::F64ReinterpretI64 => "BI_cvtop T_f64 CVO_reinterpret T_i64 None".to_string(),
         Operator::I32Extend8S => todo!(),
         Operator::I32Extend16S => todo!(),
         Operator::I64Extend8S => todo!(),
