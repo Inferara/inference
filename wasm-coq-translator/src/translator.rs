@@ -15,8 +15,8 @@ const RCB_DOT: &str = "|}.\n";
 const LRB: char = '(';
 const RRB: char = ')';
 
-const LIST_EXT: &str = " :: ";
-const LIST_SEAL: &str = "nil)";
+const LIST_EXT: &str = " ::\n";
+const LIST_SEAL: &str = "nil";
 
 pub(crate) struct WasmParseData<'a> {
     mod_name: String,
@@ -169,9 +169,10 @@ impl WasmParseData<'_> {
 
         let mut created_function_types = String::new();
         for rec_group in &self.function_types {
-            created_function_types.push(LRB);
+            // created_function_types.push(LRB);
             match translate_function_type(rec_group) {
                 Ok(translated_function_type) => {
+                    created_function_types.push_str("    ");
                     created_function_types.push_str(translated_function_type.as_str());
                     created_function_types.push_str(LIST_EXT);
                 }
@@ -179,6 +180,7 @@ impl WasmParseData<'_> {
                     errors.push(e);
                 }
             }
+            created_function_types.push_str("    ");
             created_function_types.push_str(LIST_SEAL);
         }
 
@@ -187,11 +189,13 @@ impl WasmParseData<'_> {
             Ok((translated_function_names, translated_functions_string)) => {
                 res.push_str(translated_functions_string.as_str());
                 for function_name in translated_function_names {
+                    created_functions.push_str("    ");
                     created_functions.push_str(function_name.as_str());
                     created_functions.push_str(LIST_EXT);
                 }
+                created_functions.push_str("    ");
                 created_functions.push_str(LIST_SEAL);
-                created_functions.pop();
+                // created_functions.pop();
             }
             Err(e) => {
                 errors.push(e);
@@ -200,10 +204,10 @@ impl WasmParseData<'_> {
 
         //Record module
         let module_name = &self.mod_name;
-        res.push_str(format!("Definition {module_name} : module :=\n").as_str());
+        res.push_str(format!("Definition {module_name} : module := ").as_str());
         res.push_str(LCB);
-        res.push_str(format!("mod_types := {created_function_types};").as_str());
-        res.push_str(format!("mod_funcs := {created_functions};").as_str());
+        res.push_str(format!("  mod_types := \n{created_function_types};\n").as_str());
+        res.push_str(format!("  mod_funcs := \n{created_functions};\n").as_str());
         // res.push_str(format!("mod_tables := {created_tables};").as_str());
         // res.push_str(format!("mod_mems := {created_memory_types};").as_str());
         // res.push_str(format!("mod_globals := {created_globals};").as_str());
@@ -217,7 +221,6 @@ impl WasmParseData<'_> {
         // res.push_str(format!("mod_imports := {translated_imports};").as_str());
         // res.push_str(format!("mod_exports := {created_exports};").as_str());
         res.push_str(RCB_DOT);
-        res.push_str(".\n");
         Ok(res)
     }
 }
@@ -436,7 +439,7 @@ impl Expression<'_> {
                 }
             }
             res.push_str(LIST_EXT);
-            res.push('\n');
+            // res.push('\n');
         }
         res.push_str(&"  ".repeat(tabs_count));
         res.push_str("nil");
@@ -634,21 +637,16 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
                     let val_type = translate_value_type(param)?;
                     params_str.push_str(format!("{val_type} :: ").as_str());
                 }
-                params_str.push_str("nil;\n");
+                params_str.push_str("nil");
 
                 let mut results_str = String::new();
                 for result in ft.results() {
                     let val_type = translate_value_type(result)?;
                     results_str.push_str(format!("{val_type} :: ").as_str());
                 }
-                results_str.push_str("nil;\n");
+                results_str.push_str("nil");
 
-                res.push_str(format!("Definition ft_{id} : function_type :=\n").as_str());
-                res.push_str(LCB);
-                res.push_str(format!("ft_params := {params_str};").as_str());
-                res.push_str(format!("ft_results := {results_str}").as_str());
-                res.push_str(RCB_DOT);
-                res.push_str(".\n");
+                res.push_str(format!("Tf ({params_str}) ({results_str})").as_str());
             }
             CompositeInnerType::Array(_)
             | CompositeInnerType::Struct(_)
@@ -685,14 +683,14 @@ fn translate_functions(
         let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?)?;
 
         translated_functions_string
-            .push_str(format!("Definition func_{id} : module_func :=\n").as_str());
+            .push_str(format!("Definition func_{id} : module_func := ").as_str());
         translated_functions_string.push_str(LCB);
         translated_functions_string
-            .push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
+            .push_str(format!("  modfunc_type := {modfunc_type}%N;\n").as_str());
         translated_functions_string
-            .push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
+            .push_str(format!("  modfunc_locals := {modfunc_locals};\n").as_str());
         translated_functions_string
-            .push_str(format!("modfunc_body :=\n{modfunc_body};\n").as_str());
+            .push_str(format!("  modfunc_body :=\n{modfunc_body};\n").as_str());
         translated_functions_string.push_str(RCB_DOT);
         translated_functions_string.push('\n');
     }
