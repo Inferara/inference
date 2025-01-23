@@ -402,7 +402,7 @@ struct Expression<'a> {
     parts: Vec<ExpressionPart<'a>>,
 }
 
-impl<'a> Expression<'a> {
+impl Expression<'_> {
     fn is_empty(&self) -> bool {
         self.parts.is_empty()
     }
