@@ -65,6 +65,7 @@ impl WasmParseData<'_> {
         res.push_str("\n");
         res.push_str("Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n");
         res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
+        res.push_str("Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.\n");
         res.push_str("\n");
 
         let mut errors = Vec::new();
@@ -128,20 +129,21 @@ impl WasmParseData<'_> {
         created_memory_types.push_str("    ");
         created_memory_types.push_str(LIST_SEAL);
 
-        // let mut created_globals = String::new();
-        // for global in &self.globals {
-        //     created_globals.push(LRB);
-        //     match translate_global(global) {
-        //         Ok(translated_global) => {
-        //             created_globals.push_str(translated_global.as_str());
-        //             created_globals.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_globals.push_str(LIST_SEAL);
-        // }
+        let mut created_globals = String::new();
+        for global in &self.globals {
+            match translate_global(global) {
+                Ok(translated_global) => {
+                    created_globals.push_str("    ");
+                    created_globals.push_str(translated_global.as_str());
+                    created_globals.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        created_globals.push_str("    ");
+        created_globals.push_str(LIST_SEAL);
 
         // let mut created_data_segments = String::new();
         // for data in &self.data {
@@ -213,7 +215,7 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_funcs :=\n{created_functions};\n").as_str());
         res.push_str(format!("  mod_tables :=\n{created_tables};\n").as_str());
         res.push_str(format!("  mod_mems :=\n{created_memory_types};\n").as_str());
-        // res.push_str(format!("mod_globals := {created_globals};").as_str());
+        res.push_str(format!("  mod_globals :=\n{created_globals};\n").as_str());
         // res.push_str(format!("mod_elems := {created_elements};").as_str());
         // res.push_str(format!("mod_datas := {created_data_segments};").as_str());
         // if let Some(start_function) = self.start_function {
@@ -359,31 +361,16 @@ fn translate_table_type(table: &Table) -> anyhow::Result<String> {
 
 //Definition memory_type
 fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
-    // let mut res = String::new();
-    // let id = get_id();
     let limits = translate_memory_type_limits(memory_type)?;
     Ok(format!("Mm {limits}"))
-    // res.push_str(format!("Definition mem_{id} : memory_type :=\n").as_str());
-    // res.push_str(LCB);
-    // res.push_str(format!("limits := {limits}\n").as_str());
-    // res.push_str(RCB_DOT);
-    // res.push_str(".\n");
-    // Ok(res)
 }
 
 //Record global_type
 fn translate_global(global: &Global) -> anyhow::Result<String> {
-    let mut res = String::new();
-    let id = get_id();
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
-    res.push_str(format!("Definition global_{id} : global_type :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("tg_mut := {tg_mut};\n").as_str());
-    res.push_str(format!("tg_t := {tg_t}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    // TODO: translation of global.init_expr
+    Ok(format!("Mg {tg_mut} ({tg_t}) nil"))
 }
 
 //Inductive module_datamode
