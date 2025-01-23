@@ -63,6 +63,8 @@ impl WasmParseData<'_> {
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
         res.push_str("\n");
+        res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
+        res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
         res.push_str("Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n");
         res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
         res.push_str("Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.\n");
@@ -388,6 +390,88 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
     Ok(res)
 }
 
+/////////////////// Expression translation, reference implementation /////////////////////
+
+// struct BasicInstr {
+//     text: String,
+//     nest: Option<(Vec<BasicInstr>, Option<Vec<BasicInstr>>)>
+// }
+
+// fn expr_build(operead: &mut OperatorsReader) -> anyhow::Result<(Vec<BasicInstr>, bool)> {
+//     let mut expr: Vec<BasicInstr> = Vec::new();
+//     while !operead.eof() {
+//         let op = operead.read()?;
+//         let top = translate_basic_operator(&op)?;
+//         let nop = match op {
+//             wasmparser::Operator::Block { .. } |
+//             wasmparser::Operator::Loop { .. } => {
+//                 let (nested, ended) = expr_build(operead)?;
+//                 if ended { Some((nested, None)) }
+//                 else { bail!("unexpected else"); }
+//             },
+//             wasmparser::Operator::If { .. } => {
+//                 let (nthen, ended) = expr_build(operead)?;
+//                 if ended { Some((nthen, Some(Vec::new()))) }
+//                 else {
+//                     let (nelse, ended) = expr_build(operead)?;
+//                     if ended { Some((nthen, Some(nelse))) }
+//                     else { bail!("unexpected else"); }
+//                 }
+//             },
+//             wasmparser::Operator::Else => { return Ok((expr, false)); },
+//             wasmparser::Operator::End => { return Ok((expr, true)); },
+//             _ => None
+//         };
+//         expr.push(BasicInstr { text: top, nest: nop });
+//     }
+//     bail!("unexpected eof");
+// }
+
+// fn expr_print(expr: &[BasicInstr], tab: usize) -> String {
+//     let mut res = String::new();
+//     let prefix = "  ".repeat(tab + 1);
+
+//     for bi in expr {
+//         res.push_str(&prefix);
+//         res.push_str(&bi.text);
+
+//         match &bi.nest {
+//             None => {},
+//             Some((e1, ne2)) => {
+//                 res.push_str(" (\n");
+//                 res.push_str(&expr_print(&e1, tab + 1));
+//                 res.push_str(")");
+
+//                 match ne2 {
+//                     None => {},
+//                     Some(e2) => {
+//                         res.push_str(" (\n");
+//                         res.push_str(&expr_print(&e2, tab + 1));
+//                         res.push_str(")");
+//                     }
+//                 }
+//             }
+//         }
+
+//         res.push_str(" ::\n");
+//     }
+
+//     res.push_str(&"  ".repeat(tab));
+//     res.push_str("nil");
+//     res
+// }
+
+// fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
+//     let (expr, ended) = expr_build(operators_reader)?;
+//     if !ended { bail!("unexpected else"); }
+//     if !operators_reader.eof() { bail!("preemptive end"); }
+//     Ok(expr_print(&expr, 1))
+// }
+
+////////////////////////// End of reference implementation //////////////////////////
+
+/////////////////// Expression translation, working draft /////////////////////
+
 enum ExpressionPart<'a> {
     Operator(Operator<'a>),
     Expression(Expression<'a>),
@@ -476,20 +560,21 @@ fn translate_expression<'a>(
     Ok(result)
 }
 
-//Definition expr
 fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
     let mut peekable_operators_reader = operators_reader.clone().into_iter().peekable();
     let expression = translate_expression(&mut peekable_operators_reader)?;
     Ok(expression.to_string())
 }
 
+////////////////////////// End of working draft //////////////////////////
+
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
     let res = match block_type {
-        BlockType::Empty => String::new(),
-        BlockType::FuncType(index) => format!("BT_id {index}"),
+        BlockType::Empty => "BT_valtype None".to_string(),
+        BlockType::FuncType(index) => format!("BT_id {index}%N"),
         BlockType::Type(valtype) => {
             let valtype = translate_value_type(valtype)?;
-            format!("BT_valtype {valtype}")
+            format!("BT_valtype (Some ({valtype}))")
         }
     };
     Ok(res)
@@ -829,8 +914,8 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             }
             "BI_memory_grow".to_string()
         }
-        Operator::I32Const { value } => format!("BI_const_num (VAL_int32 {value})"),
-        Operator::I64Const { value } => format!("BI_const_num (VAL_int64 {value})"),
+        Operator::I32Const { value } => format!("BI_const_num (Vi32 {value})"),
+        Operator::I64Const { value } => format!("BI_const_num (Vi64 {value})"),
         Operator::F32Const { value } => {
             let val = value.bits();
             format!("BI_const_num (VAL_float32 {val})")
