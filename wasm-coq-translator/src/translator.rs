@@ -62,8 +62,9 @@ impl WasmParseData<'_> {
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
-
-        res.push_str("\n\n");
+        res.push_str("\n");
+        res.push_str("Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n");
+        res.push_str("\n");
 
         let mut errors = Vec::new();
 
@@ -94,20 +95,21 @@ impl WasmParseData<'_> {
         //     created_exports.push_str(LIST_SEAL);
         // }
 
-        // let mut created_tables = String::new();
-        // for table in &self.tables {
-        //     created_tables.push(LRB);
-        //     match translate_table_type(table) {
-        //         Ok(translated_table_type) => {
-        //             created_tables.push_str(translated_table_type.as_str());
-        //             created_tables.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_tables.push_str(LIST_SEAL);
-        // }
+        let mut created_tables = String::new();
+        for table in &self.tables {
+            match translate_table_type(table) {
+                Ok(translated_table_type) => {
+                    created_tables.push_str("    ");
+                    created_tables.push_str(translated_table_type.as_str());
+                    created_tables.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        created_tables.push_str("    ");
+        created_tables.push_str(LIST_SEAL);
 
         // let mut created_memory_types = String::new();
         // for memory_type in &self.memory_types {
@@ -180,9 +182,9 @@ impl WasmParseData<'_> {
                     errors.push(e);
                 }
             }
-            created_function_types.push_str("    ");
-            created_function_types.push_str(LIST_SEAL);
         }
+        created_function_types.push_str("    ");
+        created_function_types.push_str(LIST_SEAL);
 
         let mut created_functions = String::new();
         match translate_functions(&self.function_type_indexes, &self.function_bodies) {
@@ -193,22 +195,21 @@ impl WasmParseData<'_> {
                     created_functions.push_str(function_name.as_str());
                     created_functions.push_str(LIST_EXT);
                 }
-                created_functions.push_str("    ");
-                created_functions.push_str(LIST_SEAL);
-                // created_functions.pop();
             }
             Err(e) => {
                 errors.push(e);
             }
-        };
+        }
+        created_functions.push_str("    ");
+        created_functions.push_str(LIST_SEAL);
 
         //Record module
         let module_name = &self.mod_name;
         res.push_str(format!("Definition {module_name} : module := ").as_str());
         res.push_str(LCB);
-        res.push_str(format!("  mod_types := \n{created_function_types};\n").as_str());
-        res.push_str(format!("  mod_funcs := \n{created_functions};\n").as_str());
-        // res.push_str(format!("mod_tables := {created_tables};").as_str());
+        res.push_str(format!("  mod_types :=\n{created_function_types};\n").as_str());
+        res.push_str(format!("  mod_funcs :=\n{created_functions};\n").as_str());
+        res.push_str(format!("  mod_tables :=\n{created_tables};\n").as_str());
         // res.push_str(format!("mod_mems := {created_memory_types};").as_str());
         // res.push_str(format!("mod_globals := {created_globals};").as_str());
         // res.push_str(format!("mod_elems := {created_elements};").as_str());
@@ -303,13 +304,12 @@ fn translate_mutability(mutable: bool) -> String {
 
 //Record limits
 fn translate_table_type_limits(table_type: &TableType) -> anyhow::Result<String> {
-    let lim_min = table_type.initial.to_string();
+    let lim_min = format!("{}%N", table_type.initial);
     let lim_max = match table_type.maximum {
-        Some(max) => max.to_string(),
+        Some(max) => format!("Some({max}%N)"),
         None => "None".to_string(),
     };
-    let ref_type = translate_ref_type(&table_type.element_type)?;
-    Ok(format!("{LCB} tt_limits := {LCB} lim_min := {lim_min}; lim_max := {lim_max} {RCB_DOT}; tt_elem_type := {ref_type} {RCB_DOT}"))
+    Ok(format!("{{| lim_min := {lim_min}; lim_max := {lim_max} |}}"))
 }
 
 //Record limits
@@ -352,17 +352,9 @@ fn translate_module_export_desc(export: &Export) -> anyhow::Result<String> {
 
 //Record table_type
 fn translate_table_type(table: &Table) -> anyhow::Result<String> {
-    let mut res = String::new();
     let tt_limits = translate_table_type_limits(&table.ty)?;
     let tt_elem_type = translate_ref_type(&table.ty.element_type)?;
-    let id = get_id();
-    res.push_str(format!("Definition tt_{id} : table_type :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("tt_limits := {tt_limits};\n").as_str());
-    res.push_str(format!("tt_elem_type := {tt_elem_type}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    Ok(format!("Mt {tt_limits} {tt_elem_type}"))
 }
 
 //Definition memory_type
@@ -881,54 +873,54 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::I64LeU => "BI_relop T_i64 (Relop_i (ROI_le SX_U))".to_string(),
         Operator::I64GeS => "BI_relop T_i64 (Relop_i (ROI_ge SX_S))".to_string(),
         Operator::I64GeU => "BI_relop T_i64 (Relop_i (ROI_ge SX_U))".to_string(),
-        Operator::F32Eq => "BI_relop T_f32 (relop_f ROI_eq)".to_string(),
-        Operator::F32Ne => "BI_relop T_f32 (relop_f ROI_ne)".to_string(),
-        Operator::F32Lt => "BI_relop T_f32 (relop_f ROI_lt)".to_string(),
-        Operator::F32Gt => "BI_relop T_f32 (relop_f ROI_gt)".to_string(),
-        Operator::F32Le => "BI_relop T_f32 (relop_f ROI_le)".to_string(),
-        Operator::F32Ge => "BI_relop T_f32 (relop_f ROI_ge)".to_string(),
-        Operator::F64Eq => "BI_relop T_f64 (relop_f ROI_eq)".to_string(),
-        Operator::F64Ne => "BI_relop T_f64 (relop_f ROI_ne)".to_string(),
-        Operator::F64Lt => "BI_relop T_f64 (relop_f ROI_lt)".to_string(),
-        Operator::F64Gt => "BI_relop T_f64 (relop_f ROI_gt)".to_string(),
-        Operator::F64Le => "BI_relop T_f64 (relop_f ROI_le)".to_string(),
-        Operator::F64Ge => "BI_relop T_f64 (relop_f ROI_ge)".to_string(),
+        Operator::F32Eq => "BI_relop T_f32 (Relop_f ROI_eq)".to_string(),
+        Operator::F32Ne => "BI_relop T_f32 (Relop_f ROI_ne)".to_string(),
+        Operator::F32Lt => "BI_relop T_f32 (Relop_f ROI_lt)".to_string(),
+        Operator::F32Gt => "BI_relop T_f32 (Relop_f ROI_gt)".to_string(),
+        Operator::F32Le => "BI_relop T_f32 (Relop_f ROI_le)".to_string(),
+        Operator::F32Ge => "BI_relop T_f32 (Relop_f ROI_ge)".to_string(),
+        Operator::F64Eq => "BI_relop T_f64 (Relop_f ROI_eq)".to_string(),
+        Operator::F64Ne => "BI_relop T_f64 (Relop_f ROI_ne)".to_string(),
+        Operator::F64Lt => "BI_relop T_f64 (Relop_f ROI_lt)".to_string(),
+        Operator::F64Gt => "BI_relop T_f64 (Relop_f ROI_gt)".to_string(),
+        Operator::F64Le => "BI_relop T_f64 (Relop_f ROI_le)".to_string(),
+        Operator::F64Ge => "BI_relop T_f64 (Relop_f ROI_ge)".to_string(),
         Operator::I32Clz => "BI_unop T_i32 (Unop_i UOI_clz)".to_string(),
         Operator::I32Ctz => "BI_unop T_i32 (Unop_i UOI_ctz)".to_string(),
         Operator::I32Popcnt => "BI_unop T_i32 (Unop_i UOI_popcnt)".to_string(),
-        Operator::I32Add => "BI_binop T_i32 (binop_i BOI_add)".to_string(),
-        Operator::I32Sub => "BI_binop T_i32 (binop_i BOI_sub)".to_string(),
-        Operator::I32Mul => "BI_binop T_i32 (binop_i BOI_mul)".to_string(),
-        Operator::I32DivS => "BI_binop T_i32 (binop_i (BOI_div SX_S))".to_string(),
-        Operator::I32DivU => "BI_binop T_i32 (binop_i (BOI_div SX_U))".to_string(),
-        Operator::I32RemS => "BI_binop T_i32 (binop_i (BOI_rem SX_S))".to_string(),
-        Operator::I32RemU => "BI_binop T_i32 (binop_i (BOI_rem SX_U))".to_string(),
-        Operator::I32And => "BI_binop T_i32 (binop_i BOI_and)".to_string(),
-        Operator::I32Or => "BI_binop T_i32 (binop_i BOI_or)".to_string(),
-        Operator::I32Xor => "BI_binop T_i32 (binop_i BOI_xor)".to_string(),
-        Operator::I32Shl => "BI_binop T_i32 (binop_i BOI_shl)".to_string(),
-        Operator::I32ShrS => "BI_binop T_i32 (binop_i (BOI_shr SX_S))".to_string(),
-        Operator::I32ShrU => "BI_binop T_i32 (binop_i (BOI_shr SX_U))".to_string(),
-        Operator::I32Rotl => "BI_binop T_i32 (binop_i BOI_rotl)".to_string(),
-        Operator::I32Rotr => "BI_binop T_i32 (binop_i BOI_rotr)".to_string(),
+        Operator::I32Add => "BI_binop T_i32 (Binop_i BOI_add)".to_string(),
+        Operator::I32Sub => "BI_binop T_i32 (Binop_i BOI_sub)".to_string(),
+        Operator::I32Mul => "BI_binop T_i32 (Binop_i BOI_mul)".to_string(),
+        Operator::I32DivS => "BI_binop T_i32 (Binop_i (BOI_div SX_S))".to_string(),
+        Operator::I32DivU => "BI_binop T_i32 (Binop_i (BOI_div SX_U))".to_string(),
+        Operator::I32RemS => "BI_binop T_i32 (Binop_i (BOI_rem SX_S))".to_string(),
+        Operator::I32RemU => "BI_binop T_i32 (Binop_i (BOI_rem SX_U))".to_string(),
+        Operator::I32And => "BI_binop T_i32 (Binop_i BOI_and)".to_string(),
+        Operator::I32Or => "BI_binop T_i32 (Binop_i BOI_or)".to_string(),
+        Operator::I32Xor => "BI_binop T_i32 (Binop_i BOI_xor)".to_string(),
+        Operator::I32Shl => "BI_binop T_i32 (Binop_i BOI_shl)".to_string(),
+        Operator::I32ShrS => "BI_binop T_i32 (Binop_i (BOI_shr SX_S))".to_string(),
+        Operator::I32ShrU => "BI_binop T_i32 (Binop_i (BOI_shr SX_U))".to_string(),
+        Operator::I32Rotl => "BI_binop T_i32 (Binop_i BOI_rotl)".to_string(),
+        Operator::I32Rotr => "BI_binop T_i32 (Binop_i BOI_rotr)".to_string(),
         Operator::I64Clz => "BI_unop T_i64 (Unop_i UOI_clz)".to_string(),
         Operator::I64Ctz => "BI_unop T_i64 (Unop_i UOI_ctz)".to_string(),
         Operator::I64Popcnt => "BI_unop T_i64 (Unop_i UOI_popcnt)".to_string(),
-        Operator::I64Add => "BI_binop T_i64 (binop_i BOI_add)".to_string(),
-        Operator::I64Sub => "BI_binop T_i64 (binop_i BOI_sub)".to_string(),
-        Operator::I64Mul => "BI_binop T_i64 (binop_i BOI_mul)".to_string(),
-        Operator::I64DivS => "BI_binop T_i64 (binop_i (BOI_div SX_S))".to_string(),
-        Operator::I64DivU => "BI_binop T_i64 (binop_i (BOI_div SX_U))".to_string(),
-        Operator::I64RemS => "BI_binop T_i64 (binop_i (BOI_rem SX_S))".to_string(),
-        Operator::I64RemU => "BI_binop T_i64 (binop_i (BOI_rem SX_U))".to_string(),
-        Operator::I64And => "BI_binop T_i64 (binop_i BOI_and)".to_string(),
-        Operator::I64Or => "BI_binop T_i64 (binop_i BOI_or)".to_string(),
-        Operator::I64Xor => "BI_binop T_i64 (binop_i BOI_xor)".to_string(),
-        Operator::I64Shl => "BI_binop T_i64 (binop_i BOI_shl)".to_string(),
-        Operator::I64ShrS => "BI_binop T_i64 (binop_i (BOI_shr SX_S))".to_string(),
-        Operator::I64ShrU => "BI_binop T_i64 (binop_i (BOI_shr SX_U))".to_string(),
-        Operator::I64Rotl => "BI_binop T_i64 (binop_i BOI_rotl)".to_string(),
-        Operator::I64Rotr => "BI_binop T_i64 (binop_i BOI_rotr)".to_string(),
+        Operator::I64Add => "BI_binop T_i64 (Binop_i BOI_add)".to_string(),
+        Operator::I64Sub => "BI_binop T_i64 (Binop_i BOI_sub)".to_string(),
+        Operator::I64Mul => "BI_binop T_i64 (Binop_i BOI_mul)".to_string(),
+        Operator::I64DivS => "BI_binop T_i64 (Binop_i (BOI_div SX_S))".to_string(),
+        Operator::I64DivU => "BI_binop T_i64 (Binop_i (BOI_div SX_U))".to_string(),
+        Operator::I64RemS => "BI_binop T_i64 (Binop_i (BOI_rem SX_S))".to_string(),
+        Operator::I64RemU => "BI_binop T_i64 (Binop_i (BOI_rem SX_U))".to_string(),
+        Operator::I64And => "BI_binop T_i64 (Binop_i BOI_and)".to_string(),
+        Operator::I64Or => "BI_binop T_i64 (Binop_i BOI_or)".to_string(),
+        Operator::I64Xor => "BI_binop T_i64 (Binop_i BOI_xor)".to_string(),
+        Operator::I64Shl => "BI_binop T_i64 (Binop_i BOI_shl)".to_string(),
+        Operator::I64ShrS => "BI_binop T_i64 (Binop_i (BOI_shr SX_S))".to_string(),
+        Operator::I64ShrU => "BI_binop T_i64 (Binop_i (BOI_shr SX_U))".to_string(),
+        Operator::I64Rotl => "BI_binop T_i64 (Binop_i BOI_rotl)".to_string(),
+        Operator::I64Rotr => "BI_binop T_i64 (Binop_i BOI_rotr)".to_string(),
         Operator::F32Abs => "BI_unop T_f32 (Unop_f UOF_abs)".to_string(),
         Operator::F32Neg => "BI_unop T_f32 (Unop_f UOF_neg)".to_string(),
         Operator::F32Ceil => "BI_unop T_f32 (Unop_f UOF_ceil)".to_string(),
@@ -936,13 +928,13 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::F32Trunc => "BI_unop T_f32 (Unop_f UOF_trunc)".to_string(),
         Operator::F32Nearest => "BI_unop T_f32 (Unop_f UOF_nearest)".to_string(),
         Operator::F32Sqrt => "BI_unop T_f32 (Unop_f UOF_sqrt)".to_string(),
-        Operator::F32Add => "BI_binop T_f32 (binop_f BOF_add)".to_string(),
-        Operator::F32Sub => "BI_binop T_f32 (binop_f BOF_sub)".to_string(),
-        Operator::F32Mul => "BI_binop T_f32 (binop_f BOF_mul)".to_string(),
-        Operator::F32Div => "BI_binop T_f32 (binop_f BOF_div)".to_string(),
-        Operator::F32Min => "BI_binop T_f32 (binop_f BOF_min)".to_string(),
-        Operator::F32Max => "BI_binop T_f32 (binop_f BOF_max)".to_string(),
-        Operator::F32Copysign => "BI_binop T_f32 (binop_f BOF_copysign)".to_string(),
+        Operator::F32Add => "BI_binop T_f32 (Binop_f BOF_add)".to_string(),
+        Operator::F32Sub => "BI_binop T_f32 (Binop_f BOF_sub)".to_string(),
+        Operator::F32Mul => "BI_binop T_f32 (Binop_f BOF_mul)".to_string(),
+        Operator::F32Div => "BI_binop T_f32 (Binop_f BOF_div)".to_string(),
+        Operator::F32Min => "BI_binop T_f32 (Binop_f BOF_min)".to_string(),
+        Operator::F32Max => "BI_binop T_f32 (Binop_f BOF_max)".to_string(),
+        Operator::F32Copysign => "BI_binop T_f32 (Binop_f BOF_copysign)".to_string(),
         Operator::F64Abs => "BI_unop T_f64 (Unop_f UOF_abs)".to_string(),
         Operator::F64Neg => "BI_unop T_f64 (Unop_f UOF_neg)".to_string(),
         Operator::F64Ceil => "BI_unop T_f64 (Unop_f UOF_ceil)".to_string(),
@@ -950,13 +942,13 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::F64Trunc => "BI_unop T_f64 (Unop_f UOF_trunc)".to_string(),
         Operator::F64Nearest => "BI_unop T_f64 (Unop_f UOF_nearest)".to_string(),
         Operator::F64Sqrt => "BI_unop T_f64 (Unop_f UOF_sqrt)".to_string(),
-        Operator::F64Add => "BI_binop T_f64 (binop_f BOF_add)".to_string(),
-        Operator::F64Sub => "BI_binop T_f64 (binop_f BOF_sub)".to_string(),
-        Operator::F64Mul => "BI_binop T_f64 (binop_f BOF_mul)".to_string(),
-        Operator::F64Div => "BI_binop T_f64 (binop_f BOF_div)".to_string(),
-        Operator::F64Min => "BI_binop T_f64 (binop_f BOF_min)".to_string(),
-        Operator::F64Max => "BI_binop T_f64 (binop_f BOF_max)".to_string(),
-        Operator::F64Copysign => "BI_binop T_f64 (binop_f BOF_copysign)".to_string(),
+        Operator::F64Add => "BI_binop T_f64 (Binop_f BOF_add)".to_string(),
+        Operator::F64Sub => "BI_binop T_f64 (Binop_f BOF_sub)".to_string(),
+        Operator::F64Mul => "BI_binop T_f64 (Binop_f BOF_mul)".to_string(),
+        Operator::F64Div => "BI_binop T_f64 (Binop_f BOF_div)".to_string(),
+        Operator::F64Min => "BI_binop T_f64 (Binop_f BOF_min)".to_string(),
+        Operator::F64Max => "BI_binop T_f64 (Binop_f BOF_max)".to_string(),
+        Operator::F64Copysign => "BI_binop T_f64 (Binop_f BOF_copysign)".to_string(),
         Operator::I32WrapI64 => "BI_cvtop T_i32 (CVO_wrap T_i64 None)".to_string(),
         Operator::I32TruncF32S => "BI_cvtop T_i32 (CVO_trunc T_f32 (Some SX_S))".to_string(),
         Operator::I32TruncF32U => "BI_cvtop T_i32 (CVO_trunc T_f32 (Some SX_U))".to_string(),
