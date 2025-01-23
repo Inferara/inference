@@ -167,20 +167,20 @@ impl WasmParseData<'_> {
         //     created_elements.push_str(LIST_SEAL);
         // }
 
-        // let mut created_function_types = String::new();
-        // for rec_group in &self.function_types {
-        //     created_function_types.push(LRB);
-        //     match translate_function_type(rec_group) {
-        //         Ok(translated_function_type) => {
-        //             created_function_types.push_str(translated_function_type.as_str());
-        //             created_function_types.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_function_types.push_str(LIST_SEAL);
-        // }
+        let mut created_function_types = String::new();
+        for rec_group in &self.function_types {
+            created_function_types.push(LRB);
+            match translate_function_type(rec_group) {
+                Ok(translated_function_type) => {
+                    created_function_types.push_str(translated_function_type.as_str());
+                    created_function_types.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+            created_function_types.push_str(LIST_SEAL);
+        }
 
         let mut created_functions = String::new();
         match translate_functions(&self.function_type_indexes, &self.function_bodies) {
@@ -202,7 +202,7 @@ impl WasmParseData<'_> {
         let module_name = &self.mod_name;
         res.push_str(format!("Definition {module_name} : module :=\n").as_str());
         res.push_str(LCB);
-        // res.push_str(format!("mod_types := {created_function_types};").as_str());
+        res.push_str(format!("mod_types := {created_function_types};").as_str());
         res.push_str(format!("mod_funcs := {created_functions};").as_str());
         // res.push_str(format!("mod_tables := {created_tables};").as_str());
         // res.push_str(format!("mod_mems := {created_memory_types};").as_str());
