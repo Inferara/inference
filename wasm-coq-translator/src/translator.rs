@@ -65,115 +65,122 @@ impl WasmParseData<'_> {
 
         res.push_str("\n\n");
 
-        let mut translated_imports = String::new();
         let mut errors = Vec::new();
-        for import in &self.imports {
-            match translate_module_import(import) {
-                Ok(translated_import) => {
-                    translated_imports.push_str(translated_import.as_str());
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-        }
-        let mut created_exports = String::new();
-        for export in &self.exports {
-            created_exports.push(LRB);
-            match translate_export_module(export) {
-                Ok(translated_export) => {
-                    created_exports.push_str(translated_export.as_str());
-                    created_exports.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_exports.push_str(LIST_SEAL);
-        }
-        let mut created_tables = String::new();
-        for table in &self.tables {
-            created_tables.push(LRB);
-            match translate_table_type(table) {
-                Ok(translated_table_type) => {
-                    created_tables.push_str(translated_table_type.as_str());
-                    created_tables.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_tables.push_str(LIST_SEAL);
-        }
-        let mut created_memory_types = String::new();
-        for memory_type in &self.memory_types {
-            created_memory_types.push(LRB);
-            match translate_memory_type(memory_type) {
-                Ok(translated_memory) => {
-                    created_memory_types.push_str(translated_memory.as_str());
-                    created_memory_types.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_memory_types.push_str(LIST_SEAL);
-        }
-        let mut created_globals = String::new();
-        for global in &self.globals {
-            created_globals.push(LRB);
-            match translate_global(global) {
-                Ok(translated_global) => {
-                    created_globals.push_str(translated_global.as_str());
-                    created_globals.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_globals.push_str(LIST_SEAL);
-        }
-        let mut created_data_segments = String::new();
-        for data in &self.data {
-            created_data_segments.push(LRB);
-            match translate_data(data) {
-                Ok(translated_data) => {
-                    created_data_segments.push_str(translated_data.as_str());
-                    created_data_segments.push_str(LIST_EXT);
-                }
-                Err(e) => errors.push(e),
-            }
-            created_data_segments.push_str(LIST_SEAL);
-        }
-        let mut created_elements = String::new();
-        for element in &self.elements {
-            created_elements.push(LRB);
-            match translate_element(element) {
-                Ok(translated_element) => {
-                    created_elements.push_str(translated_element.as_str());
-                    created_elements.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_elements.push_str(LIST_SEAL);
-        }
 
-        let mut created_function_types = String::new();
-        for rec_group in &self.function_types {
-            created_function_types.push(LRB);
-            match translate_function_type(rec_group) {
-                Ok(translated_function_type) => {
-                    created_function_types.push_str(translated_function_type.as_str());
-                    created_function_types.push_str(LIST_EXT);
-                }
-                Err(e) => {
-                    errors.push(e);
-                }
-            }
-            created_function_types.push_str(LIST_SEAL);
-        }
+        // let mut translated_imports = String::new();
+        // for import in &self.imports {
+        //     match translate_module_import(import) {
+        //         Ok(translated_import) => {
+        //             translated_imports.push_str(translated_import.as_str());
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        // }
+
+        // let mut created_exports = String::new();
+        // for export in &self.exports {
+        //     created_exports.push(LRB);
+        //     match translate_export_module(export) {
+        //         Ok(translated_export) => {
+        //             created_exports.push_str(translated_export.as_str());
+        //             created_exports.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_exports.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_tables = String::new();
+        // for table in &self.tables {
+        //     created_tables.push(LRB);
+        //     match translate_table_type(table) {
+        //         Ok(translated_table_type) => {
+        //             created_tables.push_str(translated_table_type.as_str());
+        //             created_tables.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_tables.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_memory_types = String::new();
+        // for memory_type in &self.memory_types {
+        //     created_memory_types.push(LRB);
+        //     match translate_memory_type(memory_type) {
+        //         Ok(translated_memory) => {
+        //             created_memory_types.push_str(translated_memory.as_str());
+        //             created_memory_types.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_memory_types.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_globals = String::new();
+        // for global in &self.globals {
+        //     created_globals.push(LRB);
+        //     match translate_global(global) {
+        //         Ok(translated_global) => {
+        //             created_globals.push_str(translated_global.as_str());
+        //             created_globals.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_globals.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_data_segments = String::new();
+        // for data in &self.data {
+        //     created_data_segments.push(LRB);
+        //     match translate_data(data) {
+        //         Ok(translated_data) => {
+        //             created_data_segments.push_str(translated_data.as_str());
+        //             created_data_segments.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => errors.push(e),
+        //     }
+        //     created_data_segments.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_elements = String::new();
+        // for element in &self.elements {
+        //     created_elements.push(LRB);
+        //     match translate_element(element) {
+        //         Ok(translated_element) => {
+        //             created_elements.push_str(translated_element.as_str());
+        //             created_elements.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_elements.push_str(LIST_SEAL);
+        // }
+
+        // let mut created_function_types = String::new();
+        // for rec_group in &self.function_types {
+        //     created_function_types.push(LRB);
+        //     match translate_function_type(rec_group) {
+        //         Ok(translated_function_type) => {
+        //             created_function_types.push_str(translated_function_type.as_str());
+        //             created_function_types.push_str(LIST_EXT);
+        //         }
+        //         Err(e) => {
+        //             errors.push(e);
+        //         }
+        //     }
+        //     created_function_types.push_str(LIST_SEAL);
+        // }
 
         let mut created_functions = String::new();
         match translate_functions(&self.function_type_indexes, &self.function_bodies) {
@@ -190,20 +197,20 @@ impl WasmParseData<'_> {
         let module_name = &self.mod_name;
         res.push_str(format!("Definition {module_name} : module :=\n").as_str());
         res.push_str(LCB);
-        res.push_str(format!("mod_types := Tf {created_function_types};").as_str());
+        // res.push_str(format!("mod_types := Tf {created_function_types};").as_str());
         res.push_str(format!("mod_funcs := Tf {created_functions};").as_str());
-        res.push_str(format!("mod_tables := Tf {created_tables};").as_str());
-        res.push_str(format!("mod_mems := Tf {created_memory_types};").as_str());
-        res.push_str(format!("mod_globals := Tf {created_globals};").as_str());
-        res.push_str(format!("mod_elems := Tf {created_elements};").as_str());
-        res.push_str(format!("mod_datas := Tf {created_data_segments};").as_str());
-        if let Some(start_function) = self.start_function {
-            res.push_str(format!("mod_start := Some({start_function});\n").as_str());
-        } else {
-            res.push_str("mod_start := None;\n");
-        }
-        res.push_str(format!("mod_imports := Tf {translated_imports};").as_str());
-        res.push_str(format!("mod_exports := Tf {created_exports};").as_str());
+        // res.push_str(format!("mod_tables := Tf {created_tables};").as_str());
+        // res.push_str(format!("mod_mems := Tf {created_memory_types};").as_str());
+        // res.push_str(format!("mod_globals := Tf {created_globals};").as_str());
+        // res.push_str(format!("mod_elems := Tf {created_elements};").as_str());
+        // res.push_str(format!("mod_datas := Tf {created_data_segments};").as_str());
+        // if let Some(start_function) = self.start_function {
+        //     res.push_str(format!("mod_start := Some({start_function});\n").as_str());
+        // } else {
+        //     res.push_str("mod_start := None;\n");
+        // }
+        // res.push_str(format!("mod_imports := Tf {translated_imports};").as_str());
+        // res.push_str(format!("mod_exports := Tf {created_exports};").as_str());
         res.push_str(RCB_DOT);
         res.push_str(".\n");
         Ok(res)
