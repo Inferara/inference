@@ -64,6 +64,7 @@ impl WasmParseData<'_> {
         res.push_str("From Wasm Require Import datatypes.\n");
         res.push_str("\n");
         res.push_str("Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n");
+        res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
         res.push_str("\n");
 
         let mut errors = Vec::new();
@@ -111,20 +112,21 @@ impl WasmParseData<'_> {
         created_tables.push_str("    ");
         created_tables.push_str(LIST_SEAL);
 
-        // let mut created_memory_types = String::new();
-        // for memory_type in &self.memory_types {
-        //     created_memory_types.push(LRB);
-        //     match translate_memory_type(memory_type) {
-        //         Ok(translated_memory) => {
-        //             created_memory_types.push_str(translated_memory.as_str());
-        //             created_memory_types.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_memory_types.push_str(LIST_SEAL);
-        // }
+        let mut created_memory_types = String::new();
+        for memory_type in &self.memory_types {
+            match translate_memory_type(memory_type) {
+                Ok(translated_memory) => {
+                    created_memory_types.push_str("    ");
+                    created_memory_types.push_str(translated_memory.as_str());
+                    created_memory_types.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        created_memory_types.push_str("    ");
+        created_memory_types.push_str(LIST_SEAL);
 
         // let mut created_globals = String::new();
         // for global in &self.globals {
@@ -210,7 +212,7 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_types :=\n{created_function_types};\n").as_str());
         res.push_str(format!("  mod_funcs :=\n{created_functions};\n").as_str());
         res.push_str(format!("  mod_tables :=\n{created_tables};\n").as_str());
-        // res.push_str(format!("mod_mems := {created_memory_types};").as_str());
+        res.push_str(format!("  mod_mems :=\n{created_memory_types};\n").as_str());
         // res.push_str(format!("mod_globals := {created_globals};").as_str());
         // res.push_str(format!("mod_elems := {created_elements};").as_str());
         // res.push_str(format!("mod_datas := {created_data_segments};").as_str());
@@ -309,19 +311,17 @@ fn translate_table_type_limits(table_type: &TableType) -> anyhow::Result<String>
         Some(max) => format!("Some({max}%N)"),
         None => "None".to_string(),
     };
-    Ok(format!("{{| lim_min := {lim_min}; lim_max := {lim_max} |}}"))
+    Ok(format!("{{|lim_min := {lim_min}; lim_max := {lim_max}|}}"))
 }
 
 //Record limits
 fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<String> {
-    let lim_min = memory_type.initial.to_string();
+    let lim_min = format!("{}%N", memory_type.initial);
     let lim_max = match memory_type.maximum {
-        Some(max) => max.to_string(),
+        Some(max) => format!("Some({max}%N)"),
         None => "None".to_string(),
     };
-    Ok(format!(
-        "{LCB} l_min := {lim_min}; l_max := {lim_max} {RCB_DOT}"
-    ))
+    Ok(format!("{{|lim_min := {lim_min}; lim_max := {lim_max}|}}"))
 }
 
 //Inductive translate_export_module
@@ -359,15 +359,16 @@ fn translate_table_type(table: &Table) -> anyhow::Result<String> {
 
 //Definition memory_type
 fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
-    let mut res = String::new();
-    let id = get_id();
+    // let mut res = String::new();
+    // let id = get_id();
     let limits = translate_memory_type_limits(memory_type)?;
-    res.push_str(format!("Definition mem_{id} : memory_type :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("limits := {limits}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    Ok(format!("Mm {limits}"))
+    // res.push_str(format!("Definition mem_{id} : memory_type :=\n").as_str());
+    // res.push_str(LCB);
+    // res.push_str(format!("limits := {limits}\n").as_str());
+    // res.push_str(RCB_DOT);
+    // res.push_str(".\n");
+    // Ok(res)
 }
 
 //Record global_type
