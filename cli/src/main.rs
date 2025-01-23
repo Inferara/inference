@@ -68,8 +68,20 @@ fn main() {
         },
         None => "v",
     };
+    let source = match args.source {
+        Some(s) => match s.as_str().to_lowercase().as_str() {
+            "wat" => "wat",
+            //"wasm" => "wasm",
+            _ => "inf",
+        },
+        None => "inf",
+    };
     let source_code = fs::read_to_string(args.path).expect("Error reading source file");
-    let wat = compile_to_wat(source_code.as_str()).unwrap();
+    let wat = if source == "inf" {
+        compile_to_wat(source_code.as_str()).unwrap()
+    } else {
+        source_code
+    };
     if generate == "wat" {
         let wat_file_path = output_path.join("out.wat");
         fs::write(wat_file_path.clone(), wat).expect("Error writing WAT file");

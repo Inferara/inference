@@ -5,6 +5,8 @@ pub(crate) struct Cli {
     pub(crate) path: std::path::PathBuf,
     #[clap(short = 'g', long = "generate", required = false)]
     pub(crate) generate: Option<String>,
+    #[clap(short = 's', long = "source", required = false)]
+    pub(crate) source: Option<String>,
     #[clap(short = 'o', long = "output", required = false)]
     pub(crate) output: Option<std::path::PathBuf>,
 }
