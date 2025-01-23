@@ -1,3 +1,4 @@
+use anyhow::{bail, Error};
 use uuid::Uuid;
 use wasmparser::{
     AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
@@ -108,7 +109,7 @@ impl WasmParseData<'_> {
         }
         let mut created_globals = String::new();
         for global in &self.globals {
-            created_globals.push('(');оператором
+            created_globals.push('(');
             match translate_global(global) {
                 Ok(translated_global) => {
                     created_globals.push_str(translated_global.as_str());
@@ -375,7 +376,7 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
             memory_index,
             offset_expr,
         } => {
-            let expression = translate_expr(offset_expr.get_operators_reader())?;
+            let expression = translate_expr(&mut offset_expr.get_operators_reader())?;
             format!("MD_active {memory_index} ({expression})")
         }
         DataKind::Passive => "MD_passive".to_string(),
@@ -383,17 +384,81 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
     Ok(res)
 }
 
-//Definition expr
-fn translate_expr(operators_reader: OperatorsReader) -> anyhow::Result<String> {
+struct BasicInstr {
+    text: String,
+    nest: Option<(Vec<BasicInstr>, Option<Vec<BasicInstr>>)>
+}
+
+fn expr_build(operead: &mut OperatorsReader) -> anyhow::Result<(Vec<BasicInstr>, bool)> {
+    let mut expr: Vec<BasicInstr> = Vec::new();
+    while !operead.eof() {
+        let op = operead.read()?;
+        let top = translate_basic_instruction(&op)?;
+        let nop = match op {
+            wasmparser::Operator::Block { .. } |
+            wasmparser::Operator::Loop { .. } => {
+                let (nested, ended) = expr_build(operead)?;
+                if ended { Some((nested, None)) }
+                else { bail!("unexpected else"); }
+            },
+            wasmparser::Operator::If { .. } => {
+                let (nthen, ended) = expr_build(operead)?;
+                if ended { Some((nthen, Some(Vec::new()))) }
+                else {
+                    let (nelse, ended) = expr_build(operead)?;
+                    if ended { Some((nthen, Some(nelse))) }
+                    else { bail!("unexpected else"); }
+                }
+            },
+            wasmparser::Operator::Else => { return Ok((expr, false)); },
+            wasmparser::Operator::End => { return Ok((expr, true)); },
+            _ => None
+        };
+        expr.push(BasicInstr { text: top, nest: nop });
+    }
+    bail!("unexpected eof");
+}
+
+fn expr_print(expr: &[BasicInstr], tab: usize) -> String {
     let mut res = String::new();
-    for operator in operators_reader {
-        let op = operator?;
-        let translated_op = translate_basic_instruction(op)?;
-        res.push_str(translated_op.as_str());
+    let prefix = "  ".repeat(tab + 1);
+
+    for bi in expr {
+        res.push_str(&prefix);
+        res.push_str(&bi.text);
+
+        match &bi.nest {
+            None => {},
+            Some((e1, ne2)) => {
+                res.push_str(" (\n");
+                res.push_str(&expr_print(&e1, tab + 1));
+                res.push_str(")");
+
+                match ne2 {
+                    None => {},
+                    Some(e2) => {
+                        res.push_str(" (\n");
+                        res.push_str(&expr_print(&e2, tab + 1));
+                        res.push_str(")");
+                    }
+                }
+            }
+        }
+
         res.push_str(" ::\n");
     }
+
+    res.push_str(&"  ".repeat(tab));
     res.push_str("nil");
-    Ok(res)
+    res
+}
+
+//Definition expr
+fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
+    let (expr, ended) = expr_build(operators_reader)?;
+    if !ended { bail!("unexpected else"); }
+    if !operators_reader.eof() { bail!("preemptive end"); }
+    Ok(expr_print(&expr, 0))
 }
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
@@ -436,7 +501,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr = String::new();
             for operator in offset_expr.get_operators_reader() {
                 let op = operator?;
-                let translated_op = translate_basic_instruction(op)?;
+                let translated_op = translate_basic_instruction(&op)?;
                 expr.push_str(translated_op.as_str());
                 expr.push_str("::");
             }
@@ -456,7 +521,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
                 let mut expr = String::new();
                 for operator in expr_reader.get_operators_reader() {
                     let op = operator?;
-                    let translated_op = translate_basic_instruction(op)?;
+                    let translated_op = translate_basic_instruction(&op)?;
                     expr.push_str(translated_op.as_str());
                     expr.push_str("::");
                 }
@@ -576,7 +641,7 @@ fn translate_functions(
         }
         modfunc_locals.push_str("nil");
 
-        let modfunc_body = translate_expr(function_body.get_operators_reader()?)?;
+        let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?)?;
 
         res.push_str(format!("Definition func_{id} : module_func :=\n").as_str());
         res.push_str(RLB);
@@ -590,24 +655,24 @@ fn translate_functions(
 }
 
 //Inductive basic_instruction
-fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
+fn translate_basic_instruction(operator: &Operator) -> anyhow::Result<String> {
     let operator = match operator {
         wasmparser::Operator::Nop => "BI_nop".to_string(),
         wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
         wasmparser::Operator::Block { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("BI_block ({blockty}) (")
+            format!("BI_block ({blockty})")
         }
         Operator::Loop { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("BI_loop ({blockty}) (")
+            format!("BI_loop ({blockty})")
         }
         Operator::If { blockty } => {
             let blockty = translate_block_type(&blockty)?;
-            format!("BI_if ({blockty}) (")
+            format!("BI_if ({blockty})")
         }
-        Operator::Else => "nil) (".to_string(),
-        Operator::End => "nil)".to_string(),
+        Operator::Else => "".to_string(),
+        Operator::End => "".to_string(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}"),
         Operator::BrTable { targets } => {
@@ -632,11 +697,11 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
         } => format!("BI_call_indirect {type_index} {table_index}"),
         Operator::Drop => "BI_drop".to_string(),
         Operator::Select => "BI_select None".to_string(),
-        Operator::LocalGet { local_index } => format!("BI_local_get {local_index}"),
-        Operator::LocalSet { local_index } => format!("BI_local_set {local_index}"),
-        Operator::LocalTee { local_index } => format!("BI_local_tee {local_index}"),
-        Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}"),
-        Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}"),
+        Operator::LocalGet { local_index } => format!("BI_local_get {local_index}%N"),
+        Operator::LocalSet { local_index } => format!("BI_local_set {local_index}%N"),
+        Operator::LocalTee { local_index } => format!("BI_local_tee {local_index}%N"),
+        Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}%N"),
+        Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}%N"),
         Operator::I32Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
             format!("BI_load T_i32 None {memarg}")
@@ -730,13 +795,13 @@ fn translate_basic_instruction(operator: Operator) -> anyhow::Result<String> {
             format!("BI_store T_i64 (Some Tp_i32) {memarg}")
         }
         Operator::MemorySize { mem } => {
-            if mem > 0 {
+            if *mem > 0 {
                 return Err(anyhow::anyhow!("Memory index is not supported"));
             }
             "BI_memory_size".to_string()
         }
         Operator::MemoryGrow { mem } => {
-            if mem > 0 {
+            if *mem > 0 {
                 return Err(anyhow::anyhow!("Memory index is not supported"));
             }
             "BI_memory_grow".to_string()
