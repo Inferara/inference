@@ -191,6 +191,7 @@ impl WasmParseData<'_> {
                     created_functions.push_str(LIST_EXT);
                 }
                 created_functions.push_str(LIST_SEAL);
+                created_functions.pop();
             }
             Err(e) => {
                 errors.push(e);
@@ -201,20 +202,20 @@ impl WasmParseData<'_> {
         let module_name = &self.mod_name;
         res.push_str(format!("Definition {module_name} : module :=\n").as_str());
         res.push_str(LCB);
-        // res.push_str(format!("mod_types := Tf {created_function_types};").as_str());
-        res.push_str(format!("mod_funcs := Tf {created_functions};").as_str());
-        // res.push_str(format!("mod_tables := Tf {created_tables};").as_str());
-        // res.push_str(format!("mod_mems := Tf {created_memory_types};").as_str());
-        // res.push_str(format!("mod_globals := Tf {created_globals};").as_str());
-        // res.push_str(format!("mod_elems := Tf {created_elements};").as_str());
-        // res.push_str(format!("mod_datas := Tf {created_data_segments};").as_str());
+        // res.push_str(format!("mod_types := {created_function_types};").as_str());
+        res.push_str(format!("mod_funcs := {created_functions};").as_str());
+        // res.push_str(format!("mod_tables := {created_tables};").as_str());
+        // res.push_str(format!("mod_mems := {created_memory_types};").as_str());
+        // res.push_str(format!("mod_globals := {created_globals};").as_str());
+        // res.push_str(format!("mod_elems := {created_elements};").as_str());
+        // res.push_str(format!("mod_datas := {created_data_segments};").as_str());
         // if let Some(start_function) = self.start_function {
         //     res.push_str(format!("mod_start := Some({start_function});\n").as_str());
         // } else {
         //     res.push_str("mod_start := None;\n");
         // }
-        // res.push_str(format!("mod_imports := Tf {translated_imports};").as_str());
-        // res.push_str(format!("mod_exports := Tf {created_exports};").as_str());
+        // res.push_str(format!("mod_imports := {translated_imports};").as_str());
+        // res.push_str(format!("mod_exports := {created_exports};").as_str());
         res.push_str(RCB_DOT);
         res.push_str(".\n");
         Ok(res)
