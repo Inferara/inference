@@ -1,12 +1,13 @@
 use core::fmt;
-use std::fmt::Display;
+use std::{fmt::Display, iter::Peekable};
 
 use anyhow::bail;
 use uuid::Uuid;
 use wasmparser::{
     AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
     ElementKind, Export, FuncType, FunctionBody, Global, HeapType, Import, MemoryType, Operator,
-    OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
+    OperatorsIterator, OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef,
+    ValType as wpValType,
 };
 
 const LCB: &str = "{|\n";
@@ -402,11 +403,8 @@ struct Expression<'a> {
 }
 
 impl<'a> Expression<'a> {
-    fn last_operation(&self) -> Option<Operator<'a>> {
-        match self.parts.last() {
-            Some(ExpressionPart::Operator(op)) => Some(op.clone()),
-            _ => None,
-        }
+    fn is_empty(&self) -> bool {
+        self.parts.is_empty()
     }
 
     fn print_with_offset(&self, tabs_count: usize) -> String {
@@ -441,47 +439,43 @@ impl Display for Expression<'_> {
 }
 
 fn translate_expression<'a>(
-    operators_reader: &mut OperatorsReader<'a>,
+    operators_reader: &mut Peekable<OperatorsIterator<'a>>,
 ) -> anyhow::Result<Expression<'a>> {
     let mut result = Expression { parts: Vec::new() };
-    while !operators_reader.eof() {
-        let op = operators_reader.read()?;
-        match op {
-            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } => {
+    while let Some(next_operator) = operators_reader.peek().cloned() {
+        let next_operator = next_operator.as_ref().unwrap();
+        match next_operator {
+            wasmparser::Operator::Block { .. }
+            | wasmparser::Operator::Loop { .. }
+            | wasmparser::Operator::If { .. } => {
+                operators_reader.next();
                 let inner_expression = translate_expression(operators_reader)?;
-                if matches!(
-                    &inner_expression.last_operation(),
-                    Some(wasmparser::Operator::Else)
-                ) {
+                if !inner_expression.is_empty() {
                     result
                         .parts
                         .push(ExpressionPart::Expression(inner_expression));
-                } else {
-                    bail!("Block is not closed properly, {:?}", op);
                 }
             }
-            wasmparser::Operator::If { .. } => {
+            wasmparser::Operator::Else => {
+                result
+                    .parts
+                    .push(ExpressionPart::Operator(next_operator.to_owned()));
+                operators_reader.next();
                 let inner_expression = translate_expression(operators_reader)?;
-                match &inner_expression.last_operation() {
-                    Some(wasmparser::Operator::Else) => {
-                        result
-                            .parts
-                            .push(ExpressionPart::Expression(inner_expression));
-                        let else_expression = translate_expression(operators_reader)?;
-                        result
-                            .parts
-                            .push(ExpressionPart::Expression(else_expression));
-                    }
-                    Some(wasmparser::Operator::End) => result
-                        .parts
-                        .push(ExpressionPart::Expression(inner_expression)),
-                    _ => bail!("If is not closed properly, {:?}", op),
-                };
-                return Ok(result);
+                result
+                    .parts
+                    .push(ExpressionPart::Expression(inner_expression));
             }
-            wasmparser::Operator::Else => {}
-            wasmparser::Operator::End => {}
-            _ => result.parts.push(ExpressionPart::Operator(op)),
+            wasmparser::Operator::End => {
+                operators_reader.next();
+                break;
+            }
+            _ => {
+                operators_reader.next();
+                result
+                    .parts
+                    .push(ExpressionPart::Operator(next_operator.to_owned()))
+            }
         }
     }
     Ok(result)
@@ -489,7 +483,8 @@ fn translate_expression<'a>(
 
 //Definition expr
 fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
-    let expression = translate_expression(operators_reader)?;
+    let mut peekable_operators_reader = operators_reader.clone().into_iter().peekable();
+    let expression = translate_expression(&mut peekable_operators_reader)?;
     Ok(expression.to_string())
 }
 
@@ -703,8 +698,8 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             let blockty = translate_block_type(blockty)?;
             format!("BI_if ({blockty})")
         }
-        Operator::Else => "".to_string(),
-        Operator::End => "".to_string(),
+        Operator::Else => String::new(),
+        Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
         Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}"),
         Operator::BrTable { targets } => {
