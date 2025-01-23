@@ -41,7 +41,7 @@ fn parse_inf_file(input: &str) -> Response {
             .map(|w| wasm = w)
             .unwrap_or_else(|e| errors.push(e.to_string()));
 
-        wasm_to_v(&wasm)
+        wasm_to_v("playground", &wasm)
             .map(|v_str| v = v_str)
             .unwrap_or_else(|e| errors.push(e.to_string()));
 

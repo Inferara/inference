@@ -184,9 +184,13 @@ impl WasmParseData<'_> {
 
         let mut created_functions = String::new();
         match translate_functions(&self.function_type_indexes, &self.function_bodies) {
-            Ok(translated_function) => {
-                res.push_str(translated_function.as_str());
-                created_functions.push_str(translated_function.as_str());
+            Ok((translated_function_names, translated_functions_string)) => {
+                res.push_str(translated_functions_string.as_str());
+                for function_name in translated_function_names {
+                    created_functions.push_str(function_name.as_str());
+                    created_functions.push_str(LIST_EXT);
+                }
+                created_functions.push_str(LIST_SEAL);
             }
             Err(e) => {
                 errors.push(e);
@@ -659,10 +663,12 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
 fn translate_functions(
     function_type_indexes: &[u32],
     function_bodies: &[FunctionBody],
-) -> anyhow::Result<String> {
-    let mut res = String::new();
+) -> anyhow::Result<(Vec<String>, String)> {
+    let mut translated_function_names = Vec::new();
+    let mut translated_functions_string = String::new();
     for (index, function_body) in function_bodies.iter().enumerate() {
         let id = get_id();
+        translated_function_names.push(format!("func_{id}"));
         let modfunc_type = *function_type_indexes.get(index).unwrap_or(&0);
 
         let mut modfunc_locals = String::new();
@@ -677,15 +683,19 @@ fn translate_functions(
 
         let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?)?;
 
-        res.push_str(format!("Definition func_{id} : module_func :=\n").as_str());
-        res.push_str(LCB);
-        res.push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
-        res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
-        res.push_str(format!("modfunc_body :=\n{modfunc_body};\n").as_str());
-        res.push_str(RCB_DOT);
-        res.push('\n');
+        translated_functions_string
+            .push_str(format!("Definition func_{id} : module_func :=\n").as_str());
+        translated_functions_string.push_str(LCB);
+        translated_functions_string
+            .push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
+        translated_functions_string
+            .push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
+        translated_functions_string
+            .push_str(format!("modfunc_body :=\n{modfunc_body};\n").as_str());
+        translated_functions_string.push_str(RCB_DOT);
+        translated_functions_string.push('\n');
     }
-    Ok(res)
+    Ok((translated_function_names, translated_functions_string))
 }
 
 //Inductive basic_instruction
