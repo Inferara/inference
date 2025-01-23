@@ -110,7 +110,7 @@ fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
             ComponentExportSection(_) => { /* ... */ }
 
             CustomSection(custom_section) => {
-                println!("Custom section: {custom_section:?}");
+                // println!("Custom section: {custom_section:?}");
             }
 
             // most likely you'd return an error here

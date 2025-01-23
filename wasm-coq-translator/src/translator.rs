@@ -1,10 +1,21 @@
-use anyhow::{bail, Error};
+use core::fmt;
+use std::fmt::Display;
+
+use anyhow::bail;
 use uuid::Uuid;
 use wasmparser::{
     AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
     ElementKind, Export, FuncType, FunctionBody, Global, HeapType, Import, MemoryType, Operator,
     OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
+
+const LCB: &str = "{|\n";
+const RCB_DOT: &str = "|}.\n";
+const LRB: char = '(';
+const RRB: char = ')';
+
+const LIST_EXT: &str = " :: ";
+const LIST_SEAL: &str = "nil)";
 
 pub(crate) struct WasmParseData<'a> {
     mod_name: String,
@@ -67,100 +78,100 @@ impl WasmParseData<'_> {
         }
         let mut created_exports = String::new();
         for export in &self.exports {
-            created_exports.push('(');
+            created_exports.push(LRB);
             match translate_export_module(export) {
                 Ok(translated_export) => {
                     created_exports.push_str(translated_export.as_str());
-                    created_exports.push_str(" :: ");
+                    created_exports.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_exports.push_str("nil)");
+            created_exports.push_str(LIST_SEAL);
         }
         let mut created_tables = String::new();
         for table in &self.tables {
-            created_tables.push('(');
+            created_tables.push(LRB);
             match translate_table_type(table) {
                 Ok(translated_table_type) => {
                     created_tables.push_str(translated_table_type.as_str());
-                    created_tables.push_str(" :: ");
+                    created_tables.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_tables.push_str("nil)");
+            created_tables.push_str(LIST_SEAL);
         }
         let mut created_memory_types = String::new();
         for memory_type in &self.memory_types {
-            created_memory_types.push('(');
+            created_memory_types.push(LRB);
             match translate_memory_type(memory_type) {
                 Ok(translated_memory) => {
                     created_memory_types.push_str(translated_memory.as_str());
-                    created_memory_types.push_str(" :: ");
+                    created_memory_types.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_memory_types.push_str("nil)");
+            created_memory_types.push_str(LIST_SEAL);
         }
         let mut created_globals = String::new();
         for global in &self.globals {
-            created_globals.push('(');
+            created_globals.push(LRB);
             match translate_global(global) {
                 Ok(translated_global) => {
                     created_globals.push_str(translated_global.as_str());
-                    created_globals.push_str(" :: ");
+                    created_globals.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_globals.push_str("nil)");
+            created_globals.push_str(LIST_SEAL);
         }
         let mut created_data_segments = String::new();
         for data in &self.data {
-            created_data_segments.push('(');
+            created_data_segments.push(LRB);
             match translate_data(data) {
                 Ok(translated_data) => {
                     created_data_segments.push_str(translated_data.as_str());
-                    created_data_segments.push_str(" :: ");
+                    created_data_segments.push_str(LIST_EXT);
                 }
                 Err(e) => errors.push(e),
             }
-            created_data_segments.push_str("nil)");
+            created_data_segments.push_str(LIST_SEAL);
         }
         let mut created_elements = String::new();
         for element in &self.elements {
-            created_elements.push('(');
+            created_elements.push(LRB);
             match translate_element(element) {
                 Ok(translated_element) => {
                     created_elements.push_str(translated_element.as_str());
-                    created_elements.push_str(" :: ");
+                    created_elements.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_elements.push_str("nil)");
+            created_elements.push_str(LIST_SEAL);
         }
 
         let mut created_function_types = String::new();
         for rec_group in &self.function_types {
-            created_function_types.push('(');
+            created_function_types.push(LRB);
             match translate_function_type(rec_group) {
                 Ok(translated_function_type) => {
                     created_function_types.push_str(translated_function_type.as_str());
-                    created_function_types.push_str(" :: ");
+                    created_function_types.push_str(LIST_EXT);
                 }
                 Err(e) => {
                     errors.push(e);
                 }
             }
-            created_function_types.push_str("nil)");
+            created_function_types.push_str(LIST_SEAL);
         }
 
         let mut created_functions = String::new();
@@ -177,7 +188,7 @@ impl WasmParseData<'_> {
         //Record module
         let module_name = &self.mod_name;
         res.push_str(format!("Definition {module_name} : module :=\n").as_str());
-        res.push_str(RLB);
+        res.push_str(LCB);
         res.push_str(format!("mod_types := Tf {created_function_types};").as_str());
         res.push_str(format!("mod_funcs := Tf {created_functions};").as_str());
         res.push_str(format!("mod_tables := Tf {created_tables};").as_str());
@@ -192,14 +203,11 @@ impl WasmParseData<'_> {
         }
         res.push_str(format!("mod_imports := Tf {translated_imports};").as_str());
         res.push_str(format!("mod_exports := Tf {created_exports};").as_str());
-        res.push_str(RRB);
+        res.push_str(RCB_DOT);
         res.push_str(".\n");
         Ok(res)
     }
 }
-
-const RLB: &str = "{|\n";
-const RRB: &str = "|}\n";
 
 //Inductive reference_type
 fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
@@ -237,11 +245,11 @@ fn translate_module_import(import: &Import) -> anyhow::Result<String> {
     let imp_desc = translate_module_import_desc(import)?;
     let mut res = String::new();
     res.push_str(format!("Definition {definition_name} : module_import :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("imp_module := \"{imp_module}\";\n").as_str());
     res.push_str(format!("imp_name := \"{imp_name}\";\n").as_str());
     res.push_str(format!("imp_desc := {imp_desc}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -285,7 +293,7 @@ fn translate_table_type_limits(table_type: &TableType) -> anyhow::Result<String>
         None => "None".to_string(),
     };
     let ref_type = translate_ref_type(&table_type.element_type)?;
-    Ok(format!("{RLB} tt_limits := {RLB} lim_min := {lim_min}; lim_max := {lim_max} {RRB}; tt_elem_type := {ref_type} {RRB}"))
+    Ok(format!("{LCB} tt_limits := {LCB} lim_min := {lim_min}; lim_max := {lim_max} {RCB_DOT}; tt_elem_type := {ref_type} {RCB_DOT}"))
 }
 
 //Record limits
@@ -296,7 +304,7 @@ fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<Stri
         None => "None".to_string(),
     };
     Ok(format!(
-        "{RLB} l_min := {lim_min}; l_max := {lim_max} {RRB}"
+        "{LCB} l_min := {lim_min}; l_max := {lim_max} {RCB_DOT}"
     ))
 }
 
@@ -306,10 +314,10 @@ fn translate_export_module(export: &Export) -> anyhow::Result<String> {
     let modexp_name = export.name;
     let modexp_desc = translate_module_export_desc(export)?;
     res.push_str(format!("Definition {modexp_name} : module_export :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("modexp_name := \"{modexp_name}\";\n").as_str());
     res.push_str(format!("modexp_desc := {modexp_desc}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -333,10 +341,10 @@ fn translate_table_type(table: &Table) -> anyhow::Result<String> {
     let tt_elem_type = translate_ref_type(&table.ty.element_type)?;
     let id = get_id();
     res.push_str(format!("Definition tt_{id} : table_type :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("tt_limits := {tt_limits};\n").as_str());
     res.push_str(format!("tt_elem_type := {tt_elem_type}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -347,9 +355,9 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
     let id = get_id();
     let limits = translate_memory_type_limits(memory_type)?;
     res.push_str(format!("Definition mem_{id} : memory_type :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("limits := {limits}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -361,10 +369,10 @@ fn translate_global(global: &Global) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
     res.push_str(format!("Definition global_{id} : global_type :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("tg_mut := {tg_mut};\n").as_str());
     res.push_str(format!("tg_t := {tg_t}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -384,81 +392,105 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
     Ok(res)
 }
 
-struct BasicInstr {
-    text: String,
-    nest: Option<(Vec<BasicInstr>, Option<Vec<BasicInstr>>)>
+enum ExpressionPart<'a> {
+    Operator(Operator<'a>),
+    Expression(Expression<'a>),
 }
 
-fn expr_build(operead: &mut OperatorsReader) -> anyhow::Result<(Vec<BasicInstr>, bool)> {
-    let mut expr: Vec<BasicInstr> = Vec::new();
-    while !operead.eof() {
-        let op = operead.read()?;
-        let top = translate_basic_instruction(&op)?;
-        let nop = match op {
-            wasmparser::Operator::Block { .. } |
-            wasmparser::Operator::Loop { .. } => {
-                let (nested, ended) = expr_build(operead)?;
-                if ended { Some((nested, None)) }
-                else { bail!("unexpected else"); }
-            },
-            wasmparser::Operator::If { .. } => {
-                let (nthen, ended) = expr_build(operead)?;
-                if ended { Some((nthen, Some(Vec::new()))) }
-                else {
-                    let (nelse, ended) = expr_build(operead)?;
-                    if ended { Some((nthen, Some(nelse))) }
-                    else { bail!("unexpected else"); }
-                }
-            },
-            wasmparser::Operator::Else => { return Ok((expr, false)); },
-            wasmparser::Operator::End => { return Ok((expr, true)); },
-            _ => None
-        };
-        expr.push(BasicInstr { text: top, nest: nop });
+struct Expression<'a> {
+    parts: Vec<ExpressionPart<'a>>,
+}
+
+impl<'a> Expression<'a> {
+    fn last_operation(&self) -> Option<Operator<'a>> {
+        match self.parts.last() {
+            Some(ExpressionPart::Operator(op)) => Some(op.clone()),
+            _ => None,
+        }
     }
-    bail!("unexpected eof");
-}
 
-fn expr_print(expr: &[BasicInstr], tab: usize) -> String {
-    let mut res = String::new();
-    let prefix = "  ".repeat(tab + 1);
-
-    for bi in expr {
-        res.push_str(&prefix);
-        res.push_str(&bi.text);
-
-        match &bi.nest {
-            None => {},
-            Some((e1, ne2)) => {
-                res.push_str(" (\n");
-                res.push_str(&expr_print(&e1, tab + 1));
-                res.push_str(")");
-
-                match ne2 {
-                    None => {},
-                    Some(e2) => {
-                        res.push_str(" (\n");
-                        res.push_str(&expr_print(&e2, tab + 1));
-                        res.push_str(")");
-                    }
+    fn print_with_offset(&self, tabs_count: usize) -> String {
+        let mut res = String::new();
+        let prefix = "  ".repeat(tabs_count);
+        for part in &self.parts {
+            res.push_str(&prefix);
+            match part {
+                ExpressionPart::Operator(op) => {
+                    let translated_op = translate_basic_operator(op).unwrap();
+                    res.push_str(&translated_op);
+                }
+                ExpressionPart::Expression(expr) => {
+                    res.push_str(" (\n");
+                    res.push_str(&expr.print_with_offset(tabs_count + 1));
+                    res.push_str(")\n");
                 }
             }
+            res.push_str(LIST_EXT);
+            res.push('\n');
         }
-
-        res.push_str(" ::\n");
+        res.push_str(&"  ".repeat(tabs_count));
+        res.push_str("nil");
+        res
     }
+}
 
-    res.push_str(&"  ".repeat(tab));
-    res.push_str("nil");
-    res
+impl Display for Expression<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.print_with_offset(2))
+    }
+}
+
+fn translate_expression<'a>(
+    operators_reader: &mut OperatorsReader<'a>,
+) -> anyhow::Result<Expression<'a>> {
+    let mut result = Expression { parts: Vec::new() };
+    while !operators_reader.eof() {
+        let op = operators_reader.read()?;
+        match op {
+            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } => {
+                let inner_expression = translate_expression(operators_reader)?;
+                if matches!(
+                    &inner_expression.last_operation(),
+                    Some(wasmparser::Operator::Else)
+                ) {
+                    result
+                        .parts
+                        .push(ExpressionPart::Expression(inner_expression));
+                } else {
+                    bail!("Block is not closed properly, {:?}", op);
+                }
+            }
+            wasmparser::Operator::If { .. } => {
+                let inner_expression = translate_expression(operators_reader)?;
+                match &inner_expression.last_operation() {
+                    Some(wasmparser::Operator::Else) => {
+                        result
+                            .parts
+                            .push(ExpressionPart::Expression(inner_expression));
+                        let else_expression = translate_expression(operators_reader)?;
+                        result
+                            .parts
+                            .push(ExpressionPart::Expression(else_expression));
+                    }
+                    Some(wasmparser::Operator::End) => result
+                        .parts
+                        .push(ExpressionPart::Expression(inner_expression)),
+                    _ => bail!("If is not closed properly, {:?}", op),
+                };
+                return Ok(result);
+            }
+            wasmparser::Operator::Else => {}
+            wasmparser::Operator::End => {}
+            _ => result.parts.push(ExpressionPart::Operator(op)),
+        }
+    }
+    Ok(result)
 }
 
 //Definition expr
 fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
-    let (expr, ended) = expr_build(operators_reader)?;
-    if !ended { bail!("unexpected else"); }
-    if !operators_reader.eof() { bail!("preemptive end"); }
-    Ok(expr_print(&expr, 0))
+    let expression = translate_expression(operators_reader)?;
+    Ok(expression.to_string())
 }
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
@@ -480,10 +512,10 @@ fn translate_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
     let memarg_offset = memarg.offset.to_string();
     let memarg_align = memarg.align.to_string();
     res.push_str(format!("Definition memarg_{id} : memarg :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("memarg_offset := {memarg_offset};\n").as_str());
     res.push_str(format!("memarg_align := {memarg_align}\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -501,7 +533,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr = String::new();
             for operator in offset_expr.get_operators_reader() {
                 let op = operator?;
-                let translated_op = translate_basic_instruction(&op)?;
+                let translated_op = translate_basic_operator(&op)?;
                 expr.push_str(translated_op.as_str());
                 expr.push_str("::");
             }
@@ -521,7 +553,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
                 let mut expr = String::new();
                 for operator in expr_reader.get_operators_reader() {
                     let op = operator?;
-                    let translated_op = translate_basic_instruction(&op)?;
+                    let translated_op = translate_basic_operator(&op)?;
                     expr.push_str(translated_op.as_str());
                     expr.push_str("::");
                 }
@@ -544,11 +576,11 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
         }
     };
     res.push_str(format!("Definition element_{id} : module_element :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("modelem_type := {modelem_type};\n").as_str());
     res.push_str(format!("modelem_init := {modelem_init};\n").as_str());
     res.push_str(format!("module_elemmode := {module_elemmode};\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
@@ -605,10 +637,10 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
                 results_str.push_str("nil;\n");
 
                 res.push_str(format!("Definition ft_{id} : function_type :=\n").as_str());
-                res.push_str(RLB);
+                res.push_str(LCB);
                 res.push_str(format!("ft_params := {params_str};").as_str());
                 res.push_str(format!("ft_results := {results_str}").as_str());
-                res.push_str(RRB);
+                res.push_str(RCB_DOT);
                 res.push_str(".\n");
             }
             CompositeInnerType::Array(_)
@@ -644,31 +676,31 @@ fn translate_functions(
         let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?)?;
 
         res.push_str(format!("Definition func_{id} : module_func :=\n").as_str());
-        res.push_str(RLB);
+        res.push_str(LCB);
         res.push_str(format!("modfunc_type := {modfunc_type}%N;\n").as_str());
         res.push_str(format!("modfunc_locals := {modfunc_locals};\n").as_str());
-        res.push_str(format!("modfunc_body :=\n{modfunc_body};").as_str());
-        res.push_str(RRB);
-        res.push_str(".\n");
+        res.push_str(format!("modfunc_body :=\n{modfunc_body};\n").as_str());
+        res.push_str(RCB_DOT);
+        res.push('\n');
     }
     Ok(res)
 }
 
 //Inductive basic_instruction
-fn translate_basic_instruction(operator: &Operator) -> anyhow::Result<String> {
+fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
     let operator = match operator {
         wasmparser::Operator::Nop => "BI_nop".to_string(),
         wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
         wasmparser::Operator::Block { blockty } => {
-            let blockty = translate_block_type(&blockty)?;
+            let blockty = translate_block_type(blockty)?;
             format!("BI_block ({blockty})")
         }
         Operator::Loop { blockty } => {
-            let blockty = translate_block_type(&blockty)?;
+            let blockty = translate_block_type(blockty)?;
             format!("BI_loop ({blockty})")
         }
         Operator::If { blockty } => {
-            let blockty = translate_block_type(&blockty)?;
+            let blockty = translate_block_type(blockty)?;
             format!("BI_if ({blockty})")
         }
         Operator::Else => "".to_string(),
@@ -703,95 +735,95 @@ fn translate_basic_instruction(operator: &Operator) -> anyhow::Result<String> {
         Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}%N"),
         Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}%N"),
         Operator::I32Load { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 None {memarg}")
         }
         Operator::I64Load { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 None {memarg}")
         }
         Operator::F32Load { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_f32 None {memarg}")
         }
         Operator::F64Load { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_f64 None {memarg}")
         }
         Operator::I32Load8S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I32Load8U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I32Load16S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I32Load16U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load8S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg}")
         }
         Operator::I64Load8U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg}")
         }
         Operator::I64Load16S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg}")
         }
         Operator::I64Load16U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg}")
         }
         Operator::I64Load32S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg}")
         }
         Operator::I64Load32U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg}")
         }
         Operator::I32Store { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i32 None {memarg}")
         }
         Operator::I64Store { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i64 None {memarg}")
         }
         Operator::F32Store { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_f32 None {memarg}")
         }
         Operator::F64Store { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_f64 None {memarg}")
         }
         Operator::I32Store8 { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i32 (Some Tp_i8) {memarg}")
         }
         Operator::I32Store16 { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i32 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store8 { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i64 (Some Tp_i8) {memarg}")
         }
         Operator::I64Store16 { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i64 (Some Tp_i16) {memarg}")
         }
         Operator::I64Store32 { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store T_i64 (Some Tp_i32) {memarg}")
         }
         Operator::MemorySize { mem } => {
@@ -1690,200 +1722,16 @@ fn translate_data(data: &Data) -> anyhow::Result<String> {
     }
     moddata_init.push_str("nil");
     res.push_str(format!("Definition moddata_{id} : module_data :=\n").as_str());
-    res.push_str(RLB);
+    res.push_str(LCB);
     res.push_str(format!("moddata_init := {moddata_init};\n").as_str());
     res.push_str(format!("moddata_mode := {moddata_mode};\n").as_str());
-    res.push_str(RRB);
+    res.push_str(RCB_DOT);
     res.push_str(".\n");
     Ok(res)
 }
-
-// fn translate_element(element: &Element) -> Result<(String, String), WasmModuleParseError> {
-//     let mut res = String::new();
-//     let id = get_id();
-//     let name = format!("ElementSegment{id}");
-
-//     res.push_str(format!("Definition {name} : WasmElementSegment :=\n").as_str());
-//     res.push_str("{|\n");
-
-//     match &element.items {
-//         wasmparser::ElementItems::Expressions(ref_type, expr) => {
-//             match *ref_type {
-//                 RefType::FUNCREF => {
-//                     res.push_str("es_type := rt_func;\n");
-//                 }
-//                 RefType::EXTERNREF => {
-//                     res.push_str("es_type := rt_extern;\n");
-//                 }
-//                 _ => {}
-//             }
-//             let mut expression_translated = String::new();
-//             for e in expr.clone() {
-//                 match translate_operators_reader(e.unwrap().get_operators_reader()) {
-//                     Ok(expression) => {
-//                         expression_translated.push_str(expression.as_str());
-//                     }
-//                     Err(e) => {
-//                         return Err(WasmModuleParseError::add_string_to_reported_error(
-//                             &String::from("Failed to translate element segment expression"),
-//                             e,
-//                         ));
-//                     }
-//                 }
-//             }
-
-//             res.push_str(format!("es_init := ({expression_translated});\n").as_str());
-//         }
-//         wasmparser::ElementItems::Functions(indexes) => {
-//             let mut index_val = String::new();
-//             for index in indexes.clone() {
-//                 let index_unwrapped = index.unwrap();
-//                 index_val.push_str(format!("{index_unwrapped}").as_str());
-//             }
-//             res.push_str("es_type := rt_func;\n");
-//             res.push_str(
-//                 format!("es_init := (i_reference (ri_ref_func {index_val}) :: nil) :: nil;\n")
-//                     .as_str(),
-//             );
-//         }
-//     }
-
-//     match &element.kind {
-//         ElementKind::Active {
-//             table_index,
-//             offset_expr,
-//         } => match translate_operators_reader(offset_expr.get_operators_reader()) {
-//             Ok(expression) => {
-//                 let index = table_index.unwrap_or(0);
-//                 res.push_str(format!("es_mode := esm_active {index} ({expression})\n").as_str());
-//             }
-//             Err(e) => {
-//                 return Err(WasmModuleParseError::add_string_to_reported_error(
-//                     &String::from("Failed to translate element segment offset expression"),
-//                     e,
-//                 ));
-//             }
-//         },
-//         ElementKind::Passive => {
-//             res.push_str("es_mode := esm_passive\n");
-//         }
-//         ElementKind::Declared => {
-//             res.push_str("es_mode := esm_declarative\n");
-//         }
-//     }
-
-//     res.push_str("|}.\n\n");
-//     Ok((name, res))
-// }
-
-// fn translate_rec_group(rec_group: &RecGroup) -> (String, String) {
-//     let mut res = String::new();
-//     let id = get_id();
-//     let name = format!("FuncionType{id}");
-//     res.push_str(format!("Definition {name} : WasmFuncionType :=\n").as_str());
-//     res.push_str("{|\n");
-
-//     for ty in rec_group.types() {
-//         match &ty.composite_type.inner {
-//             CompositeInnerType::Func(ft) => {
-//                 let mut params_str = String::new();
-//                 for param in ft.params() {
-//                     let sp = stringify_val_type(*param);
-//                     params_str.push_str(format!("{sp} :: ").as_str());
-//                 }
-//                 params_str.push_str("nil;\n");
-//                 res.push_str(format!("ft_params := {params_str}").as_str());
-
-//                 let mut results_str = String::new();
-//                 for result in ft.results() {
-//                     let sp = stringify_val_type(*result);
-//                     results_str.push_str(format!("{sp} :: ").as_str());
-//                 }
-//                 results_str.push_str("nil;\n");
-//                 res.push_str(format!("ft_results := {results_str}").as_str());
-//             }
-//             CompositeInnerType::Array(_)
-//             | CompositeInnerType::Struct(_)
-//             | CompositeInnerType::Cont(_) => {
-//                 //TODO
-//             }
-//         }
-//     }
-//     res.push_str("|}.\n\n");
-//     (name, res)
-// }
-
-// fn translate_functions(
-//     function_type_indexes: &[u32],
-//     function_bodies: &[FunctionBody],
-// ) -> Result<(Vec<String>, String), WasmModuleParseError> {
-//     let mut res = String::new();
-//     let mut function_names = Vec::new();
-//     for (index, function_body) in function_bodies.iter().enumerate() {
-//         let id = get_id();
-//         let name = format!("Function{id}");
-//         let type_index = *function_type_indexes.get(index).unwrap_or(&0);
-
-//         res.push_str(format!("Definition {name} : WasmFunction :=\n").as_str());
-//         res.push_str("{|\n");
-//         res.push_str(format!("f_typeidx := {type_index};\n").as_str());
-//         let mut locals = String::new();
-//         if let Ok(locals_reader) = function_body.get_locals_reader() {
-//             for local in locals_reader {
-//                 let (_, val_type) = local.unwrap();
-//                 let val_type = match val_type {
-//                     wpValType::I32 => "vt_num nt_i32",
-//                     wpValType::I64 => "vt_num nt_i64",
-//                     wpValType::F32 => "vt_num nt_f32",
-//                     wpValType::F64 => "vt_num nt_f64",
-//                     wpValType::V128 => "vt_vec vt_v128",
-//                     wpValType::Ref(ref_type) => match ref_type {
-//                         RefType::FUNCREF => "vt_ref rt_func",
-//                         RefType::EXTERNREF => "vt_ref rt_extern",
-//                         _ => "vt_ref _",
-//                     },
-//                 };
-//                 locals.push_str(format!("{val_type} :: ").as_str());
-//             }
-//         }
-//         locals.push_str("nil");
-//         res.push_str(format!("f_locals := {locals};\n").as_str());
-//         match translate_operators_reader(function_body.get_operators_reader().unwrap()) {
-//             Ok(expression) => {
-//                 res.push_str(format!("f_body := {expression}").as_str());
-//             }
-//             Err(e) => {
-//                 return Err(WasmModuleParseError::add_string_to_reported_error(
-//                     &String::from("Failed to translate function body"),
-//                     e,
-//                 ));
-//             }
-//         }
-//         res.push_str("|}.\n");
-//         res.push('\n');
-//         function_names.push(name);
-//     }
-//     Ok((function_names, res))
-// }
 
 fn get_id() -> String {
     let uuid = Uuid::new_v4().to_string();
     let mut parts = uuid.split('-');
     parts.next().unwrap().to_string()
 }
-
-// fn stringify_val_type(val_type: wpValType) -> String {
-//     match val_type {
-//         wpValType::I32 => "vt_num nt_i32",
-//         wpValType::I64 => "vt_num nt_i64",
-//         wpValType::F32 => "vt_num nt_f32",
-//         wpValType::F64 => "vt_num nt_f64",
-//         wpValType::V128 => "vt_vec vt_v128",
-//         wpValType::Ref(ref_type) => match ref_type {
-//             RefType::FUNCREF => "vt_ref rt_func",
-//             RefType::EXTERNREF => "vt_ref rt_extern",
-//             _ => "vt_ref _",
-//         },
-//     }
-//     .to_string()
-// }
