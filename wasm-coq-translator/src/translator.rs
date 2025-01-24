@@ -60,6 +60,7 @@ impl WasmParseData<'_> {
         res.push_str("Require Import String.\n");
         res.push_str("Require Import BinNat.\n");
         res.push_str("Require Import ZArith.\n");
+        res.push_str("From Wasm Require Import bytes.\n");
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
         res.push('\n');
@@ -149,18 +150,19 @@ impl WasmParseData<'_> {
         created_globals.push_str("    ");
         created_globals.push_str(LIST_SEAL);
 
-        // let mut created_data_segments = String::new();
-        // for data in &self.data {
-        //     created_data_segments.push(LRB);
-        //     match translate_data(data) {
-        //         Ok(translated_data) => {
-        //             created_data_segments.push_str(translated_data.as_str());
-        //             created_data_segments.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => errors.push(e),
-        //     }
-        //     created_data_segments.push_str(LIST_SEAL);
-        // }
+        let mut created_data_segments = String::new();
+        for data in &self.data {
+            match translate_data(data) {
+                Ok(translated_data) => {
+                    created_data_segments.push_str("    ");
+                    created_data_segments.push_str(translated_data.as_str());
+                    created_data_segments.push_str(LIST_EXT);
+                }
+                Err(e) => errors.push(e),
+            }
+        }
+        created_data_segments.push_str("    ");
+        created_data_segments.push_str(LIST_SEAL);
 
         let mut created_elements = String::new();
         for element in &self.elements {
@@ -222,7 +224,7 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_mems :=\n{created_memory_types};\n").as_str());
         res.push_str(format!("  mod_globals :=\n{created_globals};\n").as_str());
         res.push_str(format!("  mod_elems :=\n{created_elements};\n").as_str());
-        // res.push_str(format!("mod_datas := {created_data_segments};").as_str());
+        res.push_str(format!("  mod_datas :=\n{created_data_segments};\n").as_str());
         // if let Some(start_function) = self.start_function {
         //     res.push_str(format!("mod_start := Some({start_function});\n").as_str());
         // } else {
@@ -386,7 +388,7 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
             offset_expr,
         } => {
             let expression = translate_expr(&mut offset_expr.get_operators_reader())?;
-            format!("MD_active {memory_index} ({expression})")
+            format!("MD_active {memory_index}%N ({expression})")
         }
         DataKind::Passive => "MD_passive".to_string(),
     };
@@ -567,7 +569,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
         } => {
             let tableidx = table_index.unwrap_or_default();
             let expr = translate_expr(&mut offset_expr.get_operators_reader())?;
-            format!("ME_active {tableidx} ({expr})")
+            format!("ME_active {tableidx}%N ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
         ElementKind::Declared => "ME_declared".to_string(),
@@ -1091,12 +1093,12 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::TypedSelect { ty } => todo!(),
         Operator::RefNull { hty } => todo!(),
         Operator::RefIsNull => "BI_ref_is_null".to_string(),
-        Operator::RefFunc { function_index } => format!("BI_ref_func {function_index}"),
-        Operator::TableFill { table } => format!("BI_table_fill {table}"),
-        Operator::TableGet { table } => format!("BI_table_get {table}"),
-        Operator::TableSet { table } => format!("BI_table_set {table}"),
-        Operator::TableGrow { table } => format!("BI_table_grow {table}"),
-        Operator::TableSize { table } => format!("BI_table_size {table}"),
+        Operator::RefFunc { function_index } => format!("BI_ref_func {function_index}%N"),
+        Operator::TableFill { table } => format!("BI_table_fill {table}%N"),
+        Operator::TableGet { table } => format!("BI_table_get {table}%N"),
+        Operator::TableSet { table } => format!("BI_table_set {table}%N"),
+        Operator::TableGrow { table } => format!("BI_table_grow {table}%N"),
+        Operator::TableSize { table } => format!("BI_table_size {table}%N"),
         Operator::ReturnCall { function_index } => todo!(),
         Operator::ReturnCallIndirect {
             type_index,
@@ -1730,24 +1732,17 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
 //Record module_data
 fn translate_data(data: &Data) -> anyhow::Result<String> {
     let mut res = String::new();
-    let id = get_id();
     let moddata_mode = translate_module_datamode(data)?;
     let mut moddata_init = String::new();
     for byte in data.data {
-        if *byte < 0x10 {
-            moddata_init.push_str(format!("x0{byte:x}").as_str());
-        } else {
-            moddata_init.push_str(&format!("{byte:#2x?}")[1..]);
-        }
+        moddata_init.push_str(format!("#{byte:02X}").as_str());
         moddata_init.push_str(" :: ");
     }
     moddata_init.push_str("nil");
-    res.push_str(format!("Definition moddata_{id} : module_data :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("moddata_init := {moddata_init};\n").as_str());
-    res.push_str(format!("moddata_mode := {moddata_mode};\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
+    res.push_str("{|\n");
+    res.push_str(format!("    moddata_init := {moddata_init};\n").as_str());
+    res.push_str(format!("    moddata_mode := {moddata_mode};\n").as_str());
+    res.push_str("|}");
     Ok(res)
 }
 
