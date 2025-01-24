@@ -78,6 +78,11 @@ impl WasmParseData<'_> {
         res.push_str("  imp_desc := d;\n");
         res.push_str("|}.\n");
         res.push('\n');
+        res.push_str("Definition Me n d := {|\n");
+        res.push_str("  modexp_name := list_byte_of_string n;\n");
+        res.push_str("  modexp_desc := d;\n");
+        res.push_str("|}.\n");
+        res.push('\n');
 
         let mut errors = Vec::new();
 
@@ -97,20 +102,21 @@ impl WasmParseData<'_> {
         translated_imports.push_str("    ");
         translated_imports.push_str(LIST_SEAL);
 
-        // let mut created_exports = String::new();
-        // for export in &self.exports {
-        //     created_exports.push(LRB);
-        //     match translate_export_module(export) {
-        //         Ok(translated_export) => {
-        //             created_exports.push_str(translated_export.as_str());
-        //             created_exports.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_exports.push_str(LIST_SEAL);
-        // }
+        let mut created_exports = String::new();
+        for export in &self.exports {
+            match translate_export_module(export) {
+                Ok(translated_export) => {
+                    created_exports.push_str("    ");
+                    created_exports.push_str(translated_export.as_str());
+                    created_exports.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        created_exports.push_str("    ");
+        created_exports.push_str(LIST_SEAL);
 
         let mut created_tables = String::new();
         for table in &self.tables {
@@ -241,7 +247,7 @@ impl WasmParseData<'_> {
             res.push_str("  mod_start := None;\n");
         }
         res.push_str(format!("  mod_imports :=\n{translated_imports};\n").as_str());
-        // res.push_str(format!("mod_exports := {created_exports};").as_str());
+        res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
         Ok(res)
     }
@@ -337,25 +343,18 @@ fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<Stri
 
 //Inductive translate_export_module
 fn translate_export_module(export: &Export) -> anyhow::Result<String> {
-    let mut res = String::new();
     let modexp_name = export.name;
     let modexp_desc = translate_module_export_desc(export)?;
-    res.push_str(format!("Definition {modexp_name} : module_export :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("modexp_name := \"{modexp_name}\";\n").as_str());
-    res.push_str(format!("modexp_desc := {modexp_desc}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    Ok(format!("Me \"{modexp_name}\" ({modexp_desc})"))
 }
 
 //Inductive module_export_desc
 fn translate_module_export_desc(export: &Export) -> anyhow::Result<String> {
     let res = match export.kind {
-        wasmparser::ExternalKind::Func => format!("MED_func {}", export.index),
-        wasmparser::ExternalKind::Table => format!("MED_table {}", export.index),
-        wasmparser::ExternalKind::Memory => format!("MED_mem {}", export.index),
-        wasmparser::ExternalKind::Global => format!("MED_global {}", export.index),
+        wasmparser::ExternalKind::Func => format!("MED_func {}%N", export.index),
+        wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
+        wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
+        wasmparser::ExternalKind::Global => format!("MED_global {}%N", export.index),
         wasmparser::ExternalKind::Tag => return Err(anyhow::anyhow!("Tag is not supported")),
     };
     Ok(res)
