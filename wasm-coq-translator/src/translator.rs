@@ -162,20 +162,21 @@ impl WasmParseData<'_> {
         //     created_data_segments.push_str(LIST_SEAL);
         // }
 
-        // let mut created_elements = String::new();
-        // for element in &self.elements {
-        //     created_elements.push(LRB);
-        //     match translate_element(element) {
-        //         Ok(translated_element) => {
-        //             created_elements.push_str(translated_element.as_str());
-        //             created_elements.push_str(LIST_EXT);
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        //     created_elements.push_str(LIST_SEAL);
-        // }
+        let mut created_elements = String::new();
+        for element in &self.elements {
+            match translate_element(element) {
+                Ok(translated_element) => {
+                    created_elements.push_str("    ");
+                    created_elements.push_str(translated_element.as_str());
+                    created_elements.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        created_elements.push_str("    ");
+        created_elements.push_str(LIST_SEAL);
 
         let mut created_function_types = String::new();
         for rec_group in &self.function_types {
@@ -220,7 +221,7 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_tables :=\n{created_tables};\n").as_str());
         res.push_str(format!("  mod_mems :=\n{created_memory_types};\n").as_str());
         res.push_str(format!("  mod_globals :=\n{created_globals};\n").as_str());
-        // res.push_str(format!("mod_elems := {created_elements};").as_str());
+        res.push_str(format!("  mod_elems :=\n{created_elements};\n").as_str());
         // res.push_str(format!("mod_datas := {created_data_segments};").as_str());
         // if let Some(start_function) = self.start_function {
         //     res.push_str(format!("mod_start := Some({start_function});\n").as_str());
@@ -374,7 +375,6 @@ fn translate_global(global: &Global) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
     let mg_init = translate_expr(&mut global.init_expr.get_operators_reader())?;
-    // TODO: translation of global.init_expr
     Ok(format!("Mg {tg_mut} ({tg_t}) ({mg_init})"))
 }
 
@@ -559,21 +559,14 @@ fn translate_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
 //Record module_element
 fn translate_element(element: &Element) -> anyhow::Result<String> {
     let mut res = String::new();
-    let id = get_id();
-    let module_elemmode = match &element.kind {
+    // let id = get_id();
+    let modelem_mode = match &element.kind {
         ElementKind::Active {
             table_index,
             offset_expr,
         } => {
             let tableidx = table_index.unwrap_or_default();
-            let mut expr = String::new();
-            for operator in offset_expr.get_operators_reader() {
-                let op = operator?;
-                let translated_op = translate_basic_operator(&op)?;
-                expr.push_str(translated_op.as_str());
-                expr.push_str("::");
-            }
-            expr.push_str("nil");
+            let expr = translate_expr(&mut offset_expr.get_operators_reader())?;
             format!("ME_active {tableidx} ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
@@ -586,18 +579,11 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, expr_reader) = result?;
-                let mut expr = String::new();
-                for operator in expr_reader.get_operators_reader() {
-                    let op = operator?;
-                    let translated_op = translate_basic_operator(&op)?;
-                    expr.push_str(translated_op.as_str());
-                    expr.push_str("::");
-                }
-                expr.push_str("nil");
-                expr_list.push_str(expr.as_str());
-                expr_list.push_str("::");
+                let expr = translate_expr(&mut expr_reader.get_operators_reader())?;
+                expr_list.push_str(format!("({expr})").as_str());
+                expr_list.push_str(" ::\n");
             }
-            format!("ME_expressions ({expr_list})")
+            format!("{expr_list}nil")
         }
         ElementItems::Functions(elements) => {
             modelem_type = "T_funcref".to_string();
@@ -611,13 +597,11 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             format!("ME_functions {indexes}")
         }
     };
-    res.push_str(format!("Definition element_{id} : module_element :=\n").as_str());
-    res.push_str(LCB);
+    res.push_str("{|\n");
     res.push_str(format!("modelem_type := {modelem_type};\n").as_str());
-    res.push_str(format!("modelem_init := {modelem_init};\n").as_str());
-    res.push_str(format!("module_elemmode := {module_elemmode};\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
+    res.push_str(format!("modelem_init :=\n{modelem_init};\n").as_str());
+    res.push_str(format!("modelem_mode := {modelem_mode};\n").as_str());
+    res.push_str("|}");
     Ok(res)
 }
 
