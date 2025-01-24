@@ -72,20 +72,30 @@ impl WasmParseData<'_> {
         res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
         res.push_str("Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.\n");
         res.push('\n');
+        res.push_str("Definition Mi m n d := {|\n");
+        res.push_str("  imp_module := list_byte_of_string m;\n");
+        res.push_str("  imp_name := list_byte_of_string n;\n");
+        res.push_str("  imp_desc := d;\n");
+        res.push_str("|}.\n");
+        res.push('\n');
 
         let mut errors = Vec::new();
 
-        // let mut translated_imports = String::new();
-        // for import in &self.imports {
-        //     match translate_module_import(import) {
-        //         Ok(translated_import) => {
-        //             translated_imports.push_str(translated_import.as_str());
-        //         }
-        //         Err(e) => {
-        //             errors.push(e);
-        //         }
-        //     }
-        // }
+        let mut translated_imports = String::new();
+        for import in &self.imports {
+            match translate_module_import(import) {
+                Ok(translated_import) => {
+                    translated_imports.push_str("    ");
+                    translated_imports.push_str(translated_import.as_str());
+                    translated_imports.push_str(LIST_EXT);
+                }
+                Err(e) => {
+                    errors.push(e);
+                }
+            }
+        }
+        translated_imports.push_str("    ");
+        translated_imports.push_str(LIST_SEAL);
 
         // let mut created_exports = String::new();
         // for export in &self.exports {
@@ -230,7 +240,7 @@ impl WasmParseData<'_> {
         } else {
             res.push_str("  mod_start := None;\n");
         }
-        // res.push_str(format!("mod_imports := {translated_imports};").as_str());
+        res.push_str(format!("  mod_imports :=\n{translated_imports};\n").as_str());
         // res.push_str(format!("mod_exports := {created_exports};").as_str());
         res.push_str(RCB_DOT);
         Ok(res)
@@ -268,24 +278,16 @@ fn translate_value_type(val_type: &wpValType) -> anyhow::Result<String> {
 fn translate_module_import(import: &Import) -> anyhow::Result<String> {
     let imp_name = String::from(import.name);
     let imp_module = String::from(import.module);
-    let definition_name =
-        imp_module.clone() + &imp_name.clone().remove(0).to_uppercase().to_string();
+    // let definition_name =
+    //     imp_module.clone() + &imp_name.clone().remove(0).to_uppercase().to_string();
     let imp_desc = translate_module_import_desc(import)?;
-    let mut res = String::new();
-    res.push_str(format!("Definition {definition_name} : module_import :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("imp_module := \"{imp_module}\";\n").as_str());
-    res.push_str(format!("imp_name := \"{imp_name}\";\n").as_str());
-    res.push_str(format!("imp_desc := {imp_desc}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    Ok(format!("Mi \"{imp_module}\" \"{imp_name}\" ({imp_desc})"))
 }
 
 //Inductive module_import_desc
 fn translate_module_import_desc(import: &Import) -> anyhow::Result<String> {
     let res = match import.ty {
-        TypeRef::Func(index) => format!("MID_func {index}"),
+        TypeRef::Func(index) => format!("MID_func {index}%N"),
         TypeRef::Global(global_type) => {
             let tg_mut = translate_mutability(global_type.mutable);
             let tg_t = translate_value_type(&global_type.content_type)?;
