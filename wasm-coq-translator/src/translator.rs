@@ -392,91 +392,21 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
     Ok(res)
 }
 
-/////////////////// Expression translation, reference implementation /////////////////////
-
-// struct BasicInstr {
-//     text: String,
-//     nest: Option<(Vec<BasicInstr>, Option<Vec<BasicInstr>>)>
-// }
-
-// fn expr_build(operead: &mut OperatorsReader) -> anyhow::Result<(Vec<BasicInstr>, bool)> {
-//     let mut expr: Vec<BasicInstr> = Vec::new();
-//     while !operead.eof() {
-//         let op = operead.read()?;
-//         let top = translate_basic_operator(&op)?;
-//         let nop = match op {
-//             wasmparser::Operator::Block { .. } |
-//             wasmparser::Operator::Loop { .. } => {
-//                 let (nested, ended) = expr_build(operead)?;
-//                 if ended { Some((nested, None)) }
-//                 else { bail!("unexpected else"); }
-//             },
-//             wasmparser::Operator::If { .. } => {
-//                 let (nthen, ended) = expr_build(operead)?;
-//                 if ended { Some((nthen, Some(Vec::new()))) }
-//                 else {
-//                     let (nelse, ended) = expr_build(operead)?;
-//                     if ended { Some((nthen, Some(nelse))) }
-//                     else { bail!("unexpected else"); }
-//                 }
-//             },
-//             wasmparser::Operator::Else => { return Ok((expr, false)); },
-//             wasmparser::Operator::End => { return Ok((expr, true)); },
-//             _ => None
-//         };
-//         expr.push(BasicInstr { text: top, nest: nop });
-//     }
-//     bail!("unexpected eof");
-// }
-
-// fn expr_print(expr: &[BasicInstr], tab: usize) -> String {
-//     let mut res = String::new();
-//     let prefix = "  ".repeat(tab + 1);
-
-//     for bi in expr {
-//         res.push_str(&prefix);
-//         res.push_str(&bi.text);
-
-//         match &bi.nest {
-//             None => {},
-//             Some((e1, ne2)) => {
-//                 res.push_str(" (\n");
-//                 res.push_str(&expr_print(&e1, tab + 1));
-//                 res.push_str(")");
-
-//                 match ne2 {
-//                     None => {},
-//                     Some(e2) => {
-//                         res.push_str(" (\n");
-//                         res.push_str(&expr_print(&e2, tab + 1));
-//                         res.push_str(")");
-//                     }
-//                 }
-//             }
-//         }
-
-//         res.push_str(" ::\n");
-//     }
-
-//     res.push_str(&"  ".repeat(tab));
-//     res.push_str("nil");
-//     res
-// }
-
-// fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
-//     let (expr, ended) = expr_build(operators_reader)?;
-//     if !ended { bail!("unexpected else"); }
-//     if !operators_reader.eof() { bail!("preemptive end"); }
-//     Ok(expr_print(&expr, 1))
-// }
-
-////////////////////////// End of reference implementation //////////////////////////
-
-/////////////////// Expression translation, working draft /////////////////////
-
 enum ExpressionPart<'a> {
     Operator(Operator<'a>),
-    Expression(Expression<'a>),
+    Block(BlockExpr<'a>),
+    Condition(ConditionExpr<'a>),
+}
+
+struct BlockExpr<'a> {
+    label: Operator<'a>,
+    parts: Expression<'a>,
+}
+
+struct ConditionExpr<'a> {
+    label: Operator<'a>,
+    then_arm: Expression<'a>,
+    else_arm: Expression<'a>,
 }
 
 struct Expression<'a> {
@@ -484,38 +414,56 @@ struct Expression<'a> {
 }
 
 impl Expression<'_> {
-    fn is_empty(&self) -> bool {
-        self.parts.is_empty()
+    fn last_part(&self) -> Option<&ExpressionPart> {
+        self.parts.last()
     }
 
-    fn print_with_offset(&self, tabs_count: usize) -> String {
+    fn print_with_offset(&self, tabs_count: usize) -> anyhow::Result<String> {
         let mut res = String::new();
-        let prefix = "  ".repeat(tabs_count);
+        let offset = "  ".repeat(tabs_count);
         for part in &self.parts {
-            res.push_str(&prefix);
             match part {
-                ExpressionPart::Operator(op) => {
-                    let translated_op = translate_basic_operator(op).unwrap();
-                    res.push_str(&translated_op);
+                ExpressionPart::Operator(op) => match op {
+                    Operator::Else | Operator::End => {}
+                    _ => {
+                        res.push_str(offset.as_str());
+                        res.push_str(translate_basic_operator(op)?.as_str());
+                        res.push_str(LIST_EXT);
+                    }
+                },
+                ExpressionPart::Block(block) => {
+                    res.push_str(offset.as_str());
+                    res.push_str(translate_basic_operator(&block.label)?.as_str());
+                    res.push_str(" (\n");
+                    res.push_str(block.parts.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(") ");
+                    res.push_str("::\n");
                 }
-                ExpressionPart::Expression(expr) => {
-                    res.push_str("(\n");
-                    res.push_str(&expr.print_with_offset(tabs_count + 1));
-                    res.push(')');
+                ExpressionPart::Condition(cond) => {
+                    res.push_str(offset.as_str());
+                    res.push_str(translate_basic_operator(&cond.label)?.as_str());
+                    res.push_str(" (\n");
+                    res.push_str(cond.then_arm.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(") (\n");
+                    res.push_str(cond.else_arm.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(") ");
+                    res.push_str("::\n");
                 }
             }
-            res.push_str(LIST_EXT);
-            // res.push('\n');
         }
-        res.push_str(&"  ".repeat(tabs_count));
-        res.push_str("nil");
-        res
+        res.push_str(format!("{offset}nil").as_str());
+        Ok(res)
     }
 }
 
 impl Display for Expression<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.print_with_offset(2))
+        write!(
+            f,
+            "{}",
+            self.print_with_offset(2)
+                .unwrap_or(String::from("Error rendering expression"))
+        )
     }
 }
 
@@ -523,33 +471,46 @@ fn translate_expression<'a>(
     operators_reader: &mut Peekable<OperatorsIterator<'a>>,
 ) -> anyhow::Result<Expression<'a>> {
     let mut result = Expression { parts: Vec::new() };
-    while let Some(next_operator) = operators_reader.peek().cloned() {
+    while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
         match next_operator {
-            wasmparser::Operator::Block { .. }
-            | wasmparser::Operator::Loop { .. }
-            | wasmparser::Operator::If { .. } => {
-                operators_reader.next();
-                let inner_expression = translate_expression(operators_reader)?;
-                if !inner_expression.is_empty() {
-                    result
-                        .parts
-                        .push(ExpressionPart::Expression(inner_expression));
-                }
+            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } => {
+                // operators_reader.next();
+                let block_operations = translate_expression(operators_reader)?;
+                let block = BlockExpr {
+                    label: next_operator.to_owned(),
+                    parts: block_operations,
+                };
+                result.parts.push(ExpressionPart::Block(block));
             }
-            wasmparser::Operator::Else => {
-                operators_reader.next();
-                let inner_expression = translate_expression(operators_reader)?;
+            wasmparser::Operator::If { .. } => {
+                // operators_reader.next();
+                let then_arm = translate_expression(operators_reader)?;
+                let else_arm = if matches!(
+                    then_arm.last_part().unwrap(),
+                    ExpressionPart::Operator(Operator::End)
+                ) {
+                    Expression { parts: Vec::new() }
+                } else {
+                    translate_expression(operators_reader)?
+                };
+
+                let condition = ConditionExpr {
+                    label: next_operator.to_owned(),
+                    then_arm,
+                    else_arm,
+                };
+                result.parts.push(ExpressionPart::Condition(condition));
+            }
+            wasmparser::Operator::Else | wasmparser::Operator::End => {
+                // operators_reader.next();
                 result
                     .parts
-                    .push(ExpressionPart::Expression(inner_expression));
-            }
-            wasmparser::Operator::End => {
-                operators_reader.next();
+                    .push(ExpressionPart::Operator(next_operator.to_owned()));
                 break;
             }
             _ => {
-                operators_reader.next();
+                // operators_reader.next();
                 result
                     .parts
                     .push(ExpressionPart::Operator(next_operator.to_owned()))
