@@ -62,7 +62,7 @@ impl WasmParseData<'_> {
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import numerics.\n");
         res.push_str("From Wasm Require Import datatypes.\n");
-        res.push_str("\n");
+        res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
         res.push_str(
@@ -70,7 +70,7 @@ impl WasmParseData<'_> {
         );
         res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
         res.push_str("Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.\n");
-        res.push_str("\n");
+        res.push('\n');
 
         let mut errors = Vec::new();
 
