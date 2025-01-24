@@ -225,11 +225,11 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_globals :=\n{created_globals};\n").as_str());
         res.push_str(format!("  mod_elems :=\n{created_elements};\n").as_str());
         res.push_str(format!("  mod_datas :=\n{created_data_segments};\n").as_str());
-        // if let Some(start_function) = self.start_function {
-        //     res.push_str(format!("mod_start := Some({start_function});\n").as_str());
-        // } else {
-        //     res.push_str("mod_start := None;\n");
-        // }
+        if let Some(start_function) = self.start_function {
+            res.push_str(format!("  mod_start := Some {{|modstart_func := {start_function}%N|}};\n").as_str());
+        } else {
+            res.push_str("  mod_start := None;\n");
+        }
         // res.push_str(format!("mod_imports := {translated_imports};").as_str());
         // res.push_str(format!("mod_exports := {created_exports};").as_str());
         res.push_str(RCB_DOT);
