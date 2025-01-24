@@ -65,7 +65,9 @@ impl WasmParseData<'_> {
         res.push_str("\n");
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
-        res.push_str("Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n");
+        res.push_str(
+            "Definition Mt l et := {|modtab_type := {|tt_limits := l; tt_elem_type := et|}|}.\n",
+        );
         res.push_str("Definition Mm l := {|modmem_type := l|}.\n");
         res.push_str("Definition Mg mut t init := {|modglob_type := {|tg_mut := mut; tg_t := t|}; modglob_init := init|}.\n");
         res.push_str("\n");
@@ -497,9 +499,9 @@ impl Expression<'_> {
                     res.push_str(&translated_op);
                 }
                 ExpressionPart::Expression(expr) => {
-                    res.push_str(" (\n");
+                    res.push_str("(\n");
                     res.push_str(&expr.print_with_offset(tabs_count + 1));
-                    res.push_str(")\n");
+                    res.push(')');
                 }
             }
             res.push_str(LIST_EXT);
@@ -536,9 +538,6 @@ fn translate_expression<'a>(
                 }
             }
             wasmparser::Operator::Else => {
-                result
-                    .parts
-                    .push(ExpressionPart::Operator(next_operator.to_owned()));
                 operators_reader.next();
                 let inner_expression = translate_expression(operators_reader)?;
                 result
