@@ -373,8 +373,9 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
 fn translate_global(global: &Global) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
+    let mg_init = translate_expr(&mut global.init_expr.get_operators_reader())?;
     // TODO: translation of global.init_expr
-    Ok(format!("Mg {tg_mut} ({tg_t}) nil"))
+    Ok(format!("Mg {tg_mut} ({tg_t}) ({mg_init})"))
 }
 
 //Inductive module_datamode
@@ -653,7 +654,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
 //Inductive function_type
 fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     let mut res = String::new();
-    let id = get_id();
+    // let id = get_id();
     for ty in rec_group.types() {
         match &ty.composite_type.inner {
             CompositeInnerType::Func(ft) => {
@@ -742,7 +743,7 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::Else => String::new(),
         Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
-        Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}"),
+        Operator::BrIf { relative_depth } => format!("BI_br_if {relative_depth}%N"),
         Operator::BrTable { targets } => {
             if targets.is_empty() {
                 "BI_br_table".to_string()
