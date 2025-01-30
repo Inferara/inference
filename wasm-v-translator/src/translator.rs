@@ -300,7 +300,7 @@ fn translate_module_import_desc(import: &Import) -> anyhow::Result<String> {
         TypeRef::Global(global_type) => {
             let tg_mut = translate_mutability(global_type.mutable);
             let tg_t = translate_value_type(&global_type.content_type)?;
-            format!("MID_global tg_mut := {tg_mut}; tg_t := {tg_t}")
+            format!("MID_global {{|tg_mut := {tg_mut}; tg_t := {tg_t}|}}")
         }
         TypeRef::Memory(memory_type) => {
             let limits = translate_memory_type_limits(&memory_type)?;
