@@ -1,14 +1,12 @@
 use core::fmt;
 use std::{fmt::Display, iter::Peekable};
 
-use anyhow::bail;
-use uuid::Uuid;
-use wasmparser::{
-    AbstractHeapType, BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems,
-    ElementKind, Export, FuncType, FunctionBody, Global, HeapType, Import, MemoryType, Operator,
-    OperatorsIterator, OperatorsReader, RecGroup, RefType, Table, TableType, TypeRef,
-    ValType as wpValType,
+use inf_wasmparser::{
+    BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems, ElementKind, Export,
+    FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
+    RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
+use uuid::Uuid;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
@@ -354,11 +352,11 @@ fn translate_export_module(export: &Export) -> anyhow::Result<String> {
 //Inductive module_export_desc
 fn translate_module_export_desc(export: &Export) -> anyhow::Result<String> {
     let res = match export.kind {
-        wasmparser::ExternalKind::Func => format!("MED_func {}%N", export.index),
-        wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
-        wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
-        wasmparser::ExternalKind::Global => format!("MED_global {}%N", export.index),
-        wasmparser::ExternalKind::Tag => return Err(anyhow::anyhow!("Tag is not supported")),
+        inf_wasmparser::ExternalKind::Func => format!("MED_func {}%N", export.index),
+        inf_wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
+        inf_wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
+        inf_wasmparser::ExternalKind::Global => format!("MED_global {}%N", export.index),
+        inf_wasmparser::ExternalKind::Tag => return Err(anyhow::anyhow!("Tag is not supported")),
     };
     Ok(res)
 }
@@ -481,7 +479,7 @@ fn translate_expression<'a>(
     while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
         match next_operator {
-            wasmparser::Operator::Block { .. } | wasmparser::Operator::Loop { .. } => {
+            inf_wasmparser::Operator::Block { .. } | inf_wasmparser::Operator::Loop { .. } => {
                 // operators_reader.next();
                 let block_operations = translate_expression(operators_reader)?;
                 let block = BlockExpr {
@@ -490,7 +488,7 @@ fn translate_expression<'a>(
                 };
                 result.parts.push(ExpressionPart::Block(block));
             }
-            wasmparser::Operator::If { .. } => {
+            inf_wasmparser::Operator::If { .. } => {
                 // operators_reader.next();
                 let then_arm = translate_expression(operators_reader)?;
                 let else_arm = if matches!(
@@ -509,19 +507,15 @@ fn translate_expression<'a>(
                 };
                 result.parts.push(ExpressionPart::Condition(condition));
             }
-            wasmparser::Operator::Else | wasmparser::Operator::End => {
-                // operators_reader.next();
+            inf_wasmparser::Operator::Else | inf_wasmparser::Operator::End => {
                 result
                     .parts
                     .push(ExpressionPart::Operator(next_operator.to_owned()));
                 break;
             }
-            _ => {
-                // operators_reader.next();
-                result
-                    .parts
-                    .push(ExpressionPart::Operator(next_operator.to_owned()))
-            }
+            _ => result
+                .parts
+                .push(ExpressionPart::Operator(next_operator.to_owned())),
         }
     }
     Ok(result)
@@ -532,8 +526,6 @@ fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<Stri
     let expression = translate_expression(&mut peekable_operators_reader)?;
     Ok(expression.to_string())
 }
-
-////////////////////////// End of working draft //////////////////////////
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
     let res = match block_type {
@@ -548,7 +540,7 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
 }
 
 //Record memarg
-fn translate_memarg(memarg: &wasmparser::MemArg) -> anyhow::Result<String> {
+fn translate_memarg(memarg: &inf_wasmparser::MemArg) -> anyhow::Result<String> {
     let mut res = String::new();
     let id = get_id();
     let memarg_offset = memarg.offset.to_string();
@@ -716,9 +708,9 @@ fn translate_functions(
 //Inductive basic_instruction
 fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
     let operator = match operator {
-        wasmparser::Operator::Nop => "BI_nop".to_string(),
-        wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
-        wasmparser::Operator::Block { blockty } => {
+        inf_wasmparser::Operator::Nop => "BI_nop".to_string(),
+        inf_wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
+        inf_wasmparser::Operator::Block { blockty } => {
             let blockty = translate_block_type(blockty)?;
             format!("BI_block ({blockty})")
         }
@@ -730,6 +722,24 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             let blockty = translate_block_type(blockty)?;
             format!("BI_if ({blockty})")
         }
+        Operator::Forall { blockty } => {
+            let blockty = translate_block_type(blockty)?;
+            format!("BI_forall ({blockty})")
+        }
+        Operator::Exists { blockty } => {
+            let blockty = translate_block_type(blockty)?;
+            format!("BI_exists ({blockty})")
+        }
+        Operator::Assume { blockty } => {
+            let blockty = translate_block_type(blockty)?;
+            format!("BI_assume ({blockty})")
+        }
+        Operator::Unique { blockty } => {
+            let blockty = translate_block_type(blockty)?;
+            format!("BI_unique ({blockty})")
+        }
+        Operator::I32Uzumaki { value } => format!("BI_uzumaki_num T_i32 {value}"),
+        Operator::I64Uzumaki { value } => format!("BI_uzumaki_num T_i64 {value}"),
         Operator::Else => String::new(),
         Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),

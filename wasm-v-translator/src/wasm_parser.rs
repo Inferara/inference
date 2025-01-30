@@ -1,5 +1,4 @@
-use std::io::Read;
-use wasmparser::{
+use inf_wasmparser::{
     Parser,
     Payload::{
         CodeSectionEntry, CodeSectionStart, ComponentAliasSection, ComponentCanonicalSection,
@@ -10,6 +9,7 @@ use wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
+use std::io::Read;
 
 use crate::translator::WasmParseData;
 

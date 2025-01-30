@@ -1,5 +1,5 @@
 [package]
-name = "inference-wasm-coq-translator"
+name = "inference-wasm-v-translator"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -8,7 +8,7 @@ repository = { workspace = true }
 
 [dependencies]
 anyhow.workspace = true
-wasmparser = "0.223.0"
+inf-wasmparser.workspace = true
 
 [dependencies.uuid]
 version = "1.10.0"

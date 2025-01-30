@@ -5,7 +5,7 @@ resolver = "2"
 members = [
     "ast",
     "cli",
-    "wasm-coq-translator",
+    "wasm-v-translator",
     "wat-codegen",
     "inference",
     "tests",
@@ -24,10 +24,12 @@ repository = "https://github.com/Inferara/inference"
 inference = { path = "./inference", version = "0.0.1" }
 inference-ast = { path = "./ast", version = "0.0.1" }
 inference-cli = { path = "./cli", version = "0.0.1" }
-inference-wasm-coq-translator = { path = "./wasm-coq-translator", version = "0.0.1" }
+inference-wasm-v-translator = { path = "./wasm-v-translator", version = "0.0.1" }
 inference-wat-codegen = { path = "./wat-codegen", version = "0.0.1" }
 inference-tests = { path = "./tests", version = "0.0.1" }
 inference-playground-server = { path = "./playground-server", version = "0.0.1" }
+inf-wast = "0.0.5"
+inf-wasmparser = "0.0.5"
 wat-fmt = { path = "./wat-fmt", version = "0.0.1" }
 tree-sitter = "0.24.7"
 tree-sitter-inference = "0.0.28"
