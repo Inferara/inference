@@ -732,8 +732,8 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             let blockty = translate_block_type(blockty)?;
             format!("BI_unique ({blockty})")
         }
-        Operator::I32Uzumaki { value } => format!("BI_uzumaki_num T_i32 {value}"),
-        Operator::I64Uzumaki { value } => format!("BI_uzumaki_num T_i64 {value}"),
+        Operator::I32Uzumaki { .. } => format!("BI_uzumaki_num T_i32"),
+        Operator::I64Uzumaki { .. } => format!("BI_uzumaki_num T_i64"),
         Operator::Else => String::new(),
         Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
