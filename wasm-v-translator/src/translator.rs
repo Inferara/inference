@@ -481,7 +481,12 @@ fn translate_expression<'a>(
     while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
         match next_operator {
-            inf_wasmparser::Operator::Block { .. } | inf_wasmparser::Operator::Loop { .. } => {
+            inf_wasmparser::Operator::Block { .. } |
+            inf_wasmparser::Operator::Loop { .. }  |
+            inf_wasmparser::Operator::Forall { .. }  |
+            inf_wasmparser::Operator::Exists { .. }  |
+            inf_wasmparser::Operator::Assume { .. }  |
+            inf_wasmparser::Operator::Unique { .. } => {
                 // operators_reader.next();
                 let block_operations = translate_expression(operators_reader)?;
                 let block = BlockExpr {
