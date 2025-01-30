@@ -81,6 +81,8 @@ impl WasmParseData<'_> {
         res.push_str("  modexp_desc := d;\n");
         res.push_str("|}.\n");
         res.push('\n');
+        res.push_str("Definition Ma of al := {|memarg_offset := of; memarg_align := al|}.\n");
+        res.push('\n');
 
         let mut errors = Vec::new();
 
@@ -541,17 +543,9 @@ fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
 
 //Record memarg
 fn translate_memarg(memarg: &inf_wasmparser::MemArg) -> anyhow::Result<String> {
-    let mut res = String::new();
-    let id = get_id();
     let memarg_offset = memarg.offset.to_string();
     let memarg_align = memarg.align.to_string();
-    res.push_str(format!("Definition memarg_{id} : memarg :=\n").as_str());
-    res.push_str(LCB);
-    res.push_str(format!("memarg_offset := {memarg_offset};\n").as_str());
-    res.push_str(format!("memarg_align := {memarg_align}\n").as_str());
-    res.push_str(RCB_DOT);
-    res.push_str(".\n");
-    Ok(res)
+    Ok(format!("Ma {memarg_offset}%N {memarg_align}%N"))
 }
 
 //Record module_element
@@ -773,95 +767,95 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}%N"),
         Operator::I32Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i32 None {memarg}")
+            format!("BI_load T_i32 None ({memarg})")
         }
         Operator::I64Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 None {memarg}")
+            format!("BI_load T_i64 None ({memarg})")
         }
         Operator::F32Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_f32 None {memarg}")
+            format!("BI_load T_f32 None ({memarg})")
         }
         Operator::F64Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_f64 None {memarg}")
+            format!("BI_load T_f64 None ({memarg})")
         }
         Operator::I32Load8S { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i8, SX_S)) {memarg}")
+            format!("BI_load T_i32 (Some (Tp_i8, SX_S)) ({memarg})")
         }
         Operator::I32Load8U { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i8, SX_U)) {memarg}")
+            format!("BI_load T_i32 (Some (Tp_i8, SX_U)) ({memarg})")
         }
         Operator::I32Load16S { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i16, SX_S)) {memarg}")
+            format!("BI_load T_i32 (Some (Tp_i16, SX_S)) ({memarg})")
         }
         Operator::I32Load16U { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i32 (Some (Tp_i16, SX_U)) {memarg}")
+            format!("BI_load T_i32 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::I64Load8S { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i8, SX_S)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i8, SX_S)) ({memarg})")
         }
         Operator::I64Load8U { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i8, SX_U)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i8, SX_U)) ({memarg})")
         }
         Operator::I64Load16S { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i16, SX_S)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i16, SX_S)) ({memarg})")
         }
         Operator::I64Load16U { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::I64Load32S { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i32, SX_S)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i32, SX_S)) ({memarg})")
         }
         Operator::I64Load32U { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_load T_i64 (Some (Tp_i32, SX_U)) {memarg}")
+            format!("BI_load T_i64 (Some (Tp_i32, SX_U)) ({memarg})")
         }
         Operator::I32Store { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i32 None {memarg}")
+            format!("BI_store T_i32 None ({memarg})")
         }
         Operator::I64Store { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i64 None {memarg}")
+            format!("BI_store T_i64 None ({memarg})")
         }
         Operator::F32Store { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_f32 None {memarg}")
+            format!("BI_store T_f32 None ({memarg})")
         }
         Operator::F64Store { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_f64 None {memarg}")
+            format!("BI_store T_f64 None ({memarg})")
         }
         Operator::I32Store8 { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i32 (Some Tp_i8) {memarg}")
+            format!("BI_store T_i32 (Some Tp_i8) ({memarg})")
         }
         Operator::I32Store16 { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i32 (Some Tp_i16) {memarg}")
+            format!("BI_store T_i32 (Some Tp_i16) ({memarg})")
         }
         Operator::I64Store8 { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i64 (Some Tp_i8) {memarg}")
+            format!("BI_store T_i64 (Some Tp_i8) ({memarg})")
         }
         Operator::I64Store16 { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i64 (Some Tp_i16) {memarg}")
+            format!("BI_store T_i64 (Some Tp_i16) ({memarg})")
         }
         Operator::I64Store32 { memarg } => {
             let memarg = translate_memarg(memarg)?;
-            format!("BI_store T_i64 (Some Tp_i32) {memarg}")
+            format!("BI_store T_i64 (Some Tp_i32) ({memarg})")
         }
         Operator::MemorySize { mem } => {
             if *mem > 0 {
@@ -1193,91 +1187,91 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         }
         Operator::V128Load { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::V128Load8x8S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) ({memarg})")
         }
         Operator::V128Load8x8U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) ({memarg})")
         }
         Operator::V128Load16x4S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) ({memarg})")
         }
         Operator::V128Load16x4U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::V128Load32x2S { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) ({memarg})")
         }
         Operator::V128Load32x2U { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) {memarg}")
+            format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) ({memarg})")
         }
         Operator::V128Load8Splat { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_splat Twv_8 {memarg}")
+            format!("BI_load_vec LVA_splat Twv_8 ({memarg})")
         }
         Operator::V128Load16Splat { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_splat Twv_16 {memarg}")
+            format!("BI_load_vec LVA_splat Twv_16 ({memarg})")
         }
         Operator::V128Load32Splat { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_splat Twv_32 {memarg}")
+            format!("BI_load_vec LVA_splat Twv_32 ({memarg})")
         }
         Operator::V128Load64Splat { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_splat Twv_64 {memarg}")
+            format!("BI_load_vec LVA_splat Twv_64 ({memarg})")
         }
         Operator::V128Load32Zero { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_zero Tztv_32 {memarg}")
+            format!("BI_load_vec LVA_zero Tztv_32 ({memarg})")
         }
         Operator::V128Load64Zero { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_load_vec LVA_zero Tztv_64 {memarg}")
+            format!("BI_load_vec LVA_zero Tztv_64 ({memarg})")
         }
         Operator::V128Store { memarg } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_64 {memarg} 0")
+            format!("BI_store_vec_lane Twv_64 ({memarg}) 0")
         }
         Operator::V128Load8Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
         }
         Operator::V128Load16Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
         }
         Operator::V128Load32Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
         }
         Operator::V128Load64Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
         }
         Operator::V128Store8Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_8 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
         }
         Operator::V128Store16Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_16 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
         }
         Operator::V128Store32Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_32 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
         }
         Operator::V128Store64Lane { memarg, lane } => {
             let memarg = translate_memarg(&memarg)?;
-            format!("BI_store_vec_lane Twv_64 {memarg} {lane}")
+            format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
         }
         Operator::V128Const { value } => {
             let value = value.i128();
