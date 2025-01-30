@@ -481,12 +481,12 @@ fn translate_expression<'a>(
     while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
         match next_operator {
-            inf_wasmparser::Operator::Block { .. } |
-            inf_wasmparser::Operator::Loop { .. }  |
-            inf_wasmparser::Operator::Forall { .. }  |
-            inf_wasmparser::Operator::Exists { .. }  |
-            inf_wasmparser::Operator::Assume { .. }  |
-            inf_wasmparser::Operator::Unique { .. } => {
+            inf_wasmparser::Operator::Block { .. }
+            | inf_wasmparser::Operator::Loop { .. }
+            | inf_wasmparser::Operator::Forall { .. }
+            | inf_wasmparser::Operator::Exists { .. }
+            | inf_wasmparser::Operator::Assume { .. }
+            | inf_wasmparser::Operator::Unique { .. } => {
                 // operators_reader.next();
                 let block_operations = translate_expression(operators_reader)?;
                 let block = BlockExpr {
@@ -680,9 +680,11 @@ fn translate_functions(
         let mut modfunc_locals = String::new();
         if let Ok(locals_reader) = function_body.get_locals_reader() {
             for local in locals_reader {
-                let (_, val_type) = local.unwrap();
+                let (reps, val_type) = local.unwrap();
                 let val_type = translate_value_type(&val_type)?;
-                modfunc_locals.push_str(format!("{val_type} :: ").as_str());
+                for _ in 0..reps {
+                    modfunc_locals.push_str(format!("{val_type} :: ").as_str());
+                }
             }
         }
         modfunc_locals.push_str("nil");
