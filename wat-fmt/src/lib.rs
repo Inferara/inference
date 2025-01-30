@@ -202,7 +202,7 @@ fn format_block(
                     match sub_token.as_str() {
                         "loop" | "if" | "forall" | "exists" | "assume" | "unique" => {
                             fill_indentation(&mut result, current_indent + 1, indent_size);
-                            tokens_iter.next(); // consume "("
+                            tokens_iter.next(); // consume "block type"
                             let block_type = tokens_iter.next().unwrap(); // e.g. "loop"
                             result.push('(');
                             result.push_str(block_type);
@@ -215,7 +215,7 @@ fn format_block(
                         "local" => {
                             fill_indentation(&mut result, current_indent + 1, indent_size);
                             result.push('(');
-                            tokens_iter.next(); // consume "("
+                            tokens_iter.next(); // consume "local"
                             result.push_str(&format_inline_group(tokens_iter));
                         }
                         _ => break,
@@ -223,6 +223,10 @@ fn format_block(
                 }
             }
             ")" => {
+                tokens_iter.next(); // Consume ')'
+                                    // fill_indentation(&mut result, current_indent - 1, indent_size);
+                result.pop();
+                result.push(')');
                 break;
             }
             "i32.uzumaki" | "i64.uzumaki" | "i32.add" | "i64.add" => {
