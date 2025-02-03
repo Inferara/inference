@@ -1,316 +1,192 @@
 #![no_std]
-
 extern crate alloc;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt::Write;
 
-use alloc::{
-    borrow::ToOwned,
-    string::{String, ToString},
-    vec::Vec,
-};
-use core::iter::Peekable;
-use core::slice::Iter;
+enum Context {
+    TopLevel,
+    Function,
+    Export,
+    Param,
+    Result,
+    Local,
+    ControlFlow,
+}
 
-/// Formats a WAT string with an indentation of 2 spaces.
 pub fn format(input: &str) -> String {
-    format_with_indent(input, 2)
-}
+    let mut output = String::new();
+    let mut indent = 0;
+    let mut context = Vec::new();
+    let mut pending_space = false;
+    let mut current_line_indent = 0;
+    let mut in_string = false;
+    let mut in_comment = false;
 
-/// Formats a WAT string using a configurable indentation level.
-pub fn format_with_indent(input: &str, indent_size: usize) -> String {
-    let tokens = tokenize(input);
-    let mut tokens_iter = tokens.iter().peekable();
-    format_module(&mut tokens_iter, 0, indent_size)
-}
-
-/// Splits the input into tokens (parentheses and sequences of non-whitespace, non-parenthesis chars).
-fn tokenize(input: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
+    context.push(Context::TopLevel);
 
     for c in input.chars() {
         match c {
-            '(' | ')' => {
-                if !current.trim().is_empty() {
-                    tokens.push(current.trim().to_string());
-                }
-                current.clear();
-                tokens.push(c.to_string());
-            }
-            ' ' | '\n' | '\r' | '\t' => {
-                if !current.trim().is_empty() {
-                    tokens.push(current.trim().to_string());
-                }
-                current.clear();
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-    if !current.trim().is_empty() {
-        tokens.push(current.trim().to_string());
-    }
-    tokens
-}
-
-fn format_module(
-    tokens_iter: &mut Peekable<Iter<String>>,
-    current_indent: usize,
-    indent_size: usize,
-) -> String {
-    let mut result = String::new();
-    while let Some(token) = tokens_iter.peek().cloned() {
-        match token.as_str() {
-            "(" => {
-                tokens_iter.next(); // Consume '('
-                if let Some(next_token) = tokens_iter.peek() {
-                    match next_token.as_str() {
-                        "module" => {
-                            tokens_iter.next(); // consume "module"
-                            result.push_str("(module\n");
-                            result.push_str(&format_module_children(
-                                tokens_iter,
-                                current_indent + 1,
-                                indent_size,
-                            ));
-                        }
-                        _ => {
-                            // The module is probably malformed so we fallback to the default s-expressions formatter
-                            todo!("Format the module as a sequence of s-expressions");
-                        }
-                    }
-                }
-            }
-            ")" => {
-                result.push('\n');
-                tokens_iter.next(); // Consume ')'
-                result.push(')');
-                if tokens_iter.peek().is_some() {
-                    panic!(
-                        "Unexpected token after module closing parenthesis {:?}",
-                        tokens_iter.peek()
+            '(' => {
+                if !in_comment && !in_string {
+                    let keyword = get_keyword(input);
+                    handle_opening(
+                        &keyword,
+                        &mut context,
+                        &mut indent,
+                        &mut current_line_indent,
+                        &mut output,
                     );
+                    pending_space = false;
+                } else {
+                    output.push(c);
+                }
+            }
+            ')' => {
+                if !in_comment && !in_string {
+                    handle_closing(
+                        &mut context,
+                        &mut indent,
+                        &mut current_line_indent,
+                        &mut output,
+                    );
+                    pending_space = false;
+                } else {
+                    output.push(c);
+                }
+            }
+            ';' if peek_next_char(input) == Some(';') => {
+                in_comment = true;
+                output.push_str(";;");
+            }
+            '"' if !in_comment => {
+                in_string = !in_string;
+                output.push(c);
+            }
+            '\n' => {
+                in_comment = false;
+                output.push(c);
+                current_line_indent = 0;
+                pending_space = false;
+            }
+            _ if in_comment || in_string => {
+                output.push(c);
+            }
+            ' ' | '\t' => {
+                if !pending_space {
+                    pending_space = true;
                 }
             }
             _ => {
-                // The module is probably malformed so we fallback to the default s-expressions formatter
-                todo!("Format the module as a sequence of s-expressions");
+                if current_line_indent < indent {
+                    write!(&mut output, "\n{}", "  ".repeat(indent)).unwrap();
+                    current_line_indent = indent;
+                }
+                if pending_space {
+                    output.push(' ');
+                    pending_space = false;
+                }
+                output.push(c);
             }
         }
     }
-    result
+
+    output
 }
 
-fn format_module_children(
-    tokens_iter: &mut Peekable<Iter<String>>,
-    current_indent: usize,
-    indent_size: usize,
-) -> String {
-    let mut result = String::new();
-    let mut depth = 0;
-    while let Some(token) = tokens_iter.peek().cloned() {
-        match token.as_str() {
-            "(" => {
-                depth += 1;
-                tokens_iter.next(); // Consume '('
-                if let Some(next_token) = tokens_iter.peek() {
-                    match next_token.as_str() {
-                        "func" => {
-                            tokens_iter.next(); // consume "func"
-                            result.push('\n');
-                            fill_indentation(&mut result, current_indent, indent_size);
-                            result.push_str("(func");
-                            result.push_str(&format_func_signature(tokens_iter));
-                            result.push_str(&format_block(
-                                tokens_iter,
-                                current_indent,
-                                indent_size,
-                            ));
-                            // result.push_str(tokens_iter.next().unwrap()); // Consume ')'
-                        }
-                        _ => {
-                            // The function is probably malformed so we fallback
-                            // to the default s-expressions formatter
-                            todo!("Format the module function as a sequence of s-expressions");
-                        }
-                    }
-                }
+fn handle_opening(
+    keyword: &str,
+    context: &mut Vec<Context>,
+    indent: &mut usize,
+    current_line_indent: &mut usize,
+    output: &mut String,
+) {
+    match context.last() {
+        Some(Context::TopLevel) => {
+            context.push(Context::Function);
+            *indent = 1;
+            write!(output, "(").unwrap();
+        }
+        Some(Context::Function) => match keyword {
+            "export" => {
+                context.push(Context::Export);
+                write!(output, " (export").unwrap();
             }
-            ")" => {
-                depth -= 1;
-                if depth < 0 {
-                    break;
-                }
-                tokens_iter.next(); // Consume ')'
-                fill_indentation(&mut result, current_indent, indent_size);
-                result.push_str(")\n");
+            "param" => {
+                context.push(Context::Param);
+                write!(output, " (param").unwrap();
             }
+            "result" => {
+                context.push(Context::Result);
+                write!(output, " (result").unwrap();
+            }
+            "local" => {
+                context.push(Context::Local);
+                write!(output, "\n{}(", "  ".repeat(*indent)).unwrap();
+                *indent += 1;
+                *current_line_indent = *indent;
+            }
+            _ => {
+                context.push(Context::ControlFlow);
+                write!(output, "\n{}(", "  ".repeat(*indent)).unwrap();
+                *indent += 1;
+                *current_line_indent = *indent;
+            }
+        },
+        Some(Context::ControlFlow) => {
+            *indent += 1;
+            write!(output, " (").unwrap();
+        }
+        _ => write!(output, " (").unwrap(),
+    }
+}
+
+fn handle_closing(
+    context: &mut Vec<Context>,
+    indent: &mut usize,
+    current_line_indent: &mut usize,
+    output: &mut String,
+) {
+    if let Some(last_context) = context.pop() {
+        match last_context {
+            Context::Function => {
+                *indent = 0;
+                write!(output, ")").unwrap();
+            }
+            Context::Export | Context::Param | Context::Result => {
+                write!(output, ")").unwrap();
+            }
+            Context::Local => {
+                *indent -= 1;
+                write!(output, ")").unwrap();
+            }
+            Context::ControlFlow => {
+                *indent -= 1;
+                write!(output, "\n{})", "  ".repeat(*indent)).unwrap();
+                *current_line_indent = *indent;
+            }
+            _ => write!(output, ")").unwrap(),
+        }
+    }
+}
+
+fn get_keyword(input: &str) -> String {
+    let mut keyword = String::new();
+    let mut paren_depth = 0;
+
+    for c in input.chars() {
+        match c {
+            '(' => paren_depth += 1,
+            ')' => paren_depth -= 1,
+            ' ' | '\t' | '\n' if paren_depth == 0 => break,
+            _ if paren_depth == 0 => keyword.push(c),
             _ => {}
         }
     }
-    result
+
+    keyword
 }
 
-fn format_func_signature(tokens_iter: &mut Peekable<Iter<String>>) -> String {
-    let mut result = String::new();
-    while let Some(token) = tokens_iter.peek().cloned() {
-        match token.as_str() {
-            "(" => {
-                let mut lookahead = tokens_iter.clone();
-                lookahead.next(); // Consume '('
-                if let Some(next_token) = lookahead.peek() {
-                    match next_token.as_str() {
-                        "export" | "param" | "result" => {
-                            tokens_iter.next(); // consume sub_token
-                            result.push(' ');
-                            result.push('(');
-                            result.push_str(&format_inline_group(tokens_iter));
-                        }
-                        _ => {
-                            break;
-                        }
-                    }
-                }
-            }
-            ")" => {
-                tokens_iter.next(); // Consume ')'
-                result.push(')');
-                return result;
-            }
-            _ => {
-                break;
-                // todo!("Format the function signature as a sequence of s-expressions");
-            }
-        }
-    }
-    result
-}
-
-fn format_block(
-    tokens_iter: &mut Peekable<Iter<String>>,
-    current_indent: usize,
-    indent_size: usize,
-) -> String {
-    let mut result = String::new();
-    while let Some(token) = tokens_iter.peek().cloned() {
-        result.push('\n');
-        match token.as_str() {
-            "(" => {
-                let mut lookahead = tokens_iter.clone();
-                lookahead.next(); // Consume '('
-                if let Some(sub_token) = lookahead.peek() {
-                    match sub_token.as_str() {
-                        "loop" | "if" | "forall" | "exists" | "assume" | "unique" => {
-                            fill_indentation(&mut result, current_indent + 1, indent_size);
-                            tokens_iter.next(); // consume "block type"
-                            let block_type = tokens_iter.next().unwrap(); // e.g. "loop"
-                            result.push('(');
-                            result.push_str(block_type);
-                            result.push_str(&format_block(
-                                tokens_iter,
-                                current_indent + 2,
-                                indent_size,
-                            ));
-                        }
-                        "local" => {
-                            fill_indentation(&mut result, current_indent + 1, indent_size);
-                            result.push('(');
-                            tokens_iter.next(); // consume "local"
-                            result.push_str(&format_inline_group(tokens_iter));
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            ")" => {
-                tokens_iter.next(); // Consume ')'
-                                    // fill_indentation(&mut result, current_indent - 1, indent_size);
-                result.pop();
-                result.push(')');
-                break;
-            }
-            "i32.uzumaki" | "i64.uzumaki" | "i32.add" | "i64.add" => {
-                format_single_token(
-                    &mut result,
-                    tokens_iter.next().unwrap().to_owned(),
-                    current_indent + 1,
-                    indent_size,
-                );
-            }
-            "local.set" | "local.get" | "i32.const" | "i64.const" => {
-                format_instruction_with_operands(
-                    &mut result,
-                    tokens_iter,
-                    current_indent,
-                    indent_size,
-                    1,
-                );
-            }
-            _ => {
-                todo!("Unexpected token in function body: {:?}", token);
-            }
-        }
-    }
-    result
-}
-
-fn format_instruction_with_operands(
-    result: &mut String,
-    tokens_iter: &mut Peekable<Iter<String>>,
-    current_indent: usize,
-    indent_size: usize,
-    operands: usize,
-) {
-    fill_indentation(result, current_indent + 1, indent_size);
-    result.push_str(tokens_iter.next().unwrap());
-    for _ in 0..operands {
-        result.push(' ');
-        format_single_token(result, tokens_iter.next().unwrap().to_owned(), 0, 0);
-    }
-}
-
-fn format_single_token(
-    result: &mut String,
-    token: String,
-    current_indent: usize,
-    indent_size: usize,
-) {
-    fill_indentation(result, current_indent, indent_size);
-    result.push_str(&token);
-}
-
-fn format_inline_group(tokens_iter: &mut Peekable<Iter<String>>) -> String {
-    let mut out = String::new();
-    let mut depth = 1;
-
-    for token in tokens_iter {
-        match token.as_str() {
-            "(" => {
-                depth += 1;
-                out.push('(');
-            }
-            ")" => {
-                depth -= 1;
-                out.push(')');
-                if depth == 0 {
-                    out.pop(); // remove the last ')'
-                    out.pop(); // remove the last ' '
-                    out.push(')');
-                    break;
-                }
-            }
-            _ => {
-                out.push_str(token);
-                out.push(' ');
-            }
-        }
-    }
-
-    out
-}
-
-fn fill_indentation(result: &mut String, current_indent: usize, indent_size: usize) {
-    for _ in 0..(current_indent * indent_size) {
-        result.push(' ');
-    }
+fn peek_next_char(input: &str) -> Option<char> {
+    input.chars().next()
 }

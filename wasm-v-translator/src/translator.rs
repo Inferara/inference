@@ -10,8 +10,6 @@ use uuid::Uuid;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
-const LRB: char = '(';
-const RRB: char = ')';
 
 const LIST_EXT: &str = " ::\n";
 const LIST_SEAL: &str = "nil";
@@ -739,8 +737,8 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             let blockty = translate_block_type(blockty)?;
             format!("BI_unique ({blockty})")
         }
-        Operator::I32Uzumaki { .. } => format!("BI_uzumaki_num T_i32"),
-        Operator::I64Uzumaki { .. } => format!("BI_uzumaki_num T_i64"),
+        Operator::I32Uzumaki { .. } => String::from("BI_uzumaki_num T_i32"),
+        Operator::I64Uzumaki { .. } => String::from("BI_uzumaki_num T_i64"),
         Operator::Else => String::new(),
         Operator::End => String::new(),
         Operator::Br { relative_depth } => format!("BI_br {relative_depth}"),
@@ -1015,70 +1013,32 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::I64Extend16S => todo!(),
         Operator::I64Extend32S => todo!(),
         Operator::RefEq => todo!(),
-        Operator::StructNew { struct_type_index } => todo!(),
-        Operator::StructNewDefault { struct_type_index } => todo!(),
-        Operator::StructGet {
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructGetS {
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructGetU {
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::StructSet {
-            struct_type_index,
-            field_index,
-        } => todo!(),
-        Operator::ArrayNew { array_type_index } => todo!(),
-        Operator::ArrayNewDefault { array_type_index } => todo!(),
-        Operator::ArrayNewFixed {
-            array_type_index,
-            array_size,
-        } => todo!(),
-        Operator::ArrayNewData {
-            array_type_index,
-            array_data_index,
-        } => todo!(),
-        Operator::ArrayNewElem {
-            array_type_index,
-            array_elem_index,
-        } => todo!(),
-        Operator::ArrayGet { array_type_index } => todo!(),
-        Operator::ArrayGetS { array_type_index } => todo!(),
-        Operator::ArrayGetU { array_type_index } => todo!(),
-        Operator::ArraySet { array_type_index } => todo!(),
+        Operator::StructNew { .. } => todo!(),
+        Operator::StructNewDefault { .. } => todo!(),
+        Operator::StructGet { .. } => todo!(),
+        Operator::StructGetS { .. } => todo!(),
+        Operator::StructGetU { .. } => todo!(),
+        Operator::StructSet { .. } => todo!(),
+        Operator::ArrayNew { .. } => todo!(),
+        Operator::ArrayNewDefault { .. } => todo!(),
+        Operator::ArrayNewFixed { .. } => todo!(),
+        Operator::ArrayNewData { .. } => todo!(),
+        Operator::ArrayNewElem { .. } => todo!(),
+        Operator::ArrayGet { .. } => todo!(),
+        Operator::ArrayGetS { .. } => todo!(),
+        Operator::ArrayGetU { .. } => todo!(),
+        Operator::ArraySet { .. } => todo!(),
         Operator::ArrayLen => todo!(),
-        Operator::ArrayFill { array_type_index } => todo!(),
-        Operator::ArrayCopy {
-            array_type_index_dst,
-            array_type_index_src,
-        } => todo!(),
-        Operator::ArrayInitData {
-            array_type_index,
-            array_data_index,
-        } => todo!(),
-        Operator::ArrayInitElem {
-            array_type_index,
-            array_elem_index,
-        } => todo!(),
-        Operator::RefTestNonNull { hty } => todo!(),
-        Operator::RefTestNullable { hty } => todo!(),
-        Operator::RefCastNonNull { hty } => todo!(),
-        Operator::RefCastNullable { hty } => todo!(),
-        Operator::BrOnCast {
-            relative_depth,
-            from_ref_type,
-            to_ref_type,
-        } => todo!(),
-        Operator::BrOnCastFail {
-            relative_depth,
-            from_ref_type,
-            to_ref_type,
-        } => todo!(),
+        Operator::ArrayFill { .. } => todo!(),
+        Operator::ArrayCopy { .. } => todo!(),
+        Operator::ArrayInitData { .. } => todo!(),
+        Operator::ArrayInitElem { .. } => todo!(),
+        Operator::RefTestNonNull { .. } => todo!(),
+        Operator::RefTestNullable { .. } => todo!(),
+        Operator::RefCastNonNull { .. } => todo!(),
+        Operator::RefCastNullable { .. } => todo!(),
+        Operator::BrOnCast { .. } => todo!(),
+        Operator::BrOnCastFail { .. } => todo!(),
         Operator::AnyConvertExtern => todo!(),
         Operator::ExternConvertAny => todo!(),
         Operator::RefI31 => todo!(),
@@ -1099,14 +1059,11 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             src_mem: _,
         } => "BI_memory_copy".to_string(),
         Operator::MemoryFill { mem: _ } => "BI_memory_fill".to_string(),
-        Operator::TableInit { elem_index, table } => todo!(),
-        Operator::ElemDrop { elem_index } => todo!(),
-        Operator::TableCopy {
-            dst_table,
-            src_table,
-        } => todo!(),
-        Operator::TypedSelect { ty } => todo!(),
-        Operator::RefNull { hty } => todo!(),
+        Operator::TableInit { .. } => todo!(),
+        Operator::ElemDrop { .. } => todo!(),
+        Operator::TableCopy { .. } => todo!(),
+        Operator::TypedSelect { .. } => todo!(),
+        Operator::RefNull { .. } => todo!(),
         Operator::RefIsNull => "BI_ref_is_null".to_string(),
         Operator::RefFunc { function_index } => format!("BI_ref_func {function_index}%N"),
         Operator::TableFill { table } => format!("BI_table_fill {table}%N"),
@@ -1114,12 +1071,9 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::TableSet { table } => format!("BI_table_set {table}%N"),
         Operator::TableGrow { table } => format!("BI_table_grow {table}%N"),
         Operator::TableSize { table } => format!("BI_table_size {table}%N"),
-        Operator::ReturnCall { function_index } => todo!(),
-        Operator::ReturnCallIndirect {
-            type_index,
-            table_index,
-        } => todo!(),
-        Operator::MemoryDiscard { mem } => todo!(),
+        Operator::ReturnCall { .. } => todo!(),
+        Operator::ReturnCallIndirect { .. } => todo!(),
+        Operator::MemoryDiscard { .. } => todo!(),
         Operator::MemoryAtomicNotify { memarg: _ }
         | Operator::MemoryAtomicWait32 { memarg: _ }
         | Operator::MemoryAtomicWait64 { memarg: _ }
@@ -1193,98 +1147,98 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             ))
         }
         Operator::V128Load { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::V128Load8x8S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_S)) ({memarg})")
         }
         Operator::V128Load8x8U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i8, SX_U)) ({memarg})")
         }
         Operator::V128Load16x4S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_S)) ({memarg})")
         }
         Operator::V128Load16x4U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i16, SX_U)) ({memarg})")
         }
         Operator::V128Load32x2S { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_S)) ({memarg})")
         }
         Operator::V128Load32x2U { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_packed T_i64 (Some (Tp_i32, SX_U)) ({memarg})")
         }
         Operator::V128Load8Splat { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_splat Twv_8 ({memarg})")
         }
         Operator::V128Load16Splat { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_splat Twv_16 ({memarg})")
         }
         Operator::V128Load32Splat { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_splat Twv_32 ({memarg})")
         }
         Operator::V128Load64Splat { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_splat Twv_64 ({memarg})")
         }
         Operator::V128Load32Zero { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_zero Tztv_32 ({memarg})")
         }
         Operator::V128Load64Zero { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_load_vec LVA_zero Tztv_64 ({memarg})")
         }
         Operator::V128Store { memarg } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_64 ({memarg}) 0")
         }
         Operator::V128Load8Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
         }
         Operator::V128Load16Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
         }
         Operator::V128Load32Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
         }
         Operator::V128Load64Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
         }
         Operator::V128Store8Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_8 ({memarg}) {lane}")
         }
         Operator::V128Store16Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_16 ({memarg}) {lane}")
         }
         Operator::V128Store32Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_32 ({memarg}) {lane}")
         }
         Operator::V128Store64Lane { memarg, lane } => {
-            let memarg = translate_memarg(&memarg)?;
+            let memarg = translate_memarg(memarg)?;
             format!("BI_store_vec_lane Twv_64 ({memarg}) {lane}")
         }
         Operator::V128Const { value } => {
             let value = value.i128();
             format!("BI_const_vec {value}")
         }
-        Operator::I8x16Shuffle { lanes } => todo!(),
+        Operator::I8x16Shuffle { .. } => todo!(),
         Operator::I8x16ExtractLaneS { lane } => {
             format!("BI_extract_vec (SV_ishape SVI_8_16) (Some SX_S) {lane}")
         }
@@ -1546,13 +1500,13 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         Operator::I16x8RelaxedQ15mulrS => todo!(),
         Operator::I16x8RelaxedDotI8x16I7x16S => todo!(),
         Operator::I32x4RelaxedDotI8x16I7x16AddS => todo!(),
-        Operator::TryTable { try_table } => todo!(),
-        Operator::Throw { tag_index } => todo!(),
+        Operator::TryTable { .. } => todo!(),
+        Operator::Throw { .. } => todo!(),
         Operator::ThrowRef => todo!(),
-        Operator::Try { blockty } => todo!(),
-        Operator::Catch { tag_index } => todo!(),
-        Operator::Rethrow { relative_depth } => todo!(),
-        Operator::Delegate { relative_depth } => todo!(),
+        Operator::Try { .. } => todo!(),
+        Operator::Catch { .. } => todo!(),
+        Operator::Rethrow { .. } => todo!(),
+        Operator::Delegate { .. } => todo!(),
         Operator::CatchAll => todo!(),
         Operator::GlobalAtomicGet {
             ordering: _,
@@ -1711,32 +1665,19 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
             ))
         }
         Operator::RefI31Shared => todo!(),
-        Operator::CallRef { type_index } => todo!(),
-        Operator::ReturnCallRef { type_index } => todo!(),
+        Operator::CallRef { .. } => todo!(),
+        Operator::ReturnCallRef { .. } => todo!(),
         Operator::RefAsNonNull => todo!(),
-        Operator::BrOnNull { relative_depth } => todo!(),
-        Operator::BrOnNonNull { relative_depth } => todo!(),
-        Operator::ContNew { cont_type_index } => todo!(),
-        Operator::ContBind {
-            argument_index,
-            result_index,
-        } => todo!(),
-        Operator::Suspend { tag_index } => todo!(),
-        Operator::Resume {
-            cont_type_index,
-            resume_table,
-        } => todo!(),
-        Operator::ResumeThrow {
-            cont_type_index,
-            tag_index,
-            resume_table,
-        } => todo!(),
-        Operator::Switch {
-            cont_type_index,
-            tag_index,
-        } => todo!(),
-        Operator::I64Add128 => todo!(),
-        Operator::I64Sub128 => todo!(),
+        Operator::BrOnNull { .. } => todo!(),
+        Operator::BrOnNonNull { .. } => todo!(),
+        Operator::ContNew { .. } => todo!(),
+        Operator::ContBind { .. } => todo!(),
+        Operator::Suspend { .. } => todo!(),
+        Operator::Resume { .. } => todo!(),
+        Operator::ResumeThrow { .. } => todo!(),
+        Operator::Switch { .. } => todo!(),
+        Operator::I64Add128 { .. } => todo!(),
+        Operator::I64Sub128 { .. } => todo!(),
         Operator::I64MulWideS => todo!(),
         Operator::I64MulWideU => todo!(),
         _ => return Err(anyhow::anyhow!("Operator {:?} not recognized", operator)),

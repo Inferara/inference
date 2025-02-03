@@ -100,7 +100,7 @@ mod test {
             let z: i32 = x + y;
         }
         "#;
-        let result = parse_inf_file(input);
+        parse_inf_file(input);
         // assert_eq!(result.errors.len(), 0);
         // assert_eq!(result.wat.len(), 0);
         // assert_eq!(result.v.len(), 0);

@@ -109,7 +109,7 @@ fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(custom_section) => {
+            CustomSection(_) => {
                 // println!("Custom section: {custom_section:?}");
             }
 
