@@ -109,8 +109,94 @@ fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(_) => {
-                // println!("Custom section: {custom_section:?}");
+            CustomSection(custom_section) => {
+                println!("Custom section name: {}", custom_section.name());
+                match custom_section.as_known() {
+                    inf_wasmparser::KnownCustom::Name(name_section) => {
+                        for name in name_section {
+                            let name = name?;
+                            match name {
+                                inf_wasmparser::Name::Module { name, .. } => {
+                                    println!("Module name: {}", name);
+                                }
+                                inf_wasmparser::Name::Function(func_names) => {
+                                    for func_name in func_names {
+                                        let func_name = func_name?;
+                                        println!(
+                                            "Function name: {} at index {}",
+                                            func_name.name, func_name.index
+                                        );
+                                    }
+                                }
+                                inf_wasmparser::Name::Local(locals) => {
+                                    for local in locals {
+                                        let local = local?;
+                                        let index = local.index;
+                                        for local_names in local.names {
+                                            let local_names = local_names?;
+                                            println!(
+                                                "Local name: {} at index {} in function {}",
+                                                local_names.name, local_names.index, index
+                                            );
+                                        }
+                                    }
+                                }
+                                // inf_wasmparser::Name::Label(labels) => {
+                                //     for (index, label_names) in labels {
+                                //         for (label_index, name) in label_names {
+                                //             println!(
+                                //                 "Label name: {} at index {} in function {}",
+                                //                 name, label_index, index
+                                //             );
+                                //         }
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Type(types) => {
+                                //     for (index, name) in types {
+                                //         println!("Type name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Table(tables) => {
+                                //     for (index, name) in tables {
+                                //         println!("Table name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Memory(memories) => {
+                                //     for (index, name) in memories {
+                                //         println!("Memory name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Global(globals) => {
+                                //     for (index, name) in globals {
+                                //         println!("Global name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Element(elements) => {
+                                //     for (index, name) in elements {
+                                //         println!("Element name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Data(data) => {
+                                //     for (index, name) in data {
+                                //         println!("Data name: {} at index {}", name, index);
+                                //     }
+                                // }
+                                // inf_wasmparser::Name::Field(fields) => {
+                                //     for (index, field_names) in fields {
+                                //         for (field_index, name) in field_names {
+                                //             println!(
+                                //                 "Field name {} at index {} in function {}",
+                                //                 name, field_index, index
+                                //             );
+                                //         }
+                                //     }
+                                // }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             // most likely you'd return an error here

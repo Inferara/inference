@@ -11,6 +11,7 @@ members = [
     "tests",
     "playground-server",
     "wat-fmt",
+    "wasm-fmt",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ inference-playground-server = { path = "./playground-server", version = "0.0.1" 
 inf-wast = "0.0.5"
 inf-wasmparser = "0.0.5"
 wat-fmt = { path = "./wat-fmt", version = "0.0.1" }
-tree-sitter = "0.24.7"
+wasm-fmt = { path = "./wasm-fmt", version = "0.0.1" }
+tree-sitter = "0.25.1"
 tree-sitter-inference = "0.0.28"
 anyhow = "1.0.44"

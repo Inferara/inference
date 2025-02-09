@@ -3,7 +3,8 @@ use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
 use inference::{compile_to_wat, wasm_to_v, wat_to_wasm};
 use serde::{Deserialize, Serialize};
 
-use wat_fmt::format;
+use wasm_fmt::format as wasm_format;
+use wat_fmt::format as wat_format;
 
 #[derive(Deserialize)]
 struct CompileRequest {
@@ -14,6 +15,7 @@ struct CompileRequest {
 struct Response {
     wat: String,
     wasm: Vec<u8>,
+    wasm_str: String,
     v: String,
     errors: Vec<String>,
 }
@@ -30,6 +32,7 @@ fn parse_inf_file(input: &str) -> Response {
             return Response {
                 wat: String::new(),
                 wasm: vec![],
+                wasm_str: String::new(),
                 v: String::new(),
                 errors,
             };
@@ -45,10 +48,12 @@ fn parse_inf_file(input: &str) -> Response {
             .map(|v_str| v = v_str)
             .unwrap_or_else(|e| errors.push(e.to_string()));
 
-        let wat = format(&wat);
+        let wat = wat_format(&wat);
+        let wasm_str = wasm_format(&wasm);
         Response {
             wat,
             wasm,
+            wasm_str,
             v,
             errors,
         }
@@ -56,6 +61,7 @@ fn parse_inf_file(input: &str) -> Response {
         Response {
             wat: String::new(),
             wasm: vec![],
+            wasm_str: String::new(),
             v,
             errors,
         }
@@ -89,6 +95,8 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod test {
+    use std::any;
+
     use super::*;
 
     #[test]
@@ -105,5 +113,23 @@ mod test {
         // assert_eq!(result.wat.len(), 0);
         // assert_eq!(result.v.len(), 0);
         // assert_eq!(result.wasm.len(), 0);
+    }
+
+    #[test]
+    fn test_custom_section() {
+        let input = r#"
+        (module
+          ;; This custom section is usually automatically added when you use
+          ;; the appropriate syntax or compile with the proper flags.
+          (func $add (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "add" (func $add))
+        )
+        "#;
+
+        let binding = wat_to_wasm(input);
+        wasm_to_v("playground", &binding.unwrap()).unwrap();
     }
 }
