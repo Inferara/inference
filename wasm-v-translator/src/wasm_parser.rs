@@ -9,7 +9,7 @@ use inf_wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
-use std::io::Read;
+use std::{collections::HashMap, io::Read};
 
 use crate::translator::WasmParseData;
 
@@ -18,7 +18,7 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
     match parse(mod_name.to_string(), &data) {
-        Ok(parse_data) => parse_data.translate(),
+        Ok(mut parse_data) => parse_data.translate(),
         Err(e) => Err(anyhow::anyhow!(e.to_string())),
     }
 }
@@ -110,92 +110,47 @@ fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
             ComponentExportSection(_) => { /* ... */ }
 
             CustomSection(custom_section) => {
-                println!("Custom section name: {}", custom_section.name());
-                match custom_section.as_known() {
-                    inf_wasmparser::KnownCustom::Name(name_section) => {
-                        for name in name_section {
-                            let name = name?;
-                            match name {
-                                inf_wasmparser::Name::Module { name, .. } => {
-                                    println!("Module name: {}", name);
-                                }
-                                inf_wasmparser::Name::Function(func_names) => {
-                                    for func_name in func_names {
-                                        let func_name = func_name?;
-                                        println!(
-                                            "Function name: {} at index {}",
-                                            func_name.name, func_name.index
-                                        );
-                                    }
-                                }
-                                inf_wasmparser::Name::Local(locals) => {
-                                    for local in locals {
-                                        let local = local?;
-                                        let index = local.index;
-                                        for local_names in local.names {
-                                            let local_names = local_names?;
-                                            println!(
-                                                "Local name: {} at index {} in function {}",
-                                                local_names.name, local_names.index, index
-                                            );
-                                        }
-                                    }
-                                }
-                                // inf_wasmparser::Name::Label(labels) => {
-                                //     for (index, label_names) in labels {
-                                //         for (label_index, name) in label_names {
-                                //             println!(
-                                //                 "Label name: {} at index {} in function {}",
-                                //                 name, label_index, index
-                                //             );
-                                //         }
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Type(types) => {
-                                //     for (index, name) in types {
-                                //         println!("Type name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Table(tables) => {
-                                //     for (index, name) in tables {
-                                //         println!("Table name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Memory(memories) => {
-                                //     for (index, name) in memories {
-                                //         println!("Memory name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Global(globals) => {
-                                //     for (index, name) in globals {
-                                //         println!("Global name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Element(elements) => {
-                                //     for (index, name) in elements {
-                                //         println!("Element name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Data(data) => {
-                                //     for (index, name) in data {
-                                //         println!("Data name: {} at index {}", name, index);
-                                //     }
-                                // }
-                                // inf_wasmparser::Name::Field(fields) => {
-                                //     for (index, field_names) in fields {
-                                //         for (field_index, name) in field_names {
-                                //             println!(
-                                //                 "Field name {} at index {} in function {}",
-                                //                 name, field_index, index
-                                //             );
-                                //         }
-                                //     }
-                                // }
-                                _ => {}
+                if let inf_wasmparser::KnownCustom::Name(name_section) = custom_section.as_known() {
+                    for name in name_section {
+                        let name = name?;
+                        match name {
+                            inf_wasmparser::Name::Module { name, .. } => {
+                                wasm_parse_data.mod_name = name.to_string();
                             }
+                            inf_wasmparser::Name::Function(func_names) => {
+                                let mut func_names_map = HashMap::new();
+                                for func_name in func_names {
+                                    let func_name = func_name?;
+                                    func_names_map
+                                        .insert(func_name.index, func_name.name.to_string());
+                                }
+                                if !func_names_map.is_empty() {
+                                    wasm_parse_data.func_names_map = Some(func_names_map);
+                                }
+                            }
+                            inf_wasmparser::Name::Local(locals) => {
+                                let mut func_locals_name_map: HashMap<u32, HashMap<u32, String>> =
+                                    HashMap::new();
+                                for local in locals {
+                                    let local = local?;
+                                    let index = local.index;
+                                    func_locals_name_map.entry(index).or_default();
+                                    for naming in local.names {
+                                        let naming = naming?;
+                                        func_locals_name_map
+                                            .get_mut(&index)
+                                            .unwrap()
+                                            .insert(naming.index, naming.name.to_string());
+                                    }
+                                }
+                                if !func_locals_name_map.is_empty() {
+                                    wasm_parse_data.func_locals_name_map =
+                                        Some(func_locals_name_map);
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
                 }
             }
 

@@ -42,19 +42,19 @@ pub fn generate_string_for_source_file(source_file: &SourceFile) -> String {
 #[allow(clippy::single_match)]
 pub fn generate_for_source_file(source_file: &SourceFile) -> Vec<String> {
     let mut result = Vec::new();
+    result.push(s_module());
     for definition in &source_file.definitions {
         match definition {
             Definition::Spec(spec) => {
                 result.extend(generate_for_spec(spec));
             }
             Definition::Function(function) => {
-                result.push(s_module());
                 result.extend(generate_for_function_definition(function));
-                result.push(r_brace());
             }
             _ => {}
         }
     }
+    result.push(r_brace());
     result
 }
 
@@ -76,8 +76,8 @@ fn generate_for_spec(spec: &SpecDefinition) -> Vec<String> {
 
 fn generate_for_function_definition(function: &FunctionDefinition) -> Vec<String> {
     let mut result = Vec::new();
-    result.push(s_func());
-    result.push(format!("(export \"{}\")", function.name()));
+    result.push(format!("{} ${}", s_func(), function.name()));
+    // result.push(format!("(export \"{}\")", function.name()));
     result.extend(generate_function_parameters(function));
 
     if let Some(returns) = &function.returns {
@@ -97,6 +97,11 @@ fn generate_for_function_definition(function: &FunctionDefinition) -> Vec<String
     result.extend(locals);
     result.extend(block);
     result.push(r_brace());
+    result.push(format!(
+        "(export \"{}\" (func ${}))",
+        function.name(),
+        function.name()
+    ));
     result
 }
 

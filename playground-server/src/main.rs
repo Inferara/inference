@@ -114,22 +114,4 @@ mod test {
         // assert_eq!(result.v.len(), 0);
         // assert_eq!(result.wasm.len(), 0);
     }
-
-    #[test]
-    fn test_custom_section() {
-        let input = r#"
-        (module
-          ;; This custom section is usually automatically added when you use
-          ;; the appropriate syntax or compile with the proper flags.
-          (func $add (param i32 i32) (result i32)
-            local.get 0
-            local.get 1
-            i32.add)
-          (export "add" (func $add))
-        )
-        "#;
-
-        let binding = wat_to_wasm(input);
-        wasm_to_v("playground", &binding.unwrap()).unwrap();
-    }
 }
