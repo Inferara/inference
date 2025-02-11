@@ -799,7 +799,10 @@ fn translate_basic_operator(
         Operator::LocalGet { local_index } => {
             if let Some(local_name_map) = local_name_map {
                 if local_name_map.contains_key(local_index) {
-                    format!("BI_local_get {}", local_name_map.get(local_index).unwrap())
+                    format!(
+                        "BI_local_get {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
                 } else {
                     format!("BI_local_get {local_index}%N")
                 }
@@ -810,7 +813,10 @@ fn translate_basic_operator(
         Operator::LocalSet { local_index } => {
             if let Some(local_name_map) = local_name_map {
                 if local_name_map.contains_key(local_index) {
-                    format!("BI_local_set {}", local_name_map.get(local_index).unwrap())
+                    format!(
+                        "BI_local_set {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
                 } else {
                     format!("BI_local_set {local_index}%N")
                 }
@@ -821,7 +827,10 @@ fn translate_basic_operator(
         Operator::LocalTee { local_index } => {
             if let Some(local_name_map) = local_name_map {
                 if local_name_map.contains_key(local_index) {
-                    format!("BI_local_tee {}", local_name_map.get(local_index).unwrap())
+                    format!(
+                        "BI_local_tee {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
                 } else {
                     format!("BI_local_tee {local_index}%N")
                 }
