@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{fmt::Display, iter::Peekable};
+use std::{collections::HashMap, fmt::Display};
 
 use inf_wasmparser::{
     BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems, ElementKind, Export,
@@ -15,7 +15,9 @@ const LIST_EXT: &str = " ::\n";
 const LIST_SEAL: &str = "nil";
 
 pub(crate) struct WasmParseData<'a> {
-    mod_name: String,
+    pub(crate) mod_name: String,
+    pub(crate) func_names_map: Option<HashMap<u32, String>>,
+    pub(crate) func_locals_name_map: Option<HashMap<u32, HashMap<u32, String>>>,
 
     pub(crate) start_function: Option<u32>,
 
@@ -29,12 +31,17 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_types: Vec<RecGroup>,
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
+
+    translated_function_names: Vec<String>,
+    translated_functions_string: String,
 }
 
 impl WasmParseData<'_> {
     pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
+            func_names_map: None,
+            func_locals_name_map: None,
             start_function: None,
             imports: Vec::new(),
             exports: Vec::new(),
@@ -46,11 +53,14 @@ impl WasmParseData<'_> {
             function_types: Vec::new(),
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
+
+            translated_function_names: Vec::new(),
+            translated_functions_string: String::new(),
         }
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn translate(&self) -> anyhow::Result<String /* WasmModuleParseError*/> {
+    pub(crate) fn translate(&mut self) -> anyhow::Result<String /* WasmModuleParseError*/> {
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");
@@ -212,10 +222,10 @@ impl WasmParseData<'_> {
         created_function_types.push_str(LIST_SEAL);
 
         let mut created_functions = String::new();
-        match translate_functions(&self.function_type_indexes, &self.function_bodies) {
-            Ok((translated_function_names, translated_functions_string)) => {
-                res.push_str(translated_functions_string.as_str());
-                for function_name in translated_function_names {
+        match self.translate_functions() {
+            Ok(_) => {
+                res.push_str(self.translated_functions_string.as_str());
+                for function_name in &self.translated_function_names {
                     created_functions.push_str("    ");
                     created_functions.push_str(function_name.as_str());
                     created_functions.push_str(LIST_EXT);
@@ -251,6 +261,55 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
         Ok(res)
+    }
+
+    //Record module_func
+    fn translate_functions(&mut self) -> anyhow::Result<()> {
+        for (index, function_body) in self.function_bodies.iter().enumerate() {
+            let modfunc_type = *self.function_type_indexes.get(index).unwrap_or(&0);
+            let func_name = if let Some(func_names_map) = &self.func_names_map {
+                func_names_map
+                    .get(&(index as u32))
+                    .unwrap_or(&format!("func_{}", get_id()))
+                    .to_owned()
+            } else {
+                format!("func_{}", get_id())
+            };
+            self.translated_function_names.push(func_name.clone());
+
+            let mut modfunc_locals = String::new();
+            if let Ok(locals_reader) = function_body.get_locals_reader() {
+                for local in locals_reader {
+                    let (reps, val_type) = local.unwrap();
+                    let val_type = translate_value_type(&val_type)?;
+                    for _ in 0..reps {
+                        modfunc_locals.push_str(format!("{val_type} :: ").as_str());
+                    }
+                }
+            }
+            modfunc_locals.push_str("nil");
+
+            let modfunc_body = match &self.func_locals_name_map {
+                Some(func_locals_name_map) => translate_expr(
+                    &mut function_body.get_operators_reader()?,
+                    func_locals_name_map.get(&modfunc_type).cloned(),
+                )?,
+                None => translate_expr(&mut function_body.get_operators_reader()?, None)?,
+            };
+
+            self.translated_functions_string
+                .push_str(format!("Definition {func_name} : module_func := ").as_str());
+            self.translated_functions_string.push_str(LCB);
+            self.translated_functions_string
+                .push_str(format!("  modfunc_type := {modfunc_type}%N;\n").as_str());
+            self.translated_functions_string
+                .push_str(format!("  modfunc_locals := {modfunc_locals};\n").as_str());
+            self.translated_functions_string
+                .push_str(format!("  modfunc_body :=\n{modfunc_body};\n").as_str());
+            self.translated_functions_string.push_str(RCB_DOT);
+            self.translated_functions_string.push('\n');
+        }
+        Ok(())
     }
 }
 
@@ -378,7 +437,7 @@ fn translate_memory_type(memory_type: &MemoryType) -> anyhow::Result<String> {
 fn translate_global(global: &Global) -> anyhow::Result<String> {
     let tg_mut = translate_mutability(global.ty.mutable);
     let tg_t = translate_value_type(&global.ty.content_type)?;
-    let mg_init = translate_expr(&mut global.init_expr.get_operators_reader())?;
+    let mg_init = translate_expr(&mut global.init_expr.get_operators_reader(), None)?;
     Ok(format!("Mg {tg_mut} ({tg_t}) ({mg_init})"))
 }
 
@@ -389,7 +448,7 @@ fn translate_module_datamode(data: &Data) -> anyhow::Result<String> {
             memory_index,
             offset_expr,
         } => {
-            let expression = translate_expr(&mut offset_expr.get_operators_reader())?;
+            let expression = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
             format!("MD_active {memory_index}%N ({expression})")
         }
         DataKind::Passive => "MD_passive".to_string(),
@@ -414,8 +473,10 @@ struct ConditionExpr<'a> {
     else_arm: Expression<'a>,
 }
 
+#[derive(Default)]
 struct Expression<'a> {
     parts: Vec<ExpressionPart<'a>>,
+    local_name_map: Option<HashMap<u32, String>>,
 }
 
 impl Expression<'_> {
@@ -432,13 +493,15 @@ impl Expression<'_> {
                     Operator::Else | Operator::End => {}
                     _ => {
                         res.push_str(offset.as_str());
-                        res.push_str(translate_basic_operator(op)?.as_str());
+                        res.push_str(translate_basic_operator(op, &self.local_name_map)?.as_str());
                         res.push_str(LIST_EXT);
                     }
                 },
                 ExpressionPart::Block(block) => {
                     res.push_str(offset.as_str());
-                    res.push_str(translate_basic_operator(&block.label)?.as_str());
+                    res.push_str(
+                        translate_basic_operator(&block.label, &self.local_name_map)?.as_str(),
+                    );
                     res.push_str(" (\n");
                     res.push_str(block.parts.print_with_offset(tabs_count + 1)?.as_str());
                     res.push_str(") ");
@@ -446,7 +509,9 @@ impl Expression<'_> {
                 }
                 ExpressionPart::Condition(cond) => {
                     res.push_str(offset.as_str());
-                    res.push_str(translate_basic_operator(&cond.label)?.as_str());
+                    res.push_str(
+                        translate_basic_operator(&cond.label, &self.local_name_map)?.as_str(),
+                    );
                     res.push_str(" (\n");
                     res.push_str(cond.then_arm.print_with_offset(tabs_count + 1)?.as_str());
                     res.push_str(") (\n");
@@ -473,9 +538,9 @@ impl Display for Expression<'_> {
 }
 
 fn translate_expression<'a>(
-    operators_reader: &mut Peekable<OperatorsIterator<'a>>,
+    operators_reader: &mut OperatorsIterator<'a>,
 ) -> anyhow::Result<Expression<'a>> {
-    let mut result = Expression { parts: Vec::new() };
+    let mut result = Expression::default();
     while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
         match next_operator {
@@ -500,7 +565,7 @@ fn translate_expression<'a>(
                     then_arm.last_part().unwrap(),
                     ExpressionPart::Operator(Operator::End)
                 ) {
-                    Expression { parts: Vec::new() }
+                    Expression::default()
                 } else {
                     translate_expression(operators_reader)?
                 };
@@ -526,9 +591,13 @@ fn translate_expression<'a>(
     Ok(result)
 }
 
-fn translate_expr(operators_reader: &mut OperatorsReader) -> anyhow::Result<String> {
-    let mut peekable_operators_reader = operators_reader.clone().into_iter().peekable();
-    let expression = translate_expression(&mut peekable_operators_reader)?;
+fn translate_expr(
+    operators_reader: &mut OperatorsReader,
+    local_name_map: Option<HashMap<u32, String>>,
+) -> anyhow::Result<String> {
+    let mut peekable_operators_reader = operators_reader.clone().into_iter();
+    let mut expression = translate_expression(&mut peekable_operators_reader)?;
+    expression.local_name_map = local_name_map;
     Ok(expression.to_string())
 }
 
@@ -561,7 +630,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             offset_expr,
         } => {
             let tableidx = table_index.unwrap_or_default();
-            let expr = translate_expr(&mut offset_expr.get_operators_reader())?;
+            let expr = translate_expr(&mut offset_expr.get_operators_reader(), None)?;
             format!("ME_active {tableidx}%N ({expr})")
         }
         ElementKind::Passive => "ME_passive".to_string(),
@@ -574,7 +643,7 @@ fn translate_element(element: &Element) -> anyhow::Result<String> {
             let mut expr_list = String::new();
             for result in elements.clone().into_iter_with_offsets() {
                 let (_, expr_reader) = result?;
-                let expr = translate_expr(&mut expr_reader.get_operators_reader())?;
+                let expr = translate_expr(&mut expr_reader.get_operators_reader(), None)?;
                 expr_list.push_str(format!("({expr})").as_str());
                 expr_list.push_str(" ::\n");
             }
@@ -663,49 +732,11 @@ fn translate_function_type(rec_group: &RecGroup) -> anyhow::Result<String> {
     Ok(res)
 }
 
-//Record module_func
-fn translate_functions(
-    function_type_indexes: &[u32],
-    function_bodies: &[FunctionBody],
-) -> anyhow::Result<(Vec<String>, String)> {
-    let mut translated_function_names = Vec::new();
-    let mut translated_functions_string = String::new();
-    for (index, function_body) in function_bodies.iter().enumerate() {
-        let id = get_id();
-        translated_function_names.push(format!("func_{id}"));
-        let modfunc_type = *function_type_indexes.get(index).unwrap_or(&0);
-
-        let mut modfunc_locals = String::new();
-        if let Ok(locals_reader) = function_body.get_locals_reader() {
-            for local in locals_reader {
-                let (reps, val_type) = local.unwrap();
-                let val_type = translate_value_type(&val_type)?;
-                for _ in 0..reps {
-                    modfunc_locals.push_str(format!("{val_type} :: ").as_str());
-                }
-            }
-        }
-        modfunc_locals.push_str("nil");
-
-        let modfunc_body = translate_expr(&mut function_body.get_operators_reader()?)?;
-
-        translated_functions_string
-            .push_str(format!("Definition func_{id} : module_func := ").as_str());
-        translated_functions_string.push_str(LCB);
-        translated_functions_string
-            .push_str(format!("  modfunc_type := {modfunc_type}%N;\n").as_str());
-        translated_functions_string
-            .push_str(format!("  modfunc_locals := {modfunc_locals};\n").as_str());
-        translated_functions_string
-            .push_str(format!("  modfunc_body :=\n{modfunc_body};\n").as_str());
-        translated_functions_string.push_str(RCB_DOT);
-        translated_functions_string.push('\n');
-    }
-    Ok((translated_function_names, translated_functions_string))
-}
-
 //Inductive basic_instruction
-fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
+fn translate_basic_operator(
+    operator: &Operator,
+    local_name_map: &Option<HashMap<u32, String>>,
+) -> anyhow::Result<String> {
     let operator = match operator {
         inf_wasmparser::Operator::Nop => "BI_nop".to_string(),
         inf_wasmparser::Operator::Unreachable => "BI_unreachable".to_string(),
@@ -765,9 +796,48 @@ fn translate_basic_operator(operator: &Operator) -> anyhow::Result<String> {
         } => format!("BI_call_indirect {type_index} {table_index}"),
         Operator::Drop => "BI_drop".to_string(),
         Operator::Select => "BI_select None".to_string(),
-        Operator::LocalGet { local_index } => format!("BI_local_get {local_index}%N"),
-        Operator::LocalSet { local_index } => format!("BI_local_set {local_index}%N"),
-        Operator::LocalTee { local_index } => format!("BI_local_tee {local_index}%N"),
+        Operator::LocalGet { local_index } => {
+            if let Some(local_name_map) = local_name_map {
+                if local_name_map.contains_key(local_index) {
+                    format!(
+                        "BI_local_get {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
+                } else {
+                    format!("BI_local_get {local_index}%N")
+                }
+            } else {
+                format!("BI_local_get {local_index}%N")
+            }
+        }
+        Operator::LocalSet { local_index } => {
+            if let Some(local_name_map) = local_name_map {
+                if local_name_map.contains_key(local_index) {
+                    format!(
+                        "BI_local_set {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
+                } else {
+                    format!("BI_local_set {local_index}%N")
+                }
+            } else {
+                format!("BI_local_set {local_index}%N")
+            }
+        }
+        Operator::LocalTee { local_index } => {
+            if let Some(local_name_map) = local_name_map {
+                if local_name_map.contains_key(local_index) {
+                    format!(
+                        "BI_local_tee {local_index}%N (*{}*)",
+                        local_name_map.get(local_index).unwrap()
+                    )
+                } else {
+                    format!("BI_local_tee {local_index}%N")
+                }
+            } else {
+                format!("BI_local_tee {local_index}%N")
+            }
+        }
         Operator::GlobalGet { global_index } => format!("BI_global_get {global_index}%N"),
         Operator::GlobalSet { global_index } => format!("BI_global_set {global_index}%N"),
         Operator::I32Load { memarg } => {

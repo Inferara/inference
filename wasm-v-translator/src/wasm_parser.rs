@@ -9,7 +9,7 @@ use inf_wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
-use std::io::Read;
+use std::{collections::HashMap, io::Read};
 
 use crate::translator::WasmParseData;
 
@@ -18,7 +18,7 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
     match parse(mod_name.to_string(), &data) {
-        Ok(parse_data) => parse_data.translate(),
+        Ok(mut parse_data) => parse_data.translate(),
         Err(e) => Err(anyhow::anyhow!(e.to_string())),
     }
 }
@@ -109,8 +109,49 @@ fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
             ComponentImportSection(_) => { /* ... */ }
             ComponentExportSection(_) => { /* ... */ }
 
-            CustomSection(_) => {
-                // println!("Custom section: {custom_section:?}");
+            CustomSection(custom_section) => {
+                if let inf_wasmparser::KnownCustom::Name(name_section) = custom_section.as_known() {
+                    for name in name_section {
+                        let name = name?;
+                        match name {
+                            inf_wasmparser::Name::Module { name, .. } => {
+                                wasm_parse_data.mod_name = name.to_string();
+                            }
+                            inf_wasmparser::Name::Function(func_names) => {
+                                let mut func_names_map = HashMap::new();
+                                for func_name in func_names {
+                                    let func_name = func_name?;
+                                    func_names_map
+                                        .insert(func_name.index, func_name.name.to_string());
+                                }
+                                if !func_names_map.is_empty() {
+                                    wasm_parse_data.func_names_map = Some(func_names_map);
+                                }
+                            }
+                            inf_wasmparser::Name::Local(locals) => {
+                                let mut func_locals_name_map: HashMap<u32, HashMap<u32, String>> =
+                                    HashMap::new();
+                                for local in locals {
+                                    let local = local?;
+                                    let index = local.index;
+                                    func_locals_name_map.entry(index).or_default();
+                                    for naming in local.names {
+                                        let naming = naming?;
+                                        func_locals_name_map
+                                            .get_mut(&index)
+                                            .unwrap()
+                                            .insert(naming.index, naming.name.to_string());
+                                    }
+                                }
+                                if !func_locals_name_map.is_empty() {
+                                    wasm_parse_data.func_locals_name_map =
+                                        Some(func_locals_name_map);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
 
             // most likely you'd return an error here
