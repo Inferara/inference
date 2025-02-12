@@ -7,8 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-/// The full (dummy) Operator enum with one variant per opcode.
-/// In a real parser these variants would carry proper arguments.
+#[allow(non_camel_case_types)]
 #[derive(Clone)]
 pub enum Operator {
     // --- Control instructions ---
