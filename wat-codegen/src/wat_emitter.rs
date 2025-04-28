@@ -123,7 +123,7 @@ impl WatEmitter {
 
     fn emit_function_parameters(function: &FunctionDefinition) -> Vec<String> {
         let mut result = Vec::new();
-        if let Some(parameters) = &function.parameters {
+        if let Some(parameters) = &function.arguments {
             for parameter in parameters {
                 result.push(format!(
                     "(param ${} {})",

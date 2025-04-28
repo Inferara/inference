@@ -161,7 +161,7 @@ impl FunctionDefinition {
             id: get_node_id(),
             location,
             name,
-            parameters: arguments,
+            arguments,
             returns,
             body,
         }
@@ -317,7 +317,7 @@ impl VariableDefinitionStatement {
         name: Rc<Identifier>,
         type_: Type,
         value: Option<Expression>,
-        is_undef: bool,
+        is_uzumaki: bool,
     ) -> Self {
         VariableDefinitionStatement {
             id: get_node_id(),
@@ -325,7 +325,7 @@ impl VariableDefinitionStatement {
             name,
             type_,
             value,
-            is_undef,
+            is_uzumaki,
         }
     }
 
