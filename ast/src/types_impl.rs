@@ -34,6 +34,7 @@ impl SourceFile {
     }
 
     pub fn add_use_directive(&mut self, use_directive: Rc<UseDirective>) {
+    pub fn add_use_directive(&mut self, use_directive: Rc<UseDirective>) {
         self.use_directives.push(use_directive);
     }
 

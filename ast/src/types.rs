@@ -89,7 +89,7 @@ macro_rules! ast_nodes {
             }
         )+
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         pub enum AstNode {
             $(
                 $name(std::rc::Rc<$name>),
@@ -97,6 +97,7 @@ macro_rules! ast_nodes {
         }
 
         impl AstNode {
+            #[must_use]
             pub fn id(&self) -> u32 {
                 match self {
                     $(

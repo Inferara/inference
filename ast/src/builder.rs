@@ -1,6 +1,4 @@
 #![warn(clippy::pedantic)]
-
-use core::panicking::panic;
 use std::{collections::HashMap, marker::PhantomData, rc::Rc};
 
 use crate::{
@@ -46,6 +44,12 @@ pub struct Builder<'a, S> {
     _state: PhantomData<S>,
 }
 
+impl Default for Builder<'_, InitState> {
+    fn default() -> Self {
+        Builder::new()
+    }
+}
+
 impl<'a> Builder<'a, InitState> {
     #[must_use]
     pub fn new() -> Self {
@@ -80,10 +84,11 @@ impl<'a> Builder<'a, InitState> {
     /// # Errors
     ///
     /// This function will return an error if the `source_file` is malformed and a valid AST cannot be constructed.
+    #[allow(clippy::single_match_else)]
     pub fn build_ast(&mut self) -> anyhow::Result<Builder<CompleteState>> {
         let mut res = Vec::new();
         for (root, code) in &self.source_code.clone() {
-            let location = Self::get_location(&root, code);
+            let location = Self::get_location(root, code);
             let mut ast = SourceFile::new(location);
 
             for i in 0..root.child_count() {
@@ -92,16 +97,11 @@ impl<'a> Builder<'a, InitState> {
 
                     match child_kind {
                         "use_directive" => {
-                            ast.add_use_directive(self.build_use_directive(&child, code))
+                            ast.add_use_directive(self.build_use_directive(&child, code));
                         }
                         _ => {
-                            if let Ok(definition) = self.build_definition(&child, code) {
-                                ast.add_definition(definition);
-                            } else {
-                                return Err(anyhow::anyhow!(
-                                    "Unexpected child of type {child_kind}"
-                                ));
-                            }
+                            let definition = self.build_definition(&child, code);
+                            ast.add_definition(definition);
                         }
                     }
                 }
@@ -117,7 +117,7 @@ impl<'a> Builder<'a, InitState> {
         })
     }
 
-    fn build_use_directive(&mut self, node: &Node, code: &[u8]) -> UseDirective {
+    fn build_use_directive(&mut self, node: &Node, code: &[u8]) -> Rc<UseDirective> {
         let location = Self::get_location(node, code);
         let mut segments = None;
         let mut imported_types = None;
@@ -125,12 +125,12 @@ impl<'a> Builder<'a, InitState> {
         let mut cursor = node.walk();
 
         if let Some(from_literal) = node.child_by_field_name("from_literal") {
-            from = Some(self.build_string_literal(&from_literal, code).value);
+            from = Some(self.build_string_literal(&from_literal, code).value.clone());
         } else {
             let founded_segments = node
                 .children_by_field_name("segment", &mut cursor)
                 .map(|segment| self.build_identifier(&segment, code));
-            let founded_segments: Vec<Identifier> = founded_segments.collect();
+            let founded_segments: Vec<Rc<Identifier>> = founded_segments.collect();
             if !founded_segments.is_empty() {
                 segments = Some(founded_segments);
             }
@@ -140,30 +140,33 @@ impl<'a> Builder<'a, InitState> {
         let founded_imported_types = node
             .children_by_field_name("imported_type", &mut cursor)
             .map(|imported_type| self.build_identifier(&imported_type, code));
-        let founded_imported_types: Vec<Identifier> = founded_imported_types.collect();
+        let founded_imported_types: Vec<Rc<Identifier>> = founded_imported_types.collect();
         if !founded_imported_types.is_empty() {
             imported_types = Some(founded_imported_types);
         }
 
-        UseDirective::new(imported_types, segments, from, location)
+        let node = Rc::new(UseDirective::new(imported_types, segments, from, location));
+        self.arena.add_node(AstNode::UseDirective(node.clone()));
+        node
     }
 
-    fn build_spec_definition(&mut self, node: &Node, code: &[u8]) -> SpecDefinition {
+    fn build_spec_definition(&mut self, node: &Node, code: &[u8]) -> Rc<SpecDefinition> {
         let location = Self::get_location(node, code);
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
         let mut definitions = Vec::new();
 
         for i in 0..node.child_count() {
             let child = node.child(i).unwrap();
-            if let Ok(definition) = self.build_definition(&child, code) {
-                definitions.push(definition);
-            }
+            let definition = self.build_definition(&child, code);
+            definitions.push(definition);
         }
 
-        SpecDefinition::new(name, definitions, location)
+        let node = Rc::new(SpecDefinition::new(name, definitions, location));
+        self.arena.add_node(AstNode::SpecDefinition(node.clone()));
+        node
     }
 
-    fn build_enum_definition(&mut self, node: &Node, code: &[u8]) -> EnumDefinition {
+    fn build_enum_definition(&mut self, node: &Node, code: &[u8]) -> Rc<EnumDefinition> {
         let location = Self::get_location(node, code);
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
         let mut variants = Vec::new();
@@ -172,12 +175,14 @@ impl<'a> Builder<'a, InitState> {
         let founded_variants = node
             .children_by_field_name("variant", &mut cursor)
             .map(|segment| self.build_identifier(&segment, code));
-        let founded_variants: Vec<Identifier> = founded_variants.collect();
+        let founded_variants: Vec<Rc<Identifier>> = founded_variants.collect();
         if !founded_variants.is_empty() {
             variants = founded_variants;
         }
 
-        EnumDefinition::new(name, variants, location)
+        let node = Rc::new(EnumDefinition::new(name, variants, location));
+        self.arena.add_node(AstNode::EnumDefinition(node.clone()));
+        node
     }
 
     fn build_definition(&mut self, node: &Node, code: &[u8]) -> Definition {
@@ -185,7 +190,7 @@ impl<'a> Builder<'a, InitState> {
         match kind {
             "spec_definition" => Definition::Spec(self.build_spec_definition(node, code)),
             "struct_definition" => {
-                let struct_definition = self.build_struct_definition(node, code)?;
+                let struct_definition = self.build_struct_definition(node, code);
                 Definition::Struct(struct_definition)
             }
             "enum_definition" => Definition::Enum(self.build_enum_definition(node, code)),
@@ -193,13 +198,13 @@ impl<'a> Builder<'a, InitState> {
                 Definition::Constant(self.build_constant_definition(node, code))
             }
             "function_definition" => {
-                Definition::Function(self.build_function_definition(node, code)?)
+                Definition::Function(self.build_function_definition(node, code))
             }
             "external_function_definition" => {
                 Definition::ExternalFunction(self.build_external_function_definition(node, code))
             }
             "type_definition_statement" => Definition::Type(self.build_type_definition(node, code)),
-            _ => panic!("Unexpected definition type: {}", kind),
+            _ => panic!("Unexpected definition type: {kind}"),
         }
     }
 
@@ -275,6 +280,8 @@ impl<'a> Builder<'a, InitState> {
         let node = Rc::new(FunctionDefinition::new(
             name, arguments, returns, body, location,
         ));
+        self.arena
+            .add_node(AstNode::FunctionDefinition(node.clone()));
         node
     }
 
