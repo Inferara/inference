@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::rc::Rc;
+use std::{fmt::Display, rc::Rc};
 
 use crate::symbols::SymbolType;
 
@@ -126,8 +127,13 @@ impl EnumDefinition {
 
 impl Identifier {
     #[must_use]
-    pub fn new(id: u32, name: String, location: Location) -> Self {
-        Identifier { id, location, name }
+    pub fn new(id: u32, name: String, location: Location, ty: Option<SymbolType>) -> Self {
+        Identifier {
+            id,
+            location,
+            name,
+            ty,
+        }
     }
 }
 
@@ -536,10 +542,30 @@ impl UnitLiteral {
     }
 }
 
+impl Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Array(at) => write!(f, "{}", at),
+            Type::Simple(st) => write!(f, "{}", st),
+            Type::Generic(gt) => write!(f, "{}", gt),
+            Type::Function(ft) => write!(f, "{}", ft),
+            Type::Qualified(q) => write!(f, "{}", q),
+            Type::QualifiedName(qn) => write!(f, "{}", qn),
+            Type::Custom(identifier) => write!(f, "{}", identifier.name),
+        }
+    }
+}
+
 impl SimpleType {
     #[must_use]
     pub fn new(id: u32, location: Location, name: String) -> Self {
         SimpleType { id, location, name }
+    }
+}
+
+impl Display for SimpleType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
     }
 }
 
@@ -555,20 +581,47 @@ impl GenericType {
     }
 }
 
+impl Display for GenericType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}<{}>",
+            self.base.name,
+            self.parameters
+                .iter()
+                .map(|param| format!("{}", param))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+
 impl FunctionType {
     #[must_use]
-    pub fn new(
-        id: u32,
-        location: Location,
-        parameters: Option<Vec<Type>>,
-        returns: Box<Type>,
-    ) -> Self {
+    pub fn new(id: u32, location: Location, parameters: Option<Vec<Type>>, returns: Type) -> Self {
         FunctionType {
             id,
             location,
             parameters,
             returns,
         }
+    }
+}
+
+impl Display for FunctionType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "fn({})->{}",
+            self.parameters.as_ref().map_or("".to_string(), |params| {
+                params
+                    .iter()
+                    .map(|param| format!("{}", param))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
+            self.returns
+        )
     }
 }
 
@@ -589,6 +642,12 @@ impl QualifiedName {
     }
 }
 
+impl Display for QualifiedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}::{}", self.qualifier.name, self.name.name)
+    }
+}
+
 impl TypeQualifiedName {
     #[must_use]
     pub fn new(id: u32, location: Location, alias: Rc<Identifier>, name: Rc<Identifier>) -> Self {
@@ -601,19 +660,33 @@ impl TypeQualifiedName {
     }
 }
 
+impl Display for TypeQualifiedName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}::{}as", self.alias.name, self.name.name)
+    }
+}
+
 impl TypeArray {
     #[must_use]
-    pub fn new(
-        id: u32,
-        location: Location,
-        element_type: Box<Type>,
-        size: Option<Box<Expression>>,
-    ) -> Self {
+    pub fn new(id: u32, location: Location, element_type: Type, size: Option<Expression>) -> Self {
         TypeArray {
             id,
             location,
             element_type,
             size,
         }
+    }
+}
+
+impl Display for TypeArray {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{};{}]",
+            self.element_type,
+            self.size
+                .as_ref()
+                .map_or("".to_string(), |size| format!("{}", size))
+        )
     }
 }

@@ -253,7 +253,9 @@ impl WatEmitter {
             Expression::MemberAccess(member_access) => {
                 result.extend(self.emit_for_member_access(member_access));
             }
-            Expression::Uzumaki(_) => result.push(String::from("i32.uzumaki")),
+            Expression::Uzumaki(u) => {
+                result.push(format!("{}.uzumaki", Self::emit_for_symbol_type(&u.ty)));
+            }
             _ => result.push(format!("{expr:?} expression type is not supported yet")),
         }
         result
@@ -294,7 +296,7 @@ impl WatEmitter {
 
     fn emit_for_type(type_: &Type) -> String {
         match type_ {
-            Type::Simple(simple) => simple.name.clone(),
+            Type::Simple(simple) => Self::map_integer_types(&simple.name.clone()),
             Type::Custom(identifier) => identifier.name.clone(),
             _ => format!("{type_:?} type is not supported yet"),
         }
@@ -302,7 +304,16 @@ impl WatEmitter {
 
     fn emit_for_symbol_type(symbol_type: &SymbolType) -> String {
         match symbol_type {
-            SymbolType::Global(name) | SymbolType::Inner(name) => name.clone(),
+            SymbolType::Global(name) => Self::map_integer_types(&name.clone()),
+            SymbolType::Inner(name) => name.clone(),
+            SymbolType::Untyped => format!("shoudl not try to emit type for {symbol_type:?}"),
+        }
+    }
+
+    fn map_integer_types(t: &str) -> String {
+        match t {
+            "i64" | "u64" => String::from("i64"),
+            _ => String::from("i32"),
         }
     }
 

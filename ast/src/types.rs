@@ -206,7 +206,7 @@ ast_enums! {
         Literal(Literal),//TODO add type
         Identifier(Rc<Identifier>),//TODO add type
         Type(Type),//TODO add type
-        Uzumaki(Rc<UzumakiExpression>),//TODO add type
+        Uzumaki(Rc<UzumakiExpression>),
     }
 
     pub enum Literal {
@@ -362,6 +362,7 @@ ast_nodes! {
 
     pub struct Identifier {
         pub name: String,
+        pub ty: Option<SymbolType>
     }
 
     pub struct ConstantDefinition {
