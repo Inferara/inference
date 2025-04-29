@@ -1,9 +1,10 @@
-#![warn(clippy::pedantic)]
-
-use inference_ast::types::{
-    AssertStatement, BinaryExpression, BlockType, Definition, Expression, FunctionCallExpression,
-    FunctionDefinition, Literal, MemberAccessExpression, OperatorKind, SourceFile, SpecDefinition,
-    Statement, Type, VariableDefinitionStatement,
+use inference_ast::{
+    symbols::SymbolType,
+    types::{
+        AssertStatement, BinaryExpression, BlockType, Definition, Expression,
+        FunctionCallExpression, FunctionDefinition, Literal, MemberAccessExpression, OperatorKind,
+        SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
+    },
 };
 
 fn r_brace() -> String {
@@ -299,12 +300,18 @@ impl WatEmitter {
         }
     }
 
+    fn emit_for_symbol_type(symbol_type: &SymbolType) -> String {
+        match symbol_type {
+            SymbolType::Global(name) | SymbolType::Inner(name) => name.clone(),
+        }
+    }
+
     #[allow(clippy::single_match_else)]
     fn emit_for_literal(literal: &Literal) -> String {
         match literal {
             Literal::Number(number) => {
                 let literal_value = &number.value;
-                let type_ = WatEmitter::emit_for_type(&number.type_);
+                let type_ = WatEmitter::emit_for_symbol_type(&number.ty);
                 format!("{type_}.const {literal_value}")
             }
             _ => format!("{literal:?} literal is not supported yet"),

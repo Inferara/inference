@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 
-use crate::{node::Location, types::TypeMemberAccessExpression};
+use crate::symbols::SymbolType;
 
 use super::types::{
     ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
@@ -144,7 +144,7 @@ impl ConstantDefinition {
             id,
             location,
             name,
-            type_,
+            ty: type_,
             value,
         }
     }
@@ -437,7 +437,7 @@ impl PrefixUnaryExpression {
 
 impl UzumakiExpression {
     #[must_use]
-    pub fn new(id: u32, location: Location, ty: Type) -> Self {
+    pub fn new(id: u32, location: Location, ty: SymbolType) -> Self {
         UzumakiExpression { id, location, ty }
     }
 }
@@ -519,12 +519,12 @@ impl StringLiteral {
 
 impl NumberLiteral {
     #[must_use]
-    pub fn new(id: u32, location: Location, value: String, type_: Type) -> Self {
+    pub fn new(id: u32, location: Location, value: String, ty: SymbolType) -> Self {
         NumberLiteral {
             id,
             location,
             value,
-            type_,
+            ty,
         }
     }
 }

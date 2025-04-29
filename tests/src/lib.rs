@@ -1,4 +1,5 @@
 //! This module contains various infc end to end tests
+mod ast;
 
 #[cfg(test)]
 mod general_tests {

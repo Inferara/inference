@@ -1,11 +1,13 @@
-use std::{collections::HashMap, marker::PhantomData, rc::Rc};
+use std::{marker::PhantomData, rc::Rc};
 
 use crate::{
     arena::Arena,
+    symbols::{SymbolTable, SymbolType},
+    t_ast::TypedAst,
     types::{
         ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AstNode,
-        BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition,
-        EnumDefinition, Expression, ExternalFunctionDefinition, FunctionCallExpression,
+        BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition,
+        Definition, EnumDefinition, Expression, ExternalFunctionDefinition, FunctionCallExpression,
         FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, Location,
         LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind, Parameter,
         ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType,
@@ -15,8 +17,6 @@ use crate::{
     },
 };
 use tree_sitter::Node;
-
-use super::types::BlockType;
 
 #[allow(dead_code)]
 trait BuilderInit {}
@@ -28,17 +28,12 @@ impl BuilderInit for InitState {}
 pub struct CompleteState;
 impl BuilderComplete for CompleteState {}
 
-pub enum Scope {
-    Global,
-    Inner(String),
-}
-
 #[allow(dead_code)]
 pub struct Builder<'a, S> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    types_table: HashMap<String, Scope>,
-    t_ast: Vec<SourceFile>,
+    types: Vec<SymbolType>,
+    t_ast: Option<TypedAst>,
     _state: PhantomData<S>,
 }
 
@@ -54,8 +49,8 @@ impl<'a> Builder<'a, InitState> {
         Self {
             arena: Arena::default(),
             source_code: Vec::new(),
-            types_table: HashMap::new(),
-            t_ast: Vec::new(),
+            types: Vec::new(),
+            t_ast: None,
             _state: PhantomData,
         }
     }
@@ -107,11 +102,13 @@ impl<'a> Builder<'a, InitState> {
             }
             res.push(ast);
         }
+        let symbol_table = SymbolTable::build(self.types.clone(), &res);
+        let t_ast = TypedAst::new(res, symbol_table, self.arena.clone());
         Ok(Builder {
-            arena: self.arena.clone(),
+            arena: Arena::default(),
             source_code: Vec::new(),
-            types_table: HashMap::new(),
-            t_ast: res,
+            types: Vec::new(),
+            t_ast: Some(t_ast),
             _state: PhantomData,
         })
     }
@@ -209,6 +206,7 @@ impl<'a> Builder<'a, InitState> {
             variants = founded_variants;
         }
 
+        self.types.push(SymbolType::Inner(name.name.clone()));
         let node = Rc::new(EnumDefinition::new(id, name, variants, location));
         self.arena
             .add_node(AstNode::EnumDefinition(node.clone()), parent_id);
@@ -259,7 +257,6 @@ impl<'a> Builder<'a, InitState> {
         let name =
             self.build_identifier(id, &node.child_by_field_name("struct_name").unwrap(), code);
         let mut fields = Vec::new();
-
         let mut cursor = node.walk();
         let founded_fields = node
             .children_by_field_name("field", &mut cursor)
@@ -268,7 +265,6 @@ impl<'a> Builder<'a, InitState> {
         if !founded_fields.is_empty() {
             fields = founded_fields;
         }
-
         cursor = node.walk();
         let founded_methods = node
             .children_by_field_name("method", &mut cursor)
@@ -302,10 +298,15 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
-        let value = self.build_literal(id, &node.child_by_field_name("value").unwrap(), code);
+        let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
+        let value = self.build_literal(
+            id,
+            &node.child_by_field_name("value").unwrap(),
+            code,
+            Some(Self::symbol_type_from_ast_type(ty.clone())),
+        );
 
-        let node = Rc::new(ConstantDefinition::new(id, name, type_, value, location));
+        let node = Rc::new(ConstantDefinition::new(id, name, ty, value, location));
         self.arena
             .add_node(AstNode::ConstantDefinition(node.clone()), parent_id);
         node
@@ -421,7 +422,7 @@ impl<'a> Builder<'a, InitState> {
                     &node.child_by_field_name("body").unwrap(),
                     code,
                 );
-                let node = Rc::new(Block::new(parent_id, location, statements));
+                let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(AstNode::Block(node.clone()), parent_id);
                 BlockType::Assume(node)
             }
@@ -431,7 +432,7 @@ impl<'a> Builder<'a, InitState> {
                     &node.child_by_field_name("body").unwrap(),
                     code,
                 );
-                let node = Rc::new(Block::new(parent_id, location, statements));
+                let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(AstNode::Block(node.clone()), parent_id);
                 BlockType::Forall(node)
             }
@@ -441,7 +442,7 @@ impl<'a> Builder<'a, InitState> {
                     &node.child_by_field_name("body").unwrap(),
                     code,
                 );
-                let node = Rc::new(Block::new(parent_id, location, statements));
+                let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(AstNode::Block(node.clone()), parent_id);
                 BlockType::Exists(node)
             }
@@ -451,13 +452,13 @@ impl<'a> Builder<'a, InitState> {
                     &node.child_by_field_name("body").unwrap(),
                     code,
                 );
-                let node = Rc::new(Block::new(parent_id, location, statements));
+                let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(AstNode::Block(node.clone()), parent_id);
                 BlockType::Unique(node)
             }
             "block" => {
                 let statemetns = self.build_block_statements(id, node, code);
-                let node = Rc::new(Block::new(parent_id, location, statemetns));
+                let node = Rc::new(Block::new(id, location, statemetns));
                 self.arena.add_node(AstNode::Block(node.clone()), parent_id);
                 BlockType::Block(node)
             }
@@ -585,9 +586,14 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let value = node
-            .child_by_field_name("value")
-            .map(|n| self.build_expression(id, &n, code, Some(ty.clone())));
+        let value = node.child_by_field_name("value").map(|n| {
+            self.build_expression(
+                id,
+                &n,
+                code,
+                Some(Self::symbol_type_from_ast_type(ty.clone())),
+            )
+        });
         let is_undef = node.child_by_field_name("undef").is_some();
 
         let node = Rc::new(VariableDefinitionStatement::new(
@@ -622,7 +628,7 @@ impl<'a> Builder<'a, InitState> {
         parent_id: u32,
         node: &Node,
         code: &[u8],
-        ty: Option<Type>,
+        ty: Option<SymbolType>,
     ) -> Expression {
         let node_kind = node.kind();
         match node_kind {
@@ -649,10 +655,13 @@ impl<'a> Builder<'a, InitState> {
                 Expression::Binary(self.build_binary_expression(parent_id, node, code))
             }
             "bool_literal" | "string_literal" | "number_literal" | "array_literal"
-            | "unit_literal" => Expression::Literal(self.build_literal(parent_id, node, code)),
-            "uzumaki_keyword" => {
-                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code, ty))
-            }
+            | "unit_literal" => Expression::Literal(self.build_literal(parent_id, node, code, ty)),
+            "uzumaki_keyword" => Expression::Uzumaki(self.build_uzumaki_expression(
+                parent_id,
+                node,
+                code,
+                ty.unwrap(),
+            )),
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
             _ => panic!("Unexpected expression node kind: {node_kind}"),
         }
@@ -886,12 +895,20 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
-    fn build_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Literal {
+    fn build_literal(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+        ty: Option<SymbolType>,
+    ) -> Literal {
         match node.kind() {
             "array_literal" => Literal::Array(self.build_array_literal(parent_id, node, code)),
             "bool_literal" => Literal::Bool(self.build_bool_literal(parent_id, node, code)),
             "string_literal" => Literal::String(self.build_string_literal(parent_id, node, code)),
-            "number_literal" => Literal::Number(self.build_number_literal(parent_id, node, code)),
+            "number_literal" => {
+                Literal::Number(self.build_number_literal(parent_id, node, code, ty))
+            }
             "unit_literal" => Literal::Unit(self.build_unit_literal(parent_id, node, code)),
             _ => panic!("Unexpected literal type: {}", node.kind()),
         }
@@ -941,7 +958,6 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
-
         let node = Rc::new(StringLiteral::new(id, location, value));
         self.arena
             .add_node(AstNode::StringLiteral(node.clone()), parent_id);
@@ -953,22 +969,12 @@ impl<'a> Builder<'a, InitState> {
         parent_id: u32,
         node: &Node,
         code: &[u8],
+        ty: Option<SymbolType>,
     ) -> Rc<NumberLiteral> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
-
-        //FIXME hack
-        let node = Rc::new(NumberLiteral::new(
-            id,
-            location,
-            value,
-            Type::Simple(Rc::new(SimpleType::new(
-                id,
-                Location::default(),
-                "i32".to_string(),
-            ))),
-        ));
+        let node = Rc::new(NumberLiteral::new(id, location, value, ty.unwrap()));
         self.arena
             .add_node(AstNode::NumberLiteral(node.clone()), parent_id);
         node
@@ -1013,9 +1019,14 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
-        let size = node
-            .child_by_field_name("length")
-            .map(|n| Box::new(self.build_expression(id, &n, code, Some(element_type.clone()))));
+        let size = node.child_by_field_name("length").map(|n| {
+            Box::new(self.build_expression(
+                id,
+                &n,
+                code,
+                Some(Self::symbol_type_from_ast_type(element_type.clone())),
+            ))
+        });
 
         let node = Rc::new(TypeArray::new(id, location, Box::new(element_type), size));
         self.arena
@@ -1027,7 +1038,7 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
-        self.types_table.insert(name.clone(), Scope::Global);
+        self.types.push(SymbolType::Global(name.clone()));
         let node = Rc::new(SimpleType::new(id, location, name));
         self.arena
             .add_node(AstNode::SimpleType(node.clone()), parent_id);
@@ -1122,11 +1133,11 @@ impl<'a> Builder<'a, InitState> {
         parent_id: u32,
         node: &Node,
         code: &[u8],
-        ty: Option<Type>,
+        ty: SymbolType,
     ) -> Rc<UzumakiExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let node = Rc::new(UzumakiExpression::new(id, location, ty.unwrap()));
+        let node = Rc::new(UzumakiExpression::new(id, location, ty));
         self.arena
             .add_node(AstNode::UzumakiExpression(node.clone()), parent_id);
         node
@@ -1140,6 +1151,18 @@ impl<'a> Builder<'a, InitState> {
         self.arena
             .add_node(AstNode::Identifier(node.clone()), parent_id);
         node
+    }
+
+    fn symbol_type_from_ast_type(ty: Type) -> SymbolType {
+        match ty {
+            Type::Array(_) => SymbolType::Inner("array".to_string()), //TODO implement
+            Type::Simple(t) => SymbolType::Global(t.name.clone()),
+            Type::Generic(_) => SymbolType::Inner("generic".to_string()), //TODO implement
+            Type::Qualified(_) => SymbolType::Inner("qualified".to_string()), //TODO implement
+            Type::QualifiedName(_) => SymbolType::Inner("qualified_name".to_string()), //TODO implement
+            Type::Function(_) => SymbolType::Inner("function".to_string()), //TODO implement
+            Type::Custom(_) => SymbolType::Inner("custom".to_string()),     //TODO implement
+        }
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -1173,8 +1196,12 @@ impl<'a> Builder<'a, InitState> {
 
 impl Builder<'_, CompleteState> {
     /// Returns typed AST
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if resulted `TypedAst` is `None` which means an error occured during the parsing process.
     #[must_use]
-    pub fn t_ast(self) -> Vec<SourceFile> {
-        self.t_ast
+    pub fn t_ast(self) -> TypedAst {
+        self.t_ast.unwrap()
     }
 }

@@ -31,7 +31,7 @@ pub fn compile_to_wat(source_code: &str) -> anyhow::Result<String> {
     builder.add_source_code(root_node, code);
     let builder = builder.build_ast()?;
     let mut wat_generator = inference_wat_codegen::wat_emitter::WatEmitter::default();
-    for ast in builder.t_ast() {
+    for ast in builder.t_ast().source_files {
         wat_generator.add_source_file(ast);
     }
     Ok(wat_generator.emit())

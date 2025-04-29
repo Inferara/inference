@@ -4,16 +4,18 @@ use crate::types::AstNode;
 
 #[derive(Default, Clone)]
 pub(crate) struct Arena {
-    nodes: HashMap<u32, AstNode>,
-    node_routes: Vec<NodeRoute>,
+    pub(crate) nodes: HashMap<u32, AstNode>,
+    pub(crate) node_routes: Vec<NodeRoute>,
 }
 
 impl Arena {
     pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
+        // println!("Adding node with ID: {node:?}");
         assert!(node.id() != 0, "Node ID must be non-zero");
         assert!(
             !self.nodes.contains_key(&node.id()),
-            "Node already exists in the arena"
+            "Node with ID {} already exists in the arena",
+            node.id()
         );
         let id = node.id();
         self.nodes.insert(node.id(), node);
@@ -43,7 +45,17 @@ impl Arena {
             .and_then(|node| node.parent)
     }
 
-    // pub fn check_expressions_typed(&self) {}
+    // pub fn check_expressions_typed(&self) {
+    //     for node in self.nodes.values() {
+    //         match &node {
+    //             AstNode::UzumakiExpression(expr) => {
+    //                 assert!(
+    //                     expr.ty
+    //                 )
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 #[derive(Clone, Default)]

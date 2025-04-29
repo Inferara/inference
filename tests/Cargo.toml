@@ -7,9 +7,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-serde_json = "1.0.143"
-anyhow.workspace = true
 inference-ast.workspace = true
-serde.workspace = true
+inference.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true

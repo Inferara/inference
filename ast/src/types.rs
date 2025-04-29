@@ -4,7 +4,9 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+use crate::symbols::SymbolType;
+
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Location {
     pub offset_start: u32,
     pub offset_end: u32,
@@ -60,7 +62,7 @@ macro_rules! ast_node {
         }
     ) => {
         $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+        #[derive(Clone, PartialEq, Eq, Debug)]
         $struct_vis struct $name {
             pub id: u32,
             pub location: $crate::types::Location,
@@ -102,6 +104,15 @@ macro_rules! ast_nodes {
                     )+
                 }
             }
+
+            #[must_use]
+            pub fn start_line(&self) -> u32 {
+                match self {
+                    $(
+                        AstNode::$name(node) => node.location.start_line,
+                    )+
+                }
+            }
         }
     };
 }
@@ -117,7 +128,7 @@ macro_rules! ast_enum {
         }
     ) => {
         $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+        #[derive(Clone, PartialEq, Eq, Debug)]
         $enum_vis enum $name {
             $(
                 $(#[$arm_attr])*
@@ -355,8 +366,7 @@ ast_nodes! {
 
     pub struct ConstantDefinition {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-        pub type_: Type,
+        pub ty: Type,
         pub value: Literal,
     }
 
@@ -456,7 +466,7 @@ ast_nodes! {
     }
 
     pub struct UzumakiExpression {
-        pub ty: Type,
+        pub ty: SymbolType,
     }
 
     pub struct PrefixUnaryExpression {
@@ -497,7 +507,7 @@ ast_nodes! {
 
     pub struct NumberLiteral {
         pub value: String,
-        pub type_: Type,
+        pub ty: SymbolType,
     }
 
     pub struct UnitLiteral {}
