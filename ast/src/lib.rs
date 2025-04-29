@@ -1,3 +1,4 @@
+#![warn(clippy::pedantic)]
 pub(crate) mod arena;
 pub mod builder;
 pub(crate) mod node;

@@ -1,6 +1,3 @@
-#![warn(clippy::pedantic)]
-#![allow(dead_code)]
-
 use core::fmt;
 use std::{
     fmt::{Display, Formatter},
@@ -317,7 +314,7 @@ pub enum UnaryOperatorKind {
         Function(Rc<FunctionType>),
         QualifiedName(Rc<QualifiedName>),
         Qualified(Rc<TypeQualifiedName>),
-        Identifier(Rc<Identifier>),
+        Custom(Rc<Identifier>),
     }
 }
 
@@ -465,9 +462,7 @@ ast_nodes! {
 
     pub struct FunctionCallExpression {
         pub function: Expression,
-        pub arguments: Option<Vec<(Rc<Identifier>, Expression)>>,
-        pub function: Expression,
-        pub arguments: Option<Vec<(Rc<Identifier>, Expression)>>,
+        pub arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
     }
 
     pub struct UzumakiExpression {}

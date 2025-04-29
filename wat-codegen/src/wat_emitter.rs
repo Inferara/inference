@@ -294,7 +294,7 @@ impl WatEmitter {
     fn emit_for_type(type_: &Type) -> String {
         match type_ {
             Type::Simple(simple) => simple.name.clone(),
-            Type::Identifier(identifier) => identifier.name.clone(),
+            Type::Custom(identifier) => identifier.name.clone(),
             _ => format!("{type_:?} type is not supported yet"),
         }
     }

@@ -1,4 +1,3 @@
-#![warn(clippy::pedantic)]
 use std::{collections::HashMap, marker::PhantomData, rc::Rc};
 
 use crate::{
@@ -88,8 +87,9 @@ impl<'a> Builder<'a, InitState> {
     pub fn build_ast(&mut self) -> anyhow::Result<Builder<CompleteState>> {
         let mut res = Vec::new();
         for (root, code) in &self.source_code.clone() {
+            let id = Self::get_node_id();
             let location = Self::get_location(root, code);
-            let mut ast = SourceFile::new(location);
+            let mut ast = SourceFile::new(id, location);
 
             for i in 0..root.child_count() {
                 if let Some(child) = root.child(i) {
@@ -97,10 +97,10 @@ impl<'a> Builder<'a, InitState> {
 
                     match child_kind {
                         "use_directive" => {
-                            ast.add_use_directive(self.build_use_directive(&child, code));
+                            ast.add_use_directive(self.build_use_directive(id, &child, code));
                         }
                         _ => {
-                            let definition = self.build_definition(&child, code);
+                            let definition = self.build_definition(id, &child, code);
                             ast.add_definition(definition);
                         }
                     }
@@ -117,7 +117,13 @@ impl<'a> Builder<'a, InitState> {
         })
     }
 
-    fn build_use_directive(&mut self, node: &Node, code: &[u8]) -> Rc<UseDirective> {
+    fn build_use_directive(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<UseDirective> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut segments = None;
         let mut imported_types = None;
@@ -125,11 +131,15 @@ impl<'a> Builder<'a, InitState> {
         let mut cursor = node.walk();
 
         if let Some(from_literal) = node.child_by_field_name("from_literal") {
-            from = Some(self.build_string_literal(&from_literal, code).value.clone());
+            from = Some(
+                self.build_string_literal(id, &from_literal, code)
+                    .value
+                    .clone(),
+            );
         } else {
             let founded_segments = node
                 .children_by_field_name("segment", &mut cursor)
-                .map(|segment| self.build_identifier(&segment, code));
+                .map(|segment| self.build_identifier(id, &segment, code));
             let founded_segments: Vec<Rc<Identifier>> = founded_segments.collect();
             if !founded_segments.is_empty() {
                 segments = Some(founded_segments);
@@ -139,84 +149,118 @@ impl<'a> Builder<'a, InitState> {
         cursor = node.walk();
         let founded_imported_types = node
             .children_by_field_name("imported_type", &mut cursor)
-            .map(|imported_type| self.build_identifier(&imported_type, code));
+            .map(|imported_type| self.build_identifier(id, &imported_type, code));
         let founded_imported_types: Vec<Rc<Identifier>> = founded_imported_types.collect();
         if !founded_imported_types.is_empty() {
             imported_types = Some(founded_imported_types);
         }
 
-        let node = Rc::new(UseDirective::new(imported_types, segments, from, location));
-        self.arena.add_node(AstNode::UseDirective(node.clone()));
+        let node = Rc::new(UseDirective::new(
+            id,
+            imported_types,
+            segments,
+            from,
+            location,
+        ));
+        self.arena
+            .add_node(AstNode::UseDirective(node.clone()), parent_id);
         node
     }
 
-    fn build_spec_definition(&mut self, node: &Node, code: &[u8]) -> Rc<SpecDefinition> {
+    fn build_spec_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<SpecDefinition> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut definitions = Vec::new();
 
         for i in 0..node.child_count() {
             let child = node.child(i).unwrap();
-            let definition = self.build_definition(&child, code);
+            let definition = self.build_definition(id, &child, code);
             definitions.push(definition);
         }
 
-        let node = Rc::new(SpecDefinition::new(name, definitions, location));
-        self.arena.add_node(AstNode::SpecDefinition(node.clone()));
+        let node = Rc::new(SpecDefinition::new(id, name, definitions, location));
+        self.arena
+            .add_node(AstNode::SpecDefinition(node.clone()), parent_id);
         node
     }
 
-    fn build_enum_definition(&mut self, node: &Node, code: &[u8]) -> Rc<EnumDefinition> {
+    fn build_enum_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<EnumDefinition> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut variants = Vec::new();
 
         let mut cursor = node.walk();
         let founded_variants = node
             .children_by_field_name("variant", &mut cursor)
-            .map(|segment| self.build_identifier(&segment, code));
+            .map(|segment| self.build_identifier(id, &segment, code));
         let founded_variants: Vec<Rc<Identifier>> = founded_variants.collect();
         if !founded_variants.is_empty() {
             variants = founded_variants;
         }
 
-        let node = Rc::new(EnumDefinition::new(name, variants, location));
-        self.arena.add_node(AstNode::EnumDefinition(node.clone()));
+        let node = Rc::new(EnumDefinition::new(id, name, variants, location));
+        self.arena
+            .add_node(AstNode::EnumDefinition(node.clone()), parent_id);
         node
     }
 
-    fn build_definition(&mut self, node: &Node, code: &[u8]) -> Definition {
+    fn build_definition(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Definition {
         let kind = node.kind();
         match kind {
-            "spec_definition" => Definition::Spec(self.build_spec_definition(node, code)),
+            "spec_definition" => {
+                Definition::Spec(self.build_spec_definition(parent_id, node, code))
+            }
             "struct_definition" => {
-                let struct_definition = self.build_struct_definition(node, code);
+                let struct_definition = self.build_struct_definition(parent_id, node, code);
                 Definition::Struct(struct_definition)
             }
-            "enum_definition" => Definition::Enum(self.build_enum_definition(node, code)),
+            "enum_definition" => {
+                Definition::Enum(self.build_enum_definition(parent_id, node, code))
+            }
             "constant_definition" => {
-                Definition::Constant(self.build_constant_definition(node, code))
+                Definition::Constant(self.build_constant_definition(parent_id, node, code))
             }
             "function_definition" => {
-                Definition::Function(self.build_function_definition(node, code))
+                Definition::Function(self.build_function_definition(parent_id, node, code))
             }
-            "external_function_definition" => {
-                Definition::ExternalFunction(self.build_external_function_definition(node, code))
+            "external_function_definition" => Definition::ExternalFunction(
+                self.build_external_function_definition(parent_id, node, code),
+            ),
+            "type_definition_statement" => {
+                Definition::Type(self.build_type_definition(parent_id, node, code))
             }
-            "type_definition_statement" => Definition::Type(self.build_type_definition(node, code)),
             _ => panic!("Unexpected definition type: {kind}"),
         }
     }
 
-    fn build_struct_definition(&mut self, node: &Node, code: &[u8]) -> Rc<StructDefinition> {
+    fn build_struct_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<StructDefinition> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("struct_name").unwrap(), code);
+        let name =
+            self.build_identifier(id, &node.child_by_field_name("struct_name").unwrap(), code);
         let mut fields = Vec::new();
 
         let mut cursor = node.walk();
         let founded_fields = node
             .children_by_field_name("field", &mut cursor)
-            .map(|segment| self.build_struct_field(&segment, code));
+            .map(|segment| self.build_struct_field(id, &segment, code));
         let founded_fields: Vec<Rc<StructField>> = founded_fields.collect();
         if !founded_fields.is_empty() {
             fields = founded_fields;
@@ -225,39 +269,54 @@ impl<'a> Builder<'a, InitState> {
         cursor = node.walk();
         let founded_methods = node
             .children_by_field_name("method", &mut cursor)
-            .map(|segment| self.build_function_definition(&segment, code));
+            .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
 
-        let node = Rc::new(StructDefinition::new(name, fields, methods, location));
-        self.arena.add_node(AstNode::StructDefinition(node.clone()));
-        node
-    }
-
-    fn build_struct_field(&mut self, node: &Node, code: &[u8]) -> Rc<StructField> {
-        let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(&node.child_by_field_name("type").unwrap(), code);
-
-        let node = Rc::new(StructField::new(name, type_, location));
-        self.arena.add_node(AstNode::StructField(node.clone()));
-        node
-    }
-
-    fn build_constant_definition(&mut self, node: &Node, code: &[u8]) -> Rc<ConstantDefinition> {
-        let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(&node.child_by_field_name("type").unwrap(), code);
-        let value = self.build_literal(&node.child_by_field_name("value").unwrap(), code);
-
-        let node = Rc::new(ConstantDefinition::new(name, type_, value, location));
+        let node = Rc::new(StructDefinition::new(id, name, fields, methods, location));
         self.arena
-            .add_node(AstNode::ConstantDefinition(node.clone()));
+            .add_node(AstNode::StructDefinition(node.clone()), parent_id);
         node
     }
 
-    fn build_function_definition(&mut self, node: &Node, code: &[u8]) -> Rc<FunctionDefinition> {
+    fn build_struct_field(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<StructField> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
+
+        let node = Rc::new(StructField::new(id, name, type_, location));
+        self.arena
+            .add_node(AstNode::StructField(node.clone()), parent_id);
+        node
+    }
+
+    fn build_constant_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<ConstantDefinition> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
+        let value = self.build_literal(id, &node.child_by_field_name("value").unwrap(), code);
+
+        let node = Rc::new(ConstantDefinition::new(id, name, type_, value, location));
+        self.arena
+            .add_node(AstNode::ConstantDefinition(node.clone()), parent_id);
+        node
+    }
+
+    fn build_function_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<FunctionDefinition> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut arguments = None;
         let mut returns = None;
 
@@ -265,7 +324,7 @@ impl<'a> Builder<'a, InitState> {
             let mut cursor = argument_list_node.walk();
             let founded_arguments = argument_list_node
                 .children_by_field_name("argument", &mut cursor)
-                .map(|segment| self.build_argument(&segment, code));
+                .map(|segment| self.build_argument(id, &segment, code));
             let founded_arguments: Vec<Rc<Parameter>> = founded_arguments.collect();
             if !founded_arguments.is_empty() {
                 arguments = Some(founded_arguments);
@@ -273,25 +332,27 @@ impl<'a> Builder<'a, InitState> {
         }
 
         if let Some(returns_node) = node.child_by_field_name("returns") {
-            returns = Some(self.build_type(&returns_node, code));
+            returns = Some(self.build_type(id, &returns_node, code));
         }
         let body_node = node.child_by_field_name("body").unwrap();
-        let body = self.build_block(&body_node, code);
+        let body = self.build_block(id, &body_node, code);
         let node = Rc::new(FunctionDefinition::new(
-            name, arguments, returns, body, location,
+            id, name, arguments, returns, body, location,
         ));
         self.arena
-            .add_node(AstNode::FunctionDefinition(node.clone()));
+            .add_node(AstNode::FunctionDefinition(node.clone()), parent_id);
         node
     }
 
     fn build_external_function_definition(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<ExternalFunctionDefinition> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut arguments = None;
         let mut returns = None;
 
@@ -299,101 +360,128 @@ impl<'a> Builder<'a, InitState> {
 
         let founded_arguments = node
             .children_by_field_name("argument", &mut cursor)
-            .map(|segment| self.build_identifier(&segment, code));
+            .map(|segment| self.build_identifier(id, &segment, code));
         let founded_arguments: Vec<Rc<Identifier>> = founded_arguments.collect();
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
 
         if let Some(returns_node) = node.child_by_field_name("returns") {
-            returns = Some(self.build_type(&returns_node, code));
+            returns = Some(self.build_type(id, &returns_node, code));
         }
 
         let node = Rc::new(ExternalFunctionDefinition::new(
-            name, arguments, returns, location,
+            id, name, arguments, returns, location,
         ));
         self.arena
-            .add_node(AstNode::ExternalFunctionDefinition(node.clone()));
+            .add_node(AstNode::ExternalFunctionDefinition(node.clone()), parent_id);
         node
     }
 
-    fn build_type_definition(&mut self, node: &Node, code: &[u8]) -> Rc<TypeDefinition> {
+    fn build_type_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<TypeDefinition> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(&node.child_by_field_name("type").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
 
-        let node = Rc::new(TypeDefinition::new(name, type_, location));
-        self.arena.add_node(AstNode::TypeDefinition(node.clone()));
+        let node = Rc::new(TypeDefinition::new(id, name, type_, location));
+        self.arena
+            .add_node(AstNode::TypeDefinition(node.clone()), parent_id);
         node
     }
 
-    fn build_argument(&mut self, node: &Node, code: &[u8]) -> Rc<Parameter> {
+    fn build_argument(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Parameter> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name_node = node.child_by_field_name("name").unwrap();
-        let name = self.build_identifier(&name_node, code);
+        let name = self.build_identifier(id, &name_node, code);
         let type_node = node.child_by_field_name("type").unwrap();
-        let type_ = self.build_type(&type_node, code);
-        let node = Rc::new(Parameter::new(location, name, type_));
-        self.arena.add_node(AstNode::Parameter(node.clone()));
+        let type_ = self.build_type(id, &type_node, code);
+        let node = Rc::new(Parameter::new(id, location, name, type_));
+        self.arena
+            .add_node(AstNode::Parameter(node.clone()), parent_id);
         node
     }
 
-    fn build_block(&mut self, node: &Node, code: &[u8]) -> BlockType {
+    fn build_block(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> BlockType {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
+        //FIXME add to arena
         match node.kind() {
             "assume_block" => BlockType::Assume(Rc::new(Block::new(
+                parent_id,
                 location,
-                self.build_block_statements(&node.child_by_field_name("body").unwrap(), code),
+                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
             ))),
             "forall_block" => BlockType::Forall(Rc::new(Block::new(
+                parent_id,
                 location,
-                self.build_block_statements(&node.child_by_field_name("body").unwrap(), code),
+                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
             ))),
             "exists_block" => BlockType::Exists(Rc::new(Block::new(
+                parent_id,
                 location,
-                self.build_block_statements(&node.child_by_field_name("body").unwrap(), code),
+                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
             ))),
             "unique_block" => BlockType::Unique(Rc::new(Block::new(
+                parent_id,
                 location,
-                self.build_block_statements(&node.child_by_field_name("body").unwrap(), code),
+                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
             ))),
             _ => BlockType::Block(Rc::new(Block::new(
+                parent_id,
                 location,
-                self.build_block_statements(node, code),
+                self.build_block_statements(id, node, code),
             ))),
         }
     }
 
-    fn build_block_statements(&mut self, node: &Node, code: &[u8]) -> Vec<Statement> {
+    fn build_block_statements(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Vec<Statement> {
         let mut statements = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            statements.push(self.build_statement(&child, code));
+            statements.push(self.build_statement(parent_id, &child, code));
         }
         statements
     }
 
-    fn build_statement(&mut self, node: &Node, code: &[u8]) -> Statement {
+    fn build_statement(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Statement {
         match node.kind() {
             "block" | "forall_block" | "assume_block" | "exists_block" | "unique_block" => {
-                Statement::Block(self.build_block(node, code))
+                Statement::Block(self.build_block(parent_id, node, code))
             }
             "expression_statement" => {
-                Statement::Expression(self.build_expression_statement(node, code))
+                Statement::Expression(self.build_expression_statement(parent_id, node, code))
             }
-            "return_statement" => Statement::Return(self.build_return_statement(node, code)),
-            "loop_statement" => Statement::Loop(self.build_loop_statement(node, code)),
-            "if_statement" => Statement::If(self.build_if_statement(node, code)),
-            "variable_definition_statement" => {
-                Statement::VariableDefinition(self.build_variable_definition_statement(node, code))
+            "return_statement" => {
+                Statement::Return(self.build_return_statement(parent_id, node, code))
             }
-            "type_definition_statement" => {
-                Statement::TypeDefinition(self.build_type_definition_statement(node, code))
+            "loop_statement" => Statement::Loop(self.build_loop_statement(parent_id, node, code)),
+            "if_statement" => Statement::If(self.build_if_statement(parent_id, node, code)),
+            "variable_definition_statement" => Statement::VariableDefinition(
+                self.build_variable_definition_statement(parent_id, node, code),
+            ),
+            "type_definition_statement" => Statement::TypeDefinition(
+                self.build_type_definition_statement(parent_id, node, code),
+            ),
+            "assert_statement" => {
+                Statement::Assert(self.build_assert_statement(parent_id, node, code))
             }
-            "assert_statement" => Statement::Assert(self.build_assert_statement(node, code)),
-            "break_statement" => Statement::Break(self.build_break_statement(node, code)),
+            "break_statement" => {
+                Statement::Break(self.build_break_statement(parent_id, node, code))
+            }
             "constant_definition" => {
-                Statement::ConstantDefinition(self.build_constant_definition(node, code))
+                Statement::ConstantDefinition(self.build_constant_definition(parent_id, node, code))
             }
             _ => panic!(
                 "Unexpected statement type: {}, {}",
@@ -403,162 +491,212 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
-    fn build_expression_statement(&mut self, node: &Node, code: &[u8]) -> ExpressionStatement {
+    fn build_expression_statement(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> ExpressionStatement {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(&node.child(0).unwrap(), code);
-
-        ExpressionStatement::new(location, expression)
+        let expression = self.build_expression(id, &node.child(0).unwrap(), code);
+        //TODO what to do with this?
+        ExpressionStatement::new(id, location, expression)
     }
 
-    fn build_return_statement(&mut self, node: &Node, code: &[u8]) -> Rc<ReturnStatement> {
+    fn build_return_statement(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<ReturnStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression =
-            self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
+            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
 
-        let node = Rc::new(ReturnStatement::new(location, expression));
-        self.arena.add_node(AstNode::ReturnStatement(node.clone()));
+        let node = Rc::new(ReturnStatement::new(id, location, expression));
+        self.arena
+            .add_node(AstNode::ReturnStatement(node.clone()), parent_id);
         node
     }
 
-    fn build_loop_statement(&mut self, node: &Node, code: &[u8]) -> Rc<LoopStatement> {
+    fn build_loop_statement(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<LoopStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let condition = node
             .child_by_field_name("condition")
-            .map(|n| self.build_expression(&n, code));
+            .map(|n| self.build_expression(id, &n, code));
         let body_block = node.child_by_field_name("body").unwrap();
-        let body = self.build_block(&body_block, code);
-        let node = Rc::new(LoopStatement::new(location, condition, body));
-        self.arena.add_node(AstNode::LoopStatement(node.clone()));
+        let body = self.build_block(id, &body_block, code);
+        let node = Rc::new(LoopStatement::new(id, location, condition, body));
+        self.arena
+            .add_node(AstNode::LoopStatement(node.clone()), parent_id);
         node
     }
 
-    fn build_if_statement(&mut self, node: &Node, code: &[u8]) -> Rc<IfStatement> {
+    fn build_if_statement(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<IfStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let condition_node = node.child_by_field_name("condition").unwrap();
-        let condition = self.build_expression(&condition_node, code);
+        let condition = self.build_expression(id, &condition_node, code);
         let if_arm_node = node.child_by_field_name("if_arm").unwrap();
-        let if_arm = self.build_block(&if_arm_node, code);
+        let if_arm = self.build_block(id, &if_arm_node, code);
         let else_arm = node
             .child_by_field_name("else_arm")
-            .map(|n| self.build_block(&n, code));
-        let node = Rc::new(IfStatement::new(location, condition, if_arm, else_arm));
-        self.arena.add_node(AstNode::IfStatement(node.clone()));
+            .map(|n| self.build_block(id, &n, code));
+        let node = Rc::new(IfStatement::new(id, location, condition, if_arm, else_arm));
+        self.arena
+            .add_node(AstNode::IfStatement(node.clone()), parent_id);
         node
     }
 
     fn build_variable_definition_statement(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<VariableDefinitionStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(&node.child_by_field_name("type").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let value = node
             .child_by_field_name("value")
-            .map(|n| self.build_expression(&n, code));
+            .map(|n| self.build_expression(id, &n, code));
         let is_undef = node.child_by_field_name("undef").is_some();
 
         let node = Rc::new(VariableDefinitionStatement::new(
-            location, name, type_, value, is_undef,
+            id, location, name, type_, value, is_undef,
         ));
-        self.arena
-            .add_node(AstNode::VariableDefinitionStatement(node.clone()));
+        self.arena.add_node(
+            AstNode::VariableDefinitionStatement(node.clone()),
+            parent_id,
+        );
         node
     }
 
     fn build_type_definition_statement(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<TypeDefinitionStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(&node.child_by_field_name("type").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
 
-        let node = Rc::new(TypeDefinitionStatement::new(location, name, type_));
+        let node = Rc::new(TypeDefinitionStatement::new(id, location, name, type_));
         self.arena
-            .add_node(AstNode::TypeDefinitionStatement(node.clone()));
+            .add_node(AstNode::TypeDefinitionStatement(node.clone()), parent_id);
         node
     }
 
-    fn build_expression(&mut self, node: &Node, code: &[u8]) -> Expression {
+    fn build_expression(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Expression {
         let node_kind = node.kind();
         match node_kind {
-            "assign_expression" => Expression::Assign(self.build_assign_expression(node, code)),
-            "array_index_access_expression" => {
-                Expression::ArrayIndexAccess(self.build_array_index_access_expression(node, code))
+            "assign_expression" => {
+                Expression::Assign(self.build_assign_expression(parent_id, node, code))
             }
+            "array_index_access_expression" => Expression::ArrayIndexAccess(
+                self.build_array_index_access_expression(parent_id, node, code),
+            ),
             "member_access_expression" => {
-                Expression::MemberAccess(self.build_member_access_expression(node, code))
+                Expression::MemberAccess(self.build_member_access_expression(parent_id, node, code))
             }
+            "type" => Expression::Type(self.build_type(parent_id, node, code)),
             "function_call_expression" => {
-                Expression::FunctionCall(self.build_function_call_expression(node, code))
+                Expression::FunctionCall(self.build_function_call_expression(parent_id, node, code))
             }
             "prefix_unary_expression" => {
-                Expression::PrefixUnary(self.build_prefix_unary_expression(node, code))
+                Expression::PrefixUnary(self.build_prefix_unary_expression(parent_id, node, code))
             }
-            "parenthesized_expression" => {
-                Expression::Parenthesized(self.build_parenthesized_expression(node, code))
+            "parenthesized_expression" => Expression::Parenthesized(
+                self.build_parenthesized_expression(parent_id, node, code),
+            ),
+            "binary_expression" => {
+                Expression::Binary(self.build_binary_expression(parent_id, node, code))
             }
-            "binary_expression" => Expression::Binary(self.build_binary_expression(node, code)),
             "bool_literal" | "string_literal" | "number_literal" | "array_literal"
-            | "unit_literal" => Expression::Literal(self.build_literal(node, code)),
-            "uzumaki_keyword" => Expression::Uzumaki(self.build_uzumaki_expression(node, code)),
-            "identifier" => Expression::Identifier(self.build_identifier(node, code)),
-            _ => Expression::Type(self.build_type(node, code)),
+            | "unit_literal" => Expression::Literal(self.build_literal(parent_id, node, code)),
+            "uzumaki_keyword" => {
+                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code))
+            }
+            "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
+            _ => panic!("Unexpected expression node kind: {node_kind}"),
         }
     }
 
-    fn build_assign_expression(&mut self, node: &Node, code: &[u8]) -> Rc<AssignExpression> {
+    fn build_assign_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<AssignExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let left = self.build_expression(&node.child_by_field_name("left").unwrap(), code);
-        let right = self.build_expression(&node.child_by_field_name("right").unwrap(), code);
+        let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
+        let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
 
-        let node = Rc::new(AssignExpression::new(location, left, right));
-        self.arena.add_node(AstNode::AssignExpression(node.clone()));
+        let node = Rc::new(AssignExpression::new(id, location, left, right));
+        self.arena
+            .add_node(AstNode::AssignExpression(node.clone()), parent_id);
         node
     }
 
     fn build_array_index_access_expression(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<ArrayIndexAccessExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let array = self.build_expression(&node.named_child(0).unwrap(), code);
-        let index = self.build_expression(&node.named_child(1).unwrap(), code);
+        let array = self.build_expression(id, &node.named_child(0).unwrap(), code);
+        let index = self.build_expression(id, &node.named_child(1).unwrap(), code);
 
-        let node = Rc::new(ArrayIndexAccessExpression::new(location, array, index));
+        let node = Rc::new(ArrayIndexAccessExpression::new(id, location, array, index));
         self.arena
-            .add_node(AstNode::ArrayIndexAccessExpression(node.clone()));
+            .add_node(AstNode::ArrayIndexAccessExpression(node.clone()), parent_id);
         node
     }
 
     fn build_member_access_expression(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<MemberAccessExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression =
-            self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
-        let node = Rc::new(MemberAccessExpression::new(location, expression, name));
+        let node = Rc::new(MemberAccessExpression::new(id, location, expression, name));
         self.arena
-            .add_node(AstNode::MemberAccessExpression(node.clone()));
+            .add_node(AstNode::MemberAccessExpression(node.clone()), parent_id);
         node
     }
 
     fn build_function_call_expression(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<FunctionCallExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let function = self.build_expression(&node.child_by_field_name("function").unwrap(), code);
-        let mut argument_name_expression_map: Vec<(Rc<Identifier>, Expression)> = Vec::new();
+        let function =
+            self.build_expression(id, &node.child_by_field_name("function").unwrap(), code);
+        let mut argument_name_expression_map: Vec<(Option<Rc<Identifier>>, Expression)> =
+            Vec::new();
         let mut pending_name: Option<Rc<Identifier>> = None;
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -567,14 +705,15 @@ impl<'a> Builder<'a, InitState> {
                 if let Some(field) = cursor.field_name() {
                     match field {
                         "argument_name" => {
-                            if let Expression::Identifier(id) = self.build_expression(&child, code)
+                            if let Expression::Identifier(id) =
+                                self.build_expression(id, &child, code)
                             {
                                 pending_name = Some(id);
                             }
                         }
                         "argument" => {
-                            let expr = self.build_expression(&child, code);
-                            let name = pending_name.take().unwrap_or_default();
+                            let expr = self.build_expression(id, &child, code);
+                            let name = pending_name.take();
                             argument_name_expression_map.push((name, expr));
                         }
                         _ => {}
@@ -592,19 +731,23 @@ impl<'a> Builder<'a, InitState> {
             Some(argument_name_expression_map)
         };
 
-        let node = Rc::new(FunctionCallExpression::new(location, function, arguments));
+        let node = Rc::new(FunctionCallExpression::new(
+            id, location, function, arguments,
+        ));
         self.arena
-            .add_node(AstNode::FunctionCallExpression(node.clone()));
+            .add_node(AstNode::FunctionCallExpression(node.clone()), parent_id);
         node
     }
 
     fn build_prefix_unary_expression(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<PrefixUnaryExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(&node.child(1).unwrap(), code);
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
 
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator = match operator_node.kind() {
@@ -612,44 +755,68 @@ impl<'a> Builder<'a, InitState> {
             _ => panic!("Unexpected operator node"),
         };
 
-        let node = Rc::new(PrefixUnaryExpression::new(location, expression, operator));
+        let node = Rc::new(PrefixUnaryExpression::new(
+            id, location, expression, operator,
+        ));
         self.arena
-            .add_node(AstNode::PrefixUnaryExpression(node.clone()));
+            .add_node(AstNode::PrefixUnaryExpression(node.clone()), parent_id);
         node
     }
 
-    fn build_assert_statement(&mut self, node: &Node, code: &[u8]) -> Rc<AssertStatement> {
+    fn build_assert_statement(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<AssertStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(&node.child(1).unwrap(), code);
-        let node = Rc::new(AssertStatement::new(location, expression));
-        self.arena.add_node(AstNode::AssertStatement(node.clone()));
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
+        let node = Rc::new(AssertStatement::new(id, location, expression));
+        self.arena
+            .add_node(AstNode::AssertStatement(node.clone()), parent_id);
         node
     }
 
-    fn build_break_statement(&mut self, node: &Node, code: &[u8]) -> Rc<BreakStatement> {
+    fn build_break_statement(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<BreakStatement> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let node = Rc::new(BreakStatement::new(location));
-        self.arena.add_node(AstNode::BreakStatement(node.clone()));
+        let node = Rc::new(BreakStatement::new(id, location));
+        self.arena
+            .add_node(AstNode::BreakStatement(node.clone()), parent_id);
         node
     }
 
     fn build_parenthesized_expression(
         &mut self,
+        parent_id: u32,
         node: &Node,
         code: &[u8],
     ) -> Rc<ParenthesizedExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(&node.child(1).unwrap(), code);
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
 
-        let node = Rc::new(ParenthesizedExpression::new(location, expression));
+        let node = Rc::new(ParenthesizedExpression::new(id, location, expression));
         self.arena
-            .add_node(AstNode::ParenthesizedExpression(node.clone()));
+            .add_node(AstNode::ParenthesizedExpression(node.clone()), parent_id);
         node
     }
 
-    fn build_binary_expression(&mut self, node: &Node, code: &[u8]) -> Rc<BinaryExpression> {
+    fn build_binary_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<BinaryExpression> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let left = self.build_expression(&node.child_by_field_name("left").unwrap(), code);
+        let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator_kind = operator_node.kind();
         let operator = match operator_kind {
@@ -674,38 +841,47 @@ impl<'a> Builder<'a, InitState> {
             _ => panic!("Unexpected operator node: {operator_kind}"),
         };
 
-        let right = self.build_expression(&node.child_by_field_name("right").unwrap(), code);
+        let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
 
-        let node = Rc::new(BinaryExpression::new(location, left, operator, right));
-        self.arena.add_node(AstNode::BinaryExpression(node.clone()));
+        let node = Rc::new(BinaryExpression::new(id, location, left, operator, right));
+        self.arena
+            .add_node(AstNode::BinaryExpression(node.clone()), parent_id);
         node
     }
 
-    fn build_literal(&mut self, node: &Node, code: &[u8]) -> Literal {
+    fn build_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Literal {
         match node.kind() {
-            "array_literal" => Literal::Array(self.build_array_literal(node, code)),
-            "bool_literal" => Literal::Bool(self.build_bool_literal(node, code)),
-            "string_literal" => Literal::String(self.build_string_literal(node, code)),
-            "number_literal" => Literal::Number(self.build_number_literal(node, code)),
-            "unit_literal" => Literal::Unit(self.build_unit_literal(node, code)),
+            "array_literal" => Literal::Array(self.build_array_literal(parent_id, node, code)),
+            "bool_literal" => Literal::Bool(self.build_bool_literal(parent_id, node, code)),
+            "string_literal" => Literal::String(self.build_string_literal(parent_id, node, code)),
+            "number_literal" => Literal::Number(self.build_number_literal(parent_id, node, code)),
+            "unit_literal" => Literal::Unit(self.build_unit_literal(parent_id, node, code)),
             _ => panic!("Unexpected literal type: {}", node.kind()),
         }
     }
 
-    fn build_array_literal(&mut self, node: &Node, code: &[u8]) -> Rc<ArrayLiteral> {
+    fn build_array_literal(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<ArrayLiteral> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut elements = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            elements.push(self.build_expression(&child, code));
+            elements.push(self.build_expression(id, &child, code));
         }
 
-        let node = Rc::new(ArrayLiteral::new(location, elements));
-        self.arena.add_node(AstNode::ArrayLiteral(node.clone()));
+        let node = Rc::new(ArrayLiteral::new(id, location, elements));
+        self.arena
+            .add_node(AstNode::ArrayLiteral(node.clone()), parent_id);
         node
     }
 
-    fn build_bool_literal(&mut self, node: &Node, code: &[u8]) -> Rc<BoolLiteral> {
+    fn build_bool_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<BoolLiteral> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = match node.utf8_text(code).unwrap() {
             "true" => true,
@@ -713,57 +889,82 @@ impl<'a> Builder<'a, InitState> {
             _ => panic!("Unexpected boolean literal value"),
         };
 
-        let node = Rc::new(BoolLiteral::new(location, value));
-        self.arena.add_node(AstNode::BoolLiteral(node.clone()));
+        let node = Rc::new(BoolLiteral::new(id, location, value));
+        self.arena
+            .add_node(AstNode::BoolLiteral(node.clone()), parent_id);
         node
     }
 
-    fn build_string_literal(&mut self, node: &Node, code: &[u8]) -> Rc<StringLiteral> {
+    fn build_string_literal(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<StringLiteral> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
 
-        let node = Rc::new(StringLiteral::new(location, value));
-        self.arena.add_node(AstNode::StringLiteral(node.clone()));
+        let node = Rc::new(StringLiteral::new(id, location, value));
+        self.arena
+            .add_node(AstNode::StringLiteral(node.clone()), parent_id);
         node
     }
 
-    fn build_number_literal(&mut self, node: &Node, code: &[u8]) -> Rc<NumberLiteral> {
+    fn build_number_literal(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<NumberLiteral> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
 
         //FIXME hack
         let node = Rc::new(NumberLiteral::new(
+            id,
             location,
             value,
             Type::Simple(Rc::new(SimpleType::new(
+                id,
                 Location::default(),
                 "i32".to_string(),
             ))),
         ));
-        self.arena.add_node(AstNode::NumberLiteral(node.clone()));
+        self.arena
+            .add_node(AstNode::NumberLiteral(node.clone()), parent_id);
         node
     }
 
-    fn build_unit_literal(&mut self, node: &Node, code: &[u8]) -> Rc<UnitLiteral> {
+    fn build_unit_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<UnitLiteral> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let node = Rc::new(UnitLiteral::new(location));
-        self.arena.add_node(AstNode::UnitLiteral(node.clone()));
+        let node = Rc::new(UnitLiteral::new(id, location));
+        self.arena
+            .add_node(AstNode::UnitLiteral(node.clone()), parent_id);
         node
     }
 
-    fn build_type(&mut self, node: &Node, code: &[u8]) -> Type {
+    fn build_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Type {
         let node_kind = node.kind();
         match node_kind {
-            "type_array" => Type::Array(self.build_type_array(node, code)),
+            "type_array" => Type::Array(self.build_type_array(parent_id, node, code)),
             "type_i8" | "type_i16" | "type_i32" | "type_i64" | "type_u8" | "type_u16"
             | "type_u32" | "type_u64" | "type_bool" | "type_unit" => {
-                Type::Simple(self.build_simple_type(node, code))
+                Type::Simple(self.build_simple_type(parent_id, node, code))
             }
-            "generic_type" | "generic_name" => Type::Generic(self.build_generic_type(node, code)),
-            "type_qualified_name" => Type::Qualified(self.build_type_qualified_name(node, code)),
-            "qualified_name" => Type::QualifiedName(self.build_qualified_name(node, code)),
-            "type_fn" => Type::Function(self.build_function_type(node, code)),
-            "identifier" => Type::Identifier(self.build_identifier(node, code)),
+            "generic_type" | "generic_name" => {
+                Type::Generic(self.build_generic_type(parent_id, node, code))
+            }
+            "type_qualified_name" => {
+                Type::Qualified(self.build_type_qualified_name(parent_id, node, code))
+            }
+            "qualified_name" => {
+                Type::QualifiedName(self.build_qualified_name(parent_id, node, code))
+            }
+            "type_fn" => Type::Function(self.build_function_type(parent_id, node, code)),
+            "identifier" => Type::Custom(self.build_identifier(parent_id, node, code)),
             _ => {
                 let location = Self::get_location(node, code);
                 panic!("Unexpected type: {node_kind}, {location}")
@@ -771,30 +972,35 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
-    fn build_type_array(&mut self, node: &Node, code: &[u8]) -> Rc<TypeArray> {
+    fn build_type_array(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<TypeArray> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let element_type = self.build_type(&node.child_by_field_name("type").unwrap(), code);
+        let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let size = node
             .child_by_field_name("length")
-            .map(|n| Box::new(self.build_expression(&n, code)));
+            .map(|n| Box::new(self.build_expression(id, &n, code)));
 
-        let node = Rc::new(TypeArray::new(location, Box::new(element_type), size));
-        self.arena.add_node(AstNode::TypeArray(node.clone()));
+        let node = Rc::new(TypeArray::new(id, location, Box::new(element_type), size));
+        self.arena
+            .add_node(AstNode::TypeArray(node.clone()), parent_id);
         node
     }
 
-    fn build_simple_type(&mut self, node: &Node, code: &[u8]) -> Rc<SimpleType> {
+    fn build_simple_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<SimpleType> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
         self.types_table.insert(name.clone(), Scope::Global);
-        let node = Rc::new(SimpleType::new(location, name));
-        self.arena.add_node(AstNode::SimpleType(node.clone()));
+        let node = Rc::new(SimpleType::new(id, location, name));
+        self.arena
+            .add_node(AstNode::SimpleType(node.clone()), parent_id);
         node
     }
 
-    fn build_generic_type(&mut self, node: &Node, code: &[u8]) -> Rc<GenericType> {
+    fn build_generic_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<GenericType> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let base = self.build_identifier(&node.child_by_field_name("base_type").unwrap(), code);
+        let base = self.build_identifier(id, &node.child_by_field_name("base_type").unwrap(), code);
 
         let args = node.child(1).unwrap();
 
@@ -802,72 +1008,104 @@ impl<'a> Builder<'a, InitState> {
 
         let types = args
             .children_by_field_name("type", &mut cursor)
-            .map(|segment| self.build_type(&segment, code));
+            .map(|segment| self.build_type(id, &segment, code));
         let parameters: Vec<Type> = types.collect();
 
-        let node = Rc::new(GenericType::new(location, base, parameters));
-        self.arena.add_node(AstNode::GenericType(node.clone()));
+        let node = Rc::new(GenericType::new(id, location, base, parameters));
+        self.arena
+            .add_node(AstNode::GenericType(node.clone()), parent_id);
         node
     }
 
-    fn build_function_type(&mut self, node: &Node, code: &[u8]) -> Rc<FunctionType> {
+    fn build_function_type(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<FunctionType> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut arguments = None;
         let mut cursor = node.walk();
 
         let founded_arguments = node
             .children_by_field_name("argument", &mut cursor)
-            .map(|segment| self.build_type(&segment, code));
+            .map(|segment| self.build_type(id, &segment, code));
         let founded_arguments: Vec<Type> = founded_arguments.collect();
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
 
         let returns =
-            Box::new(self.build_type(&node.child_by_field_name("returns").unwrap(), code));
+            Box::new(self.build_type(id, &node.child_by_field_name("returns").unwrap(), code));
 
-        let node = Rc::new(FunctionType::new(location, arguments, returns));
-        self.arena.add_node(AstNode::FunctionType(node.clone()));
-        node
-    }
-
-    fn build_type_qualified_name(&mut self, node: &Node, code: &[u8]) -> Rc<TypeQualifiedName> {
-        let location = Self::get_location(node, code);
-        let alias = self.build_identifier(&node.child_by_field_name("alias").unwrap(), code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-
-        let node = Rc::new(TypeQualifiedName::new(location, alias, name));
+        let node = Rc::new(FunctionType::new(id, location, arguments, returns));
         self.arena
-            .add_node(AstNode::TypeQualifiedName(node.clone()));
+            .add_node(AstNode::FunctionType(node.clone()), parent_id);
         node
     }
 
-    fn build_qualified_name(&mut self, node: &Node, code: &[u8]) -> Rc<QualifiedName> {
+    fn build_type_qualified_name(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<TypeQualifiedName> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let alias = self.build_identifier(id, &node.child_by_field_name("alias").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+
+        let node = Rc::new(TypeQualifiedName::new(id, location, alias, name));
+        self.arena
+            .add_node(AstNode::TypeQualifiedName(node.clone()), parent_id);
+        node
+    }
+
+    fn build_qualified_name(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<QualifiedName> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let qualifier =
-            self.build_identifier(&node.child_by_field_name("qualifier").unwrap(), code);
-        let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+            self.build_identifier(id, &node.child_by_field_name("qualifier").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
-        let node = Rc::new(QualifiedName::new(location, qualifier, name));
-        self.arena.add_node(AstNode::QualifiedName(node.clone()));
-        node
-    }
-
-    fn build_uzumaki_expression(&mut self, node: &Node, code: &[u8]) -> Rc<UzumakiExpression> {
-        let location = Self::get_location(node, code);
-        let node = Rc::new(UzumakiExpression::new(location));
+        let node = Rc::new(QualifiedName::new(id, location, qualifier, name));
         self.arena
-            .add_node(AstNode::UzumakiExpression(node.clone()));
+            .add_node(AstNode::QualifiedName(node.clone()), parent_id);
         node
     }
 
-    fn build_identifier(&mut self, node: &Node, code: &[u8]) -> Rc<Identifier> {
+    fn build_uzumaki_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<UzumakiExpression> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let node = Rc::new(UzumakiExpression::new(id, location));
+        self.arena
+            .add_node(AstNode::UzumakiExpression(node.clone()), parent_id);
+        node
+    }
+
+    fn build_identifier(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Identifier> {
+        let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
-        //TODO deduce type
-        let node = Rc::new(Identifier::new(name, location));
-        self.arena.add_node(AstNode::Identifier(node.clone()));
+        let node = Rc::new(Identifier::new(id, name, location));
+        self.arena
+            .add_node(AstNode::Identifier(node.clone()), parent_id);
         node
+    }
+
+    fn get_node_id() -> u32 {
+        uuid::Uuid::new_v4().as_u128() as u32
     }
 
     #[allow(clippy::cast_possible_truncation)]
