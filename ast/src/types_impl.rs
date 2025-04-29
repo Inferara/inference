@@ -437,8 +437,8 @@ impl PrefixUnaryExpression {
 
 impl UzumakiExpression {
     #[must_use]
-    pub fn new(id: u32, location: Location) -> Self {
-        UzumakiExpression { id, location }
+    pub fn new(id: u32, location: Location, ty: Type) -> Self {
+        UzumakiExpression { id, location, ty }
     }
 }
 

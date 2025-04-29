@@ -173,16 +173,7 @@ ast_enums! {
     pub enum Statement {
         Assign(Rc<AssignExpression>),
         Block(BlockType),
-        Expression(Rc<ExpressionStatement>),
-        Return(Rc<ReturnStatement>),
-        Loop(Rc<LoopStatement>),
-        Break(Rc<BreakStatement>),
-        If(Rc<IfStatement>),
-        VariableDefinition(Rc<VariableDefinitionStatement>),
-        TypeDefinition(Rc<TypeDefinitionStatement>),
-        Assert(Rc<AssertStatement>),
-        ConstantDefinition(Rc<ConstantDefinition>),
-        Expression(ExpressionStatement),
+        Expression(Expression),
         Return(Rc<ReturnStatement>),
         Loop(Rc<LoopStatement>),
         Break(Rc<BreakStatement>),
@@ -194,18 +185,17 @@ ast_enums! {
     }
 
     pub enum Expression {
-        Assign(Rc<AssignExpression>),
-        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
-        MemberAccess(Rc<MemberAccessExpression>),
-        TypeMemberAccess(Rc<TypeMemberAccessExpression>),
-        FunctionCall(Rc<FunctionCallExpression>),
-        PrefixUnary(Rc<PrefixUnaryExpression>),
-        Parenthesized(Rc<ParenthesizedExpression>),
-        Binary(Rc<BinaryExpression>),
-        Literal(Literal),
-        Identifier(Rc<Identifier>),
-        Type(Type),
-        Uzumaki(Rc<UzumakiExpression>),
+        Assign(Rc<AssignExpression>),//TODO add type
+        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),//TODO add type
+        MemberAccess(Rc<MemberAccessExpression>),//TODO add type
+        FunctionCall(Rc<FunctionCallExpression>),//TODO add type
+        PrefixUnary(Rc<PrefixUnaryExpression>),//TODO add type
+        Parenthesized(Rc<ParenthesizedExpression>),//TODO add type
+        Binary(Rc<BinaryExpression>),//TODO add type
+        Literal(Literal),//TODO add type
+        Identifier(Rc<Identifier>),//TODO add type
+        Type(Type),//TODO add type
+        Uzumaki(Rc<UzumakiExpression>),//TODO add type
     }
 
     pub enum Literal {
@@ -465,7 +455,9 @@ ast_nodes! {
         pub arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
     }
 
-    pub struct UzumakiExpression {}
+    pub struct UzumakiExpression {
+        pub ty: Type,
+    }
 
     pub struct PrefixUnaryExpression {
         pub expression: Expression,

@@ -5,14 +5,13 @@ use crate::{
     types::{
         ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AstNode,
         BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition,
-        EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
-        FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier,
-        IfStatement, Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral,
-        OperatorKind, Parameter, ParenthesizedExpression, PrefixUnaryExpression, QualifiedName,
-        ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral,
-        StructDefinition, StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement,
-        TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
-        VariableDefinitionStatement,
+        EnumDefinition, Expression, ExternalFunctionDefinition, FunctionCallExpression,
+        FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, Location,
+        LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind, Parameter,
+        ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType,
+        SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
+        TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
+        UnitLiteral, UseDirective, UzumakiExpression, VariableDefinitionStatement,
     },
 };
 use tree_sitter::Node;
@@ -241,7 +240,11 @@ impl<'a> Builder<'a, InitState> {
             "type_definition_statement" => {
                 Definition::Type(self.build_type_definition(parent_id, node, code))
             }
-            _ => panic!("Unexpected definition type: {kind}"),
+            _ => panic!(
+                "Unexpected definition type: {}, {}",
+                node.kind(),
+                Self::get_location(node, code)
+            ),
         }
     }
 
@@ -411,33 +414,58 @@ impl<'a> Builder<'a, InitState> {
     fn build_block(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> BlockType {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        //FIXME add to arena
         match node.kind() {
-            "assume_block" => BlockType::Assume(Rc::new(Block::new(
-                parent_id,
-                location,
-                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
-            ))),
-            "forall_block" => BlockType::Forall(Rc::new(Block::new(
-                parent_id,
-                location,
-                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
-            ))),
-            "exists_block" => BlockType::Exists(Rc::new(Block::new(
-                parent_id,
-                location,
-                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
-            ))),
-            "unique_block" => BlockType::Unique(Rc::new(Block::new(
-                parent_id,
-                location,
-                self.build_block_statements(id, &node.child_by_field_name("body").unwrap(), code),
-            ))),
-            _ => BlockType::Block(Rc::new(Block::new(
-                parent_id,
-                location,
-                self.build_block_statements(id, node, code),
-            ))),
+            "assume_block" => {
+                let statements = self.build_block_statements(
+                    id,
+                    &node.child_by_field_name("body").unwrap(),
+                    code,
+                );
+                let node = Rc::new(Block::new(parent_id, location, statements));
+                self.arena.add_node(AstNode::Block(node.clone()), parent_id);
+                BlockType::Assume(node)
+            }
+            "forall_block" => {
+                let statements = self.build_block_statements(
+                    id,
+                    &node.child_by_field_name("body").unwrap(),
+                    code,
+                );
+                let node = Rc::new(Block::new(parent_id, location, statements));
+                self.arena.add_node(AstNode::Block(node.clone()), parent_id);
+                BlockType::Forall(node)
+            }
+            "exists_block" => {
+                let statements = self.build_block_statements(
+                    id,
+                    &node.child_by_field_name("body").unwrap(),
+                    code,
+                );
+                let node = Rc::new(Block::new(parent_id, location, statements));
+                self.arena.add_node(AstNode::Block(node.clone()), parent_id);
+                BlockType::Exists(node)
+            }
+            "unique_block" => {
+                let statements = self.build_block_statements(
+                    id,
+                    &node.child_by_field_name("body").unwrap(),
+                    code,
+                );
+                let node = Rc::new(Block::new(parent_id, location, statements));
+                self.arena.add_node(AstNode::Block(node.clone()), parent_id);
+                BlockType::Unique(node)
+            }
+            "block" => {
+                let statemetns = self.build_block_statements(id, node, code);
+                let node = Rc::new(Block::new(parent_id, location, statemetns));
+                self.arena.add_node(AstNode::Block(node.clone()), parent_id);
+                BlockType::Block(node)
+            }
+            _ => panic!(
+                "Unexpected block type: {}, {}",
+                node.kind(),
+                Self::get_location(node, code)
+            ),
         }
     }
 
@@ -461,7 +489,7 @@ impl<'a> Builder<'a, InitState> {
                 Statement::Block(self.build_block(parent_id, node, code))
             }
             "expression_statement" => {
-                Statement::Expression(self.build_expression_statement(parent_id, node, code))
+                Statement::Expression(self.build_expression(parent_id, node, code, None))
             }
             "return_statement" => {
                 Statement::Return(self.build_return_statement(parent_id, node, code))
@@ -491,19 +519,6 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
-    fn build_expression_statement(
-        &mut self,
-        parent_id: u32,
-        node: &Node,
-        code: &[u8],
-    ) -> ExpressionStatement {
-        let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
-        let expression = self.build_expression(id, &node.child(0).unwrap(), code);
-        //TODO what to do with this?
-        ExpressionStatement::new(id, location, expression)
-    }
-
     fn build_return_statement(
         &mut self,
         parent_id: u32,
@@ -512,8 +527,12 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<ReturnStatement> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression =
-            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
+        let expression = self.build_expression(
+            id,
+            &node.child_by_field_name("expression").unwrap(),
+            code,
+            None,
+        );
 
         let node = Rc::new(ReturnStatement::new(id, location, expression));
         self.arena
@@ -531,7 +550,7 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let condition = node
             .child_by_field_name("condition")
-            .map(|n| self.build_expression(id, &n, code));
+            .map(|n| self.build_expression(id, &n, code, None));
         let body_block = node.child_by_field_name("body").unwrap();
         let body = self.build_block(id, &body_block, code);
         let node = Rc::new(LoopStatement::new(id, location, condition, body));
@@ -544,7 +563,7 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let condition_node = node.child_by_field_name("condition").unwrap();
-        let condition = self.build_expression(id, &condition_node, code);
+        let condition = self.build_expression(id, &condition_node, code, None);
         let if_arm_node = node.child_by_field_name("if_arm").unwrap();
         let if_arm = self.build_block(id, &if_arm_node, code);
         let else_arm = node
@@ -564,15 +583,15 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<VariableDefinitionStatement> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
+        let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let type_ = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let value = node
             .child_by_field_name("value")
-            .map(|n| self.build_expression(id, &n, code));
+            .map(|n| self.build_expression(id, &n, code, Some(ty.clone())));
         let is_undef = node.child_by_field_name("undef").is_some();
 
         let node = Rc::new(VariableDefinitionStatement::new(
-            id, location, name, type_, value, is_undef,
+            id, location, name, ty, value, is_undef,
         ));
         self.arena.add_node(
             AstNode::VariableDefinitionStatement(node.clone()),
@@ -598,7 +617,13 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
-    fn build_expression(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Expression {
+    fn build_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+        ty: Option<Type>,
+    ) -> Expression {
         let node_kind = node.kind();
         match node_kind {
             "assign_expression" => {
@@ -626,7 +651,7 @@ impl<'a> Builder<'a, InitState> {
             "bool_literal" | "string_literal" | "number_literal" | "array_literal"
             | "unit_literal" => Expression::Literal(self.build_literal(parent_id, node, code)),
             "uzumaki_keyword" => {
-                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code))
+                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code, ty))
             }
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
             _ => panic!("Unexpected expression node kind: {node_kind}"),
@@ -641,8 +666,10 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<AssignExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
-        let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
+        let left =
+            self.build_expression(id, &node.child_by_field_name("left").unwrap(), code, None);
+        let right =
+            self.build_expression(id, &node.child_by_field_name("right").unwrap(), code, None);
 
         let node = Rc::new(AssignExpression::new(id, location, left, right));
         self.arena
@@ -658,8 +685,8 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<ArrayIndexAccessExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let array = self.build_expression(id, &node.named_child(0).unwrap(), code);
-        let index = self.build_expression(id, &node.named_child(1).unwrap(), code);
+        let array = self.build_expression(id, &node.named_child(0).unwrap(), code, None);
+        let index = self.build_expression(id, &node.named_child(1).unwrap(), code, None);
 
         let node = Rc::new(ArrayIndexAccessExpression::new(id, location, array, index));
         self.arena
@@ -675,8 +702,12 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<MemberAccessExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression =
-            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
+        let expression = self.build_expression(
+            id,
+            &node.child_by_field_name("expression").unwrap(),
+            code,
+            None,
+        );
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
         let node = Rc::new(MemberAccessExpression::new(id, location, expression, name));
@@ -693,8 +724,12 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<FunctionCallExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let function =
-            self.build_expression(id, &node.child_by_field_name("function").unwrap(), code);
+        let function = self.build_expression(
+            id,
+            &node.child_by_field_name("function").unwrap(),
+            code,
+            None,
+        );
         let mut argument_name_expression_map: Vec<(Option<Rc<Identifier>>, Expression)> =
             Vec::new();
         let mut pending_name: Option<Rc<Identifier>> = None;
@@ -706,13 +741,13 @@ impl<'a> Builder<'a, InitState> {
                     match field {
                         "argument_name" => {
                             if let Expression::Identifier(id) =
-                                self.build_expression(id, &child, code)
+                                self.build_expression(id, &child, code, None)
                             {
                                 pending_name = Some(id);
                             }
                         }
                         "argument" => {
-                            let expr = self.build_expression(id, &child, code);
+                            let expr = self.build_expression(id, &child, code, None);
                             let name = pending_name.take();
                             argument_name_expression_map.push((name, expr));
                         }
@@ -747,7 +782,7 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<PrefixUnaryExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code, None);
 
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator = match operator_node.kind() {
@@ -771,7 +806,7 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<AssertStatement> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code, None);
         let node = Rc::new(AssertStatement::new(id, location, expression));
         self.arena
             .add_node(AstNode::AssertStatement(node.clone()), parent_id);
@@ -800,7 +835,7 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<ParenthesizedExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression = self.build_expression(id, &node.child(1).unwrap(), code);
+        let expression = self.build_expression(id, &node.child(1).unwrap(), code, None);
 
         let node = Rc::new(ParenthesizedExpression::new(id, location, expression));
         self.arena
@@ -816,7 +851,8 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<BinaryExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
+        let left =
+            self.build_expression(id, &node.child_by_field_name("left").unwrap(), code, None);
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator_kind = operator_node.kind();
         let operator = match operator_kind {
@@ -841,7 +877,8 @@ impl<'a> Builder<'a, InitState> {
             _ => panic!("Unexpected operator node: {operator_kind}"),
         };
 
-        let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
+        let right =
+            self.build_expression(id, &node.child_by_field_name("right").unwrap(), code, None);
 
         let node = Rc::new(BinaryExpression::new(id, location, left, operator, right));
         self.arena
@@ -871,7 +908,7 @@ impl<'a> Builder<'a, InitState> {
         let mut elements = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            elements.push(self.build_expression(id, &child, code));
+            elements.push(self.build_expression(id, &child, code, None));
         }
 
         let node = Rc::new(ArrayLiteral::new(id, location, elements));
@@ -978,7 +1015,7 @@ impl<'a> Builder<'a, InitState> {
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let size = node
             .child_by_field_name("length")
-            .map(|n| Box::new(self.build_expression(id, &n, code)));
+            .map(|n| Box::new(self.build_expression(id, &n, code, Some(element_type.clone()))));
 
         let node = Rc::new(TypeArray::new(id, location, Box::new(element_type), size));
         self.arena
@@ -1085,10 +1122,11 @@ impl<'a> Builder<'a, InitState> {
         parent_id: u32,
         node: &Node,
         code: &[u8],
+        ty: Option<Type>,
     ) -> Rc<UzumakiExpression> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let node = Rc::new(UzumakiExpression::new(id, location));
+        let node = Rc::new(UzumakiExpression::new(id, location, ty.unwrap()));
         self.arena
             .add_node(AstNode::UzumakiExpression(node.clone()), parent_id);
         node
@@ -1104,6 +1142,7 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn get_node_id() -> u32 {
         uuid::Uuid::new_v4().as_u128() as u32
     }

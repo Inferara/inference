@@ -176,7 +176,7 @@ impl WatEmitter {
                     result.extend(self.emit_for_expression(&return_statement.expression));
                 }
                 Statement::Expression(expression) => {
-                    result.extend(self.emit_for_expression(&expression.expression));
+                    result.extend(self.emit_for_expression(expression));
                 }
                 Statement::VariableDefinition(variable_definition) => {
                     result.extend(self.emit_for_variable_definition(variable_definition));
