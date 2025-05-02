@@ -4,8 +4,6 @@ use std::{
     rc::Rc,
 };
 
-use crate::symbols::SymbolType;
-
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Location {
     pub offset_start: u32,
@@ -38,6 +36,13 @@ impl Location {
             source,
         }
     }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct TypeInfo {
+    pub name: String,
+    pub type_params: Vec<TypeInfo>,
+    // (Field type information could be added here if needed for struct field checking.)
 }
 
 impl Display for Location {
@@ -87,33 +92,6 @@ macro_rules! ast_nodes {
                 $struct_vis struct $name { $($fields)* }
             }
         )+
-
-        #[derive(Clone, Debug)]
-        pub enum AstNode {
-            $(
-                $name(std::rc::Rc<$name>),
-            )+
-        }
-
-        impl AstNode {
-            #[must_use]
-            pub fn id(&self) -> u32 {
-                match self {
-                    $(
-                        AstNode::$name(node) => node.id,
-                    )+
-                }
-            }
-
-            #[must_use]
-            pub fn start_line(&self) -> u32 {
-                match self {
-                    $(
-                        AstNode::$name(node) => node.location.start_line,
-                    )+
-                }
-            }
-        }
     };
 }
 
@@ -135,7 +113,44 @@ macro_rules! ast_enum {
                 $arm $( ( $($tuple)* ) )? $( { $($struct)* } )? ,
             )*
         }
-    }
+
+        impl $name {
+
+            #[must_use]
+            pub fn id(&self) -> u32 {
+                match self {
+                    $(
+                        $name::$arm(n, ..) => { ast_enum!(@id_arm n, $($conv)?) }
+                    )*
+                }
+            }
+
+            #[must_use]
+            pub fn location(&self) -> Location {
+                match self {
+                    $(
+                        $name::$arm(n, ..) => { ast_enum!(@location_arm n, $($conv)?) }
+                    )*
+                }
+            }
+        }
+    };
+
+    (@id_arm $inner:ident, inner_enum) => {
+        $inner.id()
+    };
+
+    (@id_arm $inner:ident, ) => {
+        $inner.id
+    };
+
+    (@location_arm $inner:ident, inner_enum) => {
+        $inner.location()
+    };
+
+    (@location_arm $inner:ident, ) => {
+        $inner.location.clone()
+    };
 }
 
 macro_rules! ast_enums {
@@ -151,10 +166,41 @@ macro_rules! ast_enums {
                 $enum_vis enum $name { $($arms)* }
             }
         )+
+
+        #[derive(Clone, Debug)]
+        pub enum AstNode {
+            $(
+                $name($name),
+            )+
+        }
+
+        impl AstNode {
+            #[must_use]
+            pub fn id(&self) -> u32 {
+                match self {
+                    $(
+                        AstNode::$name(node) => node.id(),
+                    )+
+                }
+            }
+
+            #[must_use]
+            pub fn start_line(&self) -> u32 {
+                match self {
+                    $(
+                        AstNode::$name(node) => node.location().start_line,
+                    )+
+                }
+            }
+        }
     };
 }
 
 ast_enums! {
+
+    pub enum Directive {
+        Use(Rc<UseDirective>),
+    }
 
     pub enum Definition {
         Spec(Rc<SpecDefinition>),
@@ -182,9 +228,8 @@ ast_enums! {
     }
 
     pub enum Statement {
-        Assign(Rc<AssignExpression>),
-        Block(BlockType),
-        Expression(Expression),
+        @inner_enum Block(BlockType),
+        @inner_enum Expression(Expression),
         Return(Rc<ReturnStatement>),
         Loop(Rc<LoopStatement>),
         Break(Rc<BreakStatement>),
@@ -196,17 +241,17 @@ ast_enums! {
     }
 
     pub enum Expression {
-        Assign(Rc<AssignExpression>),//TODO add type
-        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),//TODO add type
-        MemberAccess(Rc<MemberAccessExpression>),//TODO add type
-        FunctionCall(Rc<FunctionCallExpression>),//TODO add type
-        PrefixUnary(Rc<PrefixUnaryExpression>),//TODO add type
-        Parenthesized(Rc<ParenthesizedExpression>),//TODO add type
-        Binary(Rc<BinaryExpression>),//TODO add type
-        Literal(Literal),//TODO add type
-        Identifier(Rc<Identifier>),//TODO add type
-        Type(Type),//TODO add type
-        Uzumaki(Rc<UzumakiExpression>),
+        Assign(Rc<AssignExpression>, Option<TypeInfo>),
+        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>, Option<TypeInfo>),
+        MemberAccess(Rc<MemberAccessExpression>, Option<TypeInfo>),
+        FunctionCall(Rc<FunctionCallExpression>, Option<TypeInfo>),
+        PrefixUnary(Rc<PrefixUnaryExpression>, Option<TypeInfo>),
+        Parenthesized(Rc<ParenthesizedExpression>, Option<TypeInfo>),
+        Binary(Rc<BinaryExpression>, Option<TypeInfo>),
+        @inner_enum Literal(Literal, Option<TypeInfo>),
+        Identifier(Rc<Identifier>, Option<TypeInfo>),
+        @inner_enum Type(Type, Option<TypeInfo>),
+        Uzumaki(Rc<UzumakiExpression>, Option<TypeInfo>),
     }
 
     pub enum Literal {
@@ -216,98 +261,6 @@ ast_enums! {
         Number(Rc<NumberLiteral>),
         Unit(Rc<UnitLiteral>),
     }
-
-    pub enum Type {
-        Array(Rc<TypeArray>),
-        Simple(Rc<SimpleType>),
-        Generic(Rc<GenericType>),
-        Function(Rc<FunctionType>),
-        QualifiedName(Rc<QualifiedName>),
-        Qualified(Rc<TypeQualifiedName>),
-        Identifier(Rc<Identifier>),
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub enum BlockType {
-    Block(Rc<Block>),
-    Assume(Rc<Block>),
-    Forall(Rc<Block>),
-    Exists(Rc<Block>),
-    Unique(Rc<Block>),
-}
-
-impl BlockType {
-    #[must_use]
-    pub fn id(&self) -> u32 {
-        match self {
-            BlockType::Block(b)
-            | BlockType::Assume(b)
-            | BlockType::Forall(b)
-            | BlockType::Exists(b)
-            | BlockType::Unique(b) => b.id(),
-        }
-    }
-
-    #[must_use]
-    pub fn location(&self) -> crate::node::Location {
-        match self {
-            BlockType::Block(b)
-            | BlockType::Assume(b)
-            | BlockType::Forall(b)
-            | BlockType::Exists(b)
-            | BlockType::Unique(b) => b.location(),
-        }
-    }
-
-    #[must_use]
-    pub fn children(&self) -> Vec<NodeKind> {
-        match self {
-            BlockType::Block(b)
-            | BlockType::Assume(b)
-            | BlockType::Forall(b)
-            | BlockType::Exists(b)
-            | BlockType::Unique(b) => b.children(),
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-pub enum UnaryOperatorKind {
-    Neg,
-}
-
-    pub enum OperatorKind {
-        Pow,
-        Add,
-        Sub,
-        Mul,
-        Div,
-        Mod,
-        And,
-        Or,
-        Eq,
-        Ne,
-        Lt,
-        Le,
-        Gt,
-        Ge,
-        BitAnd,
-        BitOr,
-        BitXor,
-        BitNot,
-        Shl,
-        Shr,
-    }
-
-    pub enum Literal {
-        Array(Rc<ArrayLiteral>),
-        Bool(Rc<BoolLiteral>),
-        String(Rc<StringLiteral>),
-        Number(Rc<NumberLiteral>),
-        Unit(Rc<UnitLiteral>),
-    }
-
     pub enum Type {
         Array(Rc<TypeArray>),
         Simple(Rc<SimpleType>),
@@ -317,12 +270,46 @@ pub enum UnaryOperatorKind {
         Qualified(Rc<TypeQualifiedName>),
         Custom(Rc<Identifier>),
     }
+
+    pub enum Misc {
+        StructField(Rc<StructField>),
+        Parameter(Rc<Parameter>),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UnaryOperatorKind {
+    Neg,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum OperatorKind {
+    Pow,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
 }
 
 ast_nodes! {
 
     pub struct SourceFile {
-        pub use_directives: Vec<Rc<UseDirective>>,
+        pub directives: Vec<Directive>,
         pub definitions: Vec<Definition>,
     }
 
@@ -361,8 +348,7 @@ ast_nodes! {
     }
 
     pub struct Identifier {
-        pub name: String,
-        pub ty: Option<SymbolType>
+        pub name: String
     }
 
     pub struct ConstantDefinition {
@@ -373,6 +359,7 @@ ast_nodes! {
 
     pub struct FunctionDefinition {
         pub name: Rc<Identifier>,
+        pub type_parameters: Option<Vec<Rc<Identifier>>>,
         pub arguments: Option<Vec<Rc<Parameter>>>,
         pub returns: Option<Type>,
         pub body: BlockType,
@@ -388,14 +375,12 @@ ast_nodes! {
 
     pub struct TypeDefinition {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-        pub type_: Type,
+        pub ty: Type,
     }
 
     pub struct Parameter {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-        pub type_: Type,
+        pub ty: Type,
     }
 
     pub struct Block {
@@ -433,8 +418,7 @@ ast_nodes! {
 
     pub struct TypeDefinitionStatement {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-        pub type_: Type,
+        pub ty: Type,
     }
 
     pub struct AssignExpression {
@@ -466,9 +450,7 @@ ast_nodes! {
         pub arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
     }
 
-    pub struct UzumakiExpression {
-        pub ty: SymbolType,
-    }
+    pub struct UzumakiExpression {}
 
     pub struct PrefixUnaryExpression {
         pub expression: Expression,
@@ -507,8 +489,7 @@ ast_nodes! {
     }
 
     pub struct NumberLiteral {
-        pub value: String,
-        pub ty: SymbolType,
+        pub value: String
     }
 
     pub struct UnitLiteral {}
@@ -519,8 +500,7 @@ ast_nodes! {
 
     pub struct GenericType {
         pub base: Rc<Identifier>,
-        pub base: Rc<Identifier>,
-        pub parameters: Vec<Type>,
+        pub parameters: Vec<Rc<Identifier>>,
     }
 
     pub struct FunctionType {

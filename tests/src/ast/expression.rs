@@ -1,6 +1,10 @@
 #[cfg(test)]
 mod expression_tests {
-    use inference_ast::{builder::Builder, symbols::SymbolType, t_ast::TypedAst, types::AstNode};
+    use inference_ast::{
+        builder::Builder,
+        t_ast::TypedAst,
+        types::{AstNode, Expression},
+    };
 
     fn build_ast(source_code: String) -> TypedAst {
         let inference_language = tree_sitter_inference::language();
@@ -32,7 +36,8 @@ mod expression_tests {
             let h: u64 = @;
         }"#;
         let ast = build_ast(source_code.to_string());
-        let uzumaki_nodes = ast.filter_nodes(|node| matches!(node, AstNode::UzumakiExpression(_)));
+        let uzumaki_nodes =
+            ast.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Uzumaki(_, _))));
         assert!(
             uzumaki_nodes.len() == 8,
             "Expected 8 UzumakiExpression nodes, found {}",
@@ -42,12 +47,12 @@ mod expression_tests {
         let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
         uzumaki_nodes.sort_by_key(|node| node.start_line());
         for (i, node) in uzumaki_nodes.iter().enumerate() {
-            if let AstNode::UzumakiExpression(expr) = node {
+            if let AstNode::Expression(Expression::Uzumaki(_, ty)) = node {
                 assert!(
-                    expr.ty == SymbolType::Global(expected_types[i].to_string()),
+                    ty.as_ref().unwrap().name == expected_types[i],
                     "Expected type {} for UzumakiExpression, found {:?}",
                     expected_types[i],
-                    expr.ty
+                    ty
                 );
             }
         }

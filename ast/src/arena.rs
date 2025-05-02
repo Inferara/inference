@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 
-use crate::types::AstNode;
+use crate::types::{AstNode, Definition, TypeDefinition};
 
 #[derive(Default, Clone)]
-pub(crate) struct Arena {
+pub struct Arena {
     pub(crate) nodes: HashMap<u32, AstNode>,
     pub(crate) node_routes: Vec<NodeRoute>,
 }
@@ -36,8 +36,11 @@ impl Arena {
         self.node_routes.push(node);
     }
 
-    #[must_use]
-    pub(crate) fn find_parent_node(&self, id: u32) -> Option<u32> {
+    pub fn find_node(&self, id: u32) -> Option<AstNode> {
+        self.nodes.get(&id).cloned()
+    }
+
+    pub fn find_parent_node(&self, id: u32) -> Option<u32> {
         self.node_routes
             .iter()
             .find(|n| n.id == id)
@@ -45,17 +48,63 @@ impl Arena {
             .and_then(|node| node.parent)
     }
 
-    // pub fn check_expressions_typed(&self) {
-    //     for node in self.nodes.values() {
-    //         match &node {
-    //             AstNode::UzumakiExpression(expr) => {
-    //                 assert!(
-    //                     expr.ty
-    //                 )
-    //             }
-    //         }
-    //     }
-    // }
+    pub fn get_children_cmp<F>(&self, id: u32, comparator: F) -> Vec<AstNode>
+    where
+        F: Fn(&AstNode) -> bool,
+    {
+        let mut result = Vec::new();
+        let mut stack: Vec<AstNode> = Vec::new();
+
+        if let Some(root_node) = self.find_node(id) {
+            stack.push(root_node.clone());
+        }
+
+        while let Some(current_node) = stack.pop() {
+            if comparator(&current_node) {
+                result.push(current_node.clone());
+            }
+            stack.extend(
+                self.list_nodes_children(current_node.id())
+                    .into_iter()
+                    .filter(|child| comparator(child)),
+            );
+        }
+
+        result
+    }
+
+    pub fn list_type_definitions(&self) -> Vec<Rc<TypeDefinition>> {
+        self.list_nodes_cmp(|node| {
+            if let AstNode::Definition(Definition::Type(type_def)) = node {
+                Some(type_def.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+    }
+
+    fn list_nodes_children(&self, id: u32) -> Vec<AstNode> {
+        self.node_routes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .filter_map(|child_id| self.nodes.get(child_id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
+    where
+        F: Fn(&AstNode) -> Option<T> + Clone + 'a,
+        T: Clone + 'static,
+    {
+        let cmp = cmp.clone();
+        self.nodes.iter().filter_map(move |(_, node)| cmp(node))
+    }
 }
 
 #[derive(Clone, Default)]

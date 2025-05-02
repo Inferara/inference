@@ -129,7 +129,7 @@ impl WatEmitter {
                 result.push(format!(
                     "(param ${} {})",
                     parameter.name(),
-                    WatEmitter::emit_for_type(&parameter.type_)
+                    WatEmitter::emit_for_type(&parameter.ty)
                 ));
             }
         }
@@ -193,13 +193,13 @@ impl WatEmitter {
 
     fn emit_for_binary_expression(&self, bin_expr: &BinaryExpression) -> Vec<String> {
         let mut result = Vec::new();
-        if let Expression::Identifier(identifier) = &bin_expr.left {
+        if let Expression::Identifier(identifier, _) = &bin_expr.left {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.left));
         }
 
-        if let Expression::Identifier(identifier) = &bin_expr.right {
+        if let Expression::Identifier(identifier, _) = &bin_expr.right {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.right));
@@ -214,7 +214,7 @@ impl WatEmitter {
             //TODO: check order
             for (_, arg_expr) in arguments {
                 match arg_expr {
-                    Expression::Identifier(identifier) => {
+                    Expression::Identifier(identifier, _) => {
                         result.push(format!("local.get ${}", identifier.name));
                     }
                     _ => {
@@ -238,23 +238,23 @@ impl WatEmitter {
     fn emit_for_expression(&self, expr: &Expression) -> Vec<String> {
         let mut result = Vec::new();
         match expr {
-            Expression::Binary(bin_expr) => {
+            Expression::Binary(bin_expr, _) => {
                 result.extend(self.emit_for_binary_expression(bin_expr));
             }
-            Expression::Identifier(identifier) => {
+            Expression::Identifier(identifier, _) => {
                 result.push(identifier.name.clone());
             }
-            Expression::Literal(literal) => {
+            Expression::Literal(literal, _) => {
                 result.push(WatEmitter::emit_for_literal(literal));
             }
-            Expression::FunctionCall(function_call) => {
+            Expression::FunctionCall(function_call, _) => {
                 result.extend(self.emit_for_function_call(function_call));
             }
-            Expression::MemberAccess(member_access) => {
+            Expression::MemberAccess(member_access, _) => {
                 result.extend(self.emit_for_member_access(member_access));
             }
-            Expression::Uzumaki(u) => {
-                result.push(format!("{}.uzumaki", Self::emit_for_symbol_type(&u.ty)));
+            Expression::Uzumaki(_, ty) => {
+                result.push(format!("{}.uzumaki", ty.as_ref().unwrap().name)); //FIXME works only for simple types
             }
             _ => result.push(format!("{expr:?} expression type is not supported yet")),
         }
@@ -282,7 +282,7 @@ impl WatEmitter {
         result.push(format!("(local ${variable_name} {variable_type})"));
         if let Some(value) = &variable_definition.value {
             match value {
-                Expression::Identifier(identifier) => {
+                Expression::Identifier(identifier, _) => {
                     result.push(format!("local.get ${}", identifier.name));
                 }
                 _ => {
@@ -306,7 +306,9 @@ impl WatEmitter {
         match symbol_type {
             SymbolType::Global(name) => Self::map_integer_types(&name.clone()),
             SymbolType::Inner(name) => name.clone(),
-            SymbolType::Untyped => format!("shoudl not try to emit type for {symbol_type:?}"),
+            SymbolType::Generic(_) => todo!(),
+            SymbolType::Primitive(_) => todo!(),
+            SymbolType::Unit => todo!(),
         }
     }
 
@@ -322,7 +324,8 @@ impl WatEmitter {
         match literal {
             Literal::Number(number) => {
                 let literal_value = &number.value;
-                let type_ = WatEmitter::emit_for_symbol_type(&number.ty);
+                let type_ =
+                    WatEmitter::emit_for_symbol_type(&SymbolType::Global("i32".to_string()));
                 format!("{type_}.const {literal_value}")
             }
             _ => format!("{literal:?} literal is not supported yet"),
@@ -339,10 +342,10 @@ impl WatEmitter {
 
     fn emit_for_assert_statement(&self, assert: &AssertStatement) -> Vec<String> {
         match &assert.expression {
-            Expression::Binary(bin_expr) => {
+            Expression::Binary(bin_expr, _) => {
                 let mut result = Vec::new();
 
-                if let Expression::Identifier(identifier) = &bin_expr.left {
+                if let Expression::Identifier(identifier, _) = &bin_expr.left {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));
@@ -353,7 +356,7 @@ impl WatEmitter {
                     result.push(format!("local.get ${variable_name}"));
                 }
 
-                if let Expression::Identifier(identifier) = &bin_expr.right {
+                if let Expression::Identifier(identifier, _) = &bin_expr.right {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));

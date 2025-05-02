@@ -24,7 +24,7 @@ impl SourceFile {
         SourceFile {
             id,
             location,
-            use_directives: Vec::new(),
+            directives: Vec::new(),
             definitions: Vec::new(),
         }
     }
@@ -74,6 +74,11 @@ impl SpecDefinition {
             definitions,
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
 }
 
 impl StructDefinition {
@@ -93,6 +98,11 @@ impl StructDefinition {
             fields,
             methods,
         }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
     }
 }
 
@@ -123,17 +133,21 @@ impl EnumDefinition {
             variants,
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
 }
 
 impl Identifier {
     #[must_use]
-    pub fn new(id: u32, name: String, location: Location, ty: Option<SymbolType>) -> Self {
-        Identifier {
-            id,
-            location,
-            name,
-            ty,
-        }
+    pub fn new(id: u32, name: String, location: Location) -> Self {
+        Identifier { id, location, name }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.clone()
     }
 }
 
@@ -162,6 +176,7 @@ impl FunctionDefinition {
     pub fn new(
         id: u32,
         name: Rc<Identifier>,
+        type_parameters: Option<Vec<Rc<Identifier>>>,
         arguments: Option<Vec<Rc<Parameter>>>,
         returns: Option<Type>,
         body: BlockType,
@@ -171,6 +186,7 @@ impl FunctionDefinition {
             id,
             location,
             name,
+            type_parameters,
             arguments,
             returns,
             body,
@@ -217,6 +233,11 @@ impl ExternalFunctionDefinition {
             returns,
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name.name
+    }
 }
 
 impl TypeDefinition {
@@ -226,8 +247,13 @@ impl TypeDefinition {
             id,
             location,
             name,
-            type_,
+            ty: type_,
         }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
     }
 }
 
@@ -238,7 +264,7 @@ impl Parameter {
             id,
             location,
             name,
-            type_,
+            ty: type_,
         }
     }
 
@@ -365,7 +391,7 @@ impl TypeDefinitionStatement {
             id,
             location,
             name,
-            type_,
+            ty: type_,
         }
     }
 }
@@ -443,8 +469,8 @@ impl PrefixUnaryExpression {
 
 impl UzumakiExpression {
     #[must_use]
-    pub fn new(id: u32, location: Location, ty: SymbolType) -> Self {
-        UzumakiExpression { id, location, ty }
+    pub fn new(id: u32, location: Location) -> Self {
+        UzumakiExpression { id, location }
     }
 }
 
@@ -525,12 +551,11 @@ impl StringLiteral {
 
 impl NumberLiteral {
     #[must_use]
-    pub fn new(id: u32, location: Location, value: String, ty: SymbolType) -> Self {
+    pub fn new(id: u32, location: Location, value: String) -> Self {
         NumberLiteral {
             id,
             location,
             value,
-            ty,
         }
     }
 }
@@ -542,20 +567,6 @@ impl UnitLiteral {
     }
 }
 
-impl Display for Type {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Type::Array(at) => write!(f, "{}", at),
-            Type::Simple(st) => write!(f, "{}", st),
-            Type::Generic(gt) => write!(f, "{}", gt),
-            Type::Function(ft) => write!(f, "{}", ft),
-            Type::Qualified(q) => write!(f, "{}", q),
-            Type::QualifiedName(qn) => write!(f, "{}", qn),
-            Type::Custom(identifier) => write!(f, "{}", identifier.name),
-        }
-    }
-}
-
 impl SimpleType {
     #[must_use]
     pub fn new(id: u32, location: Location, name: String) -> Self {
@@ -563,36 +574,20 @@ impl SimpleType {
     }
 }
 
-impl Display for SimpleType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
 impl GenericType {
     #[must_use]
-    pub fn new(id: u32, location: Location, base: Rc<Identifier>, parameters: Vec<Type>) -> Self {
+    pub fn new(
+        id: u32,
+        location: Location,
+        base: Rc<Identifier>,
+        parameters: Vec<Rc<Identifier>>,
+    ) -> Self {
         GenericType {
             id,
             location,
             base,
             parameters,
         }
-    }
-}
-
-impl Display for GenericType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}<{}>",
-            self.base.name,
-            self.parameters
-                .iter()
-                .map(|param| format!("{}", param))
-                .collect::<Vec<_>>()
-                .join(",")
-        )
     }
 }
 
@@ -605,23 +600,6 @@ impl FunctionType {
             parameters,
             returns,
         }
-    }
-}
-
-impl Display for FunctionType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "fn({})->{}",
-            self.parameters.as_ref().map_or("".to_string(), |params| {
-                params
-                    .iter()
-                    .map(|param| format!("{}", param))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            }),
-            self.returns
-        )
     }
 }
 
@@ -642,12 +620,6 @@ impl QualifiedName {
     }
 }
 
-impl Display for QualifiedName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}::{}", self.qualifier.name, self.name.name)
-    }
-}
-
 impl TypeQualifiedName {
     #[must_use]
     pub fn new(id: u32, location: Location, alias: Rc<Identifier>, name: Rc<Identifier>) -> Self {
@@ -660,12 +632,6 @@ impl TypeQualifiedName {
     }
 }
 
-impl Display for TypeQualifiedName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}::{}as", self.alias.name, self.name.name)
-    }
-}
-
 impl TypeArray {
     #[must_use]
     pub fn new(id: u32, location: Location, element_type: Type, size: Option<Expression>) -> Self {
@@ -675,18 +641,5 @@ impl TypeArray {
             element_type,
             size,
         }
-    }
-}
-
-impl Display for TypeArray {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[{};{}]",
-            self.element_type,
-            self.size
-                .as_ref()
-                .map_or("".to_string(), |size| format!("{}", size))
-        )
     }
 }

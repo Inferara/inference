@@ -1,13 +1,19 @@
 use crate::{
     arena::Arena,
-    types::{AstNode, Expression, Location, SourceFile, Type},
+    types::{
+        AstNode, Definition, Expression, FunctionType, Location, SimpleType, SourceFile, Type,
+    },
 };
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolType {
     Global(String),
     Inner(String),
-    Untyped,
+    Generic(String),
+    Primitive(String),
+    Unit,
 }
 
 pub enum SymbolScope {}
@@ -20,40 +26,59 @@ pub struct Symbol {
 }
 
 #[derive(Clone, Default)]
-pub struct SymbolTable {}
+pub struct SymbolTable {
+    /// mapping from identifier names to their types
+    map: HashMap<String, Type>,
+}
 
 impl SymbolTable {
     pub fn build(source_files: &Vec<SourceFile>, types: &Vec<SymbolType>, arena: &Arena) -> Self {
-        // for source_file in source_files {}
-        // for node in arena.nodes.values() {
-        //     match node {
-        //         AstNode::AssignExpression(e) |
-        //         AstNode::ArrayIndexAccessExpression(e) |
-        //         AstNode::MemberAccessExpression(e) |
-        //         AstNode::FunctionCallExpression(e) |
-        //         AstNode::PrefixUnaryExpression(e) |
-        //         AstNode::ParenthesizedExpression(e) |
-        //         AstNode::BinaryExpression(e) |
-        //         AstNode::UzumakiExpression(e) |
-
-        //         AstNode::Identifier(ie) |
-
-        //         AstNode::ArrayLiteral(le) |
-        //         AstNode::BoolLiteral(le) |
-        //         AstNode::StringLiteral(le)
-        //         AstNode::NumberLiteral(le) |
-        //         AstNode::UnitLiteral(le) =>
-
-        //         AstNode::TypeArray(te) |
-        //         AstNode::SimpleType(te) |
-        //         AstNode::GenericType(te) |
-        //         &AstNode::FunctionType(te) |
-        //         &AstNode::QualifiedName(te) |
-        //         AstNode::TypeQualifiedName(te) |
-        //     }
-        // }
-        Self {}
+        // Initialize the table by recording top-level definitions
+        let mut table = SymbolTable {
+            map: HashMap::new(),
+        };
+        for sf in source_files {
+            for def in &sf.definitions {
+                match def {
+                    Definition::Constant(c) => {
+                        let name = &c.name.name;
+                        table.map.insert(name.clone(), c.ty.clone());
+                    }
+                    Definition::Function(f) => {
+                        let name = &f.name.name;
+                        // build function type
+                        let param_types = f
+                            .arguments
+                            .as_ref()
+                            .map(|args| args.iter().map(|p| p.ty.clone()).collect());
+                        let return_ty = f.returns.clone().unwrap_or_else(|| {
+                            Type::Simple(Rc::new(SimpleType::new(
+                                0,
+                                f.location.clone(),
+                                "Unit".to_string(),
+                            )))
+                        });
+                        let func_ty = Type::Function(Rc::new(FunctionType::new(
+                            0,
+                            f.location.clone(),
+                            param_types,
+                            return_ty,
+                        )));
+                        table.map.insert(name.clone(), func_ty);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        table
     }
 
-    fn infer_for_expression() {}
+    /// Look up an identifier's type in the symbol table
+    pub fn lookup(&self, name: &str) -> Option<Type> {
+        self.map.get(name).cloned()
+    }
+    /// Insert a new symbol into the table
+    pub fn insert(&mut self, name: String, ty: Type) {
+        self.map.insert(name, ty);
+    }
 }
