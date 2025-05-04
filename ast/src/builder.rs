@@ -7,7 +7,7 @@ use crate::{
     symbols::SymbolType,
     t_ast::TypedAst,
     types::{
-        ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, AstNode,
+        ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement, AstNode,
         BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition,
         Definition, EnumDefinition, Expression, ExternalFunctionDefinition, FunctionCallExpression,
         FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, Location,
@@ -540,6 +540,9 @@ impl<'a> Builder<'a, InitState> {
 
     fn build_statement(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Statement {
         match node.kind() {
+            "assign_statement" => {
+                Statement::Assign(self.build_assign_statement(parent_id, node, code))
+            }
             "block" | "forall_block" | "assume_block" | "exists_block" | "unique_block" => {
                 Statement::Block(self.build_block(parent_id, node, code))
             }
@@ -675,9 +678,6 @@ impl<'a> Builder<'a, InitState> {
     fn build_expression(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Expression {
         let node_kind = node.kind();
         match node_kind {
-            "assign_expression" => {
-                Expression::Assign(self.build_assign_expression(parent_id, node, code), None)
-            }
             "array_index_access_expression" => Expression::ArrayIndexAccess(
                 self.build_array_index_access_expression(parent_id, node, code),
                 None,
@@ -716,20 +716,20 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
-    fn build_assign_expression(
+    fn build_assign_statement(
         &mut self,
         parent_id: u32,
         node: &Node,
         code: &[u8],
-    ) -> Rc<AssignExpression> {
+    ) -> Rc<AssignStatement> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
         let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
 
-        let node = Rc::new(AssignExpression::new(id, location, left, right));
+        let node = Rc::new(AssignStatement::new(id, location, left, right));
         self.arena.add_node(
-            AstNode::Expression(Expression::Assign(node.clone(), None)),
+            AstNode::Statement(Statement::Assign(node.clone())),
             parent_id,
         );
         node
@@ -1134,6 +1134,7 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let mut arguments = None;
         let mut cursor = node.walk();
+        let mut returns = None;
 
         let founded_arguments = node
             .children_by_field_name("argument", &mut cursor)
@@ -1142,7 +1143,9 @@ impl<'a> Builder<'a, InitState> {
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
-        let returns = self.build_type(id, &node.child_by_field_name("returns").unwrap(), code);
+        if let Some(returns_type_node) = node.child_by_field_name("returns") {
+            returns = Some(self.build_type(id, &returns_type_node, code));
+        }
         let node = Rc::new(FunctionType::new(id, location, arguments, returns));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Function(node.clone()), None)),

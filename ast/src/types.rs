@@ -47,8 +47,8 @@ pub struct TypeInfo {
 
 impl TypeInfo {
     #[must_use]
-    pub fn new(ty: Type) -> Self {
-        match &ty {
+    pub fn new(ty: &Type) -> Self {
+        match ty {
             Type::Simple(simple) => Self {
                 name: simple.name.clone(),
                 type_params: vec![],
@@ -66,7 +66,7 @@ impl TypeInfo {
                 type_params: vec![],
             },
             Type::Array(array) => Self {
-                name: format!("Array<{}>", TypeInfo::new(array.element_type.clone()).name),
+                name: format!("Array<{}>", TypeInfo::new(&array.element_type).name),
                 type_params: vec![],
             },
             Type::Function(func) => {
@@ -74,14 +74,9 @@ impl TypeInfo {
                 let param_types = func
                     .parameters
                     .as_ref()
-                    .map(|params| {
-                        params
-                            .iter()
-                            .map(|p| TypeInfo::new(p.clone()))
-                            .collect::<Vec<_>>()
-                    })
+                    .map(|params| params.iter().map(TypeInfo::new).collect::<Vec<_>>())
                     .unwrap_or_default();
-                let return_type = TypeInfo::new(func.returns.clone());
+                let return_type = TypeInfo::new(&func.returns);
                 Self {
                     name: format!("Function<{}, {}>", param_types.len(), return_type.name),
                     type_params: vec![],
@@ -280,6 +275,7 @@ ast_enums! {
     pub enum Statement {
         @inner_enum Block(BlockType),
         @inner_enum Expression(Expression),
+        Assign(Rc<AssignStatement>),
         Return(Rc<ReturnStatement>),
         Loop(Rc<LoopStatement>),
         Break(Rc<BreakStatement>),
@@ -291,7 +287,6 @@ ast_enums! {
     }
 
     pub enum Expression {
-        Assign(Rc<AssignExpression>, Option<TypeInfo>),
         ArrayIndexAccess(Rc<ArrayIndexAccessExpression>, Option<TypeInfo>),
         MemberAccess(Rc<MemberAccessExpression>, Option<TypeInfo>),
         FunctionCall(Rc<FunctionCallExpression>, Option<TypeInfo>),
@@ -460,8 +455,7 @@ ast_nodes! {
 
     pub struct VariableDefinitionStatement {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-        pub type_: Type,
+        pub ty: Type,
         pub value: Option<Expression>,
         pub is_uzumaki: bool,
     }
@@ -471,9 +465,7 @@ ast_nodes! {
         pub ty: Type,
     }
 
-    pub struct AssignExpression {
-        pub left: Expression,
-        pub right: Expression,
+    pub struct AssignStatement {
         pub left: Expression,
         pub right: Expression,
     }
@@ -555,7 +547,7 @@ ast_nodes! {
 
     pub struct FunctionType {
         pub parameters: Option<Vec<Type>>,
-        pub returns: Type,
+        pub returns: Option<Type>,
     }
 
     pub struct QualifiedName {

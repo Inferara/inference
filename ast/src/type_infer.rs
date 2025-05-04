@@ -1,6 +1,6 @@
 use anyhow::bail;
 
-use crate::types::{Definition, FunctionDefinition, Identifier, TypeInfo};
+use crate::types::{Definition, FunctionDefinition, Identifier, Statement, TypeInfo};
 #[allow(clippy::all, unused_imports, dead_code)]
 use crate::types::{
     Expression, Literal, Location, OperatorKind, SimpleType, SourceFile, Type, TypeArray,
@@ -340,12 +340,6 @@ impl TypeChecker {
     #[allow(clippy::needless_pass_by_value)]
     fn infer_variables(&mut self, function_definition: Rc<FunctionDefinition>) {
         self.symbol_table.push_scope();
-        // let mut generic_type_param_placeholders: HashMap<String, Option<String>> = HashMap::new();
-        // if let Some(type_parameters) = &function_definition.type_parameters {
-        //     for tp in type_parameters {
-        //         generic_type_param_placeholders.insert(tp.name(), None);
-        //     }
-        // }
         if let Some(arguments) = &function_definition.arguments {
             for argument in arguments {
                 if let Err(err) = self
@@ -356,7 +350,150 @@ impl TypeChecker {
                 }
             }
         }
+        for stmt in &mut function_definition.body.statements() {
+            self.infer_statement(
+                stmt,
+                function_definition.returns.clone(),
+                &function_definition
+                    .type_parameters
+                    .as_ref()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .map(|p| p.name())
+                    .collect(),
+            );
+        }
         self.symbol_table.pop_scope();
+    }
+
+    fn infer_statement(
+        &mut self,
+        statement: &mut Statement,
+        return_type: Option<Type>,
+        type_parameters: &Vec<String>,
+    ) {
+        match statement {
+            Statement::Block(block_type) => {
+                self.symbol_table.push_scope();
+                for stmt in &mut block_type.statements() {
+                    self.infer_statement(stmt, return_type.clone(), type_parameters);
+                }
+                self.symbol_table.pop_scope();
+            }
+            Statement::Expression(expression) => match expression {
+                Expression::Assign(assign_expression, type_info) => {
+                    let target_type = self.infer_expression(&mut assign_expression.left);
+                    let value_type = self.infer_expression(&mut assign_expression.right);
+                    if let (Some(target_type), Some(value_type)) = (target_type, value_type) {
+                        if !Self::types_equal(&target_type, &value_type) {
+                            self.errors.push(format!(
+                                "Cannot assign value of type {:?} to variable of type {:?}",
+                                value_type, target_type
+                            ));
+                        }
+                    }
+                }
+            },
+            Statement::Return(return_statement) => todo!(),
+            Statement::Loop(loop_statement) => todo!(),
+            Statement::Break(break_statement) => todo!(),
+            Statement::If(if_statement) => todo!(),
+            Statement::VariableDefinition(variable_definition_statement) => {
+                if let Some(mut initial_value) = variable_definition_statement.value.clone() {
+                    if let Some(init_type) = self.infer_expression(&mut initial_value) {
+                        if !Self::types_equal(&init_type, &variable_definition_statement.ty) {
+                            self.errors.push(format!(
+                                "Type mismatch in variable definition: expected {:?}, found {:?}",
+                                variable_definition_statement.ty, init_type
+                            ));
+                        }
+                    }
+                }
+                if let Err(err) = self.symbol_table.push_variable_to_scope(
+                    variable_definition_statement.name(),
+                    variable_definition_statement.ty.clone(),
+                ) {
+                    self.errors.push(err.to_string());
+                }
+                //TODO handle the case when the variable is not initialized
+            }
+            Statement::TypeDefinition(type_definition_statement) => todo!(),
+            Statement::Assert(assert_statement) => todo!(),
+            Statement::ConstantDefinition(constant_definition) => todo!(),
+        }
+    }
+
+    fn infer_expression(&mut self, expression: &mut Expression) -> Option<Type> {
+        match expression {
+            Expression::ArrayIndexAccess(array_index_access_expression, type_info) => todo!(),
+            Expression::MemberAccess(member_access_expression, type_info) => todo!(),
+            Expression::FunctionCall(function_call_expression, type_info) => todo!(),
+            Expression::PrefixUnary(prefix_unary_expression, type_info) => todo!(),
+            Expression::Parenthesized(parenthesized_expression, type_info) => {
+                self.infer_expression(expression)
+            }
+            Expression::Binary(binary_expression, type_info) => todo!(),
+            Expression::Literal(literal, type_info) => todo!(),
+            Expression::Identifier(identifier, type_info) => todo!(),
+            Expression::Type(_, type_info) => todo!(),
+            Expression::Uzumaki(uzumaki_expression, type_info) => todo!(),
+        }
+    }
+
+    fn types_equal(left: &Type, right: &Type) -> bool {
+        match (left, right) {
+            (Type::Array(left), Type::Array(right)) => {
+                Self::types_equal(&left.element_type, &right.element_type)
+            }
+            (Type::Simple(left), Type::Simple(right)) => left.name == right.name,
+            (Type::Generic(left), Type::Generic(right)) => {
+                left.base.name() == right.base.name() && left.parameters == right.parameters
+            }
+            (Type::Qualified(left), Type::Qualified(right)) => left.name() == right.name(),
+            (Type::QualifiedName(left), Type::QualifiedName(right)) => {
+                left.qualifier() == right.qualifier() && left.name() == right.name()
+            }
+            (Type::Custom(left), Type::Custom(right)) => left.name() == right.name(),
+            (Type::Function(left), Type::Function(right)) => {
+                let left_has_return_type = left.returns.is_some();
+                let right_has_return_type = right.returns.is_some();
+                if left_has_return_type != right_has_return_type {
+                    return false;
+                }
+                if left_has_return_type {
+                    if let (Some(left_return_type), Some(right_return_type)) =
+                        (&left.returns, &right.returns)
+                    {
+                        if !Self::types_equal(left_return_type, right_return_type) {
+                            return false;
+                        }
+                    }
+                }
+                let left_has_parameters = left.parameters.is_some();
+                let right_has_parameters = right.parameters.is_some();
+                if left_has_parameters != right_has_parameters {
+                    return false;
+                }
+                if left_has_parameters {
+                    if let (Some(left_parameters), Some(right_parameters)) =
+                        (&left.parameters, &right.parameters)
+                    {
+                        if left_parameters.len() != right_parameters.len() {
+                            return false;
+                        }
+                        for (left_param, right_param) in
+                            left_parameters.iter().zip(right_parameters.iter())
+                        {
+                            if !Self::types_equal(left_param, right_param) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+            _ => false,
+        }
     }
 }
 
@@ -480,44 +617,6 @@ impl TypeChecker {
 //             Location::default(),
 //         )),
 //     }
-// }
-
-// pub fn traverse_source_files(
-//     source_files: &[crate::types::SourceFile],
-//     symbols: &SymbolTable,
-// ) -> Result<(), TypeError> {
-//     let ctx = TypeContext { symbols };
-//     for sf in source_files {
-//         for def in &sf.definitions {
-//             if let crate::types::Definition::Function(func_rc) = def {
-//                 traverse_function(func_rc, &ctx)?;
-//             }
-//         }
-//     }
-//     Ok(())
-// }
-
-// fn traverse_function(
-//     func_rc: &std::rc::Rc<crate::types::FunctionDefinition>,
-//     ctx: &TypeContext,
-// ) -> Result<(), TypeError> {
-//     let func = func_rc.as_ref();
-//     // TODO: insert parameter types into ctx.symbols if needed
-//     traverse_block(&func.body, ctx)
-// }
-
-// fn traverse_block(
-//     block_type: &crate::types::BlockType,
-//     ctx: &TypeContext,
-// ) -> Result<(), TypeError> {
-//     use crate::types::BlockType;
-//     if let BlockType::Block(b_rc) = block_type {
-//         let block = b_rc.as_ref();
-//         for stmt in &block.statements {
-//             traverse_statement(stmt, ctx)?;
-//         }
-//     }
-//     Ok(())
 // }
 
 // fn traverse_statement(stmt: &crate::types::Statement, ctx: &TypeContext) -> Result<(), TypeError> {

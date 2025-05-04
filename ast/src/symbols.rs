@@ -62,7 +62,7 @@ impl SymbolTable {
                             0,
                             f.location.clone(),
                             param_types,
-                            return_ty,
+                            Some(return_ty),
                         )));
                         table.map.insert(name.clone(), func_ty);
                     }

@@ -7,7 +7,7 @@ use std::{fmt::Display, rc::Rc};
 use crate::symbols::SymbolType;
 
 use super::types::{
-    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
+    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement, BinaryExpression,
     Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition,
     Expression, ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression,
     FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, LoopStatement,
@@ -40,6 +40,19 @@ impl SourceFile {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl BlockType {
+    #[must_use]
+    pub fn statements(&self) -> Vec<Statement> {
+        match self {
+            BlockType::Block(block)
+            | BlockType::Forall(block)
+            | BlockType::Assume(block)
+            | BlockType::Exists(block)
+            | BlockType::Unique(block) => block.statements.clone(),
+        }
     }
 }
 
@@ -287,10 +300,6 @@ impl Block {
             statements,
         }
     }
-
-    pub fn add_statement(&mut self, statement: Statement) {
-        self.statements.push(statement);
-    }
 }
 
 impl ExpressionStatement {
@@ -374,16 +383,15 @@ impl VariableDefinitionStatement {
             id,
             location,
             name,
-            type_,
+            ty: type_,
             value,
             is_uzumaki,
         }
     }
 
     #[must_use]
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name.name
+    pub fn name(&self) -> String {
+        self.name.name.clone()
     }
 }
 
@@ -399,10 +407,10 @@ impl TypeDefinitionStatement {
     }
 }
 
-impl AssignExpression {
+impl AssignStatement {
     #[must_use]
     pub fn new(id: u32, location: Location, left: Expression, right: Expression) -> Self {
-        AssignExpression {
+        AssignStatement {
             id,
             location,
             left,
@@ -596,7 +604,12 @@ impl GenericType {
 
 impl FunctionType {
     #[must_use]
-    pub fn new(id: u32, location: Location, parameters: Option<Vec<Type>>, returns: Type) -> Self {
+    pub fn new(
+        id: u32,
+        location: Location,
+        parameters: Option<Vec<Type>>,
+        returns: Option<Type>,
+    ) -> Self {
         FunctionType {
             id,
             location,
@@ -621,6 +634,14 @@ impl QualifiedName {
             name,
         }
     }
+
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
+
+    pub fn qualifier(&self) -> String {
+        self.qualifier.name()
+    }
 }
 
 impl TypeQualifiedName {
@@ -632,6 +653,14 @@ impl TypeQualifiedName {
             alias,
             name,
         }
+    }
+
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
+
+    pub fn alias(&self) -> String {
+        self.alias.name()
     }
 }
 
