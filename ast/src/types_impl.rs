@@ -28,14 +28,18 @@ impl SourceFile {
             definitions: Vec::new(),
         }
     }
+}
 
-    pub fn add_use_directive(&mut self, use_directive: Rc<UseDirective>) {
-    pub fn add_use_directive(&mut self, use_directive: Rc<UseDirective>) {
-        self.use_directives.push(use_directive);
-    }
-
-    pub fn add_definition(&mut self, definition: Definition) {
-        self.definitions.push(definition);
+impl SourceFile {
+    #[must_use]
+    pub fn function_definitions(&self) -> Vec<Rc<FunctionDefinition>> {
+        self.definitions
+            .iter()
+            .filter_map(|def| match def {
+                Definition::Function(func) => Some(func.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -146,6 +150,7 @@ impl Identifier {
         Identifier { id, location, name }
     }
 
+    #[must_use]
     pub fn name(&self) -> String {
         self.name.clone()
     }
@@ -194,9 +199,8 @@ impl FunctionDefinition {
     }
 
     #[must_use]
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name.name
+    pub fn name(&self) -> String {
+        self.name.name.clone()
     }
 
     #[must_use]
@@ -269,9 +273,8 @@ impl Parameter {
     }
 
     #[must_use]
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name.name
+    pub fn name(&self) -> String {
+        self.name.name.clone()
     }
 }
 

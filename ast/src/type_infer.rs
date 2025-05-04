@@ -1,11 +1,10 @@
 use anyhow::bail;
 
-use crate::types::{Definition, Identifier, TypeInfo};
+use crate::types::{Definition, FunctionDefinition, Identifier, TypeInfo};
 #[allow(clippy::all, unused_imports, dead_code)]
 use crate::types::{
     Expression, Literal, Location, OperatorKind, SimpleType, SourceFile, Type, TypeArray,
 };
-use crate::{arena::Arena, types::GenericType};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -24,7 +23,7 @@ struct SymbolTable {
 }
 
 impl SymbolTable {
-    pub fn new() -> Self {
+    fn new() -> Self {
         let mut table = SymbolTable {
             types: HashMap::default(),
             functions: HashMap::default(),
@@ -63,7 +62,27 @@ impl SymbolTable {
         table
     }
 
-    fn register_type(&mut self, name: String, type_params: Vec<TypeInfo>) -> anyhow::Result<()> {
+    fn push_scope(&mut self) {
+        self.variables.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.variables.pop();
+    }
+
+    fn push_variable_to_scope(&mut self, name: String, var_type: Type) -> anyhow::Result<()> {
+        if let Some(scope) = self.variables.last_mut() {
+            if scope.contains_key(&name) {
+                bail!("Variable `{name}` already declared in this scope");
+            }
+            scope.insert(name, var_type);
+            Ok(())
+        } else {
+            bail!("No active scope to push variables".to_string())
+        }
+    }
+
+    fn register_type(&mut self, name: String, type_params: Vec<String>) -> anyhow::Result<()> {
         if self.types.contains_key(&name) {
             bail!("Type `{name}` is already defined")
         }
@@ -80,7 +99,7 @@ impl SymbolTable {
         return_type: Type,
     ) -> Result<(), String> {
         if self.functions.contains_key(&name) {
-            return Err(format!("Function `{}` is already defined", name));
+            return Err(format!("Function `{name}` is already defined"));
         }
         self.functions.insert(
             name.clone(),
@@ -119,6 +138,14 @@ impl TypeChecker {
         if !self.errors.is_empty() {
             bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
         }
+        for source_file in program {
+            for function_definition in &mut source_file.function_definitions() {
+                self.infer_variables(function_definition.clone());
+            }
+        }
+        if !self.errors.is_empty() {
+            bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
+        }
         Ok(())
     }
 
@@ -131,13 +158,7 @@ impl TypeChecker {
                             let type_params = generic_type
                                 .parameters
                                 .iter()
-                                .map(|param| {
-                                    if let Type::Generic(generic_param) = param {
-                                        Self::construct_generic_type_info(generic_param.clone())
-                                    } else {
-                                        panic!("Expected a generic type parameter")
-                                    }
-                                })
+                                .map(|param| param.name())
                                 .collect();
                             self.symbol_table
                                 .register_type(type_definition.name(), type_params)
@@ -197,27 +218,6 @@ impl TypeChecker {
         }
     }
 
-    fn construct_generic_type_info(generic_type_definition: Rc<GenericType>) -> TypeInfo {
-        Self::construct_type_info(generic_type_definition, vec![])
-    }
-
-    #[allow(clippy::needless_pass_by_value)]
-    fn construct_type_info(
-        generic_type_definition: Rc<GenericType>,
-        type_params: Vec<TypeInfo>,
-    ) -> TypeInfo {
-        let name = generic_type_definition.base.name();
-        let mut type_info = TypeInfo { name, type_params };
-        for param in &generic_type_definition.parameters {
-            if let Type::Generic(generic_param) = param {
-                let param_info = Self::construct_generic_type_info(generic_param.clone());
-                type_info.type_params.push(param_info);
-            }
-        }
-        type_info
-    }
-
-    //TODO continue implementing this function
     fn collect_function_and_constant_definitions(&mut self, program: &mut Vec<SourceFile>) {
         for sf in program {
             for definition in &sf.definitions {
@@ -225,13 +225,47 @@ impl TypeChecker {
                     Definition::Constant(constant_definition) => todo!(),
                     Definition::Function(function_definition) => {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
-                            self.validate_type(&param.ty, None);
+                            self.validate_type(
+                                &param.ty,
+                                function_definition.type_parameters.as_ref(),
+                            );
                         }
                         if let Some(return_type) = &function_definition.returns {
                             self.validate_type(
                                 return_type,
-                                function_definition.type_parameters.clone(),
+                                function_definition.type_parameters.as_ref(),
                             );
+                        }
+                        if !self.errors.is_empty() {
+                            continue;
+                        }
+                        if let Err(err) = self.symbol_table.register_function(
+                            function_definition.name(),
+                            function_definition
+                                .type_parameters
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .map(|param| param.name())
+                                .collect(),
+                            function_definition
+                                .arguments
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .map(|param| param.ty.clone())
+                                .collect(),
+                            function_definition
+                                .returns
+                                .as_ref()
+                                .unwrap_or(&Type::Simple(Rc::new(SimpleType::new(
+                                    0,
+                                    Location::default(),
+                                    "Unit".into(),
+                                ))))
+                                .clone(),
+                        ) {
+                            self.errors.push(err);
                         }
                     }
                     Definition::ExternalFunction(external_function_definition) => {
@@ -245,7 +279,7 @@ impl TypeChecker {
         }
     }
 
-    fn validate_type(&mut self, ty: &Type, type_parameters: Option<Vec<Rc<Type>>>) {
+    fn validate_type(&mut self, ty: &Type, type_parameters: Option<&Vec<Rc<Identifier>>>) {
         match ty {
             Type::Array(type_array) => self.validate_type(&type_array.element_type, None),
             Type::Simple(simple_type) => {
@@ -264,17 +298,26 @@ impl TypeChecker {
                         .push(format!("Unknown type `{}`", generic_type.base.name()));
                 }
                 if let Some(type_params) = &type_parameters {
+                    if type_params.len() != generic_type.parameters.len() {
+                        self.errors.push(format!(
+                            "Type parameter count mismatch for `{}`: expected {}, found {}",
+                            generic_type.base.name(),
+                            generic_type.parameters.len(),
+                            type_params.len()
+                        ));
+                    }
+                    let generic_param_names: Vec<String> = generic_type
+                        .parameters
+                        .iter()
+                        .map(|param| param.name())
+                        .collect();
                     for param in &generic_type.parameters {
-                        if let Type::Generic(generic_param) = param {
-                            if !type_params
-                                .iter()
-                                .any(|tp| tp.name == generic_param.base.name)
-                            {
-                                self.errors.push(format!(
-                                    "Unknown type parameter `{}` in generic type `{}`",
-                                    generic_param.base.name, generic_type.base.name
-                                ));
-                            }
+                        if !generic_param_names.contains(&param.name()) {
+                            self.errors.push(format!(
+                                "Type parameter `{}` not found in `{}`",
+                                param.name(),
+                                generic_type.base.name()
+                            ));
                         }
                     }
                 }
@@ -292,6 +335,28 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn infer_variables(&mut self, function_definition: Rc<FunctionDefinition>) {
+        self.symbol_table.push_scope();
+        // let mut generic_type_param_placeholders: HashMap<String, Option<String>> = HashMap::new();
+        // if let Some(type_parameters) = &function_definition.type_parameters {
+        //     for tp in type_parameters {
+        //         generic_type_param_placeholders.insert(tp.name(), None);
+        //     }
+        // }
+        if let Some(arguments) = &function_definition.arguments {
+            for argument in arguments {
+                if let Err(err) = self
+                    .symbol_table
+                    .push_variable_to_scope(argument.name(), argument.ty.clone())
+                {
+                    self.errors.push(err.to_string());
+                }
+            }
+        }
+        self.symbol_table.pop_scope();
     }
 }
 

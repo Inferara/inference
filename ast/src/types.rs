@@ -41,8 +41,58 @@ impl Location {
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct TypeInfo {
     pub name: String,
-    pub type_params: Vec<TypeInfo>,
+    pub type_params: Vec<String>,
     // (Field type information could be added here if needed for struct field checking.)
+}
+
+impl TypeInfo {
+    #[must_use]
+    pub fn new(ty: Type) -> Self {
+        match &ty {
+            Type::Simple(simple) => Self {
+                name: simple.name.clone(),
+                type_params: vec![],
+            },
+            Type::Generic(generic) => Self {
+                name: generic.base.name.clone(),
+                type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
+            },
+            Type::QualifiedName(qualified_name) => Self {
+                name: qualified_name.qualifier.name.clone(),
+                type_params: vec![],
+            },
+            Type::Qualified(qualified) => Self {
+                name: qualified.alias.name.clone(),
+                type_params: vec![],
+            },
+            Type::Array(array) => Self {
+                name: format!("Array<{}>", TypeInfo::new(array.element_type.clone()).name),
+                type_params: vec![],
+            },
+            Type::Function(func) => {
+                //REVISIT
+                let param_types = func
+                    .parameters
+                    .as_ref()
+                    .map(|params| {
+                        params
+                            .iter()
+                            .map(|p| TypeInfo::new(p.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let return_type = TypeInfo::new(func.returns.clone());
+                Self {
+                    name: format!("Function<{}, {}>", param_types.len(), return_type.name),
+                    type_params: vec![],
+                }
+            }
+            Type::Custom(custom) => Self {
+                name: custom.name.clone(),
+                type_params: vec![],
+            },
+        }
+    }
 }
 
 impl Display for Location {
