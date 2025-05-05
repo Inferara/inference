@@ -193,13 +193,13 @@ impl WatEmitter {
 
     fn emit_for_binary_expression(&self, bin_expr: &BinaryExpression) -> Vec<String> {
         let mut result = Vec::new();
-        if let Expression::Identifier(identifier, _) = &bin_expr.left {
+        if let Expression::Identifier(identifier) = &bin_expr.left {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.left));
         }
 
-        if let Expression::Identifier(identifier, _) = &bin_expr.right {
+        if let Expression::Identifier(identifier) = &bin_expr.right {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.right));
@@ -214,7 +214,7 @@ impl WatEmitter {
             //TODO: check order
             for (_, arg_expr) in arguments {
                 match arg_expr {
-                    Expression::Identifier(identifier, _) => {
+                    Expression::Identifier(identifier) => {
                         result.push(format!("local.get ${}", identifier.name));
                     }
                     _ => {
@@ -238,23 +238,26 @@ impl WatEmitter {
     fn emit_for_expression(&self, expr: &Expression) -> Vec<String> {
         let mut result = Vec::new();
         match expr {
-            Expression::Binary(bin_expr, _) => {
+            Expression::Binary(bin_expr) => {
                 result.extend(self.emit_for_binary_expression(bin_expr));
             }
-            Expression::Identifier(identifier, _) => {
+            Expression::Identifier(identifier) => {
                 result.push(identifier.name.clone());
             }
-            Expression::Literal(literal, _) => {
+            Expression::Literal(literal) => {
                 result.push(WatEmitter::emit_for_literal(literal));
             }
-            Expression::FunctionCall(function_call, _) => {
+            Expression::FunctionCall(function_call) => {
                 result.extend(self.emit_for_function_call(function_call));
             }
-            Expression::MemberAccess(member_access, _) => {
+            Expression::MemberAccess(member_access) => {
                 result.extend(self.emit_for_member_access(member_access));
             }
-            Expression::Uzumaki(_, ty) => {
-                result.push(format!("{}.uzumaki", ty.as_ref().unwrap().name)); //FIXME works only for simple types
+            Expression::Uzumaki(uzumaki) => {
+                result.push(format!(
+                    "{}.uzumaki",
+                    uzumaki.type_info.borrow().as_ref().unwrap().name
+                )); //FIXME works only for simple types
             }
             _ => result.push(format!("{expr:?} expression type is not supported yet")),
         }
@@ -282,7 +285,7 @@ impl WatEmitter {
         result.push(format!("(local ${variable_name} {variable_type})"));
         if let Some(value) = &variable_definition.value {
             match &*value.borrow() {
-                Expression::Identifier(identifier, _) => {
+                Expression::Identifier(identifier) => {
                     result.push(format!("local.get ${}", identifier.name));
                 }
                 _ => {
@@ -342,10 +345,10 @@ impl WatEmitter {
 
     fn emit_for_assert_statement(&self, assert: &AssertStatement) -> Vec<String> {
         match &assert.expression {
-            Expression::Binary(bin_expr, _) => {
+            Expression::Binary(bin_expr) => {
                 let mut result = Vec::new();
 
-                if let Expression::Identifier(identifier, _) = &bin_expr.left {
+                if let Expression::Identifier(identifier) = &bin_expr.left {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));
@@ -356,7 +359,7 @@ impl WatEmitter {
                     result.push(format!("local.get ${variable_name}"));
                 }
 
-                if let Expression::Identifier(identifier, _) = &bin_expr.right {
+                if let Expression::Identifier(identifier) = &bin_expr.right {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));

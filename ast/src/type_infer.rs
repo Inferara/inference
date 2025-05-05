@@ -2,6 +2,7 @@ use anyhow::bail;
 
 use crate::types::{Definition, FunctionDefinition, Identifier, Statement, TypeInfo};
 use crate::types::{Expression, Location, SimpleType, SourceFile, Type};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -16,7 +17,7 @@ struct FuncSignature {
 struct SymbolTable {
     types: HashMap<String, TypeInfo>, // map of type name -> type info
     functions: HashMap<String, FuncSignature>, // map of function name -> signature
-    variables: Vec<HashMap<String, Type>>, // stack of variable name -> type for each scope
+    variables: Vec<HashMap<String, TypeInfo>>, // stack of variable name -> type for each scope
 }
 
 impl SymbolTable {
@@ -67,7 +68,7 @@ impl SymbolTable {
         self.variables.pop();
     }
 
-    fn push_variable_to_scope(&mut self, name: String, var_type: Type) -> anyhow::Result<()> {
+    fn push_variable_to_scope(&mut self, name: String, var_type: TypeInfo) -> anyhow::Result<()> {
         if let Some(scope) = self.variables.last_mut() {
             if scope.contains_key(&name) {
                 bail!("Variable `{name}` already declared in this scope");
@@ -113,6 +114,15 @@ impl SymbolTable {
     fn lookup_type(&self, name: &str) -> Option<&TypeInfo> {
         self.types.get(name)
     }
+
+    fn lookup_variable(&self, name: &String) -> Option<TypeInfo> {
+        for scope in self.variables.iter().rev() {
+            if let Some(ty) = scope.get(name) {
+                return Some(ty.clone());
+            }
+        }
+        None
+    }
 }
 
 pub(crate) struct TypeChecker {
@@ -135,9 +145,14 @@ impl TypeChecker {
         if !self.errors.is_empty() {
             bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
         }
+        // Infer types for each function in each source file
         for source_file in program {
-            for function_definition in &mut source_file.function_definitions() {
-                self.infer_variables(function_definition.clone());
+            // Directly iterate over definitions to ensure we operate on the actual AST nodes
+            for def in &source_file.definitions {
+                if let Definition::Function(function_definition) = def {
+                    // Clone the Rc to share the underlying FunctionDefinition
+                    self.infer_variables(function_definition.clone());
+                }
             }
         }
         if !self.errors.is_empty() {
@@ -341,7 +356,7 @@ impl TypeChecker {
             for argument in arguments {
                 if let Err(err) = self
                     .symbol_table
-                    .push_variable_to_scope(argument.name(), argument.ty.clone())
+                    .push_variable_to_scope(argument.name(), TypeInfo::new(&argument.ty))
                 {
                     self.errors.push(err.to_string());
                 }
@@ -371,18 +386,19 @@ impl TypeChecker {
     ) {
         match statement {
             Statement::Assign(assign_statement) => {
+                // infer target type from left-hand side
                 let target_type = self.infer_expression(&mut assign_statement.left.borrow_mut());
-                if let Expression::Uzumaki(_, ref mut type_info) =
-                    &mut *assign_statement.right.borrow_mut()
-                {
-                    *type_info = target_type;
+                // handle Uzumaki expression on right-hand side
+                let mut right_expr = assign_statement.right.borrow_mut();
+                if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
+                    // annotate type_info on the UzumakiExpression
+                    *uzumaki_rc.type_info.borrow_mut() = target_type.clone();
                 } else {
-                    let value_type =
-                        self.infer_expression(&mut assign_statement.right.borrow_mut());
-                    if let (Some(target_type), Some(value_type)) = (target_type, value_type) {
-                        if target_type != value_type {
+                    let value_type = self.infer_expression(&mut right_expr);
+                    if let (Some(target), Some(val)) = (target_type, value_type) {
+                        if target != val {
                             self.errors.push(format!(
-                                "Cannot assign value of type {value_type:?} to variable of type {target_type:?}"
+                                "Cannot assign value of type {val:?} to variable of type {target:?}"
                             ));
                         }
                     }
@@ -404,15 +420,13 @@ impl TypeChecker {
             Statement::If(if_statement) => todo!(),
             Statement::VariableDefinition(variable_definition_statement) => {
                 let target_type = TypeInfo::new(&variable_definition_statement.ty);
-                if let Some(initial_value) = variable_definition_statement.value.clone() {
-                    if let Expression::Uzumaki(uzumaki, ref mut type_info) =
-                        &mut *initial_value.borrow_mut()
-                    {
-                        println!("Uzumaki: {uzumaki:?}\n");
-                        *type_info = Some(target_type);
-                    } else if let Some(init_type) =
-                        self.infer_expression(&mut initial_value.borrow_mut())
-                    {
+                if let Some(initial_value) = variable_definition_statement.value.as_ref() {
+                    // check for Uzumaki initializer
+                    let mut expr_ref = initial_value.borrow_mut();
+                    if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
+                        println!("Uzumaki: {uzumaki_rc:?}\n");
+                        *uzumaki_rc.type_info.borrow_mut() = Some(target_type.clone());
+                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref) {
                         if init_type != TypeInfo::new(&variable_definition_statement.ty) {
                             self.errors.push(format!(
                                 "Type mismatch in variable definition: expected {:?}, found {:?}",
@@ -423,7 +437,7 @@ impl TypeChecker {
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     variable_definition_statement.name(),
-                    variable_definition_statement.ty.clone(),
+                    TypeInfo::new(&variable_definition_statement.ty),
                 ) {
                     self.errors.push(err.to_string());
                 }
@@ -437,20 +451,29 @@ impl TypeChecker {
 
     fn infer_expression(&mut self, expression: &mut Expression) -> Option<TypeInfo> {
         match expression {
-            Expression::ArrayIndexAccess(array_index_access_expression, ref mut type_info) => {
+            Expression::ArrayIndexAccess(array_index_access_expression) => {
                 todo!()
             }
-            Expression::MemberAccess(member_access_expression, ref mut type_info) => todo!(),
-            Expression::FunctionCall(function_call_expression, ref mut type_info) => todo!(),
-            Expression::PrefixUnary(prefix_unary_expression, ref mut type_info) => todo!(),
-            Expression::Parenthesized(parenthesized_expression, ref mut type_info) => {
-                self.infer_expression(expression)
+            Expression::MemberAccess(member_access_expression) => todo!(),
+            Expression::FunctionCall(function_call_expression) => todo!(),
+            Expression::PrefixUnary(prefix_unary_expression) => todo!(),
+            Expression::Parenthesized(parenthesized_expression) => {
+                self.infer_expression(&mut parenthesized_expression.expression.borrow_mut())
             }
-            Expression::Binary(binary_expression, ref mut type_info) => todo!(),
-            Expression::Literal(literal, ref mut type_info) => todo!(),
-            Expression::Identifier(identifier, ref mut type_info) => todo!(),
-            Expression::Type(_, ref mut type_info) => todo!(),
-            Expression::Uzumaki(_, ref mut type_info) => type_info.clone(),
+            Expression::Binary(binary_expression) => todo!(),
+            Expression::Literal(literal) => todo!(),
+            Expression::Identifier(identifier) => {
+                if let Some(var_ty) = self.symbol_table.lookup_variable(&identifier.name) {
+                    *identifier.type_info.borrow_mut() = Some(var_ty.clone());
+                    Some(var_ty)
+                } else {
+                    self.errors
+                        .push(format!("Use of undeclared variable `{}`", identifier.name));
+                    None
+                }
+            }
+            Expression::Type(type_expr) => todo!(),
+            Expression::Uzumaki(uzumaki) => uzumaki.type_info.borrow().clone(),
         }
     }
 

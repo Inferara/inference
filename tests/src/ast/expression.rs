@@ -30,14 +30,15 @@ mod expression_tests {
             let c: i32 = @;
             let d: i64 = @;
 
-            let e: u8 = @;
+            let e: u8;
+            e = @;
             let f: u16 = @;
             let g: u32 = @;
             let h: u64 = @;
         }"#;
         let ast = build_ast(source_code.to_string());
         let uzumaki_nodes =
-            ast.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Uzumaki(_, _))));
+            ast.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Uzumaki(_))));
         assert!(
             uzumaki_nodes.len() == 8,
             "Expected 8 UzumakiExpression nodes, found {}",
@@ -47,13 +48,13 @@ mod expression_tests {
         let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
         uzumaki_nodes.sort_by_key(|node| node.start_line());
         for (i, node) in uzumaki_nodes.iter().enumerate() {
-            if let AstNode::Expression(Expression::Uzumaki(uzumaki, ty)) = node {
+            if let AstNode::Expression(Expression::Uzumaki(uzumaki)) = node {
                 println!("Uzumaki: {uzumaki:?}\n");
                 assert!(
-                    ty.as_ref().unwrap().name == expected_types[i],
+                    uzumaki.type_info.borrow().as_ref().unwrap().name == expected_types[i],
                     "Expected type {} for UzumakiExpression, found {:?}",
                     expected_types[i],
-                    ty
+                    uzumaki.type_info.borrow().as_ref().unwrap().name
                 );
             }
         }

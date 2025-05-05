@@ -680,38 +680,29 @@ impl<'a> Builder<'a, InitState> {
         match node_kind {
             "array_index_access_expression" => Expression::ArrayIndexAccess(
                 self.build_array_index_access_expression(parent_id, node, code),
-                None,
             ),
-            "member_access_expression" => Expression::MemberAccess(
-                self.build_member_access_expression(parent_id, node, code),
-                None,
-            ),
-            "type" => Expression::Type(self.build_type(parent_id, node, code), None),
-            "function_call_expression" => Expression::FunctionCall(
-                self.build_function_call_expression(parent_id, node, code),
-                None,
-            ),
-            "prefix_unary_expression" => Expression::PrefixUnary(
-                self.build_prefix_unary_expression(parent_id, node, code),
-                None,
-            ),
+            "member_access_expression" => {
+                Expression::MemberAccess(self.build_member_access_expression(parent_id, node, code))
+            }
+            "type" => Expression::Type(self.build_type(parent_id, node, code)),
+            "function_call_expression" => {
+                Expression::FunctionCall(self.build_function_call_expression(parent_id, node, code))
+            }
+            "prefix_unary_expression" => {
+                Expression::PrefixUnary(self.build_prefix_unary_expression(parent_id, node, code))
+            }
             "parenthesized_expression" => Expression::Parenthesized(
                 self.build_parenthesized_expression(parent_id, node, code),
-                None,
             ),
             "binary_expression" => {
-                Expression::Binary(self.build_binary_expression(parent_id, node, code), None)
+                Expression::Binary(self.build_binary_expression(parent_id, node, code))
             }
             "bool_literal" | "string_literal" | "number_literal" | "array_literal"
-            | "unit_literal" => {
-                Expression::Literal(self.build_literal(parent_id, node, code), None)
-            }
+            | "unit_literal" => Expression::Literal(self.build_literal(parent_id, node, code)),
             "uzumaki_keyword" => {
-                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code), None)
+                Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code))
             }
-            "identifier" => {
-                Expression::Identifier(self.build_identifier(parent_id, node, code), None)
-            }
+            "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
             _ => panic!("Unexpected expression node kind: {node_kind}"),
         }
     }
@@ -748,7 +739,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(ArrayIndexAccessExpression::new(id, location, array, index));
         self.arena.add_node(
-            AstNode::Expression(Expression::ArrayIndexAccess(node.clone(), None)),
+            AstNode::Expression(Expression::ArrayIndexAccess(node.clone())),
             parent_id,
         );
         node
@@ -767,7 +758,7 @@ impl<'a> Builder<'a, InitState> {
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let node = Rc::new(MemberAccessExpression::new(id, location, expression, name));
         self.arena.add_node(
-            AstNode::Expression(Expression::MemberAccess(node.clone(), None)),
+            AstNode::Expression(Expression::MemberAccess(node.clone())),
             parent_id,
         );
         node
@@ -794,7 +785,7 @@ impl<'a> Builder<'a, InitState> {
                     match field {
                         "argument_name" => {
                             let expr = self.build_expression(id, &child, code);
-                            if let Expression::Identifier(ident, _) = expr {
+                            if let Expression::Identifier(ident) = expr {
                                 pending_name = Some(ident);
                             }
                         }
@@ -822,7 +813,7 @@ impl<'a> Builder<'a, InitState> {
             id, location, function, arguments,
         ));
         self.arena.add_node(
-            AstNode::Expression(Expression::FunctionCall(node.clone(), None)),
+            AstNode::Expression(Expression::FunctionCall(node.clone())),
             parent_id,
         );
         node
@@ -848,7 +839,7 @@ impl<'a> Builder<'a, InitState> {
             id, location, expression, operator,
         ));
         self.arena.add_node(
-            AstNode::Expression(Expression::PrefixUnary(node.clone(), None)),
+            AstNode::Expression(Expression::PrefixUnary(node.clone())),
             parent_id,
         );
         node
@@ -899,7 +890,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(ParenthesizedExpression::new(id, location, expression));
         self.arena.add_node(
-            AstNode::Expression(Expression::Parenthesized(node.clone(), None)),
+            AstNode::Expression(Expression::Parenthesized(node.clone())),
             parent_id,
         );
         node
@@ -942,7 +933,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(BinaryExpression::new(id, location, left, operator, right));
         self.arena.add_node(
-            AstNode::Expression(Expression::Binary(node.clone(), None)),
+            AstNode::Expression(Expression::Binary(node.clone())),
             parent_id,
         );
         node
@@ -975,7 +966,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(ArrayLiteral::new(id, location, elements));
         self.arena.add_node(
-            AstNode::Expression(Expression::Literal(Literal::Array(node.clone()), None)),
+            AstNode::Expression(Expression::Literal(Literal::Array(node.clone()))),
             parent_id,
         );
         node
@@ -992,7 +983,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(BoolLiteral::new(id, location, value));
         self.arena.add_node(
-            AstNode::Expression(Expression::Literal(Literal::Bool(node.clone()), None)),
+            AstNode::Expression(Expression::Literal(Literal::Bool(node.clone()))),
             parent_id,
         );
         node
@@ -1009,7 +1000,7 @@ impl<'a> Builder<'a, InitState> {
         let value = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(StringLiteral::new(id, location, value));
         self.arena.add_node(
-            AstNode::Expression(Expression::Literal(Literal::String(node.clone()), None)),
+            AstNode::Expression(Expression::Literal(Literal::String(node.clone()))),
             parent_id,
         );
         node
@@ -1026,7 +1017,7 @@ impl<'a> Builder<'a, InitState> {
         let value = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(NumberLiteral::new(id, location, value));
         self.arena.add_node(
-            AstNode::Expression(Expression::Literal(Literal::Number(node.clone()), None)),
+            AstNode::Expression(Expression::Literal(Literal::Number(node.clone()))),
             parent_id,
         );
         node
@@ -1037,7 +1028,7 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let node = Rc::new(UnitLiteral::new(id, location));
         self.arena.add_node(
-            AstNode::Expression(Expression::Literal(Literal::Unit(node.clone()), None)),
+            AstNode::Expression(Expression::Literal(Literal::Unit(node.clone()))),
             parent_id,
         );
         node
@@ -1083,7 +1074,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(TypeArray::new(id, location, element_type, size));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Array(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::Array(node.clone()))),
             parent_id,
         );
         node
@@ -1096,7 +1087,7 @@ impl<'a> Builder<'a, InitState> {
         self.types.push(SymbolType::Global(name.clone()));
         let node = Rc::new(SimpleType::new(id, location, name));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Simple(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),
             parent_id,
         );
         node
@@ -1118,7 +1109,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(GenericType::new(id, location, base, parameters));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Generic(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::Generic(node.clone()))),
             parent_id,
         );
         node
@@ -1148,7 +1139,7 @@ impl<'a> Builder<'a, InitState> {
         }
         let node = Rc::new(FunctionType::new(id, location, arguments, returns));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Function(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::Function(node.clone()))),
             parent_id,
         );
         node
@@ -1167,7 +1158,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(TypeQualifiedName::new(id, location, alias, name));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Qualified(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::Qualified(node.clone()))),
             parent_id,
         );
         node
@@ -1187,7 +1178,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(QualifiedName::new(id, location, qualifier, name));
         self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::QualifiedName(node.clone()), None)),
+            AstNode::Expression(Expression::Type(Type::QualifiedName(node.clone()))),
             parent_id,
         );
         node
@@ -1203,7 +1194,7 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let node = Rc::new(UzumakiExpression::new(id, location));
         self.arena.add_node(
-            AstNode::Expression(Expression::Uzumaki(node.clone(), None)),
+            AstNode::Expression(Expression::Uzumaki(node.clone())),
             parent_id,
         );
         node
@@ -1215,7 +1206,7 @@ impl<'a> Builder<'a, InitState> {
         let name = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(Identifier::new(id, name, location));
         self.arena.add_node(
-            AstNode::Expression(Expression::Identifier(node.clone(), None)),
+            AstNode::Expression(Expression::Identifier(node.clone())),
             parent_id,
         );
         node

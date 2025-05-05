@@ -295,16 +295,16 @@ ast_enums! {
     }
 
     pub enum Expression {
-        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>, Option<TypeInfo>),
-        MemberAccess(Rc<MemberAccessExpression>, Option<TypeInfo>),
-        FunctionCall(Rc<FunctionCallExpression>, Option<TypeInfo>),
-        PrefixUnary(Rc<PrefixUnaryExpression>, Option<TypeInfo>),
-        Parenthesized(Rc<ParenthesizedExpression>, Option<TypeInfo>),
-        Binary(Rc<BinaryExpression>, Option<TypeInfo>),
-        @inner_enum Literal(Literal, Option<TypeInfo>),
-        Identifier(Rc<Identifier>, Option<TypeInfo>),
-        @inner_enum Type(Type, Option<TypeInfo>),
-        Uzumaki(Rc<UzumakiExpression>, Option<TypeInfo>),
+        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
+        MemberAccess(Rc<MemberAccessExpression>),
+        FunctionCall(Rc<FunctionCallExpression>),
+        PrefixUnary(Rc<PrefixUnaryExpression>),
+        Parenthesized(Rc<ParenthesizedExpression>),
+        Binary(Rc<BinaryExpression>),
+        @inner_enum Literal(Literal),
+        Identifier(Rc<Identifier>),
+        @inner_enum Type(Type),
+        Uzumaki(Rc<UzumakiExpression>),
     }
 
     pub enum Literal {
@@ -401,7 +401,8 @@ ast_nodes! {
     }
 
     pub struct Identifier {
-        pub name: String
+        pub name: String,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct ConstantDefinition {
@@ -481,31 +482,36 @@ ast_nodes! {
     pub struct ArrayIndexAccessExpression {
         pub array: Expression,
         pub index: Expression,
-        pub array: Expression,
-        pub index: Expression,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct MemberAccessExpression {
         pub expression: Expression,
         pub name: Rc<Identifier>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeMemberAccessExpression {
         pub expression: Expression,
         pub name: Rc<Identifier>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct FunctionCallExpression {
         pub function: Expression,
         pub arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
-    pub struct UzumakiExpression {}
+    pub struct UzumakiExpression {
+        pub type_info: RefCell<Option<TypeInfo>>
+    }
 
     pub struct PrefixUnaryExpression {
         pub expression: Expression,
         pub expression: Expression,
         pub operator: UnaryOperatorKind,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct AssertStatement {
@@ -514,8 +520,8 @@ ast_nodes! {
     }
 
     pub struct ParenthesizedExpression {
-        pub expression: Expression,
-        pub expression: Expression,
+        pub expression: RefCell<Expression>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct BinaryExpression {
@@ -523,307 +529,66 @@ ast_nodes! {
         pub left: Expression,
         pub operator: OperatorKind,
         pub right: Expression,
-        pub right: Expression,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct ArrayLiteral {
         pub elements: Vec<Expression>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct BoolLiteral {
         pub value: bool,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct StringLiteral {
         pub value: String,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct NumberLiteral {
-        pub value: String
+        pub value: String,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
-    pub struct UnitLiteral {}
+    pub struct UnitLiteral {
+        pub type_info: RefCell<Option<TypeInfo>>
+    }
 
     pub struct SimpleType {
         pub name: String,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct GenericType {
         pub base: Rc<Identifier>,
         pub parameters: Vec<Rc<Identifier>>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct FunctionType {
         pub parameters: Option<Vec<Type>>,
         pub returns: Option<Type>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct QualifiedName {
         pub qualifier: Rc<Identifier>,
         pub name: Rc<Identifier>,
-        pub qualifier: Rc<Identifier>,
-        pub name: Rc<Identifier>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeQualifiedName {
         pub alias: Rc<Identifier>,
         pub name: Rc<Identifier>,
-        pub alias: Rc<Identifier>,
-        pub name: Rc<Identifier>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeArray {
         pub element_type: Type,
         pub size: Option<Expression>,
+        pub type_info: RefCell<Option<TypeInfo>>
     }
 
-}
-
-ast_nodes_impl! {
-    impl Node for SourceFile {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for UseDirective {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for SpecDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for StructDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for StructField {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for EnumDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for Identifier {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO revisit
-            vec![]
-        }
-    }
-    impl Node for ConstantDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for FunctionDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ExternalFunctionDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for TypeDefinition {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for Parameter {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for Block {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ExpressionStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ReturnStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for LoopStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for BreakStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO revisit
-            vec![]
-        }
-    }
-    impl Node for IfStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for VariableDefinitionStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for TypeDefinitionStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for AssignExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ArrayIndexAccessExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for MemberAccessExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for TypeMemberAccessExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for FunctionCallExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for UzumakiExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for PrefixUnaryExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for AssertStatement {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ParenthesizedExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for BinaryExpression {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for ArrayLiteral {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for BoolLiteral {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for StringLiteral {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for NumberLiteral {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for UnitLiteral {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for SimpleType {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for GenericType {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for FunctionType {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for QualifiedName {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for TypeQualifiedName {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
-    impl Node for TypeArray {
-        fn children(&self) -> Vec<NodeKind> {
-            //TODO implement
-            vec![]
-        }
-    }
 }
