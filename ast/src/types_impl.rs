@@ -384,7 +384,7 @@ impl VariableDefinitionStatement {
             location,
             name,
             ty: type_,
-            value,
+            value: value.map(RefCell::new),
             is_uzumaki,
         }
     }
@@ -413,8 +413,8 @@ impl AssignStatement {
         AssignStatement {
             id,
             location,
-            left,
-            right,
+            left: RefCell::new(left),
+            right: RefCell::new(right),
         }
     }
 }
@@ -635,10 +635,12 @@ impl QualifiedName {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> String {
         self.name.name()
     }
 
+    #[must_use]
     pub fn qualifier(&self) -> String {
         self.qualifier.name()
     }
@@ -655,10 +657,12 @@ impl TypeQualifiedName {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> String {
         self.name.name()
     }
 
+    #[must_use]
     pub fn alias(&self) -> String {
         self.alias.name()
     }

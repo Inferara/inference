@@ -1,10 +1,7 @@
 use anyhow::bail;
 
 use crate::types::{Definition, FunctionDefinition, Identifier, Statement, TypeInfo};
-#[allow(clippy::all, unused_imports, dead_code)]
-use crate::types::{
-    Expression, Literal, Location, OperatorKind, SimpleType, SourceFile, Type, TypeArray,
-};
+use crate::types::{Expression, Location, SimpleType, SourceFile, Type};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -373,6 +370,24 @@ impl TypeChecker {
         type_parameters: &Vec<String>,
     ) {
         match statement {
+            Statement::Assign(assign_statement) => {
+                let target_type = self.infer_expression(&mut assign_statement.left.borrow_mut());
+                if let Expression::Uzumaki(_, ref mut type_info) =
+                    &mut *assign_statement.right.borrow_mut()
+                {
+                    *type_info = target_type;
+                } else {
+                    let value_type =
+                        self.infer_expression(&mut assign_statement.right.borrow_mut());
+                    if let (Some(target_type), Some(value_type)) = (target_type, value_type) {
+                        if target_type != value_type {
+                            self.errors.push(format!(
+                                "Cannot assign value of type {value_type:?} to variable of type {target_type:?}"
+                            ));
+                        }
+                    }
+                }
+            }
             Statement::Block(block_type) => {
                 self.symbol_table.push_scope();
                 for stmt in &mut block_type.statements() {
@@ -380,28 +395,25 @@ impl TypeChecker {
                 }
                 self.symbol_table.pop_scope();
             }
-            Statement::Expression(expression) => match expression {
-                Expression::Assign(assign_expression, type_info) => {
-                    let target_type = self.infer_expression(&mut assign_expression.left);
-                    let value_type = self.infer_expression(&mut assign_expression.right);
-                    if let (Some(target_type), Some(value_type)) = (target_type, value_type) {
-                        if !Self::types_equal(&target_type, &value_type) {
-                            self.errors.push(format!(
-                                "Cannot assign value of type {:?} to variable of type {:?}",
-                                value_type, target_type
-                            ));
-                        }
-                    }
-                }
-            },
+            Statement::Expression(expression) => {
+                self.infer_expression(expression);
+            }
             Statement::Return(return_statement) => todo!(),
             Statement::Loop(loop_statement) => todo!(),
             Statement::Break(break_statement) => todo!(),
             Statement::If(if_statement) => todo!(),
             Statement::VariableDefinition(variable_definition_statement) => {
-                if let Some(mut initial_value) = variable_definition_statement.value.clone() {
-                    if let Some(init_type) = self.infer_expression(&mut initial_value) {
-                        if !Self::types_equal(&init_type, &variable_definition_statement.ty) {
+                let target_type = TypeInfo::new(&variable_definition_statement.ty);
+                if let Some(initial_value) = variable_definition_statement.value.clone() {
+                    if let Expression::Uzumaki(uzumaki, ref mut type_info) =
+                        &mut *initial_value.borrow_mut()
+                    {
+                        println!("Uzumaki: {uzumaki:?}\n");
+                        *type_info = Some(target_type);
+                    } else if let Some(init_type) =
+                        self.infer_expression(&mut initial_value.borrow_mut())
+                    {
+                        if init_type != TypeInfo::new(&variable_definition_statement.ty) {
                             self.errors.push(format!(
                                 "Type mismatch in variable definition: expected {:?}, found {:?}",
                                 variable_definition_statement.ty, init_type
@@ -423,23 +435,26 @@ impl TypeChecker {
         }
     }
 
-    fn infer_expression(&mut self, expression: &mut Expression) -> Option<Type> {
+    fn infer_expression(&mut self, expression: &mut Expression) -> Option<TypeInfo> {
         match expression {
-            Expression::ArrayIndexAccess(array_index_access_expression, type_info) => todo!(),
-            Expression::MemberAccess(member_access_expression, type_info) => todo!(),
-            Expression::FunctionCall(function_call_expression, type_info) => todo!(),
-            Expression::PrefixUnary(prefix_unary_expression, type_info) => todo!(),
-            Expression::Parenthesized(parenthesized_expression, type_info) => {
+            Expression::ArrayIndexAccess(array_index_access_expression, ref mut type_info) => {
+                todo!()
+            }
+            Expression::MemberAccess(member_access_expression, ref mut type_info) => todo!(),
+            Expression::FunctionCall(function_call_expression, ref mut type_info) => todo!(),
+            Expression::PrefixUnary(prefix_unary_expression, ref mut type_info) => todo!(),
+            Expression::Parenthesized(parenthesized_expression, ref mut type_info) => {
                 self.infer_expression(expression)
             }
-            Expression::Binary(binary_expression, type_info) => todo!(),
-            Expression::Literal(literal, type_info) => todo!(),
-            Expression::Identifier(identifier, type_info) => todo!(),
-            Expression::Type(_, type_info) => todo!(),
-            Expression::Uzumaki(uzumaki_expression, type_info) => todo!(),
+            Expression::Binary(binary_expression, ref mut type_info) => todo!(),
+            Expression::Literal(literal, ref mut type_info) => todo!(),
+            Expression::Identifier(identifier, ref mut type_info) => todo!(),
+            Expression::Type(_, ref mut type_info) => todo!(),
+            Expression::Uzumaki(_, ref mut type_info) => type_info.clone(),
         }
     }
 
+    #[allow(dead_code)]
     fn types_equal(left: &Type, right: &Type) -> bool {
         match (left, right) {
             (Type::Array(left), Type::Array(right)) => {
@@ -490,16 +505,12 @@ impl TypeChecker {
                         }
                     }
                 }
-                return true;
+                true
             }
             _ => false,
         }
     }
 }
-
-// pub struct TypeContext<'a> {
-//     pub symbols: &'a SymbolTable,
-// }
 
 // /// Errors during type inference
 // #[derive(Debug)]
@@ -511,151 +522,4 @@ impl TypeChecker {
 //     },
 //     UnknownIdentifier(String, Location),
 //     Other(String, Location),
-// }
-
-// pub fn infer_expr(expr: &Expression, ctx: &TypeContext) -> Result<Type, TypeError> {
-//     match expr {
-//         Expression::Literal(lit, _) => match lit {
-//             Literal::Bool(_) => Ok(Type::Simple(Rc::new(SimpleType::new(
-//                 0,
-//                 Location::default(),
-//                 "Bool".into(),
-//             )))),
-//             Literal::String(_) => Ok(Type::Simple(Rc::new(SimpleType::new(
-//                 0,
-//                 Location::default(),
-//                 "String".into(),
-//             )))),
-//             Literal::Number(_) => Ok(Type::Simple(Rc::new(SimpleType::new(
-//                 0,
-//                 Location::default(),
-//                 "Number".into(),
-//             )))),
-//             Literal::Unit(_) => Ok(Type::Simple(Rc::new(SimpleType::new(
-//                 0,
-//                 Location::default(),
-//                 "Unit".into(),
-//             )))),
-//             Literal::Array(arr) => {
-//                 let mut elem_ty: Option<Type> = None;
-//                 let arr_node = arr.as_ref();
-//                 for e in &arr_node.elements {
-//                     let ty = infer_expr(e, ctx)?;
-//                     if let Some(prev) = &elem_ty {
-//                         if *prev != ty {
-//                             return Err(TypeError::Mismatch {
-//                                 expected: prev.clone(),
-//                                 found: ty.clone(),
-//                                 loc: arr.location.clone(),
-//                             });
-//                         }
-//                     } else {
-//                         elem_ty = Some(ty.clone());
-//                     }
-//                 }
-//                 let element = elem_ty.unwrap_or_else(|| {
-//                     Type::Simple(Rc::new(SimpleType::new(
-//                         0,
-//                         Location::default(),
-//                         "Unit".into(),
-//                     )))
-//                 });
-//                 Ok(Type::Array(Rc::new(TypeArray::new(
-//                     0,
-//                     Location::default(),
-//                     element,
-//                     None,
-//                 ))))
-//             }
-//         },
-//         Expression::Identifier(id, _) => {
-//             let name = &id.name;
-//             if let Some(ty) = ctx.symbols.lookup(name) {
-//                 Ok(ty)
-//             } else {
-//                 Err(TypeError::UnknownIdentifier(
-//                     name.clone(),
-//                     id.location.clone(),
-//                 ))
-//             }
-//         }
-//         Expression::Binary(bin, _) => {
-//             let left_ty = infer_expr(&bin.left, ctx)?;
-//             let right_ty = infer_expr(&bin.right, ctx)?;
-//             if left_ty != right_ty {
-//                 return Err(TypeError::Mismatch {
-//                     expected: left_ty.clone(),
-//                     found: right_ty.clone(),
-//                     loc: bin.location.clone(),
-//                 });
-//             }
-//             let res_ty = match &bin.operator {
-//                 OperatorKind::Add | OperatorKind::Sub | OperatorKind::Mul | OperatorKind::Div => {
-//                     left_ty.clone()
-//                 }
-//                 OperatorKind::Eq
-//                 | OperatorKind::Ne
-//                 | OperatorKind::Lt
-//                 | OperatorKind::Le
-//                 | OperatorKind::Gt
-//                 | OperatorKind::Ge => Type::Simple(Rc::new(SimpleType::new(
-//                     0,
-//                     bin.location.clone(),
-//                     "Bool".into(),
-//                 ))),
-//                 op => {
-//                     return Err(TypeError::Other(
-//                         format!("Operator {op:?} not supported"),
-//                         bin.location.clone(),
-//                     ))
-//                 }
-//             };
-//             Ok(res_ty)
-//         }
-//         _ => Err(TypeError::Other(
-//             "Type inference not implemented for this expression variant".into(),
-//             Location::default(),
-//         )),
-//     }
-// }
-
-// fn traverse_statement(stmt: &crate::types::Statement, ctx: &TypeContext) -> Result<(), TypeError> {
-//     use crate::types::Statement;
-//     match stmt {
-//         Statement::Expression(expr) => {
-//             infer_expr(expr, ctx)?;
-//         }
-//         Statement::Return(ret_rc) => {
-//             infer_expr(&ret_rc.expression, ctx)?;
-//         }
-//         Statement::Assert(assert_rc) => {
-//             infer_expr(&assert_rc.expression, ctx)?;
-//         }
-//         Statement::If(if_rc) => {
-//             infer_expr(&if_rc.condition, ctx)?;
-//             traverse_block(&if_rc.if_arm, ctx)?;
-//             if let Some(else_arm) = &if_rc.else_arm {
-//                 traverse_block(else_arm, ctx)?;
-//             }
-//         }
-//         Statement::Loop(loop_rc) => {
-//             if let Some(cond) = &loop_rc.condition {
-//                 infer_expr(cond, ctx)?;
-//             }
-//             traverse_block(&loop_rc.body, ctx)?;
-//         }
-//         Statement::VariableDefinition(vd_rc) => {
-//             if let Some(init) = &vd_rc.value {
-//                 infer_expr(init, ctx)?;
-//             }
-//         }
-//         Statement::ConstantDefinition(_cd_rc) => {
-//             // constant definitions have a Literal value; skip or handle separately
-//         }
-//         Statement::Block(block_type) => {
-//             traverse_block(block_type, ctx)?;
-//         }
-//         _ => {}
-//     }
-//     Ok(())
 // }

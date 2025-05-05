@@ -1,5 +1,6 @@
 use core::fmt;
 use std::{
+    cell::RefCell,
     fmt::{Display, Formatter},
     rc::Rc,
 };
@@ -76,7 +77,14 @@ impl TypeInfo {
                     .as_ref()
                     .map(|params| params.iter().map(TypeInfo::new).collect::<Vec<_>>())
                     .unwrap_or_default();
-                let return_type = TypeInfo::new(&func.returns);
+                let return_type = if func.returns.is_some() {
+                    Self::new(func.returns.as_ref().unwrap())
+                } else {
+                    Self {
+                        name: "Unit".to_string(),
+                        type_params: vec![],
+                    }
+                };
                 Self {
                     name: format!("Function<{}, {}>", param_types.len(), return_type.name),
                     type_params: vec![],
@@ -456,7 +464,7 @@ ast_nodes! {
     pub struct VariableDefinitionStatement {
         pub name: Rc<Identifier>,
         pub ty: Type,
-        pub value: Option<Expression>,
+        pub value: Option<RefCell<Expression>>,
         pub is_uzumaki: bool,
     }
 
@@ -466,8 +474,8 @@ ast_nodes! {
     }
 
     pub struct AssignStatement {
-        pub left: Expression,
-        pub right: Expression,
+        pub left: RefCell<Expression>,
+        pub right: RefCell<Expression>,
     }
 
     pub struct ArrayIndexAccessExpression {

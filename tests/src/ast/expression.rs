@@ -47,7 +47,8 @@ mod expression_tests {
         let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
         uzumaki_nodes.sort_by_key(|node| node.start_line());
         for (i, node) in uzumaki_nodes.iter().enumerate() {
-            if let AstNode::Expression(Expression::Uzumaki(_, ty)) = node {
+            if let AstNode::Expression(Expression::Uzumaki(uzumaki, ty)) = node {
+                println!("Uzumaki: {uzumaki:?}\n");
                 assert!(
                     ty.as_ref().unwrap().name == expected_types[i],
                     "Expected type {} for UzumakiExpression, found {:?}",

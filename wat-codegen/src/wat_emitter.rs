@@ -281,12 +281,12 @@ impl WatEmitter {
         let variable_type = WatEmitter::emit_for_type(&variable_definition.ty);
         result.push(format!("(local ${variable_name} {variable_type})"));
         if let Some(value) = &variable_definition.value {
-            match value {
+            match &*value.borrow() {
                 Expression::Identifier(identifier, _) => {
                     result.push(format!("local.get ${}", identifier.name));
                 }
                 _ => {
-                    result.extend(self.emit_for_expression(value));
+                    result.extend(self.emit_for_expression(&value.borrow()));
                 }
             }
             result.push(format!("local.set ${variable_name}"));
