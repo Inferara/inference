@@ -1,21 +1,21 @@
 use std::{marker::PhantomData, rc::Rc};
 
 use crate::type_infer::TypeChecker;
-use crate::types::{Directive, Misc};
+use crate::types::{ArgumentType, Directive, IgnoreArgument, Misc, SelfReference};
 use crate::{
     arena::Arena,
-    symbols::SymbolType,
     t_ast::TypedAst,
     types::{
-        ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement, AstNode,
-        BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition,
-        Definition, EnumDefinition, Expression, ExternalFunctionDefinition, FunctionCallExpression,
-        FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, Location,
-        LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind, Parameter,
-        ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType,
-        SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
-        TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
-        UnitLiteral, UseDirective, UzumakiExpression, VariableDefinitionStatement,
+        Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement,
+        AstNode, BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement,
+        ConstantDefinition, Definition, EnumDefinition, Expression, ExternalFunctionDefinition,
+        FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier,
+        IfStatement, Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral,
+        OperatorKind, ParenthesizedExpression, PrefixUnaryExpression, QualifiedName,
+        ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral,
+        StructDefinition, StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement,
+        TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
+        VariableDefinitionStatement,
     },
 };
 use tree_sitter::Node;
@@ -34,7 +34,6 @@ impl BuilderComplete for CompleteState {}
 pub struct Builder<'a, S> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    types: Vec<SymbolType>,
     t_ast: Option<TypedAst>,
     _state: PhantomData<S>,
 }
@@ -51,7 +50,6 @@ impl<'a> Builder<'a, InitState> {
         Self {
             arena: Arena::default(),
             source_code: Vec::new(),
-            types: Vec::new(),
             t_ast: None,
             _state: PhantomData,
         }
@@ -116,7 +114,6 @@ impl<'a> Builder<'a, InitState> {
         Ok(Builder {
             arena: Arena::default(),
             source_code: Vec::new(),
-            types: Vec::new(),
             t_ast: Some(t_ast),
             _state: PhantomData,
         })
@@ -154,11 +151,7 @@ impl<'a> Builder<'a, InitState> {
         cursor = node.walk();
         let founded_imported_types = node
             .children_by_field_name("imported_type", &mut cursor)
-            .map(|imported_type| {
-                let t = self.build_identifier(id, &imported_type, code);
-                self.types.push(SymbolType::Global(t.name.clone()));
-                t
-            });
+            .map(|imported_type| self.build_identifier(id, &imported_type, code));
         let founded_imported_types: Vec<Rc<Identifier>> = founded_imported_types.collect();
         if !founded_imported_types.is_empty() {
             imported_types = Some(founded_imported_types);
@@ -221,7 +214,6 @@ impl<'a> Builder<'a, InitState> {
             variants = founded_variants;
         }
 
-        self.types.push(SymbolType::Inner(name.name.clone()));
         let node = Rc::new(EnumDefinition::new(id, name, variants, location));
         self.arena.add_node(
             AstNode::Definition(Definition::Enum(node.clone())),
@@ -344,8 +336,8 @@ impl<'a> Builder<'a, InitState> {
             let mut cursor = argument_list_node.walk();
             let founded_arguments = argument_list_node
                 .children_by_field_name("argument", &mut cursor)
-                .map(|segment| self.build_argument(id, &segment, code));
-            let founded_arguments: Vec<Rc<Parameter>> = founded_arguments.collect();
+                .map(|segment| self.build_argument_type(id, &segment, code));
+            let founded_arguments: Vec<ArgumentType> = founded_arguments.collect();
             if !founded_arguments.is_empty() {
                 arguments = Some(founded_arguments);
             }
@@ -400,8 +392,8 @@ impl<'a> Builder<'a, InitState> {
 
         let founded_arguments = node
             .children_by_field_name("argument", &mut cursor)
-            .map(|segment| self.build_identifier(id, &segment, code));
-        let founded_arguments: Vec<Rc<Identifier>> = founded_arguments.collect();
+            .map(|segment| self.build_argument_type(id, &segment, code));
+        let founded_arguments: Vec<ArgumentType> = founded_arguments.collect();
         if !founded_arguments.is_empty() {
             arguments = Some(founded_arguments);
         }
@@ -438,16 +430,77 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
-    fn build_argument(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Parameter> {
+    fn build_argument_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> ArgumentType {
+        match node.kind() {
+            "argument_declaration" => {
+                let argument = self.build_argument(parent_id, node, code);
+                ArgumentType::Argument(argument)
+            }
+            "self_reference" => {
+                let self_reference = self.build_self_reference(parent_id, node, code);
+                ArgumentType::SelfReference(self_reference)
+            }
+            "ignore_argument" => {
+                let ignore_argument = self.build_ignore_argument(parent_id, node, code);
+                ArgumentType::IgnoreArgument(ignore_argument)
+            }
+            _ => ArgumentType::Type(self.build_type(parent_id, node, code)),
+        }
+    }
+
+    fn build_argument(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Argument> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name_node = node.child_by_field_name("name").unwrap();
         let type_node = node.child_by_field_name("type").unwrap();
         let ty = self.build_type(id, &type_node, code);
+        let is_mut = node
+            .child_by_field_name("mut")
+            .map(|n| n.kind() == "true")
+            .unwrap_or(false);
         let name = self.build_identifier(id, &name_node, code);
-        let node = Rc::new(Parameter::new(id, location, name, ty));
-        self.arena
-            .add_node(AstNode::Misc(Misc::Parameter(node.clone())), parent_id);
+        let node = Rc::new(Argument::new(id, location, name, is_mut, ty));
+        self.arena.add_node(
+            AstNode::ArgumentType(ArgumentType::Argument(node.clone())),
+            parent_id,
+        );
+        node
+    }
+
+    fn build_self_reference(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<SelfReference> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let is_mut = node
+            .child_by_field_name("mut")
+            .map(|n| n.kind() == "true")
+            .unwrap_or(false);
+        let node = Rc::new(SelfReference::new(id, location, is_mut));
+        self.arena.add_node(
+            AstNode::ArgumentType(ArgumentType::SelfReference(node.clone())),
+            parent_id,
+        );
+        node
+    }
+
+    fn build_ignore_argument(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<IgnoreArgument> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
+        let node = Rc::new(IgnoreArgument::new(id, location, ty));
+        self.arena.add_node(
+            AstNode::ArgumentType(ArgumentType::IgnoreArgument(node.clone())),
+            parent_id,
+        );
         node
     }
 
@@ -1054,7 +1107,6 @@ impl<'a> Builder<'a, InitState> {
             "type_fn" => Type::Function(self.build_function_type(parent_id, node, code)),
             "identifier" => {
                 let name = self.build_identifier(parent_id, node, code);
-                self.types.push(SymbolType::Global(name.name.clone()));
                 Type::Custom(name)
             }
             _ => {
@@ -1084,7 +1136,6 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
-        self.types.push(SymbolType::Global(name.clone()));
         let node = Rc::new(SimpleType::new(id, location, name));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),

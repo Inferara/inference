@@ -3,7 +3,7 @@ mod expression_tests {
     use inference_ast::{
         builder::Builder,
         t_ast::TypedAst,
-        types::{AstNode, Expression},
+        types::{AstNode, Expression, TypeInfoKind},
     };
 
     fn build_ast(source_code: String) -> TypedAst {
@@ -44,17 +44,26 @@ mod expression_tests {
             "Expected 8 UzumakiExpression nodes, found {}",
             uzumaki_nodes.len()
         );
-        let expected_types = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"];
+        let expected_types = [
+            TypeInfoKind::I8,
+            TypeInfoKind::I16,
+            TypeInfoKind::I32,
+            TypeInfoKind::I64,
+            TypeInfoKind::U8,
+            TypeInfoKind::U16,
+            TypeInfoKind::U32,
+            TypeInfoKind::U64,
+        ];
         let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
         uzumaki_nodes.sort_by_key(|node| node.start_line());
+
         for (i, node) in uzumaki_nodes.iter().enumerate() {
             if let AstNode::Expression(Expression::Uzumaki(uzumaki)) = node {
-                println!("Uzumaki: {uzumaki:?}\n");
                 assert!(
-                    uzumaki.type_info.borrow().as_ref().unwrap().name == expected_types[i],
+                    uzumaki.type_info.borrow().as_ref().unwrap().kind == expected_types[i],
                     "Expected type {} for UzumakiExpression, found {:?}",
                     expected_types[i],
-                    uzumaki.type_info.borrow().as_ref().unwrap().name
+                    uzumaki.type_info.borrow().as_ref().unwrap().kind
                 );
             }
         }

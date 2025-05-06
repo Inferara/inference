@@ -1,10 +1,7 @@
-use inference_ast::{
-    symbols::SymbolType,
-    types::{
-        AssertStatement, BinaryExpression, BlockType, Definition, Expression,
-        FunctionCallExpression, FunctionDefinition, Literal, MemberAccessExpression, OperatorKind,
-        SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
-    },
+use inference_ast::types::{
+    AssertStatement, BinaryExpression, BlockType, Definition, Expression, FunctionCallExpression,
+    FunctionDefinition, Literal, MemberAccessExpression, OperatorKind, SourceFile, SpecDefinition,
+    Statement, Type, TypeInfo, VariableDefinitionStatement,
 };
 
 fn r_brace() -> String {
@@ -174,7 +171,7 @@ impl WatEmitter {
                     result.extend(self.emit_for_assert_statement(assert));
                 }
                 Statement::Return(return_statement) => {
-                    result.extend(self.emit_for_expression(&return_statement.expression));
+                    result.extend(self.emit_for_expression(&return_statement.expression.borrow()));
                 }
                 Statement::Expression(expression) => {
                     result.extend(self.emit_for_expression(expression));
@@ -256,7 +253,7 @@ impl WatEmitter {
             Expression::Uzumaki(uzumaki) => {
                 result.push(format!(
                     "{}.uzumaki",
-                    uzumaki.type_info.borrow().as_ref().unwrap().name
+                    uzumaki.type_info.borrow().as_ref().unwrap().kind
                 )); //FIXME works only for simple types
             }
             _ => result.push(format!("{expr:?} expression type is not supported yet")),
@@ -305,14 +302,8 @@ impl WatEmitter {
         }
     }
 
-    fn emit_for_symbol_type(symbol_type: &SymbolType) -> String {
-        match symbol_type {
-            SymbolType::Global(name) => Self::map_integer_types(&name.clone()),
-            SymbolType::Inner(name) => name.clone(),
-            SymbolType::Generic(_) => todo!(),
-            SymbolType::Primitive(_) => todo!(),
-            SymbolType::Unit => todo!(),
-        }
+    fn emit_for_type_info(type_info: &TypeInfo) -> String {
+        type_info.kind.to_string()
     }
 
     fn map_integer_types(t: &str) -> String {
@@ -328,7 +319,7 @@ impl WatEmitter {
             Literal::Number(number) => {
                 let literal_value = &number.value;
                 let type_ =
-                    WatEmitter::emit_for_symbol_type(&SymbolType::Global("i32".to_string()));
+                    WatEmitter::emit_for_type_info(number.type_info.borrow().as_ref().unwrap());
                 format!("{type_}.const {literal_value}")
             }
             _ => format!("{literal:?} literal is not supported yet"),
@@ -344,7 +335,7 @@ impl WatEmitter {
     // }
 
     fn emit_for_assert_statement(&self, assert: &AssertStatement) -> Vec<String> {
-        match &assert.expression {
+        match &*assert.expression.borrow() {
             Expression::Binary(bin_expr) => {
                 let mut result = Vec::new();
 

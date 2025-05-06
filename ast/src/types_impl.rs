@@ -4,18 +4,23 @@
 use std::rc::Rc;
 use std::{fmt::Display, rc::Rc};
 
+use crate::{
+    type_info::{TypeInfo, TypeInfoKind},
+    types::{ArgumentType, IgnoreArgument, SelfReference},
+};
+
 use crate::symbols::SymbolType;
 
 use super::types::{
-    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement, BinaryExpression,
-    Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition,
-    Expression, ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression,
-    FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement, Literal, LoopStatement,
-    MemberAccessExpression, NumberLiteral, OperatorKind, Parameter, ParenthesizedExpression,
-    PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType, SourceFile, SpecDefinition,
-    Statement, StringLiteral, StructDefinition, StructField, Type, TypeArray, TypeDefinition,
-    TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective,
-    UzumakiExpression, VariableDefinitionStatement,
+    Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement,
+    BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition,
+    Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
+    FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
+    Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
+    ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType,
+    SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
+    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
+    UnitLiteral, UseDirective, UzumakiExpression, VariableDefinitionStatement,
 };
 
 impl SourceFile {
@@ -52,6 +57,46 @@ impl BlockType {
             | BlockType::Assume(block)
             | BlockType::Exists(block)
             | BlockType::Unique(block) => block.statements.clone(),
+        }
+    }
+}
+
+impl Expression {
+    #[must_use]
+    pub fn type_info(&self) -> Option<TypeInfo> {
+        match self {
+            Expression::ArrayIndexAccess(e) => e.type_info.borrow().clone(),
+            Expression::MemberAccess(e) => e.type_info.borrow().clone(),
+            Expression::FunctionCall(e) => e.type_info.borrow().clone(),
+            Expression::PrefixUnary(e) => e.type_info.borrow().clone(),
+            Expression::Parenthesized(e) => e.type_info.borrow().clone(),
+            Expression::Binary(e) => e.type_info.borrow().clone(),
+            Expression::Literal(l) => l.type_info(),
+            Expression::Identifier(e) => e.type_info.borrow().clone(),
+            Expression::Type(e) => Some(TypeInfo::new(e)),
+            Expression::Uzumaki(e) => e.type_info.borrow().clone(),
+        }
+    }
+}
+
+impl Literal {
+    #[must_use]
+    pub fn type_info(&self) -> Option<TypeInfo> {
+        match self {
+            Literal::Bool(_) => Some(TypeInfo {
+                kind: TypeInfoKind::Bool,
+                type_params: vec![],
+            }),
+            Literal::Number(literal) => literal.type_info.borrow().clone(),
+            Literal::String(_) => Some(TypeInfo {
+                kind: TypeInfoKind::String,
+                type_params: vec![],
+            }),
+            Literal::Unit(_) => Some(TypeInfo {
+                kind: TypeInfoKind::Unit,
+                type_params: vec![],
+            }),
+            Literal::Array(literal) => literal.type_info.borrow().clone(),
         }
     }
 }
@@ -191,6 +236,11 @@ impl ConstantDefinition {
             value,
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name.clone()
+    }
 }
 
 impl FunctionDefinition {
@@ -200,7 +250,7 @@ impl FunctionDefinition {
         id: u32,
         name: Rc<Identifier>,
         type_parameters: Option<Vec<Rc<Identifier>>>,
-        arguments: Option<Vec<Rc<Parameter>>>,
+        arguments: Option<Vec<ArgumentType>>,
         returns: Option<Type>,
         body: BlockType,
         location: Location,
@@ -243,7 +293,7 @@ impl ExternalFunctionDefinition {
     pub fn new(
         id: u32,
         name: Rc<Identifier>,
-        arguments: Option<Vec<Rc<Identifier>>>,
+        arguments: Option<Vec<ArgumentType>>,
         returns: Option<Type>,
         location: Location,
     ) -> Self {
@@ -257,8 +307,8 @@ impl ExternalFunctionDefinition {
     }
 
     #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name.name
+    pub fn name(&self) -> String {
+        self.name.name.clone()
     }
 }
 
@@ -279,20 +329,39 @@ impl TypeDefinition {
     }
 }
 
-impl Parameter {
+impl Argument {
     #[must_use]
-    pub fn new(id: u32, location: Location, name: Rc<Identifier>, type_: Type) -> Self {
-        Parameter {
+    pub fn new(id: u32, location: Location, name: Rc<Identifier>, is_mut: bool, ty: Type) -> Self {
+        Argument {
             id,
             location,
             name,
-            ty: type_,
+            is_mut,
+            ty,
         }
     }
 
     #[must_use]
     pub fn name(&self) -> String {
         self.name.name.clone()
+    }
+}
+
+impl SelfReference {
+    #[must_use]
+    pub fn new(id: u32, location: Location, is_mut: bool) -> Self {
+        SelfReference {
+            id,
+            location,
+            is_mut,
+        }
+    }
+}
+
+impl IgnoreArgument {
+    #[must_use]
+    pub fn new(id: u32, location: Location, ty: Type) -> Self {
+        IgnoreArgument { id, location, ty }
     }
 }
 
@@ -324,7 +393,7 @@ impl ReturnStatement {
         ReturnStatement {
             id,
             location,
-            expression,
+            expression: RefCell::new(expression),
         }
     }
 }
@@ -340,7 +409,7 @@ impl LoopStatement {
         LoopStatement {
             id,
             location,
-            condition,
+            condition: RefCell::new(condition),
             body,
         }
     }
@@ -366,7 +435,7 @@ impl IfStatement {
         IfStatement {
             id,
             location,
-            condition,
+            condition: RefCell::new(condition),
             if_arm,
             else_arm,
         }
@@ -410,6 +479,11 @@ impl TypeDefinitionStatement {
             ty: type_,
         }
     }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name.clone()
+    }
 }
 
 impl AssignStatement {
@@ -430,8 +504,8 @@ impl ArrayIndexAccessExpression {
         ArrayIndexAccessExpression {
             id,
             location,
-            array,
-            index,
+            array: RefCell::new(array),
+            index: RefCell::new(index),
             type_info: RefCell::new(None),
         }
     }
@@ -459,12 +533,28 @@ impl FunctionCallExpression {
         function: Expression,
         arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
     ) -> Self {
+        let arguments = arguments.map(|args| {
+            args.into_iter()
+                .map(|(name, expr)| (name, RefCell::new(expr)))
+                .collect()
+        });
         FunctionCallExpression {
             id,
             location,
             function,
             arguments,
             type_info: RefCell::new(None),
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        if let Expression::Identifier(identifier) = &self.function {
+            identifier.name()
+        } else if let Expression::MemberAccess(member_access) = &self.function {
+            member_access.name.name()
+        } else {
+            String::new()
         }
     }
 }
@@ -504,7 +594,7 @@ impl AssertStatement {
         AssertStatement {
             id,
             location,
-            expression,
+            expression: RefCell::new(expression),
         }
     }
 }
@@ -549,7 +639,6 @@ impl BoolLiteral {
             id,
             location,
             value,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -573,7 +662,6 @@ impl StringLiteral {
             id,
             location,
             value,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -593,11 +681,7 @@ impl NumberLiteral {
 impl UnitLiteral {
     #[must_use]
     pub fn new(id: u32, location: Location) -> Self {
-        UnitLiteral {
-            id,
-            location,
-            type_info: RefCell::new(None),
-        }
+        UnitLiteral { id, location }
     }
 }
 

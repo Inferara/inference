@@ -1,8 +1,8 @@
 use anyhow::bail;
 
-use crate::types::{Definition, FunctionDefinition, Identifier, Statement, TypeInfo};
+use crate::type_info::{TypeInfo, TypeInfoKind};
+use crate::types::{ArgumentType, Definition, FunctionDefinition, Identifier, Statement};
 use crate::types::{Expression, Location, SimpleType, SourceFile, Type};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -10,8 +10,8 @@ use std::rc::Rc;
 struct FuncSignature {
     name: String,
     type_params: Vec<String>,
-    param_types: Vec<Type>,
-    return_type: Type,
+    param_types: Vec<TypeInfo>,
+    return_type: TypeInfo,
 }
 
 struct SymbolTable {
@@ -27,33 +27,73 @@ impl SymbolTable {
             functions: HashMap::default(),
             variables: Vec::default(),
         };
-        for size in ["8", "16", "32", "64"] {
-            table.types.insert(
-                format!("i{size}"),
-                TypeInfo {
-                    name: format!("i{size}"),
-                    type_params: vec![],
-                },
-            );
-            table.types.insert(
-                format!("u{size}"),
-                TypeInfo {
-                    name: format!("u{size}"),
-                    type_params: vec![],
-                },
-            );
-        }
+        table.types.insert(
+            "i8".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::I8,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "i16".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::I16,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "i32".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::I32,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "i64".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::I64,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "u8".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::U8,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "u16".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::U16,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "u32".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::U32,
+                type_params: vec![],
+            },
+        );
+        table.types.insert(
+            "u64".to_string(),
+            TypeInfo {
+                kind: TypeInfoKind::U64,
+                type_params: vec![],
+            },
+        );
         table.types.insert(
             "bool".to_string(),
             TypeInfo {
-                name: "bool".to_string(),
+                kind: TypeInfoKind::Bool,
                 type_params: vec![],
             },
         );
         table.types.insert(
             "string".to_string(),
             TypeInfo {
-                name: "string".to_string(),
+                kind: TypeInfoKind::String,
                 type_params: vec![],
             },
         );
@@ -80,12 +120,21 @@ impl SymbolTable {
         }
     }
 
-    fn register_type(&mut self, name: String, type_params: Vec<String>) -> anyhow::Result<()> {
-        if self.types.contains_key(&name) {
+    fn register_type(&mut self, name: &String, ty: Option<&Type>) -> anyhow::Result<()> {
+        if self.types.contains_key(name) {
             bail!("Type `{name}` is already defined")
         }
-        self.types
-            .insert(name.clone(), TypeInfo { name, type_params });
+        if let Some(ty) = ty {
+            self.types.insert(name.clone(), TypeInfo::new(ty));
+        } else {
+            self.types.insert(
+                name.clone(),
+                TypeInfo {
+                    kind: TypeInfoKind::Custom(name.clone()),
+                    type_params: vec![],
+                },
+            );
+        }
         Ok(())
     }
 
@@ -104,8 +153,8 @@ impl SymbolTable {
             FuncSignature {
                 name,
                 type_params,
-                param_types,
-                return_type,
+                param_types: param_types.iter().map(TypeInfo::new).collect(),
+                return_type: TypeInfo::new(&return_type),
             },
         );
         Ok(())
@@ -122,6 +171,10 @@ impl SymbolTable {
             }
         }
         None
+    }
+
+    fn lookup_function(&self, name: &String) -> Option<&FuncSignature> {
+        self.functions.get(name)
     }
 }
 
@@ -165,36 +218,19 @@ impl TypeChecker {
         for source_file in program {
             for definition in &source_file.definitions {
                 match definition {
-                    Definition::Type(type_definition) => match &type_definition.ty {
-                        Type::Generic(generic_type) => {
-                            let type_params = generic_type
-                                .parameters
-                                .iter()
-                                .map(|param| param.name())
-                                .collect();
-                            self.symbol_table
-                                .register_type(type_definition.name(), type_params)
-                                .unwrap_or_else(|_| {
-                                    self.errors.push(format!(
-                                        "Error registering type `{}`",
-                                        type_definition.name()
-                                    ));
-                                });
-                        }
-                        _ => {
-                            self.symbol_table
-                                .register_type(type_definition.name(), vec![])
-                                .unwrap_or_else(|_| {
-                                    self.errors.push(format!(
-                                        "Error registering type `{}`",
-                                        type_definition.name()
-                                    ));
-                                });
-                        }
-                    },
+                    Definition::Type(type_definition) => {
+                        self.symbol_table
+                            .register_type(&type_definition.name(), Some(&type_definition.ty))
+                            .unwrap_or_else(|_| {
+                                self.errors.push(format!(
+                                    "Error registering type `{}`",
+                                    type_definition.name()
+                                ));
+                            });
+                    }
                     Definition::Struct(struct_definition) => {
                         self.symbol_table
-                            .register_type(struct_definition.name(), vec![])
+                            .register_type(&struct_definition.name(), None)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
@@ -204,7 +240,7 @@ impl TypeChecker {
                     }
                     Definition::Enum(enum_definition) => {
                         self.symbol_table
-                            .register_type(enum_definition.name(), vec![])
+                            .register_type(&enum_definition.name(), None)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
@@ -214,7 +250,7 @@ impl TypeChecker {
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
-                            .register_type(spec_definition.name(), vec![])
+                            .register_type(&spec_definition.name(), None)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
@@ -234,13 +270,39 @@ impl TypeChecker {
         for sf in program {
             for definition in &sf.definitions {
                 match definition {
-                    Definition::Constant(constant_definition) => todo!(),
+                    Definition::Constant(constant_definition) => {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            constant_definition.name(),
+                            TypeInfo::new(&constant_definition.ty),
+                        ) {
+                            self.errors.push(err.to_string());
+                        }
+                    }
                     Definition::Function(function_definition) => {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
-                            self.validate_type(
-                                &param.ty,
-                                function_definition.type_parameters.as_ref(),
-                            );
+                            match param {
+                                ArgumentType::SelfReference(self_reference) => {
+                                    todo!() //TODO handle self reference
+                                }
+                                ArgumentType::IgnoreArgument(ignore_argument) => {
+                                    self.validate_type(
+                                        &ignore_argument.ty,
+                                        function_definition.type_parameters.as_ref(),
+                                    );
+                                }
+                                ArgumentType::Argument(arg) => {
+                                    self.validate_type(
+                                        &arg.ty,
+                                        function_definition.type_parameters.as_ref(),
+                                    );
+                                }
+                                ArgumentType::Type(ty) => {
+                                    self.validate_type(
+                                        &ty,
+                                        function_definition.type_parameters.as_ref(),
+                                    );
+                                }
+                            }
                         }
                         if let Some(return_type) = &function_definition.returns {
                             self.validate_type(
@@ -281,7 +343,28 @@ impl TypeChecker {
                         }
                     }
                     Definition::ExternalFunction(external_function_definition) => {
-                        todo!()
+                        if let Err(err) = self.symbol_table.register_function(
+                            external_function_definition.name(),
+                            vec![],
+                            external_function_definition
+                                .arguments
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .map(|param| param.ty.clone())
+                                .collect(),
+                            external_function_definition
+                                .returns
+                                .as_ref()
+                                .unwrap_or(&Type::Simple(Rc::new(SimpleType::new(
+                                    0,
+                                    Location::default(),
+                                    "Unit".into(),
+                                ))))
+                                .clone(),
+                        ) {
+                            self.errors.push(err);
+                        }
                     }
                     _ => {
                         // Already registered in `register_types`
@@ -354,45 +437,42 @@ impl TypeChecker {
         self.symbol_table.push_scope();
         if let Some(arguments) = &function_definition.arguments {
             for argument in arguments {
-                if let Err(err) = self
-                    .symbol_table
-                    .push_variable_to_scope(argument.name(), TypeInfo::new(&argument.ty))
-                {
-                    self.errors.push(err.to_string());
+                match argument {
+                    ArgumentType::Argument(arg) => {
+                        if let Err(err) = self
+                            .symbol_table
+                            .push_variable_to_scope(arg.name(), TypeInfo::new(&arg.ty))
+                        {
+                            self.errors.push(err.to_string());
+                        }
+                    }
+                    ArgumentType::SelfReference(self_reference) => todo!(),
+                    ArgumentType::IgnoreArgument(ignore_argument) => todo!(),
+                    ArgumentType::Type(_) => todo!(),
                 }
             }
         }
         for stmt in &mut function_definition.body.statements() {
             self.infer_statement(
                 stmt,
-                function_definition.returns.clone(),
                 &function_definition
-                    .type_parameters
+                    .returns
                     .as_ref()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .map(|p| p.name())
-                    .collect(),
+                    .map(TypeInfo::new)
+                    .unwrap_or_default(),
             );
         }
         self.symbol_table.pop_scope();
     }
 
-    fn infer_statement(
-        &mut self,
-        statement: &mut Statement,
-        return_type: Option<Type>,
-        type_parameters: &Vec<String>,
-    ) {
+    #[allow(clippy::too_many_lines)]
+    fn infer_statement(&mut self, statement: &mut Statement, return_type: &TypeInfo) {
         match statement {
             Statement::Assign(assign_statement) => {
-                // infer target type from left-hand side
                 let target_type = self.infer_expression(&mut assign_statement.left.borrow_mut());
-                // handle Uzumaki expression on right-hand side
                 let mut right_expr = assign_statement.right.borrow_mut();
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
-                    // annotate type_info on the UzumakiExpression
-                    *uzumaki_rc.type_info.borrow_mut() = target_type.clone();
+                    *uzumaki_rc.type_info.borrow_mut() = target_type;
                 } else {
                     let value_type = self.infer_expression(&mut right_expr);
                     if let (Some(target), Some(val)) = (target_type, value_type) {
@@ -407,25 +487,71 @@ impl TypeChecker {
             Statement::Block(block_type) => {
                 self.symbol_table.push_scope();
                 for stmt in &mut block_type.statements() {
-                    self.infer_statement(stmt, return_type.clone(), type_parameters);
+                    self.infer_statement(stmt, return_type);
                 }
                 self.symbol_table.pop_scope();
             }
             Statement::Expression(expression) => {
                 self.infer_expression(expression);
             }
-            Statement::Return(return_statement) => todo!(),
-            Statement::Loop(loop_statement) => todo!(),
-            Statement::Break(break_statement) => todo!(),
-            Statement::If(if_statement) => todo!(),
+            Statement::Return(return_statement) => {
+                let value_type =
+                    self.infer_expression(&mut return_statement.expression.borrow_mut());
+                if *return_type != value_type.clone().unwrap_or_default() {
+                    self.errors.push(format!(
+                        "Return type mismatch: expected {return_type:?}, found {value_type:?}"
+                    ));
+                }
+            }
+            Statement::Loop(loop_statement) => {
+                if let Some(condition) = &mut *loop_statement.condition.borrow_mut() {
+                    let condition_type = self.infer_expression(condition);
+                    if condition_type.is_none()
+                        || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
+                    {
+                        self.errors.push(format!(
+                            "Loop condition must be of type `bool`, found {condition_type:?}"
+                        ));
+                    }
+                }
+                self.symbol_table.push_scope();
+                for stmt in &mut loop_statement.body.statements() {
+                    self.infer_statement(stmt, return_type);
+                }
+                self.symbol_table.pop_scope();
+            }
+            Statement::Break(_) => {}
+            Statement::If(if_statement) => {
+                let condition_type =
+                    self.infer_expression(&mut if_statement.condition.borrow_mut());
+                if condition_type.is_none()
+                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
+                {
+                    self.errors.push(format!(
+                        "If condition must be of type `bool`, found {condition_type:?}"
+                    ));
+                }
+
+                self.symbol_table.push_scope();
+                for stmt in &mut if_statement.if_arm.statements() {
+                    self.infer_statement(stmt, return_type);
+                }
+                self.symbol_table.pop_scope();
+                if let Some(else_arm) = &if_statement.else_arm {
+                    self.symbol_table.push_scope();
+                    for stmt in &mut else_arm.statements() {
+                        self.infer_statement(stmt, return_type);
+                    }
+                    self.symbol_table.pop_scope();
+                }
+            }
             Statement::VariableDefinition(variable_definition_statement) => {
                 let target_type = TypeInfo::new(&variable_definition_statement.ty);
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
                     // check for Uzumaki initializer
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
-                        println!("Uzumaki: {uzumaki_rc:?}\n");
-                        *uzumaki_rc.type_info.borrow_mut() = Some(target_type.clone());
+                        *uzumaki_rc.type_info.borrow_mut() = Some(target_type);
                     } else if let Some(init_type) = self.infer_expression(&mut expr_ref) {
                         if init_type != TypeInfo::new(&variable_definition_statement.ty) {
                             self.errors.push(format!(
@@ -441,21 +567,107 @@ impl TypeChecker {
                 ) {
                     self.errors.push(err.to_string());
                 }
-                //TODO handle the case when the variable is not initialized
             }
-            Statement::TypeDefinition(type_definition_statement) => todo!(),
-            Statement::Assert(assert_statement) => todo!(),
-            Statement::ConstantDefinition(constant_definition) => todo!(),
+            Statement::TypeDefinition(type_definition_statement) => {
+                let type_name = type_definition_statement.name();
+                if let Err(err) = self
+                    .symbol_table
+                    .register_type(&type_name, Some(&type_definition_statement.ty))
+                {
+                    self.errors.push(err.to_string());
+                }
+            }
+            Statement::Assert(assert_statement) => {
+                let condition_type =
+                    self.infer_expression(&mut assert_statement.expression.borrow_mut());
+                if condition_type.is_none()
+                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
+                {
+                    self.errors.push(format!(
+                        "If condition must be of type `bool`, found {condition_type:?}"
+                    ));
+                }
+            }
+            Statement::ConstantDefinition(constant_definition) => {
+                let constant_type = TypeInfo::new(&constant_definition.ty);
+                if let Err(err) = self
+                    .symbol_table
+                    .push_variable_to_scope(constant_definition.name(), constant_type)
+                {
+                    self.errors.push(err.to_string());
+                }
+            }
         }
     }
 
     fn infer_expression(&mut self, expression: &mut Expression) -> Option<TypeInfo> {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
-                todo!()
+                if let Some(type_info) = array_index_access_expression.type_info.borrow().as_ref() {
+                    Some(type_info.clone())
+                } else if let Some(array_type) =
+                    self.infer_expression(&mut array_index_access_expression.array.borrow_mut())
+                {
+                    if let Some(index_type) =
+                        self.infer_expression(&mut array_index_access_expression.index.borrow_mut())
+                    {
+                        if !index_type.is_number() {
+                            self.errors.push(format!(
+                                "Array index must be of number type, found {index_type:?}"
+                            ));
+                        }
+                    }
+                    if array_type.is_array() {
+                        *array_index_access_expression.type_info.borrow_mut() =
+                            Some(array_type.clone());
+                        Some(array_type.clone())
+                    } else {
+                        self.errors
+                            .push(format!("Expected an array type, found {array_type:?}"));
+                        None
+                    }
+                } else {
+                    None
+                }
             }
             Expression::MemberAccess(member_access_expression) => todo!(),
-            Expression::FunctionCall(function_call_expression) => todo!(),
+            Expression::FunctionCall(function_call_expression) => {
+                let signature = match self
+                    .symbol_table
+                    .lookup_function(&function_call_expression.name())
+                {
+                    Some(s) => s.clone(),
+                    None => {
+                        self.errors.push(format!(
+                            "Call to undefined function `{}`",
+                            function_call_expression.name()
+                        ));
+                        if let Some(arguments) = &function_call_expression.arguments {
+                            for arg in arguments.iter() {
+                                self.infer_expression(&mut arg.1.borrow_mut());
+                            }
+                        }
+                        return None;
+                    }
+                };
+                if let Some(arguments) = &function_call_expression.arguments {
+                    if arguments.len() != signature.param_types.len() {
+                        self.errors.push(format!(
+                            "Function `{}` expects {} arguments, but {} provided",
+                            function_call_expression.name(),
+                            signature.param_types.len(),
+                            arguments.len()
+                        ));
+                        for arg in arguments {
+                            self.infer_expression(&mut arg.1.borrow_mut());
+                        }
+                        return None;
+                    }
+                }
+                *function_call_expression.type_info.borrow_mut() =
+                    Some(signature.return_type.clone());
+                Some(signature.return_type.clone())
+            }
             Expression::PrefixUnary(prefix_unary_expression) => todo!(),
             Expression::Parenthesized(parenthesized_expression) => {
                 self.infer_expression(&mut parenthesized_expression.expression.borrow_mut())
@@ -472,7 +684,7 @@ impl TypeChecker {
                     None
                 }
             }
-            Expression::Type(type_expr) => todo!(),
+            Expression::Type(type_expr) => Some(TypeInfo::new(type_expr)),
             Expression::Uzumaki(uzumaki) => uzumaki.type_info.borrow().clone(),
         }
     }

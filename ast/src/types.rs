@@ -5,6 +5,8 @@ use std::{
     rc::Rc,
 };
 
+use crate::type_info::TypeInfo;
+
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Location {
     pub offset_start: u32,
@@ -35,65 +37,6 @@ impl Location {
             end_line,
             end_column,
             source,
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TypeInfo {
-    pub name: String,
-    pub type_params: Vec<String>,
-    // (Field type information could be added here if needed for struct field checking.)
-}
-
-impl TypeInfo {
-    #[must_use]
-    pub fn new(ty: &Type) -> Self {
-        match ty {
-            Type::Simple(simple) => Self {
-                name: simple.name.clone(),
-                type_params: vec![],
-            },
-            Type::Generic(generic) => Self {
-                name: generic.base.name.clone(),
-                type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
-            },
-            Type::QualifiedName(qualified_name) => Self {
-                name: qualified_name.qualifier.name.clone(),
-                type_params: vec![],
-            },
-            Type::Qualified(qualified) => Self {
-                name: qualified.alias.name.clone(),
-                type_params: vec![],
-            },
-            Type::Array(array) => Self {
-                name: format!("Array<{}>", TypeInfo::new(&array.element_type).name),
-                type_params: vec![],
-            },
-            Type::Function(func) => {
-                //REVISIT
-                let param_types = func
-                    .parameters
-                    .as_ref()
-                    .map(|params| params.iter().map(TypeInfo::new).collect::<Vec<_>>())
-                    .unwrap_or_default();
-                let return_type = if func.returns.is_some() {
-                    Self::new(func.returns.as_ref().unwrap())
-                } else {
-                    Self {
-                        name: "Unit".to_string(),
-                        type_params: vec![],
-                    }
-                };
-                Self {
-                    name: format!("Function<{}, {}>", param_types.len(), return_type.name),
-                    type_params: vec![],
-                }
-            }
-            Type::Custom(custom) => Self {
-                name: custom.name.clone(),
-                type_params: vec![],
-            },
         }
     }
 }
@@ -324,9 +267,15 @@ ast_enums! {
         Custom(Rc<Identifier>),
     }
 
+    pub enum ArgumentType {
+        SelfReference(Rc<SelfReference>),
+        IgnoreArgument(Rc<IgnoreArgument>),
+        Argument(Rc<Argument>),
+        @inner_enum Type(Type),
+    }
+
     pub enum Misc {
         StructField(Rc<StructField>),
-        Parameter(Rc<Parameter>),
     }
 }
 
@@ -414,16 +363,14 @@ ast_nodes! {
     pub struct FunctionDefinition {
         pub name: Rc<Identifier>,
         pub type_parameters: Option<Vec<Rc<Identifier>>>,
-        pub arguments: Option<Vec<Rc<Parameter>>>,
+        pub arguments: Option<Vec<ArgumentType>>,
         pub returns: Option<Type>,
         pub body: BlockType,
     }
 
     pub struct ExternalFunctionDefinition {
         pub name: Rc<Identifier>,
-        pub arguments: Option<Vec<Rc<Identifier>>>,
-        pub name: Rc<Identifier>,
-        pub arguments: Option<Vec<Rc<Identifier>>>,
+        pub arguments: Option<Vec<ArgumentType>>,
         pub returns: Option<Type>,
     }
 
@@ -432,8 +379,17 @@ ast_nodes! {
         pub ty: Type,
     }
 
-    pub struct Parameter {
+    pub struct Argument {
         pub name: Rc<Identifier>,
+        pub is_mut: bool,
+        pub ty: Type,
+    }
+
+    pub struct SelfReference {
+        pub is_mut: bool,
+    }
+
+    pub struct IgnoreArgument {
         pub ty: Type,
     }
 
@@ -446,18 +402,18 @@ ast_nodes! {
     }
 
     pub struct ReturnStatement {
-        pub expression: Expression,
+        pub expression: RefCell<Expression>,
     }
 
     pub struct LoopStatement {
-        pub condition: Option<Expression>,
+        pub condition: RefCell<Option<Expression>>,
         pub body: BlockType,
     }
 
     pub struct BreakStatement {}
 
     pub struct IfStatement {
-        pub condition: Expression,
+        pub condition: RefCell<Expression>,
         pub if_arm: BlockType,
         pub else_arm: Option<BlockType>,
     }
@@ -480,8 +436,8 @@ ast_nodes! {
     }
 
     pub struct ArrayIndexAccessExpression {
-        pub array: Expression,
-        pub index: Expression,
+        pub array: RefCell<Expression>,
+        pub index: RefCell<Expression>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
 
@@ -499,7 +455,7 @@ ast_nodes! {
 
     pub struct FunctionCallExpression {
         pub function: Expression,
-        pub arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
+        pub arguments: Option<Vec<(Option<Rc<Identifier>>, RefCell<Expression>)>>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
 
@@ -515,8 +471,7 @@ ast_nodes! {
     }
 
     pub struct AssertStatement {
-        pub expression: Expression,
-        pub expression: Expression,
+        pub expression: RefCell<Expression>,
     }
 
     pub struct ParenthesizedExpression {
@@ -538,13 +493,11 @@ ast_nodes! {
     }
 
     pub struct BoolLiteral {
-        pub value: bool,
-        pub type_info: RefCell<Option<TypeInfo>>
+        pub value: bool
     }
 
     pub struct StringLiteral {
-        pub value: String,
-        pub type_info: RefCell<Option<TypeInfo>>
+        pub value: String
     }
 
     pub struct NumberLiteral {
@@ -553,7 +506,6 @@ ast_nodes! {
     }
 
     pub struct UnitLiteral {
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct SimpleType {
