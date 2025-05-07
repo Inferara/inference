@@ -1,6 +1,6 @@
 use std::{collections::HashMap, rc::Rc};
 
-use crate::types::{AstNode, Definition, TypeDefinition};
+use crate::nodes::{AstNode, Definition, TypeDefinition};
 
 #[derive(Default, Clone)]
 pub struct Arena {

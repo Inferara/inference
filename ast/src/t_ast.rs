@@ -1,6 +1,6 @@
 use crate::{
     arena::Arena,
-    types::{AstNode, SourceFile},
+    nodes::{AstNode, SourceFile},
 };
 
 #[derive(Clone, Default)]

@@ -1,10 +1,10 @@
 use inference_ast::{
-    type_info::TypeInfo,
-    types::{
+    nodes::{
         ArgumentType, AssertStatement, BinaryExpression, BlockType, Definition, Expression,
         FunctionCallExpression, FunctionDefinition, Literal, MemberAccessExpression, OperatorKind,
         SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
     },
+    type_info::TypeInfo,
 };
 
 fn r_brace() -> String {

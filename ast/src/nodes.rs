@@ -66,7 +66,7 @@ macro_rules! ast_node {
         #[derive(Clone, PartialEq, Eq, Debug)]
         $struct_vis struct $name {
             pub id: u32,
-            pub location: $crate::types::Location,
+            pub location: $crate::nodes::Location,
             $(
                 $(#[$field_attr])*
                 $field_vis $field_name : $field_ty,
@@ -449,6 +449,7 @@ ast_nodes! {
 
     pub struct FunctionCallExpression {
         pub function: Expression,
+        pub type_parameters: Option<Vec<Rc<Identifier>>>,
         pub arguments: Option<Vec<(Option<Rc<Identifier>>, RefCell<Expression>)>>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
@@ -480,7 +481,7 @@ ast_nodes! {
     }
 
     pub struct ArrayLiteral {
-        pub elements: Vec<Expression>,
+        pub elements: Vec<RefCell<Expression>>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
 

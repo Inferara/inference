@@ -2,9 +2,9 @@
 mod expression_tests {
     use inference_ast::{
         builder::Builder,
+        nodes::{AstNode, Expression},
         t_ast::TypedAst,
-        type_info::TypeInfoKind,
-        types::{AstNode, Expression},
+        type_info::{NumberTypeKindNumberType, TypeInfoKind},
     };
 
     fn build_ast(source_code: String) -> TypedAst {
@@ -46,14 +46,14 @@ mod expression_tests {
             uzumaki_nodes.len()
         );
         let expected_types = [
-            TypeInfoKind::I8,
-            TypeInfoKind::I16,
-            TypeInfoKind::I32,
-            TypeInfoKind::I64,
-            TypeInfoKind::U8,
-            TypeInfoKind::U16,
-            TypeInfoKind::U32,
-            TypeInfoKind::U64,
+            TypeInfoKind::Number(NumberTypeKindNumberType::I8),
+            TypeInfoKind::Number(NumberTypeKindNumberType::I16),
+            TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+            TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+            TypeInfoKind::Number(NumberTypeKindNumberType::U8),
+            TypeInfoKind::Number(NumberTypeKindNumberType::U16),
+            TypeInfoKind::Number(NumberTypeKindNumberType::U32),
+            TypeInfoKind::Number(NumberTypeKindNumberType::U64),
         ];
         let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
         uzumaki_nodes.sort_by_key(|node| node.start_line());

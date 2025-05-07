@@ -5,8 +5,8 @@ use std::rc::Rc;
 use std::{fmt::Display, rc::Rc};
 
 use crate::{
+    nodes::{ArgumentType, IgnoreArgument, SelfReference},
     type_info::{TypeInfo, TypeInfoKind},
-    types::{ArgumentType, IgnoreArgument, SelfReference},
 };
 
 use crate::symbols::SymbolType;
@@ -531,6 +531,7 @@ impl FunctionCallExpression {
         id: u32,
         location: Location,
         function: Expression,
+        type_parameters: Option<Vec<Rc<Identifier>>>,
         arguments: Option<Vec<(Option<Rc<Identifier>>, Expression)>>,
     ) -> Self {
         let arguments = arguments.map(|args| {
@@ -542,6 +543,7 @@ impl FunctionCallExpression {
             id,
             location,
             function,
+            type_parameters,
             arguments,
             type_info: RefCell::new(None),
         }
@@ -649,7 +651,7 @@ impl ArrayLiteral {
         ArrayLiteral {
             id,
             location,
-            elements,
+            elements: elements.into_iter().map(RefCell::new).collect(),
             type_info: RefCell::new(None),
         }
     }

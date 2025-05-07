@@ -1,11 +1,10 @@
 use std::{marker::PhantomData, rc::Rc};
 
+use crate::nodes::{ArgumentType, Directive, IgnoreArgument, Misc, SelfReference};
 use crate::type_infer::TypeChecker;
-use crate::types::{ArgumentType, Directive, IgnoreArgument, Misc, SelfReference};
 use crate::{
     arena::Arena,
-    t_ast::TypedAst,
-    types::{
+    nodes::{
         Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement,
         AstNode, BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement,
         ConstantDefinition, Definition, EnumDefinition, Expression, ExternalFunctionDefinition,
@@ -17,6 +16,7 @@ use crate::{
         TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
         VariableDefinitionStatement,
     },
+    t_ast::TypedAst,
 };
 use tree_sitter::Node;
 
@@ -827,6 +827,7 @@ impl<'a> Builder<'a, InitState> {
             self.build_expression(id, &node.child_by_field_name("function").unwrap(), code);
         let mut argument_name_expression_map: Vec<(Option<Rc<Identifier>>, Expression)> =
             Vec::new();
+        let mut type_parameters = None;
         let mut pending_name: Option<Rc<Identifier>> = None;
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
@@ -860,8 +861,23 @@ impl<'a> Builder<'a, InitState> {
             Some(argument_name_expression_map)
         };
 
+        if let Some(type_parameters_node) = node.child_by_field_name("type_parameters") {
+            let mut cursor = type_parameters_node.walk();
+            let founded_type_parameters = type_parameters_node
+                .children_by_field_name("type", &mut cursor)
+                .map(|segment| self.build_identifier(id, &segment, code));
+            let founded_type_parameters: Vec<Rc<Identifier>> = founded_type_parameters.collect();
+            if !founded_type_parameters.is_empty() {
+                type_parameters = Some(founded_type_parameters);
+            }
+        }
+
         let node = Rc::new(FunctionCallExpression::new(
-            id, location, function, arguments,
+            id,
+            location,
+            function,
+            type_parameters,
+            arguments,
         ));
         self.arena.add_node(
             AstNode::Expression(Expression::FunctionCall(node.clone())),

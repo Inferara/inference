@@ -1,13 +1,10 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::types::Type;
+use crate::nodes::Type;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum TypeInfoKind {
-    Unit,
-    Bool,
-    String,
+pub enum NumberTypeKindNumberType {
     I8,
     I16,
     I32,
@@ -16,8 +13,16 @@ pub enum TypeInfoKind {
     U16,
     U32,
     U64,
+}
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub enum TypeInfoKind {
+    Unit,
+    Bool,
+    String,
+    Number(NumberTypeKindNumberType),
     Custom(String),
-    Array(String),
+    Array(Box<TypeInfo>, Option<u32>),
     Generic(String),
     QualifiedName(String),
     Qualified(String),
@@ -33,15 +38,22 @@ impl Display for TypeInfoKind {
             TypeInfoKind::Unit => write!(f, "Unit"),
             TypeInfoKind::Bool => write!(f, "Bool"),
             TypeInfoKind::String => write!(f, "String"),
-            TypeInfoKind::I8 => write!(f, "I8"),
-            TypeInfoKind::I16 => write!(f, "I16"),
-            TypeInfoKind::I32 => write!(f, "I32"),
-            TypeInfoKind::I64 => write!(f, "I64"),
-            TypeInfoKind::U8 => write!(f, "U8"),
-            TypeInfoKind::U16 => write!(f, "U16"),
-            TypeInfoKind::U32 => write!(f, "U32"),
-            TypeInfoKind::U64 => write!(f, "U64"),
-            TypeInfoKind::Array(ty) => write!(f, "[{ty}]"),
+            TypeInfoKind::Number(number_type) => match number_type {
+                NumberTypeKindNumberType::I8 => write!(f, "i8"),
+                NumberTypeKindNumberType::I16 => write!(f, "i16"),
+                NumberTypeKindNumberType::I32 => write!(f, "i32"),
+                NumberTypeKindNumberType::I64 => write!(f, "i64"),
+                NumberTypeKindNumberType::U8 => write!(f, "u8"),
+                NumberTypeKindNumberType::U16 => write!(f, "u16"),
+                NumberTypeKindNumberType::U32 => write!(f, "u32"),
+                NumberTypeKindNumberType::U64 => write!(f, "u64"),
+            },
+            TypeInfoKind::Array(ty, length) => {
+                if let Some(length) = length {
+                    return write!(f, "[{ty}; {length}]");
+                }
+                write!(f, "[{ty}]")
+            }
             TypeInfoKind::Custom(ty)
             | TypeInfoKind::Spec(ty)
             | TypeInfoKind::Struct(ty)
@@ -57,17 +69,7 @@ impl Display for TypeInfoKind {
 impl TypeInfoKind {
     #[must_use]
     pub fn is_number(&self) -> bool {
-        matches!(
-            self,
-            TypeInfoKind::I8
-                | TypeInfoKind::I16
-                | TypeInfoKind::I32
-                | TypeInfoKind::I64
-                | TypeInfoKind::U8
-                | TypeInfoKind::U16
-                | TypeInfoKind::U32
-                | TypeInfoKind::U64
-        )
+        matches!(self, TypeInfoKind::Number(_))
     }
 }
 
@@ -127,10 +129,7 @@ impl TypeInfo {
                 type_params: vec![],
             },
             Type::Array(array) => Self {
-                kind: TypeInfoKind::Array(format!(
-                    "[{};TODO_arr_size]",
-                    Self::new(&array.element_type)
-                )),
+                kind: TypeInfoKind::Array(Box::new(Self::new(&array.element_type)), None),
                 type_params: vec![],
             },
             Type::Function(func) => {
@@ -168,14 +167,14 @@ impl TypeInfo {
         match simple_type_name {
             "bool" => TypeInfoKind::Bool,
             "string" => TypeInfoKind::String,
-            "i8" => TypeInfoKind::I8,
-            "i16" => TypeInfoKind::I16,
-            "i32" => TypeInfoKind::I32,
-            "i64" => TypeInfoKind::I64,
-            "u8" => TypeInfoKind::U8,
-            "u16" => TypeInfoKind::U16,
-            "u32" => TypeInfoKind::U32,
-            "u64" => TypeInfoKind::U64,
+            "i8" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
+            "i16" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
+            "i32" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+            "i64" => TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+            "u8" => TypeInfoKind::Number(NumberTypeKindNumberType::U8),
+            "u16" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
+            "u32" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
+            "u64" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
             _ => panic!("Unknown simple type: {simple_type_name}"),
         }
     }
@@ -187,7 +186,7 @@ impl TypeInfo {
 
     #[must_use]
     pub fn is_array(&self) -> bool {
-        matches!(self.kind, TypeInfoKind::Array(_))
+        matches!(self.kind, TypeInfoKind::Array(_, _))
     }
 
     #[must_use]

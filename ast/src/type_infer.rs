@@ -1,16 +1,16 @@
 use anyhow::bail;
 
-use crate::type_info::{TypeInfo, TypeInfoKind};
-use crate::types::{
-    ArgumentType, Definition, FunctionDefinition, Identifier, OperatorKind, Statement,
+use crate::nodes::{
+    ArgumentType, Definition, FunctionDefinition, Identifier, Literal, OperatorKind, Statement,
+    UnaryOperatorKind,
 };
-use crate::types::{Expression, Location, SimpleType, SourceFile, Type};
+use crate::nodes::{Expression, Location, SimpleType, SourceFile, Type};
+use crate::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 struct FuncSignature {
-    name: String,
     type_params: Vec<String>,
     param_types: Vec<TypeInfo>,
     return_type: TypeInfo,
@@ -32,56 +32,56 @@ impl SymbolTable {
         table.types.insert(
             "i8".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::I8,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I8),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "i16".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::I16,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I16),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "i32".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::I32,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "i64".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::I64,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "u8".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::U8,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U8),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "u16".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::U16,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U16),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "u32".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::U32,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U32),
                 type_params: vec![],
             },
         );
         table.types.insert(
             "u64".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::U64,
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U64),
                 type_params: vec![],
             },
         );
@@ -184,18 +184,17 @@ impl SymbolTable {
 
     fn register_function(
         &mut self,
-        name: String,
+        name: &String,
         type_params: Vec<String>,
         param_types: &[Type],
         return_type: &Type,
     ) -> Result<(), String> {
-        if self.functions.contains_key(&name) {
+        if self.functions.contains_key(name) {
             return Err(format!("Function `{name}` is already defined"));
         }
         self.functions.insert(
             name.clone(),
             FuncSignature {
-                name,
                 type_params,
                 param_types: param_types.iter().map(TypeInfo::new).collect(),
                 return_type: TypeInfo::new(return_type),
@@ -359,7 +358,7 @@ impl TypeChecker {
                             continue;
                         }
                         if let Err(err) = self.symbol_table.register_function(
-                            function_definition.name(),
+                            &function_definition.name(),
                             function_definition
                                 .type_parameters
                                 .as_ref()
@@ -396,7 +395,7 @@ impl TypeChecker {
                     }
                     Definition::ExternalFunction(external_function_definition) => {
                         if let Err(err) = self.symbol_table.register_function(
-                            external_function_definition.name(),
+                            &external_function_definition.name(),
                             vec![],
                             &external_function_definition
                                 .arguments
@@ -739,13 +738,32 @@ impl TypeChecker {
                         return None;
                     }
                 }
+
+                if !signature.type_params.is_empty() {
+                    if let Some(type_parameters) = &function_call_expression.type_parameters {
+                        if type_parameters.len() != signature.type_params.len() {
+                            self.errors.push(format!(
+                                "Function `{}` expects {} type parameters, but {} provided",
+                                function_call_expression.name(),
+                                signature.type_params.len(),
+                                type_parameters.len()
+                            ));
+                        }
+                    } else {
+                        self.errors.push(format!(
+                            "Function `{}` requires {} type parameters, but none were provided",
+                            function_call_expression.name(),
+                            signature.type_params.len()
+                        ));
+                    }
+                }
                 *function_call_expression.type_info.borrow_mut() =
                     Some(signature.return_type.clone());
                 Some(signature.return_type.clone())
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
-                    crate::types::UnaryOperatorKind::Neg => {
+                    UnaryOperatorKind::Neg => {
                         let expression_type_op = self
                             .infer_expression(&mut prefix_unary_expression.expression.borrow_mut());
                         if let Some(expression_type) = expression_type_op {
@@ -833,17 +851,49 @@ impl TypeChecker {
                 }
             }
             Expression::Literal(literal) => match literal {
-                crate::types::Literal::Array(array_literal) => todo!(),
-                crate::types::Literal::Bool(_) => Some(TypeInfo {
+                Literal::Array(array_literal) => {
+                    if array_literal.type_info.borrow().is_some() {
+                        return Some(array_literal.type_info.borrow().clone().unwrap());
+                    }
+                    if let Some(element_type_info) =
+                        self.infer_expression(&mut array_literal.elements[0].borrow_mut())
+                    {
+                        for element in &array_literal.elements[1..] {
+                            let element_type = self.infer_expression(&mut element.borrow_mut());
+                            if let Some(element_type) = element_type {
+                                if element_type != element_type_info {
+                                    self.errors.push(format!(
+                                        "Array elements must be of the same type, found {element_type:?} and {element_type_info:?}"
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        self.errors
+                            .push("Array elements must be of the same type".to_string());
+                    }
+                    None
+                }
+                Literal::Bool(_) => Some(TypeInfo {
                     kind: TypeInfoKind::Bool,
                     type_params: vec![],
                 }),
-                crate::types::Literal::String(_) => Some(TypeInfo {
+                Literal::String(_) => Some(TypeInfo {
                     kind: TypeInfoKind::String,
                     type_params: vec![],
                 }),
-                crate::types::Literal::Number(number_literal) => todo!(),
-                crate::types::Literal::Unit(_) => Some(TypeInfo {
+                Literal::Number(number_literal) => {
+                    if number_literal.type_info.borrow().is_some() {
+                        return Some(number_literal.type_info.borrow().clone().unwrap());
+                    }
+                    let res_type = TypeInfo {
+                        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                        type_params: vec![],
+                    };
+                    *number_literal.type_info.borrow_mut() = Some(res_type.clone());
+                    Some(res_type)
+                }
+                Literal::Unit(_) => Some(TypeInfo {
                     kind: TypeInfoKind::Unit,
                     type_params: vec![],
                 }),
