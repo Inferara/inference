@@ -164,9 +164,10 @@ impl TypeInfo {
     }
 
     fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
-        match simple_type_name {
+        match simple_type_name.to_lowercase().as_str() {
             "bool" => TypeInfoKind::Bool,
             "string" => TypeInfoKind::String,
+            "unit" => TypeInfoKind::Unit,
             "i8" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
             "i16" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
             "i32" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
