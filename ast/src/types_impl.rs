@@ -517,7 +517,7 @@ impl MemberAccessExpression {
         MemberAccessExpression {
             id,
             location,
-            expression,
+            expression: RefCell::new(expression),
             name,
             type_info: RefCell::new(None),
         }
@@ -570,7 +570,7 @@ impl PrefixUnaryExpression {
         PrefixUnaryExpression {
             id,
             location,
-            expression,
+            expression: RefCell::new(expression),
             operator,
             type_info: RefCell::new(None),
         }
@@ -624,9 +624,9 @@ impl BinaryExpression {
         BinaryExpression {
             id,
             location,
-            left,
+            left: RefCell::new(left),
             operator,
-            right,
+            right: RefCell::new(right),
             type_info: RefCell::new(None),
         }
     }

@@ -456,8 +456,7 @@ impl<'a> Builder<'a, InitState> {
         let ty = self.build_type(id, &type_node, code);
         let is_mut = node
             .child_by_field_name("mut")
-            .map(|n| n.kind() == "true")
-            .unwrap_or(false);
+            .is_some_and(|n| n.kind() == "true");
         let name = self.build_identifier(id, &name_node, code);
         let node = Rc::new(Argument::new(id, location, name, is_mut, ty));
         self.arena.add_node(
@@ -477,8 +476,7 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let is_mut = node
             .child_by_field_name("mut")
-            .map(|n| n.kind() == "true")
-            .unwrap_or(false);
+            .is_some_and(|n| n.kind() == "true");
         let node = Rc::new(SelfReference::new(id, location, is_mut));
         self.arena.add_node(
             AstNode::ArgumentType(ArgumentType::SelfReference(node.clone())),

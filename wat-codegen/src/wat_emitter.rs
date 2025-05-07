@@ -1,7 +1,10 @@
-use inference_ast::types::{
-    AssertStatement, BinaryExpression, BlockType, Definition, Expression, FunctionCallExpression,
-    FunctionDefinition, Literal, MemberAccessExpression, OperatorKind, SourceFile, SpecDefinition,
-    Statement, Type, TypeInfo, VariableDefinitionStatement,
+use inference_ast::{
+    type_info::TypeInfo,
+    types::{
+        ArgumentType, AssertStatement, BinaryExpression, BlockType, Definition, Expression,
+        FunctionCallExpression, FunctionDefinition, Literal, MemberAccessExpression, OperatorKind,
+        SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
+    },
 };
 
 fn r_brace() -> String {
@@ -121,13 +124,20 @@ impl WatEmitter {
 
     fn emit_function_parameters(function: &FunctionDefinition) -> Vec<String> {
         let mut result = Vec::new();
-        if let Some(parameters) = &function.arguments {
-            for parameter in parameters {
-                result.push(format!(
-                    "(param ${} {})",
-                    parameter.name(),
-                    WatEmitter::emit_for_type(&parameter.ty)
-                ));
+        if let Some(arguments) = &function.arguments {
+            for argument in arguments {
+                match argument {
+                    ArgumentType::SelfReference(_) => todo!(),
+                    ArgumentType::IgnoreArgument(_) => todo!(),
+                    ArgumentType::Argument(arg) => {
+                        result.push(format!(
+                            "(param ${} {})",
+                            arg.name(),
+                            WatEmitter::emit_for_type(&arg.ty)
+                        ));
+                    }
+                    ArgumentType::Type(_) => todo!(),
+                }
             }
         }
         result
@@ -190,16 +200,16 @@ impl WatEmitter {
 
     fn emit_for_binary_expression(&self, bin_expr: &BinaryExpression) -> Vec<String> {
         let mut result = Vec::new();
-        if let Expression::Identifier(identifier) = &bin_expr.left {
+        if let Expression::Identifier(identifier) = &*bin_expr.left.borrow() {
             result.push(format!("local.get ${}", identifier.name));
         } else {
-            result.extend(self.emit_for_expression(&bin_expr.left));
+            result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
         }
 
-        if let Expression::Identifier(identifier) = &bin_expr.right {
+        if let Expression::Identifier(identifier) = &*bin_expr.right.borrow() {
             result.push(format!("local.get ${}", identifier.name));
         } else {
-            result.extend(self.emit_for_expression(&bin_expr.right));
+            result.extend(self.emit_for_expression(&bin_expr.right.borrow()));
         }
         result.push(WatEmitter::emit_for_bin_expr_operator(&bin_expr.operator));
         result
@@ -210,12 +220,12 @@ impl WatEmitter {
         if let Some(arguments) = &function_call.arguments {
             //TODO: check order
             for (_, arg_expr) in arguments {
-                match arg_expr {
+                match &*arg_expr.borrow() {
                     Expression::Identifier(identifier) => {
                         result.push(format!("local.get ${}", identifier.name));
                     }
                     _ => {
-                        result.extend(self.emit_for_expression(arg_expr));
+                        result.extend(self.emit_for_expression(&arg_expr.borrow()));
                     }
                 }
             }
@@ -227,7 +237,7 @@ impl WatEmitter {
 
     fn emit_for_member_access(&self, member_access: &MemberAccessExpression) -> Vec<String> {
         let mut result = Vec::new();
-        result.extend(self.emit_for_expression(&member_access.expression));
+        result.extend(self.emit_for_expression(&member_access.expression.borrow()));
         result.push(format!("get ${}", member_access.name.name));
         result
     }
@@ -339,10 +349,10 @@ impl WatEmitter {
             Expression::Binary(bin_expr) => {
                 let mut result = Vec::new();
 
-                if let Expression::Identifier(identifier) = &bin_expr.left {
+                if let Expression::Identifier(identifier) = &*bin_expr.left.borrow() {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
-                    result.extend(self.emit_for_expression(&bin_expr.left));
+                    result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
                     let variable_name = format!("_assert_{}_left", assert.id);
                     let variable_type = "i32"; //TODO we cannot work with other types yet
                     result.push(format!("(local ${variable_name} {variable_type})"));
@@ -350,10 +360,10 @@ impl WatEmitter {
                     result.push(format!("local.get ${variable_name}"));
                 }
 
-                if let Expression::Identifier(identifier) = &bin_expr.right {
+                if let Expression::Identifier(identifier) = &*bin_expr.right.borrow() {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
-                    result.extend(self.emit_for_expression(&bin_expr.left));
+                    result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
                     let variable_name = format!("_assert_{}_right", assert.id);
                     let variable_type = "i32"; //TODO we cannot work with other types yet
                     result.push(format!("(local ${variable_name} {variable_type})"));

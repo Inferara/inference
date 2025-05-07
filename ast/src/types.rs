@@ -442,13 +442,7 @@ ast_nodes! {
     }
 
     pub struct MemberAccessExpression {
-        pub expression: Expression,
-        pub name: Rc<Identifier>,
-        pub type_info: RefCell<Option<TypeInfo>>
-    }
-
-    pub struct TypeMemberAccessExpression {
-        pub expression: Expression,
+        pub expression: RefCell<Expression>,
         pub name: Rc<Identifier>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
@@ -464,8 +458,7 @@ ast_nodes! {
     }
 
     pub struct PrefixUnaryExpression {
-        pub expression: Expression,
-        pub expression: Expression,
+        pub expression: RefCell<Expression>,
         pub operator: UnaryOperatorKind,
         pub type_info: RefCell<Option<TypeInfo>>
     }
@@ -480,10 +473,9 @@ ast_nodes! {
     }
 
     pub struct BinaryExpression {
-        pub left: Expression,
-        pub left: Expression,
+        pub left: RefCell<Expression>,
         pub operator: OperatorKind,
-        pub right: Expression,
+        pub right: RefCell<Expression>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
 

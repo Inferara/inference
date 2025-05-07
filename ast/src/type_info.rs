@@ -16,12 +16,15 @@ pub enum TypeInfoKind {
     U16,
     U32,
     U64,
-    Array(String),
     Custom(String),
+    Array(String),
     Generic(String),
     QualifiedName(String),
     Qualified(String),
     Function(String),
+    Struct(String),
+    Enum(String),
+    Spec(String),
 }
 
 impl Display for TypeInfoKind {
@@ -40,6 +43,9 @@ impl Display for TypeInfoKind {
             TypeInfoKind::U64 => write!(f, "U64"),
             TypeInfoKind::Array(ty) => write!(f, "[{ty}]"),
             TypeInfoKind::Custom(ty)
+            | TypeInfoKind::Spec(ty)
+            | TypeInfoKind::Struct(ty)
+            | TypeInfoKind::Enum(ty)
             | TypeInfoKind::QualifiedName(ty)
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
@@ -49,6 +55,7 @@ impl Display for TypeInfoKind {
 }
 
 impl TypeInfoKind {
+    #[must_use]
     pub fn is_number(&self) -> bool {
         matches!(
             self,
@@ -173,11 +180,23 @@ impl TypeInfo {
         }
     }
 
+    #[must_use]
     pub fn is_number(&self) -> bool {
         self.kind.is_number()
     }
 
+    #[must_use]
     pub fn is_array(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Array(_))
+    }
+
+    #[must_use]
+    pub fn is_bool(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Bool)
+    }
+
+    #[must_use]
+    pub fn is_struct(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Struct(_))
     }
 }

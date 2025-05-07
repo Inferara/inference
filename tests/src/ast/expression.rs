@@ -3,7 +3,8 @@ mod expression_tests {
     use inference_ast::{
         builder::Builder,
         t_ast::TypedAst,
-        types::{AstNode, Expression, TypeInfoKind},
+        type_info::TypeInfoKind,
+        types::{AstNode, Expression},
     };
 
     fn build_ast(source_code: String) -> TypedAst {
