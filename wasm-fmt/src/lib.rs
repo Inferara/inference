@@ -537,7 +537,7 @@ impl<'a> BinaryReader<'a> {
 fn format_hex(bytes: &[u8]) -> String {
     let mut s = String::new();
     for &b in bytes {
-        let _ = write!(s, "{:02x}", b);
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -557,7 +557,7 @@ fn format_operator(op: &Operator) -> String {
         Operator::Br(x) => format!("br {x}"),
         Operator::BrIf(x) => format!("br_if {x}"),
         Operator::BrTable { targets, default } => {
-            format!("br_table targets={:?} default={}", targets, default)
+            format!("br_table targets={targets:?} default={default}")
         }
         Operator::Return => "return".into(),
         Operator::Call(x) => format!("call {x}"),
@@ -616,8 +616,8 @@ fn format_operator(op: &Operator) -> String {
         // --- Constants ---
         Operator::I32Const(x) => format!("i32.const {x}"),
         Operator::I64Const(x) => format!("i64.const {x}"),
-        Operator::F32Const(x) => format!("f32.const 0x{:08x}", x),
-        Operator::F64Const(x) => format!("f64.const 0x{:016x}", x),
+        Operator::F32Const(x) => format!("f32.const 0x{x:08x}"),
+        Operator::F64Const(x) => format!("f64.const 0x{x:016x}"),
 
         // --- Comparison and test operators ---
         Operator::I32Eqz => "i32.eqz".into(),
@@ -903,14 +903,14 @@ fn format_operator(op: &Operator) -> String {
         Operator::I64AtomicRmwCmpxchg(x, y) => format!("i64.atomic.rmw.cmpxchg {x} {y}"),
         Operator::I32AtomicRmw8Cmpxchg_u(x, y) => format!("i32.atomic.rmw8.cmpxchg_u {x} {y}"),
         Operator::I32AtomicRmw16Cmpxchg_u(x, y) => {
-            format!("i32.atomic.rmw16.cmpxchg_u {} {}", x, y)
+            format!("i32.atomic.rmw16.cmpxchg_u {x} {y}")
         }
         Operator::I64AtomicRmw8Cmpxchg_u(x, y) => format!("i64.atomic.rmw8.cmpxchg_u {x} {y}"),
         Operator::I64AtomicRmw16Cmpxchg_u(x, y) => {
-            format!("i64.atomic.rmw16.cmpxchg_u {} {}", x, y)
+            format!("i64.atomic.rmw16.cmpxchg_u {x} {y}")
         }
         Operator::I64AtomicRmw32Cmpxchg_u(x, y) => {
-            format!("i64.atomic.rmw32.cmpxchg_u {} {}", x, y)
+            format!("i64.atomic.rmw32.cmpxchg_u {x} {y}")
         }
         Operator::GlobalAtomicGet(x, y) => format!("global.atomic.get {x} {y}"),
         Operator::GlobalAtomicSet(x, y) => format!("global.atomic.set {x} {y}"),
@@ -935,10 +935,10 @@ fn format_operator(op: &Operator) -> String {
         Operator::StructAtomicRmwOr(x, y, z) => format!("struct.atomic.rmw.or {x} {y} {z}"),
         Operator::StructAtomicRmwXor(x, y, z) => format!("struct.atomic.rmw.xor {x} {y} {z}"),
         Operator::StructAtomicRmwXchg(x, y, z) => {
-            format!("struct.atomic.rmw.xchg {} {} {}", x, y, z)
+            format!("struct.atomic.rmw.xchg {x} {y} {z}")
         }
         Operator::StructAtomicRmwCmpxchg(x, y, z) => {
-            format!("struct.atomic.rmw.cmpxchg {} {} {}", x, y, z)
+            format!("struct.atomic.rmw.cmpxchg {x} {y} {z}")
         }
         Operator::ArrayAtomicGet(x, y) => format!("array.atomic.get {x} {y}"),
         Operator::ArrayAtomicGetS(x, y) => format!("array.atomic.get_s {x} {y}"),
