@@ -241,6 +241,7 @@ ast_enums! {
         ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
         MemberAccess(Rc<MemberAccessExpression>),
         FunctionCall(Rc<FunctionCallExpression>),
+        Struct(Rc<StructExpression>),
         PrefixUnary(Rc<PrefixUnaryExpression>),
         Parenthesized(Rc<ParenthesizedExpression>),
         Binary(Rc<BinaryExpression>),
@@ -454,6 +455,12 @@ ast_nodes! {
         pub type_info: RefCell<Option<TypeInfo>>
     }
 
+    pub struct StructExpression {
+        pub name: Rc<Identifier>,
+        pub fields: Option<Vec<(Rc<Identifier>, RefCell<Expression>)>>,
+        pub type_info: RefCell<Option<TypeInfo>>
+    }
+
     pub struct UzumakiExpression {
         pub type_info: RefCell<Option<TypeInfo>>
     }
@@ -481,7 +488,7 @@ ast_nodes! {
     }
 
     pub struct ArrayLiteral {
-        pub elements: Vec<RefCell<Expression>>,
+        pub elements: Option<Vec<RefCell<Expression>>>,
         pub type_info: RefCell<Option<TypeInfo>>
     }
 

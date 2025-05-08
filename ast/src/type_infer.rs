@@ -761,6 +761,24 @@ impl TypeChecker {
                     Some(signature.return_type.clone());
                 Some(signature.return_type.clone())
             }
+            Expression::Struct(struct_expression) => {
+                if let Some(type_info) = struct_expression.type_info.borrow().as_ref() {
+                    return Some(type_info.clone());
+                }
+                let struct_type = self
+                    .symbol_table
+                    .lookup_type(&struct_expression.name())
+                    .cloned();
+                if let Some(struct_type) = struct_type {
+                    *struct_expression.type_info.borrow_mut() = Some(struct_type.clone());
+                    return Some(struct_type);
+                }
+                self.errors.push(format!(
+                    "Struct `{}` is not defined",
+                    struct_expression.name()
+                ));
+                None
+            }
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Neg => {
@@ -855,23 +873,26 @@ impl TypeChecker {
                     if array_literal.type_info.borrow().is_some() {
                         return Some(array_literal.type_info.borrow().clone().unwrap());
                     }
-                    if let Some(element_type_info) =
-                        self.infer_expression(&mut array_literal.elements[0].borrow_mut())
-                    {
-                        for element in &array_literal.elements[1..] {
-                            let element_type = self.infer_expression(&mut element.borrow_mut());
-                            if let Some(element_type) = element_type {
-                                if element_type != element_type_info {
-                                    self.errors.push(format!(
+                    if let Some(elements) = &array_literal.elements {
+                        if let Some(element_type_info) =
+                            self.infer_expression(&mut elements[0].borrow_mut())
+                        {
+                            for element in &elements[1..] {
+                                let element_type = self.infer_expression(&mut element.borrow_mut());
+                                if let Some(element_type) = element_type {
+                                    if element_type != element_type_info {
+                                        self.errors.push(format!(
                                         "Array elements must be of the same type, found {element_type:?} and {element_type_info:?}"
                                     ));
+                                    }
                                 }
                             }
+                        } else {
+                            self.errors
+                                .push("Array elements must be of the same type".to_string());
                         }
-                    } else {
-                        self.errors
-                            .push("Array elements must be of the same type".to_string());
                     }
+
                     None
                 }
                 Literal::Bool(_) => Some(TypeInfo {

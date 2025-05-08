@@ -1,6 +1,8 @@
 use std::{marker::PhantomData, rc::Rc};
 
-use crate::nodes::{ArgumentType, Directive, IgnoreArgument, Misc, SelfReference};
+use crate::nodes::{
+    ArgumentType, Directive, IgnoreArgument, Misc, SelfReference, StructExpression,
+};
 use crate::type_infer::TypeChecker;
 use crate::{
     arena::Arena,
@@ -739,6 +741,9 @@ impl<'a> Builder<'a, InitState> {
             "function_call_expression" => {
                 Expression::FunctionCall(self.build_function_call_expression(parent_id, node, code))
             }
+            "struct_expression" => {
+                Expression::Struct(self.build_struct_expression(parent_id, node, code))
+            }
             "prefix_unary_expression" => {
                 Expression::PrefixUnary(self.build_prefix_unary_expression(parent_id, node, code))
             }
@@ -881,6 +886,59 @@ impl<'a> Builder<'a, InitState> {
         ));
         self.arena.add_node(
             AstNode::Expression(Expression::FunctionCall(node.clone())),
+            parent_id,
+        );
+        node
+    }
+
+    fn build_struct_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<StructExpression> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let mut field_name_expression_map: Vec<(Rc<Identifier>, Expression)> = Vec::new();
+        let mut pending_name: Option<Rc<Identifier>> = None;
+        let mut cursor = node.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if let Some(field) = cursor.field_name() {
+                    match field {
+                        "field" => {
+                            let expr = self.build_expression(id, &child, code);
+                            if let Expression::Identifier(ident) = expr {
+                                pending_name = Some(ident);
+                            }
+                        }
+                        "value" => {
+                            let expr = self.build_expression(id, &child, code);
+                            let name = pending_name
+                                .take()
+                                .expect("pending_name is not initialized");
+                            field_name_expression_map.push((name, expr));
+                        }
+                        _ => {}
+                    }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+
+        let fields = if field_name_expression_map.is_empty() {
+            None
+        } else {
+            Some(field_name_expression_map)
+        };
+
+        let node = Rc::new(StructExpression::new(id, location, name, fields));
+        self.arena.add_node(
+            AstNode::Expression(Expression::Struct(node.clone())),
             parent_id,
         );
         node
@@ -1031,6 +1089,11 @@ impl<'a> Builder<'a, InitState> {
             elements.push(self.build_expression(id, &child, code));
         }
 
+        let elements = if elements.is_empty() {
+            None
+        } else {
+            Some(elements)
+        };
         let node = Rc::new(ArrayLiteral::new(id, location, elements));
         self.arena.add_node(
             AstNode::Expression(Expression::Literal(Literal::Array(node.clone()))),

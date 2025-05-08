@@ -1,29 +1,14 @@
 #[cfg(test)]
 mod expression_tests {
     use inference_ast::{
-        builder::Builder,
         nodes::{AstNode, Expression},
-        t_ast::TypedAst,
         type_info::{NumberTypeKindNumberType, TypeInfoKind},
     };
 
-    fn build_ast(source_code: String) -> TypedAst {
-        let inference_language = tree_sitter_inference::language();
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&inference_language)
-            .expect("Error loading Inference grammar");
-        let tree = parser.parse(source_code.clone(), None).unwrap();
-        let code = source_code.as_bytes();
-        let root_node = tree.root_node();
-        let mut builder = Builder::new();
-        builder.add_source_code(root_node, code);
-        let builder = builder.build_ast().unwrap();
-        builder.t_ast()
-    }
+    use crate::utils::build_ast;
 
     #[test]
-    fn test_uzumaki_type_in_block() {
+    fn test_type_inference_1() {
         let source_code = r#"
         fn a() {
             let a: i8 = @;

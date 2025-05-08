@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::{fmt::Display, rc::Rc};
 
 use crate::{
-    nodes::{ArgumentType, IgnoreArgument, SelfReference},
+    nodes::{ArgumentType, IgnoreArgument, SelfReference, StructExpression},
     type_info::{TypeInfo, TypeInfoKind},
 };
 
@@ -68,6 +68,7 @@ impl Expression {
             Expression::ArrayIndexAccess(e) => e.type_info.borrow().clone(),
             Expression::MemberAccess(e) => e.type_info.borrow().clone(),
             Expression::FunctionCall(e) => e.type_info.borrow().clone(),
+            Expression::Struct(e) => e.type_info.borrow().clone(),
             Expression::PrefixUnary(e) => e.type_info.borrow().clone(),
             Expression::Parenthesized(e) => e.type_info.borrow().clone(),
             Expression::Binary(e) => e.type_info.borrow().clone(),
@@ -561,6 +562,34 @@ impl FunctionCallExpression {
     }
 }
 
+impl StructExpression {
+    #[must_use]
+    pub fn new(
+        id: u32,
+        location: Location,
+        name: Rc<Identifier>,
+        fields: Option<Vec<(Rc<Identifier>, Expression)>>,
+    ) -> Self {
+        let fields = fields.map(|vec| {
+            vec.into_iter()
+                .map(|(name, expr)| (name, RefCell::new(expr)))
+                .collect()
+        });
+        StructExpression {
+            id,
+            location,
+            name,
+            fields,
+            type_info: RefCell::new(None),
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
+}
+
 impl PrefixUnaryExpression {
     #[must_use]
     pub fn new(
@@ -647,11 +676,11 @@ impl BoolLiteral {
 
 impl ArrayLiteral {
     #[must_use]
-    pub fn new(id: u32, location: Location, elements: Vec<Expression>) -> Self {
+    pub fn new(id: u32, location: Location, elements: Option<Vec<Expression>>) -> Self {
         ArrayLiteral {
             id,
             location,
-            elements: elements.into_iter().map(RefCell::new).collect(),
+            elements: elements.map(|vec| vec.into_iter().map(RefCell::new).collect()),
             type_info: RefCell::new(None),
         }
     }
