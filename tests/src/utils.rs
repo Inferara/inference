@@ -1,5 +1,6 @@
 use inference_ast::{builder::Builder, t_ast::TypedAst};
 
+#[allow(dead_code)]
 pub(crate) fn build_ast(source_code: String) -> TypedAst {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
