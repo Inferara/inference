@@ -192,13 +192,13 @@ impl WatEmitter {
 
     fn emit_for_binary_expression(&self, bin_expr: &BinaryExpression) -> Vec<String> {
         let mut result = Vec::new();
-        if let Expression::Identifier(identifier) = &bin_expr.left.as_ref() {
+        if let Expression::Identifier(identifier) = &bin_expr.left {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.left));
         }
 
-        if let Expression::Identifier(identifier) = &bin_expr.right.as_ref() {
+        if let Expression::Identifier(identifier) = &bin_expr.right {
             result.push(format!("local.get ${}", identifier.name));
         } else {
             result.extend(self.emit_for_expression(&bin_expr.right));
@@ -320,11 +320,11 @@ impl WatEmitter {
     // }
 
     fn emit_for_assert_statement(&self, assert: &AssertStatement) -> Vec<String> {
-        match assert.expression.as_ref() {
+        match &assert.expression {
             Expression::Binary(bin_expr) => {
                 let mut result = Vec::new();
 
-                if let Expression::Identifier(identifier) = &bin_expr.left.as_ref() {
+                if let Expression::Identifier(identifier) = &bin_expr.left {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));
@@ -335,7 +335,7 @@ impl WatEmitter {
                     result.push(format!("local.get ${variable_name}"));
                 }
 
-                if let Expression::Identifier(identifier) = &bin_expr.right.as_ref() {
+                if let Expression::Identifier(identifier) = &bin_expr.right {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
                     result.extend(self.emit_for_expression(&bin_expr.left));

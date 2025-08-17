@@ -1,6 +1,8 @@
 //! Inference AST Nodes and enums implementations
 #![allow(dead_code)]
 
+use std::rc::Rc;
+
 use crate::node::Location;
 
 use super::types::{
@@ -31,7 +33,7 @@ impl SourceFile {
         }
     }
 
-    pub fn add_use_directive(&mut self, use_directive: UseDirective) {
+    pub fn add_use_directive(&mut self, use_directive: Rc<UseDirective>) {
         self.use_directives.push(use_directive);
     }
 
@@ -43,8 +45,8 @@ impl SourceFile {
 impl UseDirective {
     #[must_use]
     pub fn new(
-        imported_types: Option<Vec<Identifier>>,
-        segments: Option<Vec<Identifier>>,
+        imported_types: Option<Vec<Rc<Identifier>>>,
+        segments: Option<Vec<Rc<Identifier>>>,
         from: Option<String>,
         location: Location,
     ) -> Self {
@@ -60,7 +62,7 @@ impl UseDirective {
 
 impl SpecDefinition {
     #[must_use]
-    pub fn new(name: Identifier, definitions: Vec<Definition>, location: Location) -> Self {
+    pub fn new(name: Rc<Identifier>, definitions: Vec<Definition>, location: Location) -> Self {
         SpecDefinition {
             id: get_node_id(),
             location,
@@ -73,9 +75,9 @@ impl SpecDefinition {
 impl StructDefinition {
     #[must_use]
     pub fn new(
-        name: Identifier,
-        fields: Vec<StructField>,
-        methods: Vec<FunctionDefinition>,
+        name: Rc<Identifier>,
+        fields: Vec<Rc<StructField>>,
+        methods: Vec<Rc<FunctionDefinition>>,
         location: Location,
     ) -> Self {
         StructDefinition {
@@ -90,7 +92,7 @@ impl StructDefinition {
 
 impl StructField {
     #[must_use]
-    pub fn new(name: Identifier, type_: Type, location: Location) -> Self {
+    pub fn new(name: Rc<Identifier>, type_: Type, location: Location) -> Self {
         StructField {
             id: get_node_id(),
             location,
@@ -102,7 +104,7 @@ impl StructField {
 
 impl EnumDefinition {
     #[must_use]
-    pub fn new(name: Identifier, variants: Vec<Identifier>, location: Location) -> Self {
+    pub fn new(name: Rc<Identifier>, variants: Vec<Rc<Identifier>>, location: Location) -> Self {
         EnumDefinition {
             id: get_node_id(),
             location,
@@ -135,7 +137,7 @@ impl Default for Identifier {
 
 impl ConstantDefinition {
     #[must_use]
-    pub fn new(name: Identifier, type_: Type, value: Literal, location: Location) -> Self {
+    pub fn new(name: Rc<Identifier>, type_: Type, value: Literal, location: Location) -> Self {
         ConstantDefinition {
             id: get_node_id(),
             location,
@@ -149,8 +151,8 @@ impl ConstantDefinition {
 impl FunctionDefinition {
     #[must_use]
     pub fn new(
-        name: Identifier,
-        arguments: Option<Vec<Parameter>>,
+        name: Rc<Identifier>,
+        arguments: Option<Vec<Rc<Parameter>>>,
         returns: Option<Type>,
         body: BlockType,
         location: Location,
@@ -187,8 +189,8 @@ impl FunctionDefinition {
 impl ExternalFunctionDefinition {
     #[must_use]
     pub fn new(
-        name: Identifier,
-        arguments: Option<Vec<Identifier>>,
+        name: Rc<Identifier>,
+        arguments: Option<Vec<Rc<Identifier>>>,
         returns: Option<Type>,
         location: Location,
     ) -> Self {
@@ -204,7 +206,7 @@ impl ExternalFunctionDefinition {
 
 impl TypeDefinition {
     #[must_use]
-    pub fn new(name: Identifier, type_: Type, location: Location) -> Self {
+    pub fn new(name: Rc<Identifier>, type_: Type, location: Location) -> Self {
         TypeDefinition {
             id: get_node_id(),
             location,
@@ -216,7 +218,7 @@ impl TypeDefinition {
 
 impl Parameter {
     #[must_use]
-    pub fn new(location: Location, name: Identifier, type_: Type) -> Self {
+    pub fn new(name: Rc<Identifier>, type_: Type, location: Location) -> Self {
         Parameter {
             id: get_node_id(),
             location,
@@ -312,7 +314,7 @@ impl VariableDefinitionStatement {
     #[must_use]
     pub fn new(
         location: Location,
-        name: Identifier,
+        name: Rc<Identifier>,
         type_: Type,
         value: Option<Expression>,
         is_undef: bool,
@@ -335,7 +337,7 @@ impl VariableDefinitionStatement {
 
 impl TypeDefinitionStatement {
     #[must_use]
-    pub fn new(location: Location, name: Identifier, type_: Type) -> Self {
+    pub fn new(location: Location, name: Rc<Identifier>, type_: Type) -> Self {
         TypeDefinitionStatement {
             id: get_node_id(),
             location,
@@ -347,7 +349,7 @@ impl TypeDefinitionStatement {
 
 impl AssignExpression {
     #[must_use]
-    pub fn new(location: Location, left: Box<Expression>, right: Box<Expression>) -> Self {
+    pub fn new(location: Location, left: Expression, right: Expression) -> Self {
         AssignExpression {
             id: get_node_id(),
             location,
@@ -359,7 +361,7 @@ impl AssignExpression {
 
 impl ArrayIndexAccessExpression {
     #[must_use]
-    pub fn new(location: Location, array: Box<Expression>, index: Box<Expression>) -> Self {
+    pub fn new(location: Location, array: Expression, index: Expression) -> Self {
         ArrayIndexAccessExpression {
             id: get_node_id(),
             location,
@@ -371,7 +373,7 @@ impl ArrayIndexAccessExpression {
 
 impl MemberAccessExpression {
     #[must_use]
-    pub fn new(location: Location, expression: Box<Expression>, name: Identifier) -> Self {
+    pub fn new(location: Location, expression: Expression, name: Rc<Identifier>) -> Self {
         MemberAccessExpression {
             id: get_node_id(),
             location,
@@ -385,8 +387,8 @@ impl FunctionCallExpression {
     #[must_use]
     pub fn new(
         location: Location,
-        function: Box<Expression>,
-        arguments: Option<Vec<(Identifier, Expression)>>,
+        function: Expression,
+        arguments: Option<Vec<(Rc<Identifier>, Expression)>>,
     ) -> Self {
         FunctionCallExpression {
             id: get_node_id(),
@@ -399,11 +401,7 @@ impl FunctionCallExpression {
 
 impl PrefixUnaryExpression {
     #[must_use]
-    pub fn new(
-        location: Location,
-        expression: Box<Expression>,
-        operator: UnaryOperatorKind,
-    ) -> Self {
+    pub fn new(location: Location, expression: Expression, operator: UnaryOperatorKind) -> Self {
         PrefixUnaryExpression {
             id: get_node_id(),
             location,
@@ -425,7 +423,7 @@ impl UzumakiExpression {
 
 impl AssertStatement {
     #[must_use]
-    pub fn new(location: Location, expression: Box<Expression>) -> Self {
+    pub fn new(location: Location, expression: Expression) -> Self {
         AssertStatement {
             id: get_node_id(),
             location,
@@ -436,7 +434,7 @@ impl AssertStatement {
 
 impl ParenthesizedExpression {
     #[must_use]
-    pub fn new(location: Location, expression: Box<Expression>) -> Self {
+    pub fn new(location: Location, expression: Expression) -> Self {
         ParenthesizedExpression {
             id: get_node_id(),
             location,
@@ -449,9 +447,9 @@ impl BinaryExpression {
     #[must_use]
     pub fn new(
         location: Location,
-        left: Box<Expression>,
+        left: Expression,
         operator: OperatorKind,
-        right: Box<Expression>,
+        right: Expression,
     ) -> Self {
         BinaryExpression {
             id: get_node_id(),
@@ -531,7 +529,7 @@ impl SimpleType {
 
 impl GenericType {
     #[must_use]
-    pub fn new(location: Location, base: Identifier, parameters: Vec<Type>) -> Self {
+    pub fn new(location: Location, base: Rc<Identifier>, parameters: Vec<Type>) -> Self {
         GenericType {
             id: get_node_id(),
             location,
@@ -543,7 +541,7 @@ impl GenericType {
 
 impl FunctionType {
     #[must_use]
-    pub fn new(location: Location, parameters: Option<Vec<Type>>, returns: Box<Type>) -> Self {
+    pub fn new(location: Location, parameters: Option<Vec<Type>>, returns: Type) -> Self {
         FunctionType {
             id: get_node_id(),
             location,
@@ -555,7 +553,7 @@ impl FunctionType {
 
 impl QualifiedName {
     #[must_use]
-    pub fn new(location: Location, qualifier: Identifier, name: Identifier) -> Self {
+    pub fn new(location: Location, qualifier: Rc<Identifier>, name: Rc<Identifier>) -> Self {
         QualifiedName {
             id: get_node_id(),
             location,
@@ -567,7 +565,7 @@ impl QualifiedName {
 
 impl TypeQualifiedName {
     #[must_use]
-    pub fn new(location: Location, alias: Identifier, name: Identifier) -> Self {
+    pub fn new(location: Location, alias: Rc<Identifier>, name: Rc<Identifier>) -> Self {
         TypeQualifiedName {
             id: get_node_id(),
             location,
@@ -579,7 +577,7 @@ impl TypeQualifiedName {
 
 impl TypeArray {
     #[must_use]
-    pub fn new(location: Location, element_type: Box<Type>, size: Option<Box<Expression>>) -> Self {
+    pub fn new(location: Location, element_type: Type, size: Option<Expression>) -> Self {
         TypeArray {
             id: get_node_id(),
             location,

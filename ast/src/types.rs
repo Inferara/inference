@@ -8,48 +8,48 @@ use crate::{ast_enum, ast_enums, ast_nodes, ast_nodes_impl, node::Node};
 ast_enums! {
 
     pub enum Definition {
-        Spec(SpecDefinition),
-        Struct(StructDefinition),
-        Enum(EnumDefinition),
-        Constant(ConstantDefinition),
-        Function(FunctionDefinition),
-        ExternalFunction(ExternalFunctionDefinition),
-        Type(TypeDefinition),
+        Spec(Rc<SpecDefinition>),
+        Struct(Rc<StructDefinition>),
+        Enum(Rc<EnumDefinition>),
+        Constant(Rc<ConstantDefinition>),
+        Function(Rc<FunctionDefinition>),
+        ExternalFunction(Rc<ExternalFunctionDefinition>),
+        Type(Rc<TypeDefinition>),
     }
 
     pub enum BlockType {
-        Block(Block),
-        Assume(Block),
-        Forall(Block),
-        Exists(Block),
-        Unique(Block),
+        Block(Rc<Block>),
+        Assume(Rc<Block>),
+        Forall(Rc<Block>),
+        Exists(Rc<Block>),
+        Unique(Rc<Block>),
     }
 
     pub enum Statement {
         Block(BlockType),
-        Expression(ExpressionStatement),
-        Return(ReturnStatement),
-        Loop(LoopStatement),
-        Break(BreakStatement),
-        If(IfStatement),
-        VariableDefinition(VariableDefinitionStatement),
-        TypeDefinition(TypeDefinitionStatement),
-        Assert(AssertStatement),
-        ConstantDefinition(ConstantDefinition),
+        Expression(Rc<ExpressionStatement>),
+        Return(Rc<ReturnStatement>),
+        Loop(Rc<LoopStatement>),
+        Break(Rc<BreakStatement>),
+        If(Rc<IfStatement>),
+        VariableDefinition(Rc<VariableDefinitionStatement>),
+        TypeDefinition(Rc<TypeDefinitionStatement>),
+        Assert(Rc<AssertStatement>),
+        ConstantDefinition(Rc<ConstantDefinition>),
     }
 
     pub enum Expression {
-        Assign(Box<AssignExpression>),
-        ArrayIndexAccess(Box<ArrayIndexAccessExpression>),
-        MemberAccess(Box<MemberAccessExpression>),
-        FunctionCall(Box<FunctionCallExpression>),
-        PrefixUnary(Box<PrefixUnaryExpression>),
-        Parenthesized(Box<ParenthesizedExpression>),
-        Binary(Box<BinaryExpression>),
+        Assign(Rc<AssignExpression>),
+        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
+        MemberAccess(Rc<MemberAccessExpression>),
+        FunctionCall(Rc<FunctionCallExpression>),
+        PrefixUnary(Rc<PrefixUnaryExpression>),
+        Parenthesized(Rc<ParenthesizedExpression>),
+        Binary(Rc<BinaryExpression>),
         Literal(Literal),
-        Identifier(Identifier),
-        Type(Box<Type>),
-        Uzumaki(UzumakiExpression),
+        Identifier(Rc<Identifier>),
+        Type(Type),
+        Uzumaki(Rc<UzumakiExpression>),
     }
 
     pub enum Literal {
@@ -61,13 +61,13 @@ ast_enums! {
     }
 
     pub enum Type {
-        Array(Box<TypeArray>),
-        Simple(SimpleType),
-        Generic(GenericType),
-        Function(FunctionType),
-        QualifiedName(QualifiedName),
-        Qualified(TypeQualifiedName),
-        Identifier(Identifier),
+        Array(Rc<TypeArray>),
+        Simple(Rc<SimpleType>),
+        Generic(Rc<GenericType>),
+        Function(Rc<FunctionType>),
+        QualifiedName(Rc<QualifiedName>),
+        Qualified(Rc<TypeQualifiedName>),
+        Identifier(Rc<Identifier>),
     }
 }
 
@@ -103,35 +103,35 @@ pub enum OperatorKind {
 ast_nodes! {
 
     pub struct SourceFile {
-        pub use_directives: Vec<UseDirective>,
+        pub use_directives: Vec<Rc<UseDirective>>,
         pub definitions: Vec<Definition>,
     }
 
     pub struct UseDirective {
-        pub imported_types: Option<Vec<Identifier>>,
-        pub segments: Option<Vec<Identifier>>,
+        pub imported_types: Option<Vec<Rc<Identifier>>>,
+        pub segments: Option<Vec<Rc<Identifier>>>,
         pub from: Option<String>,
     }
 
     pub struct SpecDefinition {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub definitions: Vec<Definition>,
     }
 
     pub struct StructDefinition {
-        pub name: Identifier,
-        pub fields: Vec<StructField>,
-        pub methods: Vec<FunctionDefinition>,
+        pub name: Rc<Identifier>,
+        pub fields: Vec<Rc<StructField>>,
+        pub methods: Vec<Rc<FunctionDefinition>>,
     }
 
     pub struct StructField {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
     }
 
     pub struct EnumDefinition {
-        pub name: Identifier,
-        pub variants: Vec<Identifier>,
+        pub name: Rc<Identifier>,
+        pub variants: Vec<Rc<Identifier>>,
     }
 
     pub struct Identifier {
@@ -139,31 +139,31 @@ ast_nodes! {
     }
 
     pub struct ConstantDefinition {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
         pub value: Literal,
     }
 
     pub struct FunctionDefinition {
-        pub name: Identifier,
-        pub parameters: Option<Vec<Parameter>>,
+        pub name: Rc<Identifier>,
+        pub parameters: Option<Vec<Rc<Parameter>>>,
         pub returns: Option<Type>,
         pub body: BlockType,
     }
 
     pub struct ExternalFunctionDefinition {
-        pub name: Identifier,
-        pub arguments: Option<Vec<Identifier>>,
+        pub name: Rc<Identifier>,
+        pub arguments: Option<Vec<Rc<Identifier>>>,
         pub returns: Option<Type>,
     }
 
     pub struct TypeDefinition {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
     }
 
     pub struct Parameter {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
     }
 
@@ -193,56 +193,56 @@ ast_nodes! {
     }
 
     pub struct VariableDefinitionStatement {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
         pub value: Option<Expression>,
         pub is_undef: bool,
     }
 
     pub struct TypeDefinitionStatement {
-        pub name: Identifier,
+        pub name: Rc<Identifier>,
         pub type_: Type,
     }
 
     pub struct AssignExpression {
-        pub left: Box<Expression>,
-        pub right: Box<Expression>,
+        pub left: Expression,
+        pub right: Expression,
     }
 
     pub struct ArrayIndexAccessExpression {
-        pub array: Box<Expression>,
-        pub index: Box<Expression>,
+        pub array: Expression,
+        pub index: Expression,
     }
 
     pub struct MemberAccessExpression {
-        pub expression: Box<Expression>,
-        pub name: Identifier,
+        pub expression: Expression,
+        pub name: Rc<Identifier>,
     }
 
     pub struct FunctionCallExpression {
-        pub function: Box<Expression>,
-        pub arguments: Option<Vec<(Identifier, Expression)>>,
+        pub function: Expression,
+        pub arguments: Option<Vec<(Rc<Identifier>, Expression)>>,
     }
 
     pub struct UzumakiExpression {}
 
     pub struct PrefixUnaryExpression {
-        pub expression: Box<Expression>,
+        pub expression: Expression,
         pub operator: UnaryOperatorKind,
     }
 
     pub struct AssertStatement {
-        pub expression: Box<Expression>,
+        pub expression: Expression,
     }
 
     pub struct ParenthesizedExpression {
-        pub expression: Box<Expression>,
+        pub expression: Expression,
     }
 
     pub struct BinaryExpression {
-        pub left: Box<Expression>,
+        pub left: Expression,
         pub operator: OperatorKind,
-        pub right: Box<Expression>,
+        pub right: Expression,
     }
 
     pub struct ArrayLiteral {
@@ -269,28 +269,28 @@ ast_nodes! {
     }
 
     pub struct GenericType {
-        pub base: Identifier,
+        pub base: Rc<Identifier>,
         pub parameters: Vec<Type>,
     }
 
     pub struct FunctionType {
         pub parameters: Option<Vec<Type>>,
-        pub returns: Box<Type>,
+        pub returns: Type,
     }
 
     pub struct QualifiedName {
-        pub qualifier: Identifier,
-        pub name: Identifier,
+        pub qualifier: Rc<Identifier>,
+        pub name: Rc<Identifier>,
     }
 
     pub struct TypeQualifiedName {
-        pub alias: Identifier,
-        pub name: Identifier,
+        pub alias: Rc<Identifier>,
+        pub name: Rc<Identifier>,
     }
 
     pub struct TypeArray {
-        pub element_type: Box<Type>,
-        pub size: Option<Box<Expression>>,
+        pub element_type: Type,
+        pub size: Option<Expression>,
     }
 
 }
