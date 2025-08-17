@@ -1,15 +1,20 @@
-#![warn(clippy::pedantic)]
+//! Definitions of functions that traverse tree-sitter CST and produce Inference AST.
+use std::rc::Rc;
 
-use crate::types::{
-    ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression, BinaryExpression,
-    Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition, EnumDefinition, Expression,
-    ExpressionStatement, ExternalFunctionDefinition, FunctionCallExpression, FunctionDefinition,
-    FunctionType, GenericType, Identifier, IfStatement, Literal, Location, LoopStatement,
-    MemberAccessExpression, NumberLiteral, OperatorKind, Parameter, ParenthesizedExpression,
-    PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType, SourceFile, SpecDefinition,
-    Statement, StringLiteral, StructDefinition, StructField, Type, TypeArray, TypeDefinition,
-    TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective,
-    UzumakiExpression, VariableDefinitionStatement,
+use crate::{
+    node::Location,
+    types::{
+        ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignExpression,
+        BinaryExpression, Block, BoolLiteral, BreakStatement, ConstantDefinition, Definition,
+        EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
+        FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier,
+        IfStatement, Literal, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
+        Parameter, ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement,
+        SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition,
+        StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName,
+        UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
+        VariableDefinitionStatement,
+    },
 };
 use tree_sitter::Node;
 
@@ -61,7 +66,7 @@ fn build_use_directive(parent: &mut SourceFile, node: &Node, code: &[u8]) {
     let mut cursor = node.walk();
 
     if let Some(from_literal) = node.child_by_field_name("from_literal") {
-        from = Some(build_string_literal(&from_literal, code).value);
+        from = Some(from_literal.utf8_text(code).unwrap().to_string());
     } else {
         let founded_segments = node
             .children_by_field_name("segment", &mut cursor)
@@ -568,7 +573,7 @@ fn build_literal(node: &Node, code: &[u8]) -> Literal {
     }
 }
 
-fn build_array_literal(node: &Node, code: &[u8]) -> ArrayLiteral {
+fn build_array_literal(node: &Node, code: &[u8]) -> Rc<ArrayLiteral> {
     let location = get_location(node, code);
     let mut elements = Vec::new();
     let mut cursor = node.walk();
@@ -576,10 +581,10 @@ fn build_array_literal(node: &Node, code: &[u8]) -> ArrayLiteral {
         elements.push(build_expression(&child, code));
     }
 
-    ArrayLiteral::new(location, elements)
+    Rc::new(ArrayLiteral::new(location, elements))
 }
 
-fn build_bool_literal(node: &Node, code: &[u8]) -> BoolLiteral {
+fn build_bool_literal(node: &Node, code: &[u8]) -> Rc<BoolLiteral> {
     let location = get_location(node, code);
     let value = match node.utf8_text(code).unwrap() {
         "true" => true,
@@ -587,32 +592,32 @@ fn build_bool_literal(node: &Node, code: &[u8]) -> BoolLiteral {
         _ => panic!("Unexpected boolean literal value"),
     };
 
-    BoolLiteral::new(location, value)
+    Rc::new(BoolLiteral::new(location, value))
 }
 
-fn build_string_literal(node: &Node, code: &[u8]) -> StringLiteral {
+fn build_string_literal(node: &Node, code: &[u8]) -> Rc<StringLiteral> {
     let location = get_location(node, code);
     let value = node.utf8_text(code).unwrap().to_string();
 
-    StringLiteral::new(location, value)
+    Rc::new(StringLiteral::new(location, value))
 }
 
-fn build_number_literal(node: &Node, code: &[u8]) -> NumberLiteral {
+fn build_number_literal(node: &Node, code: &[u8]) -> Rc<NumberLiteral> {
     let location = get_location(node, code);
     let value = node.utf8_text(code).unwrap().to_string();
 
     //FIXME hack
-    NumberLiteral::new(
+    Rc::new(NumberLiteral::new(
         location,
         value,
         Type::Simple(SimpleType::new(Location::default(), "i32".to_string())),
-    )
+    ))
 }
 
-fn build_unit_literal(node: &Node, code: &[u8]) -> UnitLiteral {
+fn build_unit_literal(node: &Node, code: &[u8]) -> Rc<UnitLiteral> {
     let location = get_location(node, code);
 
-    UnitLiteral::new(location)
+    Rc::new(UnitLiteral::new(location))
 }
 
 fn build_type(node: &Node, code: &[u8]) -> Type {

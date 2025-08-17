@@ -480,7 +480,7 @@ struct Expression<'a> {
 }
 
 impl Expression<'_> {
-    fn last_part(&self) -> Option<&ExpressionPart> {
+    fn last_part(&'_ self) -> Option<&'_ ExpressionPart<'_>> {
         self.parts.last()
     }
 

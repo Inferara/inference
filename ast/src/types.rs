@@ -1,129 +1,9 @@
-#![warn(clippy::pedantic)]
-#![allow(dead_code)]
+//! Base AST node definitions.
+//!
+//! Defines the `Node` trait with `Location`.
+use std::rc::Rc;
 
-use core::fmt;
-use std::fmt::{Display, Formatter};
-
-#[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct Location {
-    pub offset_start: u32,
-    pub offset_end: u32,
-    pub start_line: u32,
-    pub start_column: u32,
-    pub end_line: u32,
-    pub end_column: u32,
-    pub source: String,
-}
-
-impl Location {
-    #[must_use]
-    pub fn new(
-        offset_start: u32,
-        offset_end: u32,
-        start_line: u32,
-        start_column: u32,
-        end_line: u32,
-        end_column: u32,
-        source: String,
-    ) -> Self {
-        Self {
-            offset_start,
-            offset_end,
-            start_line,
-            start_column,
-            end_line,
-            end_column,
-            source,
-        }
-    }
-}
-
-impl Display for Location {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Location {{ offset_start: {}, offset_end: {}, start_line: {}, start_column: {}, end_line: {}, end_column: {}, source: {} }}",
-            self.offset_start, self.offset_end, self.start_line, self.start_column, self.end_line, self.end_column, self.source
-        )
-    }
-}
-
-#[macro_export]
-macro_rules! ast_node {
-    (
-        $(#[$outer:meta])*
-        $struct_vis:vis struct $name:ident {
-            $(
-                $(#[$field_attr:meta])*
-                $field_vis:vis $field_name:ident : $field_ty:ty
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-        $struct_vis struct $name {
-            pub id: u32,
-            pub location: $crate::types::Location,
-            $(
-                $(#[$field_attr])*
-                $field_vis $field_name : $field_ty,
-            )*
-        }
-    };
-}
-
-macro_rules! ast_nodes {
-    (
-        $(
-            $(#[$outer:meta])*
-            $struct_vis:vis struct $name:ident { $($fields:tt)* }
-        )+
-    ) => {
-        $(
-            ast_node! {
-                $(#[$outer])*
-                $struct_vis struct $name { $($fields)* }
-            }
-        )+
-    };
-}
-
-macro_rules! ast_enum {
-    (
-        $(#[$outer:meta])*
-        $enum_vis:vis enum $name:ident {
-            $(
-                $(#[$arm_attr:meta])*
-                $(@$conv:ident)? $arm:ident $( ( $($tuple:tt)* ) )? $( { $($struct:tt)* } )? ,
-            )*
-        }
-    ) => {
-        $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
-        $enum_vis enum $name {
-            $(
-                $(#[$arm_attr])*
-                $arm $( ( $($tuple)* ) )? $( { $($struct)* } )? ,
-            )*
-        }
-    }
-}
-
-macro_rules! ast_enums {
-    (
-        $(
-            $(#[$outer:meta])*
-            $enum_vis:vis enum $name:ident { $($arms:tt)* }
-        )+
-    ) => {
-        $(
-            ast_enum! {
-                $(#[$outer])*
-                $enum_vis enum $name { $($arms)* }
-            }
-        )+
-    };
-}
+use crate::{ast_enum, ast_enums, ast_nodes, ast_nodes_impl, node::Node};
 
 ast_enums! {
 
@@ -172,39 +52,12 @@ ast_enums! {
         Uzumaki(UzumakiExpression),
     }
 
-    pub enum UnaryOperatorKind {
-        Neg,
-    }
-
-    pub enum OperatorKind {
-        Pow,
-        Add,
-        Sub,
-        Mul,
-        Div,
-        Mod,
-        And,
-        Or,
-        Eq,
-        Ne,
-        Lt,
-        Le,
-        Gt,
-        Ge,
-        BitAnd,
-        BitOr,
-        BitXor,
-        BitNot,
-        Shl,
-        Shr,
-    }
-
     pub enum Literal {
-        Array(ArrayLiteral),
-        Bool(BoolLiteral),
-        String(StringLiteral),
-        Number(NumberLiteral),
-        Unit(UnitLiteral),
+        Array(Rc<ArrayLiteral>),
+        Bool(Rc<BoolLiteral>),
+        String(Rc<StringLiteral>),
+        Number(Rc<NumberLiteral>),
+        Unit(Rc<UnitLiteral>),
     }
 
     pub enum Type {
@@ -218,12 +71,36 @@ ast_enums! {
     }
 }
 
-ast_nodes! {
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum UnaryOperatorKind {
+    Neg,
+}
 
-    pub struct Position {
-        pub row: usize,
-        pub column: usize,
-    }
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum OperatorKind {
+    Pow,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    Shl,
+    Shr,
+}
+
+ast_nodes! {
 
     pub struct SourceFile {
         pub use_directives: Vec<UseDirective>,
@@ -416,4 +293,247 @@ ast_nodes! {
         pub size: Option<Box<Expression>>,
     }
 
+}
+
+ast_nodes_impl! {
+    impl Node for SourceFile {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for UseDirective {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for SpecDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for StructDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for StructField {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for EnumDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for Identifier {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO revisit
+            vec![]
+        }
+    }
+    impl Node for ConstantDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for FunctionDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ExternalFunctionDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for TypeDefinition {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for Parameter {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for Block {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ExpressionStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ReturnStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for LoopStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for BreakStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO revisit
+            vec![]
+        }
+    }
+    impl Node for IfStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for VariableDefinitionStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for TypeDefinitionStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for AssignExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ArrayIndexAccessExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for MemberAccessExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for FunctionCallExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for UzumakiExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for PrefixUnaryExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for AssertStatement {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ParenthesizedExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for BinaryExpression {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for ArrayLiteral {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for BoolLiteral {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for StringLiteral {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for NumberLiteral {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for UnitLiteral {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for SimpleType {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for GenericType {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for FunctionType {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for QualifiedName {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for TypeQualifiedName {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
+    impl Node for TypeArray {
+        fn children(&self) -> Vec<Box<dyn Node>> {
+            //TODO implement
+            vec![]
+        }
+    }
 }

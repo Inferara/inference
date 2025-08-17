@@ -24,7 +24,7 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
 }
 
 #[allow(clippy::match_same_arms)]
-fn parse(mod_name: String, data: &[u8]) -> anyhow::Result<WasmParseData> {
+fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
     let mut wasm_parse_data = WasmParseData::new(mod_name);
 
