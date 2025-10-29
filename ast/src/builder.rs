@@ -562,8 +562,8 @@ impl<'a> Builder<'a, InitState> {
                 BlockType::Unique(node)
             }
             "block" => {
-                let statemetns = self.build_block_statements(id, node, code);
-                let node = Rc::new(Block::new(id, location, statemetns));
+                let statements = self.build_block_statements(id, node, code);
+                let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(
                     AstNode::Statement(Statement::Block(BlockType::Block(node.clone()))),
                     parent_id,
