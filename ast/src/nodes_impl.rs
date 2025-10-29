@@ -1,17 +1,13 @@
-//! Inference AST Nodes and enums implementations
-#![allow(dead_code)]
-
-use std::rc::Rc;
-use std::{fmt::Display, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    nodes::{ArgumentType, IgnoreArgument, SelfReference, StructExpression},
+    nodes::{
+        ArgumentType, IgnoreArgument, SelfReference, StructExpression, TypeMemberAccessExpression,
+    },
     type_info::{TypeInfo, TypeInfoKind},
 };
 
-use crate::symbols::SymbolType;
-
-use super::types::{
+use super::nodes::{
     Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement,
     BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement, ConstantDefinition,
     Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
@@ -22,6 +18,62 @@ use super::types::{
     TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
     UnitLiteral, UseDirective, UzumakiExpression, VariableDefinitionStatement,
 };
+
+#[macro_export]
+macro_rules! ast_node_impl {
+    (
+        $(#[$outer:meta])*
+        impl Node for $name:ident {
+            $(
+                $(#[$method_attr:meta])*
+                fn $method:ident ( $($args:tt)* ) -> $ret:ty $body:block
+            )*
+        }
+    ) => {
+        $(#[$outer])*
+        impl Node for $name {
+            fn id(&self) -> u32 {
+                self.id
+            }
+
+            fn location(&self) -> $crate::node::Location {
+                self.location.clone()
+            }
+
+            $(
+                $(#[$method_attr])*
+                fn $method ( $($args)* ) -> $ret $body
+            )*
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! ast_nodes_impl {
+    (
+        $(
+            $(#[$outer:meta])*
+            impl Node for $name:ident {
+                $(
+                    $(#[$method_attr:meta])*
+                    fn $method:ident ( $($args:tt)* ) -> $ret:ty $body:block
+                )*
+            }
+        )+
+    ) => {
+        $(
+            $crate::ast_node_impl! {
+                $(#[$outer])*
+                impl Node for $name {
+                    $(
+                        $(#[$method_attr])*
+                        fn $method ( $($args)* ) -> $ret $body
+                    )*
+                }
+            }
+        )+
+    };
+}
 
 impl SourceFile {
     #[must_use]
@@ -34,7 +86,6 @@ impl SourceFile {
         }
     }
 }
-
 impl SourceFile {
     #[must_use]
     pub fn function_definitions(&self) -> Vec<Rc<FunctionDefinition>> {
@@ -67,6 +118,7 @@ impl Expression {
         match self {
             Expression::ArrayIndexAccess(e) => e.type_info.borrow().clone(),
             Expression::MemberAccess(e) => e.type_info.borrow().clone(),
+            Expression::TypeMemberAccess(e) => e.type_info.borrow().clone(),
             Expression::FunctionCall(e) => e.type_info.borrow().clone(),
             Expression::Struct(e) => e.type_info.borrow().clone(),
             Expression::PrefixUnary(e) => e.type_info.borrow().clone(),
@@ -103,7 +155,6 @@ impl Literal {
 }
 
 impl UseDirective {
-    #[must_use]
     #[must_use]
     pub fn new(
         id: u32,
@@ -145,7 +196,6 @@ impl SpecDefinition {
 }
 
 impl StructDefinition {
-    #[must_use]
     #[must_use]
     pub fn new(
         id: u32,
@@ -246,7 +296,6 @@ impl ConstantDefinition {
 
 impl FunctionDefinition {
     #[must_use]
-    #[must_use]
     pub fn new(
         id: u32,
         name: Rc<Identifier>,
@@ -273,7 +322,6 @@ impl FunctionDefinition {
     }
 
     #[must_use]
-    #[must_use]
     pub fn has_parameters(&self) -> bool {
         if let Some(arguments) = &self.arguments {
             return !arguments.is_empty();
@@ -282,14 +330,12 @@ impl FunctionDefinition {
     }
 
     #[must_use]
-    #[must_use]
     pub fn is_void(&self) -> bool {
         self.returns.is_none()
     }
 }
 
 impl ExternalFunctionDefinition {
-    #[must_use]
     #[must_use]
     pub fn new(
         id: u32,
@@ -425,7 +471,6 @@ impl BreakStatement {
 
 impl IfStatement {
     #[must_use]
-    #[must_use]
     pub fn new(
         id: u32,
         location: Location,
@@ -444,7 +489,6 @@ impl IfStatement {
 }
 
 impl VariableDefinitionStatement {
-    #[must_use]
     #[must_use]
     pub fn new(
         id: u32,
@@ -525,8 +569,25 @@ impl MemberAccessExpression {
     }
 }
 
-impl FunctionCallExpression {
+impl TypeMemberAccessExpression {
     #[must_use]
+    pub fn new(
+        id: u32,
+        location: Location,
+        type_expression: Expression,
+        name: Rc<Identifier>,
+    ) -> Self {
+        TypeMemberAccessExpression {
+            id,
+            location,
+            expression: RefCell::new(type_expression),
+            name,
+            type_info: RefCell::new(None),
+        }
+    }
+}
+
+impl FunctionCallExpression {
     #[must_use]
     pub fn new(
         id: u32,
@@ -643,7 +704,6 @@ impl ParenthesizedExpression {
 }
 
 impl BinaryExpression {
-    #[must_use]
     #[must_use]
     pub fn new(
         id: u32,

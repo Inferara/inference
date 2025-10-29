@@ -2,6 +2,7 @@ use std::{marker::PhantomData, rc::Rc};
 
 use crate::nodes::{
     ArgumentType, Directive, IgnoreArgument, Misc, SelfReference, StructExpression,
+    TypeMemberAccessExpression,
 };
 use crate::type_infer::TypeChecker;
 use crate::{
@@ -80,7 +81,7 @@ impl<'a> Builder<'a, InitState> {
     ///
     /// This function will return an error if the `source_file` is malformed and a valid AST cannot be constructed.
     #[allow(clippy::single_match_else)]
-    pub fn build_ast(&mut self) -> anyhow::Result<Builder<CompleteState>> {
+    pub fn build_ast(&'_ mut self) -> anyhow::Result<Builder<'_, CompleteState>> {
         let mut res = Vec::new();
         for (root, code) in &self.source_code.clone() {
             let id = Self::get_node_id();
@@ -182,8 +183,9 @@ impl<'a> Builder<'a, InitState> {
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut definitions = Vec::new();
 
-        for i in 0..node.child_count() {
-            let child = node.child(i).unwrap();
+        // first child is name
+        for i in 1..node.named_child_count() {
+            let child = node.named_child(i).unwrap();
             let definition = self.build_definition(id, &child, code);
             definitions.push(definition);
         }
@@ -250,7 +252,7 @@ impl<'a> Builder<'a, InitState> {
                 Definition::Type(self.build_type_definition(parent_id, node, code))
             }
             _ => panic!(
-                "Unexpected definition type: {}, {}",
+                "Unexpected definition kind: {}, {}",
                 node.kind(),
                 Self::get_location(node, code)
             ),
@@ -265,8 +267,7 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<StructDefinition> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name =
-            self.build_identifier(id, &node.child_by_field_name("struct_name").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut fields = Vec::new();
         let mut cursor = node.walk();
         let founded_fields = node
@@ -600,7 +601,8 @@ impl<'a> Builder<'a, InitState> {
                 Statement::Block(self.build_block(parent_id, node, code))
             }
             "expression_statement" => {
-                Statement::Expression(self.build_expression(parent_id, node, code))
+                let expr_node = node.child(0).unwrap();
+                Statement::Expression(self.build_expression(parent_id, &expr_node, code))
             }
             "return_statement" => {
                 Statement::Return(self.build_return_statement(parent_id, node, code))
@@ -734,10 +736,13 @@ impl<'a> Builder<'a, InitState> {
             "array_index_access_expression" => Expression::ArrayIndexAccess(
                 self.build_array_index_access_expression(parent_id, node, code),
             ),
+            "generic_name" | "type" => Expression::Type(self.build_type(parent_id, node, code)),
             "member_access_expression" => {
                 Expression::MemberAccess(self.build_member_access_expression(parent_id, node, code))
             }
-            "type" => Expression::Type(self.build_type(parent_id, node, code)),
+            "type_member_access_expression" => Expression::TypeMemberAccess(
+                self.build_type_member_access_expression(parent_id, node, code),
+            ),
             "function_call_expression" => {
                 Expression::FunctionCall(self.build_function_call_expression(parent_id, node, code))
             }
@@ -759,7 +764,10 @@ impl<'a> Builder<'a, InitState> {
                 Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code))
             }
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
-            _ => panic!("Unexpected expression node kind: {node_kind}"),
+            _ => panic!(
+                "Unexpected expression node kind: {node_kind} at {}",
+                Self::get_location(node, code)
+            ),
         }
     }
 
@@ -815,6 +823,27 @@ impl<'a> Builder<'a, InitState> {
         let node = Rc::new(MemberAccessExpression::new(id, location, expression, name));
         self.arena.add_node(
             AstNode::Expression(Expression::MemberAccess(node.clone())),
+            parent_id,
+        );
+        node
+    }
+
+    fn build_type_member_access_expression(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Rc<TypeMemberAccessExpression> {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let expression =
+            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
+        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let node = Rc::new(TypeMemberAccessExpression::new(
+            id, location, expression, name,
+        ));
+        self.arena.add_node(
+            AstNode::Expression(Expression::TypeMemberAccess(node.clone())),
             parent_id,
         );
         node
@@ -1033,24 +1062,24 @@ impl<'a> Builder<'a, InitState> {
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator_kind = operator_node.kind();
         let operator = match operator_kind {
-            "pow_operator" => OperatorKind::Pow,
-            "and_operator" => OperatorKind::And,
-            "or_operator" => OperatorKind::Or,
-            "add_operator" => OperatorKind::Add,
-            "sub_operator" => OperatorKind::Sub,
-            "mul_operator" => OperatorKind::Mul,
-            "mod_operator" => OperatorKind::Mod,
-            "less_operator" => OperatorKind::Lt,
-            "less_equal_operator" => OperatorKind::Le,
-            "equals_operator" => OperatorKind::Eq,
-            "not_equals_operator" => OperatorKind::Ne,
-            "greater_equal_operator" => OperatorKind::Ge,
-            "greater_operator" => OperatorKind::Gt,
-            "shift_left_operator" => OperatorKind::Shl,
-            "shift_right_operator" => OperatorKind::Shr,
-            "bit_xor_operator" => OperatorKind::BitXor,
-            "bit_and_operator" => OperatorKind::BitAnd,
-            "bit_or_operator" => OperatorKind::BitOr,
+            "**" => OperatorKind::Pow,
+            "&&" => OperatorKind::And,
+            "||" => OperatorKind::Or,
+            "+" => OperatorKind::Add,
+            "-" => OperatorKind::Sub,
+            "*" => OperatorKind::Mul,
+            "%" => OperatorKind::Mod,
+            "<" => OperatorKind::Lt,
+            "<=" => OperatorKind::Le,
+            "==" => OperatorKind::Eq,
+            "!=" => OperatorKind::Ne,
+            ">=" => OperatorKind::Ge,
+            ">" => OperatorKind::Gt,
+            "<<" => OperatorKind::Shl,
+            ">>" => OperatorKind::Shr,
+            "^" => OperatorKind::BitXor,
+            "&" => OperatorKind::BitAnd,
+            "|" => OperatorKind::BitOr,
             _ => panic!("Unexpected operator node: {operator_kind}"),
         };
 
@@ -1212,7 +1241,11 @@ impl<'a> Builder<'a, InitState> {
     fn build_simple_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<SimpleType> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let name = node.utf8_text(code).unwrap().to_string();
+        let name = if node.kind() == "type_unit" {
+            String::from("unit")
+        } else {
+            node.utf8_text(code).unwrap().to_string()
+        };
         let node = Rc::new(SimpleType::new(id, location, name));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),

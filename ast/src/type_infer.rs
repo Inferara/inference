@@ -706,6 +706,21 @@ impl TypeChecker {
                     None
                 }
             }
+            Expression::TypeMemberAccess(type_member_access_expression) => {
+                if let Some(type_info) = type_member_access_expression.type_info.borrow().as_ref() {
+                    Some(type_info.clone())
+                } else if let Some(type_expression_type) = self
+                    .infer_expression(&mut type_member_access_expression.expression.borrow_mut())
+                {
+                    // Here we would normally check if the member exists in the type
+                    // For simplicity, we assume it does and return the type expression's type
+                    *type_member_access_expression.type_info.borrow_mut() =
+                        Some(type_expression_type.clone());
+                    Some(type_expression_type)
+                } else {
+                    None
+                }
+            }
             Expression::FunctionCall(function_call_expression) => {
                 let signature = if let Some(s) = self
                     .symbol_table

@@ -206,13 +206,6 @@ ast_enums! {
         Function(Rc<FunctionDefinition>),
         ExternalFunction(Rc<ExternalFunctionDefinition>),
         Type(Rc<TypeDefinition>),
-        Spec(Rc<SpecDefinition>),
-        Struct(Rc<StructDefinition>),
-        Enum(Rc<EnumDefinition>),
-        Constant(Rc<ConstantDefinition>),
-        Function(Rc<FunctionDefinition>),
-        ExternalFunction(Rc<ExternalFunctionDefinition>),
-        Type(Rc<TypeDefinition>),
     }
 
     pub enum BlockType {
@@ -239,12 +232,13 @@ ast_enums! {
 
     pub enum Expression {
         ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
+        Binary(Rc<BinaryExpression>),
         MemberAccess(Rc<MemberAccessExpression>),
+        TypeMemberAccess(Rc<TypeMemberAccessExpression>),
         FunctionCall(Rc<FunctionCallExpression>),
         Struct(Rc<StructExpression>),
         PrefixUnary(Rc<PrefixUnaryExpression>),
         Parenthesized(Rc<ParenthesizedExpression>),
-        Binary(Rc<BinaryExpression>),
         @inner_enum Literal(Literal),
         Identifier(Rc<Identifier>),
         @inner_enum Type(Type),
@@ -324,7 +318,6 @@ ast_nodes! {
 
     pub struct SpecDefinition {
         pub name: Rc<Identifier>,
-        pub name: Rc<Identifier>,
         pub definitions: Vec<Definition>,
     }
 
@@ -332,13 +325,9 @@ ast_nodes! {
         pub name: Rc<Identifier>,
         pub fields: Vec<Rc<StructField>>,
         pub methods: Vec<Rc<FunctionDefinition>>,
-        pub name: Rc<Identifier>,
-        pub fields: Vec<Rc<StructField>>,
-        pub methods: Vec<Rc<FunctionDefinition>>,
     }
 
     pub struct StructField {
-        pub name: Rc<Identifier>,
         pub name: Rc<Identifier>,
         pub type_: Type,
     }
@@ -346,13 +335,11 @@ ast_nodes! {
     pub struct EnumDefinition {
         pub name: Rc<Identifier>,
         pub variants: Vec<Rc<Identifier>>,
-        pub name: Rc<Identifier>,
-        pub variants: Vec<Rc<Identifier>>,
     }
 
     pub struct Identifier {
         pub name: String,
-        pub type_info: RefCell<Option<TypeInfo>>
+        pub type_info: RefCell<Option<TypeInfo>> //TODO revisit
     }
 
     pub struct ConstantDefinition {
@@ -443,6 +430,12 @@ ast_nodes! {
     }
 
     pub struct MemberAccessExpression {
+        pub expression: RefCell<Expression>,
+        pub name: Rc<Identifier>,
+        pub type_info: RefCell<Option<TypeInfo>>
+    }
+
+    pub struct TypeMemberAccessExpression {
         pub expression: RefCell<Expression>,
         pub name: Rc<Identifier>,
         pub type_info: RefCell<Option<TypeInfo>>
