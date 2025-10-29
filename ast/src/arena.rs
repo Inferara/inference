@@ -1,0 +1,115 @@
+use std::{collections::HashMap, rc::Rc};
+
+use crate::nodes::{AstNode, Definition, TypeDefinition};
+
+#[derive(Default, Clone)]
+pub struct Arena {
+    pub(crate) nodes: HashMap<u32, AstNode>,
+    pub(crate) node_routes: Vec<NodeRoute>,
+}
+
+impl Arena {
+    pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
+        // println!("Adding node with ID: {node:?}");
+        assert!(node.id() != 0, "Node ID must be non-zero");
+        assert!(
+            !self.nodes.contains_key(&node.id()),
+            "Node with ID {} already exists in the arena",
+            node.id()
+        );
+        let id = node.id();
+        self.nodes.insert(node.id(), node);
+        self.add_storage_node(
+            NodeRoute {
+                id,
+                parent: Some(parent_id),
+                children: vec![],
+            },
+            parent_id,
+        );
+    }
+
+    fn add_storage_node(&mut self, node: NodeRoute, parent: u32) {
+        if let Some(parent_node) = self.node_routes.iter_mut().find(|n| n.id == parent) {
+            parent_node.children.push(node.id);
+        }
+        self.node_routes.push(node);
+    }
+
+    pub fn find_node(&self, id: u32) -> Option<AstNode> {
+        self.nodes.get(&id).cloned()
+    }
+
+    pub fn find_parent_node(&self, id: u32) -> Option<u32> {
+        self.node_routes
+            .iter()
+            .find(|n| n.id == id)
+            .cloned()
+            .and_then(|node| node.parent)
+    }
+
+    pub fn get_children_cmp<F>(&self, id: u32, comparator: F) -> Vec<AstNode>
+    where
+        F: Fn(&AstNode) -> bool,
+    {
+        let mut result = Vec::new();
+        let mut stack: Vec<AstNode> = Vec::new();
+
+        if let Some(root_node) = self.find_node(id) {
+            stack.push(root_node.clone());
+        }
+
+        while let Some(current_node) = stack.pop() {
+            if comparator(&current_node) {
+                result.push(current_node.clone());
+            }
+            stack.extend(
+                self.list_nodes_children(current_node.id())
+                    .into_iter()
+                    .filter(|child| comparator(child)),
+            );
+        }
+
+        result
+    }
+
+    pub fn list_type_definitions(&self) -> Vec<Rc<TypeDefinition>> {
+        self.list_nodes_cmp(|node| {
+            if let AstNode::Definition(Definition::Type(type_def)) = node {
+                Some(type_def.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+    }
+
+    fn list_nodes_children(&self, id: u32) -> Vec<AstNode> {
+        self.node_routes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|node| {
+                node.children
+                    .iter()
+                    .filter_map(|child_id| self.nodes.get(child_id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
+    where
+        F: Fn(&AstNode) -> Option<T> + Clone + 'a,
+        T: Clone + 'static,
+    {
+        let cmp = cmp.clone();
+        self.nodes.iter().filter_map(move |(_, node)| cmp(node))
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct NodeRoute {
+    pub id: u32,
+    parent: Option<u32>,
+    children: Vec<u32>,
+}

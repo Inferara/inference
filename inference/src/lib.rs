@@ -1,6 +1,8 @@
 #![warn(clippy::pedantic)]
 //! Inference is a programming language that is designed to be easy to learn and use.
 
+use inference_ast::builder::Builder;
+
 /// Compiles the given source code to WebAssembly Text format (WAT).
 ///
 /// # Panics
@@ -25,9 +27,13 @@ pub fn compile_to_wat(source_code: &str) -> anyhow::Result<String> {
     let tree = parser.parse(source_code, None).unwrap();
     let code = source_code.as_bytes();
     let root_node = tree.root_node();
-    let ast = inference_ast::builder::build_ast(root_node, code)?;
+    let mut builder = Builder::new();
+    builder.add_source_code(root_node, code);
+    let builder = builder.build_ast()?;
     let mut wat_generator = inference_wat_codegen::wat_emitter::WatEmitter::default();
-    wat_generator.add_source_file(ast);
+    for ast in builder.t_ast().source_files {
+        wat_generator.add_source_file(ast);
+    }
     Ok(wat_generator.emit())
 }
 

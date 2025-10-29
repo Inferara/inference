@@ -320,7 +320,7 @@ fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
     } else if *ref_type == RefType::EXTERNREF {
         Ok(String::from("T_externref"))
     } else {
-        Err(anyhow::anyhow!("Unsupported reference type {:?}", ref_type))
+        Err(anyhow::anyhow!("Unsupported reference type {ref_type:?}"))
     }
 }
 
@@ -1212,8 +1212,7 @@ fn translate_basic_operator(
         | Operator::I64AtomicRmw16CmpxchgU { memarg: _ }
         | Operator::I64AtomicRmw32CmpxchgU { memarg: _ } => {
             return Err(anyhow::anyhow!(
-                "Atomic instruction {:?} are not supported",
-                operator
+                "Atomic instruction {operator:?} are not supported",
             ))
         }
         Operator::V128Load { memarg } => {
@@ -1730,8 +1729,7 @@ fn translate_basic_operator(
             array_type_index: _,
         } => {
             return Err(anyhow::anyhow!(
-                "Atomic instruction {:?} are not supported",
-                operator
+                "Atomic instruction {operator:?} are not supported",
             ))
         }
         Operator::RefI31Shared => todo!(),
@@ -1750,7 +1748,7 @@ fn translate_basic_operator(
         Operator::I64Sub128 { .. } => todo!(),
         Operator::I64MulWideS => todo!(),
         Operator::I64MulWideU => todo!(),
-        _ => return Err(anyhow::anyhow!("Operator {:?} not recognized", operator)),
+        _ => return Err(anyhow::anyhow!("Operator {operator:?} not recognized",)),
     };
     Ok(operator.to_string())
 }

@@ -1,9 +1,10 @@
-#![warn(clippy::pedantic)]
-
-use inference_ast::types::{
-    AssertStatement, BinaryExpression, BlockType, Definition, Expression, FunctionCallExpression,
-    FunctionDefinition, Literal, MemberAccessExpression, OperatorKind, SourceFile, SpecDefinition,
-    Statement, Type, VariableDefinitionStatement,
+use inference_ast::{
+    nodes::{
+        ArgumentType, AssertStatement, BinaryExpression, BlockType, Definition, Expression,
+        FunctionCallExpression, FunctionDefinition, Literal, MemberAccessExpression, OperatorKind,
+        SourceFile, SpecDefinition, Statement, Type, VariableDefinitionStatement,
+    },
+    type_info::TypeInfo,
 };
 
 fn r_brace() -> String {
@@ -123,13 +124,20 @@ impl WatEmitter {
 
     fn emit_function_parameters(function: &FunctionDefinition) -> Vec<String> {
         let mut result = Vec::new();
-        if let Some(parameters) = &function.parameters {
-            for parameter in parameters {
-                result.push(format!(
-                    "(param ${} {})",
-                    parameter.name(),
-                    WatEmitter::emit_for_type(&parameter.type_)
-                ));
+        if let Some(arguments) = &function.arguments {
+            for argument in arguments {
+                match argument {
+                    ArgumentType::SelfReference(_) => todo!(),
+                    ArgumentType::IgnoreArgument(_) => todo!(),
+                    ArgumentType::Argument(arg) => {
+                        result.push(format!(
+                            "(param ${} {})",
+                            arg.name(),
+                            WatEmitter::emit_for_type(&arg.ty)
+                        ));
+                    }
+                    ArgumentType::Type(_) => todo!(),
+                }
             }
         }
         result
@@ -173,10 +181,10 @@ impl WatEmitter {
                     result.extend(self.emit_for_assert_statement(assert));
                 }
                 Statement::Return(return_statement) => {
-                    result.extend(self.emit_for_expression(&return_statement.expression));
+                    result.extend(self.emit_for_expression(&return_statement.expression.borrow()));
                 }
                 Statement::Expression(expression) => {
-                    result.extend(self.emit_for_expression(&expression.expression));
+                    result.extend(self.emit_for_expression(expression));
                 }
                 Statement::VariableDefinition(variable_definition) => {
                     result.extend(self.emit_for_variable_definition(variable_definition));
@@ -192,16 +200,16 @@ impl WatEmitter {
 
     fn emit_for_binary_expression(&self, bin_expr: &BinaryExpression) -> Vec<String> {
         let mut result = Vec::new();
-        if let Expression::Identifier(identifier) = &bin_expr.left {
+        if let Expression::Identifier(identifier) = &*bin_expr.left.borrow() {
             result.push(format!("local.get ${}", identifier.name));
         } else {
-            result.extend(self.emit_for_expression(&bin_expr.left));
+            result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
         }
 
-        if let Expression::Identifier(identifier) = &bin_expr.right {
+        if let Expression::Identifier(identifier) = &*bin_expr.right.borrow() {
             result.push(format!("local.get ${}", identifier.name));
         } else {
-            result.extend(self.emit_for_expression(&bin_expr.right));
+            result.extend(self.emit_for_expression(&bin_expr.right.borrow()));
         }
         result.push(WatEmitter::emit_for_bin_expr_operator(&bin_expr.operator));
         result
@@ -212,12 +220,12 @@ impl WatEmitter {
         if let Some(arguments) = &function_call.arguments {
             //TODO: check order
             for (_, arg_expr) in arguments {
-                match arg_expr {
+                match &*arg_expr.borrow() {
                     Expression::Identifier(identifier) => {
                         result.push(format!("local.get ${}", identifier.name));
                     }
                     _ => {
-                        result.extend(self.emit_for_expression(arg_expr));
+                        result.extend(self.emit_for_expression(&arg_expr.borrow()));
                     }
                 }
             }
@@ -229,7 +237,7 @@ impl WatEmitter {
 
     fn emit_for_member_access(&self, member_access: &MemberAccessExpression) -> Vec<String> {
         let mut result = Vec::new();
-        result.extend(self.emit_for_expression(&member_access.expression));
+        result.extend(self.emit_for_expression(&member_access.expression.borrow()));
         result.push(format!("get ${}", member_access.name.name));
         result
     }
@@ -252,7 +260,12 @@ impl WatEmitter {
             Expression::MemberAccess(member_access) => {
                 result.extend(self.emit_for_member_access(member_access));
             }
-            Expression::Uzumaki(_) => result.push(String::from("i32.uzumaki")),
+            Expression::Uzumaki(uzumaki) => {
+                result.push(format!(
+                    "{}.uzumaki",
+                    uzumaki.type_info.borrow().as_ref().unwrap().kind
+                )); //FIXME works only for simple types
+            }
             _ => result.push(format!("{expr:?} expression type is not supported yet")),
         }
         result
@@ -275,15 +288,15 @@ impl WatEmitter {
     ) -> Vec<String> {
         let mut result = Vec::new();
         let variable_name = variable_definition.name();
-        let variable_type = WatEmitter::emit_for_type(&variable_definition.type_);
+        let variable_type = WatEmitter::emit_for_type(&variable_definition.ty);
         result.push(format!("(local ${variable_name} {variable_type})"));
         if let Some(value) = &variable_definition.value {
-            match value {
+            match &*value.borrow() {
                 Expression::Identifier(identifier) => {
                     result.push(format!("local.get ${}", identifier.name));
                 }
                 _ => {
-                    result.extend(self.emit_for_expression(value));
+                    result.extend(self.emit_for_expression(&value.borrow()));
                 }
             }
             result.push(format!("local.set ${variable_name}"));
@@ -293,9 +306,20 @@ impl WatEmitter {
 
     fn emit_for_type(type_: &Type) -> String {
         match type_ {
-            Type::Simple(simple) => simple.name.clone(),
-            Type::Identifier(identifier) => identifier.name.clone(),
+            Type::Simple(simple) => Self::map_integer_types(&simple.name.clone()),
+            Type::Custom(identifier) => identifier.name.clone(),
             _ => format!("{type_:?} type is not supported yet"),
+        }
+    }
+
+    fn emit_for_type_info(type_info: &TypeInfo) -> String {
+        type_info.kind.to_string()
+    }
+
+    fn map_integer_types(t: &str) -> String {
+        match t {
+            "i64" | "u64" => String::from("i64"),
+            _ => String::from("i32"),
         }
     }
 
@@ -304,7 +328,8 @@ impl WatEmitter {
         match literal {
             Literal::Number(number) => {
                 let literal_value = &number.value;
-                let type_ = WatEmitter::emit_for_type(&number.type_);
+                let type_ =
+                    WatEmitter::emit_for_type_info(number.type_info.borrow().as_ref().unwrap());
                 format!("{type_}.const {literal_value}")
             }
             _ => format!("{literal:?} literal is not supported yet"),
@@ -320,14 +345,14 @@ impl WatEmitter {
     // }
 
     fn emit_for_assert_statement(&self, assert: &AssertStatement) -> Vec<String> {
-        match &assert.expression {
+        match &*assert.expression.borrow() {
             Expression::Binary(bin_expr) => {
                 let mut result = Vec::new();
 
-                if let Expression::Identifier(identifier) = &bin_expr.left {
+                if let Expression::Identifier(identifier) = &*bin_expr.left.borrow() {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
-                    result.extend(self.emit_for_expression(&bin_expr.left));
+                    result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
                     let variable_name = format!("_assert_{}_left", assert.id);
                     let variable_type = "i32"; //TODO we cannot work with other types yet
                     result.push(format!("(local ${variable_name} {variable_type})"));
@@ -335,10 +360,10 @@ impl WatEmitter {
                     result.push(format!("local.get ${variable_name}"));
                 }
 
-                if let Expression::Identifier(identifier) = &bin_expr.right {
+                if let Expression::Identifier(identifier) = &*bin_expr.right.borrow() {
                     result.push(format!("local.get ${}", identifier.name));
                 } else {
-                    result.extend(self.emit_for_expression(&bin_expr.left));
+                    result.extend(self.emit_for_expression(&bin_expr.left.borrow()));
                     let variable_name = format!("_assert_{}_right", assert.id);
                     let variable_type = "i32"; //TODO we cannot work with other types yet
                     result.push(format!("(local ${variable_name} {variable_type})"));
