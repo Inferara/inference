@@ -62,7 +62,7 @@ impl<'a> Builder<'a, InitState> {
     ///
     /// # Panics
     ///
-    /// This function will panioc if the `root` node is not of type `source_file`.
+    /// This function will panic if the `root` node is not of type `source_file`.
     pub fn add_source_code(&mut self, root: Node<'a>, code: &'a [u8]) {
         assert!(
             root.kind() == "source_file",
