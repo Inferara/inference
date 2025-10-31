@@ -33,6 +33,8 @@ impl BuilderInit for InitState {}
 pub struct CompleteState;
 impl BuilderComplete for CompleteState {}
 
+pub type CompletedBuilder<'a> = Builder<'a, CompleteState>;
+
 #[allow(dead_code)]
 pub struct Builder<'a, S> {
     arena: Arena,

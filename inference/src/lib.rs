@@ -1,7 +1,49 @@
 #![warn(clippy::pedantic)]
 //! Inference is a programming language that is designed to be easy to learn and use.
 
-use inference_ast::builder::Builder;
+use inference_ast::{builder::Builder, t_ast::TypedAst};
+
+/// Parses the given source code and returns a Typed AST.
+///
+/// # Errors
+///
+/// This function will return an error if the source code cannot be parsed or if there is an error during the AST building process.
+///
+/// # Panics
+///
+/// This function will panic if there is an error loading the Inference grammar.
+pub fn parse(source_code: &str) -> anyhow::Result<TypedAst> {
+    let inference_language = tree_sitter_inference::language();
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&inference_language)
+        .expect("Error loading Inference grammar");
+    let tree = parser.parse(source_code, None).unwrap();
+    let code = source_code.as_bytes();
+    let root_node = tree.root_node();
+    let mut builder = Builder::new();
+    builder.add_source_code(root_node, code);
+    let builder = builder.build_ast()?;
+    Ok(builder.t_ast())
+}
+
+/// Analyzes the given Typed AST for type correctness.
+///
+/// # Errors
+///
+/// This function will return an error if the type analysis fails.
+pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
+    todo!("Type analysis not yet implemented");
+}
+
+/// Generates WebAssembly binary format (WASM) from the given Typed AST.
+///
+/// # Errors
+///
+/// This function will return an error if the code generation fails.
+pub fn codegen(_: TypedAst) -> anyhow::Result<Vec<u8>> {
+    todo!("Code generation not yet implemented");
+}
 
 /// Compiles the given source code to WebAssembly Text format (WAT).
 ///

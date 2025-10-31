@@ -1,36 +1,35 @@
 #![warn(clippy::pedantic)]
 
-//! # Inference Compiler
+//! # Inference Compiler CLI
 //!
-//! This is the entry point for the Inference compiler, which provides functionality to parse and
-//! translate `.inf` source files into Coq code (`.v` files).
+//! Command line interface for the Inference toolchain.
 //!
-//! ## Modules
+//! 1. Parse  (`--parse`)   – build the typed AST.
+//! 2. Analyze (`--analyze`) – perform type / semantic inference and validation.
+//! 3. Codegen (`--codegen`) – emit WebAssembly, and optionally translate to V (`-o`).
 //!
-//! - `ast`: Contains types and builders for constructing the AST from parsed source `.inf` files.
-//! - `cli`: Contains the command-line interface (CLI) parsing logic using the `clap` crate.
-//! - `wasm_to_coq_translator`: Handles the translation of WebAssembly (`.wasm`) files to Coq code (`.v` files).
+//! At least one of the phase flags must be supplied; the phases that are requested will be
+//! executed in the canonical order even if specified out of order on the command line.
 //!
-//! ## Main Functionality
+//! Output artifacts are written to an `out/` directory relative to the current working directory.
+//! When `-o` is passed together with `--codegen` the produced WASM module is further translated
+//! into V source and saved as `out/out.v`.
 //!
-//! The main function parses command-line arguments to determine the operation mode:
+//! ## Exit codes
+//! * 0 – success.
+//! * 1 – usage / IO / phase failure.
 //!
-//! - If the `--wasm` flag is provided, the program will translate the specified `.wasm` file into `.v` code.
-//! - Otherwise, the program will parse the specified `.inf` source file and generate an AST.
+//! ## Example
+//! ```bash
+//! infc examples/hello.inf --codegen -o
+//! ```
 //!
-//! ### Functions
-//!
-//! - `main`: The entry point of the program. Handles argument parsing and dispatches to the appropriate function
-//!   based on the provided arguments. It handles parses specified in the first CLI argument
-//!   and saves the request to the `out/` directory.
-//!
-//! ### Tests
-//!
-//! The `test` suite is located in the `main_tests` module and contains tests for the main functionality
+//! ## Tests
+//! Integration tests exercise flag validation and the happy path compilation pipeline.
 
 mod parser;
 use clap::Parser;
-use inference::{compile_to_wat, wasm_to_v, wat_to_wasm};
+use inference::{analyze, codegen, parse, wasm_to_v};
 use parser::Cli;
 use std::{
     fs,
@@ -38,11 +37,15 @@ use std::{
     process::{self},
 };
 
-/// Inference compiler entry point
+/// Entry point for the CLI executable.
 ///
-/// This function parses the command-line arguments to determine whether to parse an `.inf` source file
-/// or translate a `.wasm` file into Coq code. Depending on the `--wasm` flag, it either invokes the
-/// `wasm_to_coq` function or the `parse_file` function.
+/// Responsibilities:
+/// * Parse flags.
+/// * Validate that the input path exists and at least one phase is selected.
+/// * Run requested phases (parse -> analyze -> codegen).
+/// * Optionally translate emitted WASM into V source when `-o` is set.
+///
+/// On any failure a diagnostic is printed to stderr and the process exits with code `1`.
 fn main() {
     let args = Cli::parse();
     if !args.path.exists() {
@@ -50,73 +53,76 @@ fn main() {
         process::exit(1);
     }
 
-    let output_path = match args.output {
-        Some(path) => {
-            if !path.exists() {
-                fs::create_dir_all(&path).expect("Error creating output directory");
-            }
-            path
-        }
-        None => PathBuf::from("out"),
-    };
-    let generate = match args.generate {
-        Some(g) => match g.as_str().to_lowercase().as_str() {
-            "wat" => "wat",
-            "wasm" => "wasm",
-            "f" | "full" => "f",
-            _ => "v",
-        },
-        None => "v",
-    };
-    let source = match args.source {
-        Some(s) => match s.as_str().to_lowercase().as_str() {
-            "wat" => "wat",
-            //"wasm" => "wasm",
-            _ => "inf",
-        },
-        None => "inf",
-    };
+    let output_path = PathBuf::from("out");
+    let need_parse = args.parse;
+    let need_analyze = args.analyze;
+    let need_codegen = args.codegen;
+
+    if !(need_parse || need_analyze || need_codegen) {
+        eprintln!("Error: at least one of --parse, --analyze, or --codegen must be specified");
+        process::exit(1);
+    }
+
     let source_code = fs::read_to_string(&args.path).expect("Error reading source file");
-    let wat = if source == "inf" {
-        compile_to_wat(source_code.as_str()).unwrap()
-    } else {
-        source_code
+    let mut t_ast = None;
+    if need_codegen || need_analyze || need_parse {
+        match parse(source_code.as_str()) {
+            Ok(ast) => {
+                println!("Parsed: {}", args.path.display());
+                t_ast = Some(ast);
+            }
+            Err(e) => {
+                eprintln!("Parse error: {e}");
+                process::exit(1);
+            }
+        }
+    }
+
+    let Some(t_ast) = t_ast else {
+        unreachable!("Phase validation guarantees parse ran when required");
     };
-    if generate == "wat" {
-        let wat_file_path = output_path.join("out.wat");
-        fs::write(wat_file_path.clone(), wat).expect("Error writing WAT file");
-        println!("WAT generated at: {}", wat_file_path.to_str().unwrap());
-        process::exit(0);
+
+    if need_codegen || need_analyze {
+        if let Err(e) = analyze(&t_ast) {
+            eprintln!("Analysis failed: {e}");
+            process::exit(1);
+        }
+        println!("Analyzed: {}", args.path.display());
     }
-    let wasm = wat_to_wasm(wat.as_str()).unwrap();
-    if generate == "wasm" {
-        let wasm_file_path = output_path.join("out.wasm");
-        fs::write(wasm_file_path.clone(), wasm).expect("Error writing WASM file");
-        println!("WASM generated at: {}", wasm_file_path.to_str().unwrap());
-        process::exit(0);
+
+    if need_codegen {
+        let wasm = match codegen(t_ast) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Codegen failed: {e}");
+                process::exit(1);
+            }
+        };
+        println!("WASM generated");
+        if args.generate_v_output {
+            let mod_name = args
+                .path
+                .file_stem()
+                .unwrap_or_else(|| std::ffi::OsStr::new("module"))
+                .to_str()
+                .unwrap();
+            match wasm_to_v(mod_name, &wasm) {
+                Ok(v_output) => {
+                    let v_file_path = output_path.join("out.v");
+                    if let Err(e) = fs::write(&v_file_path, v_output) {
+                        eprintln!("Failed to write V file: {e}");
+                        process::exit(1);
+                    }
+                    println!("V generated at: {}", v_file_path.to_string_lossy());
+                }
+                Err(e) => {
+                    eprintln!("WASM->V translation failed: {e}");
+                    process::exit(1);
+                }
+            }
+        }
     }
-    let mod_name = args.path.file_stem().unwrap().to_str().unwrap().to_string();
-    let v = wasm_to_v(mod_name.as_str(), &wasm).unwrap();
-    if generate == "v" {
-        let v_file_path = output_path.join("out.v");
-        fs::write(v_file_path.clone(), v).expect("Error writing V file");
-        println!("V generated at: {}", v_file_path.to_str().unwrap());
-        process::exit(0);
-    }
-    if generate == "f" {
-        let v_file_path = output_path.join("out.v");
-        fs::write(v_file_path.clone(), v).expect("Error writing V file");
-        println!("V generated at: {}", v_file_path.to_str().unwrap());
-        let wat_file_path = output_path.join("out.wat");
-        fs::write(wat_file_path.clone(), wat).expect("Error writing WAT file");
-        println!("WAT generated at: {}", wat_file_path.to_str().unwrap());
-        let wasm_file_path = output_path.join("out.wasm");
-        fs::write(wasm_file_path.clone(), wasm).expect("Error writing WASM file");
-        println!("WASM generated at: {}", wasm_file_path.to_str().unwrap());
-        process::exit(0);
-    }
-    eprintln!("Error: invalid generate option");
-    process::exit(1);
+    process::exit(0);
 }
 
 #[cfg(test)]
