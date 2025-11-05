@@ -1,5 +1,6 @@
 //! This module contains various infc end to end tests
 mod ast;
+mod codegen;
 mod utils;
 
 #[cfg(test)]
