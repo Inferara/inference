@@ -33,7 +33,8 @@ pub fn parse(source_code: &str) -> anyhow::Result<TypedAst> {
 ///
 /// This function will return an error if the type analysis fails.
 pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
-    todo!("Type analysis not yet implemented");
+    // todo!("Type analysis not yet implemented");
+    Ok(())
 }
 
 /// Generates WebAssembly binary format (WASM) from the given Typed AST.

@@ -99,16 +99,32 @@ fn main() {
             }
         };
         println!("WASM generated");
+        let source_fname = args
+            .path
+            .file_stem()
+            .unwrap_or_else(|| std::ffi::OsStr::new("module"))
+            .to_str()
+            .unwrap();
+        if args.generate_wasm_output {
+            let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
+            if let Err(e) = fs::create_dir_all(&output_path) {
+                eprintln!("Failed to create output directory: {e}");
+                process::exit(1);
+            }
+            if let Err(e) = fs::write(&wasm_file_path, &wasm) {
+                eprintln!("Failed to write WASM file: {e}");
+                process::exit(1);
+            }
+            println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
+        }
         if args.generate_v_output {
-            let mod_name = args
-                .path
-                .file_stem()
-                .unwrap_or_else(|| std::ffi::OsStr::new("module"))
-                .to_str()
-                .unwrap();
-            match wasm_to_v(mod_name, &wasm) {
+            match wasm_to_v(source_fname, &wasm) {
                 Ok(v_output) => {
-                    let v_file_path = output_path.join("out.v");
+                    let v_file_path = output_path.join(format!("{source_fname}.v"));
+                    if let Err(e) = fs::create_dir_all(&output_path) {
+                        eprintln!("Failed to create output directory: {e}");
+                        process::exit(1);
+                    }
                     if let Err(e) = fs::write(&v_file_path, v_output) {
                         eprintln!("Failed to write V file: {e}");
                         process::exit(1);

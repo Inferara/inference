@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement};
+use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement, Type};
 use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, Function, FunctionSection, Module, TypeSection, ValType,
 };
@@ -71,6 +71,32 @@ impl WasmModuleBuilder {
         //         }
         //     }
         // }
+        let mut results: Vec<ValType> = vec![];
+        if let Some(ret_type) = &function_definition.returns {
+            match ret_type {
+                Type::Array(type_array) => todo!(),
+                Type::Simple(simple_type) => {
+                    if simple_type.type_info.borrow().is_some() {
+                    } else {
+                        match simple_type.name.to_lowercase().as_str() {
+                            "i32" => results.push(ValType::I32),
+                            "i64" => results.push(ValType::I64),
+                            "f32" => results.push(ValType::F32),
+                            "f64" => results.push(ValType::F64),
+                            _ => {}
+                        }
+                    }
+                }
+                Type::Generic(generic_type) => todo!(),
+                Type::Function(function_type) => todo!(),
+                Type::QualifiedName(qualified_name) => todo!(),
+                Type::Qualified(type_qualified_name) => todo!(),
+                Type::Custom(identifier) => todo!(),
+            }
+        }
+        self.types
+            .ty()
+            .function(params.iter().map(|p| p.1), results);
         let mut function = Function::new(params);
         for stmt in function_definition.body.statements() {
             match stmt {
@@ -102,7 +128,7 @@ impl WasmModuleBuilder {
                         Expression::Type(_) => todo!(),
                         Expression::Uzumaki(uzumaki_expression) => todo!(),
                     }
-                    function.instruction(&wasm_encoder::Instruction::Return);
+                    // function.instruction(&wasm_encoder::Instruction::Return);
                 }
                 Statement::Loop(loop_statement) => todo!(),
                 Statement::Break(break_statement) => todo!(),
@@ -113,6 +139,7 @@ impl WasmModuleBuilder {
                 Statement::ConstantDefinition(constant_definition) => todo!(),
             }
         }
+        function.instruction(&wasm_encoder::Instruction::End);
         self.codes.function(&function);
         function_type_index
     }
