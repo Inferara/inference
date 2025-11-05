@@ -88,6 +88,16 @@ impl SourceFile {
 }
 impl SourceFile {
     #[must_use]
+    pub fn specs(&self) -> Vec<Rc<SpecDefinition>> {
+        self.definitions
+            .iter()
+            .filter_map(|def| match def {
+                Definition::Spec(spec) => Some(spec.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    #[must_use]
     pub fn function_definitions(&self) -> Vec<Rc<FunctionDefinition>> {
         self.definitions
             .iter()

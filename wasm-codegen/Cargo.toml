@@ -1,0 +1,15 @@
+[package]
+name = "inference-wasm-codegen"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+wasm-encoder="0.240.0"
+inference-ast.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+wasmtime="38.0.3"

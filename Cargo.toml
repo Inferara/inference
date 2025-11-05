@@ -7,6 +7,7 @@ members = [
     "cli",
     "wasm-v-translator",
     "wat-codegen",
+    "wasm-codegen",
     "inference",
     "tests",
     "playground-server",
@@ -26,6 +27,7 @@ inference-ast = { path = "./ast", version = "0.0.1" }
 inference-cli = { path = "./cli", version = "0.0.1" }
 inference-wasm-v-translator = { path = "./wasm-v-translator", version = "0.0.1" }
 inference-wat-codegen = { path = "./wat-codegen", version = "0.0.1" }
+inference-wasm-codegen = { path = "./wasm-codegen", version = "0.0.1" }
 inference-tests = { path = "./tests", version = "0.0.1" }
 inference-playground-server = { path = "./playground-server", version = "0.0.1" }
 inf-wast = "0.0.8"

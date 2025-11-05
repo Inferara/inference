@@ -91,7 +91,7 @@ fn main() {
     }
 
     if need_codegen {
-        let wasm = match codegen(t_ast) {
+        let wasm = match codegen(&t_ast) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("Codegen failed: {e}");
