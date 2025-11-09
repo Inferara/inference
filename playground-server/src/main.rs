@@ -1,10 +1,6 @@
 use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
-use inference::{compile_to_wat, wasm_to_v, wat_to_wasm};
 use serde::{Deserialize, Serialize};
-
-use wasm_fmt::format as wasm_format;
-use wat_fmt::format as wat_format;
 
 #[derive(Deserialize)]
 struct CompileRequest {
@@ -20,52 +16,52 @@ struct Response {
     errors: Vec<String>,
 }
 
-fn parse_inf_file(input: &str) -> Response {
-    let mut wasm = vec![];
-    let mut v = String::new();
-    let mut errors = vec![];
+fn parse_inf_file(_: &str) -> Response {
+    // let mut wasm = vec![];
+    let v = String::new();
+    let errors = vec![];
 
-    let wat = match compile_to_wat(input) {
-        Ok(w) => w,
-        Err(e) => {
-            errors.push(e.to_string());
-            return Response {
-                wat: String::new(),
-                wasm: vec![],
-                wasm_str: String::new(),
-                v: String::new(),
-                errors,
-            };
-        }
-    };
+    // let wat = match compile_to_wat(input) {
+    //     Ok(w) => w,
+    //     Err(e) => {
+    //         errors.push(e.to_string());
+    //         return Response {
+    //             wat: String::new(),
+    //             wasm: vec![],
+    //             wasm_str: String::new(),
+    //             v: String::new(),
+    //             errors,
+    //         };
+    //     }
+    // };
 
-    if !wat.is_empty() {
-        wat_to_wasm(&wat)
-            .map(|w| wasm = w)
-            .unwrap_or_else(|e| errors.push(e.to_string()));
+    // if !wat.is_empty() {
+    //     wat_to_wasm(&wat)
+    //         .map(|w| wasm = w)
+    //         .unwrap_or_else(|e| errors.push(e.to_string()));
 
-        wasm_to_v("playground", &wasm)
-            .map(|v_str| v = v_str)
-            .unwrap_or_else(|e| errors.push(e.to_string()));
+    //     wasm_to_v("playground", &wasm)
+    //         .map(|v_str| v = v_str)
+    //         .unwrap_or_else(|e| errors.push(e.to_string()));
 
-        let wat = wat_format(&wat);
-        let wasm_str = wasm_format(&wasm);
-        Response {
-            wat,
-            wasm,
-            wasm_str,
-            v,
-            errors,
-        }
-    } else {
-        Response {
-            wat: String::new(),
-            wasm: vec![],
-            wasm_str: String::new(),
-            v,
-            errors,
-        }
+    //     let wat = wat_format(&wat);
+    //     let wasm_str = wasm_format(&wasm);
+    //     Response {
+    //         wat,
+    //         wasm,
+    //         wasm_str,
+    //         v,
+    //         errors,
+    //     }
+    // } else {
+    Response {
+        wat: String::new(),
+        wasm: vec![],
+        wasm_str: String::new(),
+        v,
+        errors,
     }
+    // }
 }
 
 #[post("/compile")]

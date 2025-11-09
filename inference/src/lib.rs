@@ -33,7 +33,8 @@ pub fn parse(source_code: &str) -> anyhow::Result<TypedAst> {
 ///
 /// This function will return an error if the type analysis fails.
 pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
-    todo!("Type analysis not yet implemented");
+    // todo!("Type analysis not yet implemented");
+    Ok(())
 }
 
 /// Generates WebAssembly binary format (WASM) from the given Typed AST.
@@ -41,42 +42,8 @@ pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// This function will return an error if the code generation fails.
-pub fn codegen(_: TypedAst) -> anyhow::Result<Vec<u8>> {
-    todo!("Code generation not yet implemented");
-}
-
-/// Compiles the given source code to WebAssembly Text format (WAT).
-///
-/// # Panics
-///
-/// This function will panic if there is an error loading the Inference grammar.
-/// Compiles the given source code to WebAssembly Text format (WAT).
-///
-/// # Errors
-///
-/// This function will return an error if the source code cannot be parsed or if there is an error during the AST building process.
-///
-/// # Panics
-///
-/// This function will panic if there is an error loading the Inference grammar.
-#[must_use = "This function returns the compiled WebAssembly Text format as a string"]
-pub fn compile_to_wat(source_code: &str) -> anyhow::Result<String> {
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .expect("Error loading Inference grammar");
-    let tree = parser.parse(source_code, None).unwrap();
-    let code = source_code.as_bytes();
-    let root_node = tree.root_node();
-    let mut builder = Builder::new();
-    builder.add_source_code(root_node, code);
-    let builder = builder.build_ast()?;
-    let mut wat_generator = inference_wat_codegen::wat_emitter::WatEmitter::default();
-    for ast in builder.t_ast().source_files {
-        wat_generator.add_source_file(ast);
-    }
-    Ok(wat_generator.emit())
+pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
+    inference_wasm_codegen::codegen(t_ast)
 }
 
 /// Converts WebAssembly Text format (WAT) to WebAssembly binary format (WASM).
@@ -95,21 +62,6 @@ pub fn wat_to_wasm(wat: &str) -> anyhow::Result<Vec<u8>> {
     let mut module = inf_wast::parser::parse::<inf_wast::Wat>(&buf)?;
     let wasm = module.encode()?;
     Ok(wasm)
-}
-
-/// Compiles the given source code to WebAssembly binary format (WASM).
-///
-/// # Errors
-///
-/// This function will return an error if the WAT string cannot be parsed or if there is an error during the compilation process.
-///
-/// # Panics
-///
-/// This function will panic if the WAT string cannot be parsed.
-#[must_use = "This function compiles Inference source code to the WebAssembly binary format as a vector of bytes"]
-pub fn compile_to_wasm(source_code: &str) -> anyhow::Result<Vec<u8>> {
-    let wat = compile_to_wat(source_code)?;
-    wat_to_wasm(&wat)
 }
 
 /// Translates WebAssembly binary format (WASM) to Coq format.

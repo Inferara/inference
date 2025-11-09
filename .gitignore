@@ -16,7 +16,6 @@ Cargo.lock
 *_output/
 
 *.v
-*.wasm
 *.wat
 out
 test_data/**/*.json

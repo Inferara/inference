@@ -21,7 +21,10 @@ pub(crate) struct Cli {
     // Runs code generation, exit with 0 if successful
     #[clap(long = "codegen", action = clap::ArgAction::SetTrue)]
     pub(crate) codegen: bool,
-    // Generates output .v files
+    // Generates output .wasm files
     #[clap(short = 'o', action = clap::ArgAction::SetTrue)]
+    pub(crate) generate_wasm_output: bool,
+    // Generates output .v files
+    #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub(crate) generate_v_output: bool,
 }
