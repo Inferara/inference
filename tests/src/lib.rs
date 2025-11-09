@@ -1,26 +1,18 @@
 //! This module contains various infc end to end tests
+#![allow(dead_code)]
+
 mod ast;
 mod codegen;
 mod utils;
 
 #[cfg(test)]
 mod general_tests {
-    use crate::utils::build_ast;
-
-    #[allow(dead_code)]
-    pub(crate) fn get_test_data_path() -> std::path::PathBuf {
-        let current_dir = std::env::current_dir().unwrap();
-        current_dir
-            .parent() // inference
-            .unwrap()
-            .join("test_data")
-            .join("inf")
-    }
+    use crate::utils::{build_ast, get_test_data_path};
 
     #[test]
     #[allow(unused_variables)]
     fn test_example_inf_parsing() -> anyhow::Result<()> {
-        let test_data_path = get_test_data_path();
+        let test_data_path = get_test_data_path().join("inf");
         let source_code = std::fs::read_to_string(test_data_path.join("example.inf")).unwrap();
         let inference_language = tree_sitter_inference::language();
         let mut parser = tree_sitter::Parser::new();
