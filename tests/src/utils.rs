@@ -45,7 +45,7 @@ pub(crate) fn get_test_file_path(module_path: &str, test_name: &str) -> std::pat
         path = path.join(part);
     }
 
-    path.join(format!("{}.inf", test_name))
+    path.join(format!("{test_name}.inf"))
 }
 
 /// Automatically resolves a WASM test data file path based on the test's module path and name.
@@ -65,7 +65,7 @@ pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::pat
         path = path.join(part);
     }
 
-    path.join(format!("{}.wasm", test_name))
+    path.join(format!("{test_name}.wasm"))
 }
 
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {
@@ -91,8 +91,7 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
     for (i, (exp_byte, act_byte)) in expected.iter().zip(actual.iter()).enumerate() {
         assert_eq!(
             exp_byte, act_byte,
-            "WASM bytecode mismatch at byte index {}: expected {:02x}, got {:02x}",
-            i, exp_byte, act_byte
+            "WASM bytecode mismatch at byte index {i}: expected {exp_byte:02x}, got {act_byte:02x}"
         );
     }
 }
