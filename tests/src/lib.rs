@@ -1,5 +1,6 @@
 //! This module contains various infc end to end tests
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod ast;
 mod codegen;

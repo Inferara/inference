@@ -15,7 +15,7 @@ fn test_location_new() {
 #[test]
 fn test_location_display() {
     let loc = Location::new(5, 15, 2, 3, 2, 13, "test source".to_string());
-    let display = format!("{}", loc);
+    let display = format!("{loc}");
     assert!(display.contains("offset_start: 5"));
     assert!(display.contains("offset_end: 15"));
     assert!(display.contains("start_line: 2"));
@@ -61,7 +61,7 @@ fn test_location_ne() {
 #[test]
 fn test_location_debug() {
     let loc = Location::new(10, 20, 3, 5, 3, 15, "debug test".to_string());
-    let debug_str = format!("{:?}", loc);
+    let debug_str = format!("{loc:?}");
     assert!(debug_str.contains("Location"));
     assert!(debug_str.contains("offset_start: 10"));
 }

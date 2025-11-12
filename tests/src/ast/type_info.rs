@@ -7,7 +7,7 @@ fn test_type_info_unit() {
         type_params: vec![],
     };
     assert_eq!(ty.kind, TypeInfoKind::Unit);
-    assert_eq!(format!("{}", ty), "Unit");
+    assert_eq!(format!("{ty}"), "Unit");
 }
 
 #[test]
@@ -16,7 +16,7 @@ fn test_type_info_bool() {
         kind: TypeInfoKind::Bool,
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "Bool");
+    assert_eq!(format!("{ty}"), "Bool");
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn test_type_info_string() {
         kind: TypeInfoKind::String,
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "String");
+    assert_eq!(format!("{ty}"), "String");
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_type_info_i8() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::I8),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "i8");
+    assert_eq!(format!("{ty}"), "i8");
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn test_type_info_i16() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::I16),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "i16");
+    assert_eq!(format!("{ty}"), "i16");
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn test_type_info_i32() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "i32");
+    assert_eq!(format!("{ty}"), "i32");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_type_info_i64() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "i64");
+    assert_eq!(format!("{ty}"), "i64");
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn test_type_info_u8() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::U8),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "u8");
+    assert_eq!(format!("{ty}"), "u8");
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn test_type_info_u16() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::U16),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "u16");
+    assert_eq!(format!("{ty}"), "u16");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn test_type_info_u32() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::U32),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "u32");
+    assert_eq!(format!("{ty}"), "u32");
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn test_type_info_u64() {
         kind: TypeInfoKind::Number(NumberTypeKindNumberType::U64),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "u64");
+    assert_eq!(format!("{ty}"), "u64");
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn test_type_info_custom() {
         kind: TypeInfoKind::Custom("MyType".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "MyType");
+    assert_eq!(format!("{ty}"), "MyType");
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn test_type_info_array_no_length() {
         kind: TypeInfoKind::Array(Box::new(elem_ty), None),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "[i32]");
+    assert_eq!(format!("{ty}"), "[i32]");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn test_type_info_array_with_length() {
         kind: TypeInfoKind::Array(Box::new(elem_ty), Some(10)),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "[i32; 10]");
+    assert_eq!(format!("{ty}"), "[i32; 10]");
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn test_type_info_generic() {
         kind: TypeInfoKind::Generic("T".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "<T>");
+    assert_eq!(format!("{ty}"), "<T>");
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn test_type_info_qualified_name() {
         kind: TypeInfoKind::QualifiedName("std::vec::Vec".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "std::vec::Vec");
+    assert_eq!(format!("{ty}"), "std::vec::Vec");
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn test_type_info_qualified() {
         kind: TypeInfoKind::Qualified("MyModule::MyType".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "MyModule::MyType");
+    assert_eq!(format!("{ty}"), "MyModule::MyType");
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn test_type_info_function() {
         kind: TypeInfoKind::Function("my_function".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "my_function");
+    assert_eq!(format!("{ty}"), "my_function");
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn test_type_info_struct() {
         kind: TypeInfoKind::Struct("Point".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "Point");
+    assert_eq!(format!("{ty}"), "Point");
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn test_type_info_enum() {
         kind: TypeInfoKind::Enum("Color".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "Color");
+    assert_eq!(format!("{ty}"), "Color");
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn test_type_info_spec() {
         kind: TypeInfoKind::Spec("MySpec".to_string()),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", ty), "MySpec");
+    assert_eq!(format!("{ty}"), "MySpec");
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn test_type_info_with_type_params() {
         kind: TypeInfoKind::Custom("Vec".to_string()),
         type_params: vec!["T".to_string(), "U".to_string()],
     };
-    assert_eq!(format!("{}", ty), "Vec<T, U>");
+    assert_eq!(format!("{ty}"), "Vec<T, U>");
 }
 
 #[test]
@@ -260,7 +260,7 @@ fn test_nested_array_types() {
         kind: TypeInfoKind::Array(Box::new(middle_array), Some(10)),
         type_params: vec![],
     };
-    assert_eq!(format!("{}", outer_array), "[[i32; 5]; 10]");
+    assert_eq!(format!("{outer_array}"), "[[i32; 5]; 10]");
 }
 
 #[test]
