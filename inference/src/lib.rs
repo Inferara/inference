@@ -63,18 +63,3 @@ pub fn wat_to_wasm(wat: &str) -> anyhow::Result<Vec<u8>> {
     let wasm = module.encode()?;
     Ok(wasm)
 }
-
-/// Translates WebAssembly binary format (WASM) to Coq format.
-///
-/// # Errors
-///
-/// This function will return an error if the translation process fails.
-pub fn wasm_to_v(mod_name: &str, wasm: &Vec<u8>) -> anyhow::Result<String> {
-    if let Ok(v) =
-        inference_wasm_v_translator::wasm_parser::translate_bytes(mod_name, wasm.as_slice())
-    {
-        Ok(v)
-    } else {
-        Err(anyhow::anyhow!("Error translating WebAssembly to V"))
-    }
-}
