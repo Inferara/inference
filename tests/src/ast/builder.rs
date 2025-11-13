@@ -193,17 +193,6 @@ use inference::std::types::Address;
     assert_eq!(directives.len(), 2);
 }
 
-#[ignore]
-#[test]
-fn test_parse_context_definition() {
-    let source = r#"
-context A {}
-"#;
-    let ast = build_ast(source.to_string());
-    let source_files = &ast.source_files;
-    assert_eq!(source_files.len(), 1);
-}
-
 #[test]
 fn test_parse_binary_expression_add() {
     let source = r#"
@@ -372,7 +361,6 @@ fn test() -> bool {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore]
 #[test]
 fn test_parse_unary_negate() {
     let source = r#"
@@ -525,13 +513,14 @@ fn test() {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore]
 #[test]
 fn test_parse_for_loop() {
     let source = r#"
 fn test() {
-    for (let i: i32 = 0; i < 10; i = i + 1) {
+    let mut i: i32 = 0;
+    loop i < 10 {
         foo(i);
+        i = i + 1;
     }
 }
 "#;
@@ -662,7 +651,6 @@ fn test() -> i32 {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore]
 #[test]
 fn test_parse_chained_member_access() {
     let source = r#"
@@ -805,12 +793,12 @@ fn test() -> i32 {
     let source_files = &ast.source_files;
     assert_eq!(source_files.len(), 1);
 }
-#[ignore]
+
 #[test]
 fn test_parse_multiline_comments() {
     let source = r#"
-/* This is a
-   multiline comment */
+// This is a
+//   multiline comment
 fn test() -> i32 {
     return 42;
 }

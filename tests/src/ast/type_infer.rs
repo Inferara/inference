@@ -27,11 +27,11 @@ fn is_positive(x: i32) -> bool {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore = "array type inference not fully working"]
+#[ignore = "array type inference not fully implemented"]
 #[test]
 fn test_type_inference_array_type() {
     let source = r#"
-fn get_first(arr: []i32) -> i32 {
+fn get_first(arr: [i32; 1]) -> i32 {
     return arr[0];
 }
 "#;
@@ -282,11 +282,10 @@ fn test() {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore = "nested array type inference not fully working"]
 #[test]
 fn test_type_inference_nested_arrays() {
     let source = r#"
-fn test(matrix: [][]i32) {
+fn test(matrix: [[bool; 2]; 1]) {
     assert(true);
 }
 "#;

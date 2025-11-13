@@ -642,9 +642,15 @@ impl<'a> Builder<'a, InitState> {
     ) -> Rc<ReturnStatement> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let expression =
-            self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
-
+        let expr_node = &node.child_by_field_name("expression");
+        let expression = if let Some(expr) = expr_node {
+            self.build_expression(id, expr, code)
+        } else {
+            Expression::Literal(Literal::Unit(Rc::new(UnitLiteral::new(
+                Self::get_node_id(),
+                Self::get_location(node, code),
+            ))))
+        };
         let node = Rc::new(ReturnStatement::new(id, location, expression));
         self.arena.add_node(
             AstNode::Statement(Statement::Return(node.clone())),
@@ -738,7 +744,9 @@ impl<'a> Builder<'a, InitState> {
             "array_index_access_expression" => Expression::ArrayIndexAccess(
                 self.build_array_index_access_expression(parent_id, node, code),
             ),
-            "generic_name" | "type" => Expression::Type(self.build_type(parent_id, node, code)),
+            "generic_name" | "qualified_name" | "type" => {
+                Expression::Type(self.build_type(parent_id, node, code))
+            }
             "member_access_expression" => {
                 Expression::MemberAccess(self.build_member_access_expression(parent_id, node, code))
             }

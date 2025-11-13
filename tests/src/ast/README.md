@@ -91,16 +91,7 @@ cargo llvm-cov --package inference-ast --lib --summary-only
    - Good: `test_parse_function_with_multiple_parameters`
    - Bad: `test_fn_2`
 
-4. **Mark unsupported features as ignored**: If a test fails due to grammar limitations, use `#[ignore]`
-   ```rust
-   #[ignore = "feature X not yet supported in grammar"]
-   #[test]
-   fn test_feature_x() {
-       // ...
-   }
-   ```
-
-5. **Add comments for complex tests**: Explain the purpose of tests that aren't immediately obvious
+4. **Add comments for complex tests**: Explain the purpose of tests that aren't immediately obvious
 
 ### Test Organization
 
