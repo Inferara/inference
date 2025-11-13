@@ -341,7 +341,9 @@ impl FunctionDefinition {
 
     #[must_use]
     pub fn is_void(&self) -> bool {
-        self.returns.is_none()
+        self.returns
+            .as_ref()
+            .is_none_or(super::nodes::Type::is_unit_type)
     }
 }
 

@@ -1,7 +1,7 @@
 #![warn(clippy::pedantic)]
 pub(crate) mod arena;
 pub mod builder;
-// pub mod node;
+pub(crate) mod enums_impl;
 pub mod nodes;
 pub(crate) mod nodes_impl;
 pub mod t_ast;

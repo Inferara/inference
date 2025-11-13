@@ -1,6 +1,5 @@
 use crate::utils::build_ast;
 
-// Extended comprehensive tests
 #[test]
 fn test_parse_function_with_forall() {
     let source = r#"
@@ -11,6 +10,13 @@ fn test() -> () forall {
     let ast = build_ast(source.to_string());
     let source_files = &ast.source_files;
     assert_eq!(source_files.len(), 1);
+    let source_file = &source_files[0];
+    assert_eq!(source_file.definitions.len(), 1);
+    assert_eq!(source_file.function_definitions().len(), 1);
+    let func_def = &source_file.function_definitions()[0];
+    assert_eq!(func_def.name(), "test");
+    assert!(!func_def.has_parameters());
+    assert!(func_def.is_void());
 }
 
 #[test]
