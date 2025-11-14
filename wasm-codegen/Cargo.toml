@@ -12,4 +12,4 @@ inference-ast.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]
-wasmtime="38.0.3"
+wasmtime="38.0.4"
