@@ -144,25 +144,22 @@ fn main() {
 #[cfg(test)]
 mod test {
 
-    // #[test]
-    // fn test_wasm_to_coq() {
-    //     if std::env::var("GITHUB_ACTIONS").is_ok() {
-    //         eprintln!("Skipping test on GitHub Actions");
-    //         return;
-    //     }
-    //     let path = get_test_data_path().join("wasm").join("comments.0.wasm");
-    //     let absolute_path = path.canonicalize().unwrap();
-
-    //     let bytes = std::fs::read(absolute_path).unwrap();
-    //     let mod_name = String::from("index");
-    //     let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
-    //         &mod_name,
-    //         bytes.as_slice(),
-    //     );
-    //     assert!(coq.is_ok());
-    //     let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
-    //     std::fs::write(coq_file_path, coq.unwrap()).unwrap();
-    // }
+    #[test]
+    fn test_wasm_to_coq() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            eprintln!("Skipping test on GitHub Actions");
+            return;
+        }
+        let path = get_test_data_path().join("wasm").join("add_uzumaki_test.wasm");
+        let absolute_path = path.canonicalize().unwrap();
+        
+        let bytes = std::fs::read(absolute_path).unwrap();
+        let mod_name = String::from("index");
+        let coq = inference::wasm_to_v(&mod_name, &bytes);
+        assert!(coq.is_ok());
+        let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
+        std::fs::write(coq_file_path, coq.unwrap()).unwrap();
+    }
 
     #[allow(dead_code)]
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {

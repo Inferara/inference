@@ -12,7 +12,7 @@ members = [
     "tests",
     "playground-server",
     "wasm-fmt"
-]
+, "analyser"]
 
 [workspace.package]
 version = "0.0.1"
