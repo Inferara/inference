@@ -3,33 +3,35 @@
 resolver = "2"
 
 members = [
-    "ast",
-    "cli",
-    "wasm-codegen",
-    "inference",
-    "tests",
-    "playground-server",
-    "wasm-fmt"
+    "core/*",
+    "tools/*",
+    "tests"
 ]
 
 [workspace.package]
 version = "0.0.1"
-edition = "2021"
+rust-version = "1.91"
+edition = "2024"
 license = "GPL-3.0"
 homepage = "https://inferara.com"
 repository = "https://github.com/Inferara/inference"
 
 [workspace.dependencies]
-inference = { path = "./inference", version = "0.0.1" }
-inference-ast = { path = "./ast", version = "0.0.1" }
-inference-cli = { path = "./cli", version = "0.0.1" }
-inference-wasm-codegen = { path = "./wasm-codegen", version = "0.0.1" }
+# Core Inference crates
+inference = { path = "./core/inference", version = "0.0.1" }
+inference-ast = { path = "./core/ast", version = "0.0.1" }
+inference-cli = { path = "./core/cli", version = "0.0.1" }
+inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
+
 inference-tests = { path = "./tests", version = "0.0.1" }
-inference-playground-server = { path = "./playground-server", version = "0.0.1" }
+
+# Various supplementary tools
+inference-playground-server = { path = "./tools/playground-server", version = "0.0.1" }
+wasm-fmt = { path = "./tools/wasm-fmt", version = "0.0.1" }
+
 inf-wast = "0.0.8"
 inf-wasmparser = "0.0.8"
 wat-fmt = "0.0.8"
-wasm-fmt = { path = "./wasm-fmt", version = "0.0.1" }
 tree-sitter = "0.25.10"
 tree-sitter-inference = "0.0.37"
 anyhow = "1.0.100"

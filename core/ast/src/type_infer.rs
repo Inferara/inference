@@ -530,12 +530,12 @@ impl TypeChecker {
                     *uzumaki_rc.type_info.borrow_mut() = target_type;
                 } else {
                     let value_type = self.infer_expression(&mut right_expr);
-                    if let (Some(target), Some(val)) = (target_type, value_type) {
-                        if target != val {
-                            self.errors.push(format!(
-                                "Cannot assign value of type {val:?} to variable of type {target:?}"
-                            ));
-                        }
+                    if let (Some(target), Some(val)) = (target_type, value_type)
+                        && target != val
+                    {
+                        self.errors.push(format!(
+                            "Cannot assign value of type {val:?} to variable of type {target:?}"
+                        ));
                     }
                 }
             }
@@ -607,13 +607,13 @@ impl TypeChecker {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         *uzumaki_rc.type_info.borrow_mut() = Some(target_type);
-                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref) {
-                        if init_type != TypeInfo::new(&variable_definition_statement.ty) {
-                            self.errors.push(format!(
-                                "Type mismatch in variable definition: expected {:?}, found {:?}",
-                                variable_definition_statement.ty, init_type
-                            ));
-                        }
+                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref)
+                        && init_type != TypeInfo::new(&variable_definition_statement.ty)
+                    {
+                        self.errors.push(format!(
+                            "Type mismatch in variable definition: expected {:?}, found {:?}",
+                            variable_definition_statement.ty, init_type
+                        ));
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
@@ -666,12 +666,11 @@ impl TypeChecker {
                 {
                     if let Some(index_type) =
                         self.infer_expression(&mut array_index_access_expression.index.borrow_mut())
+                        && !index_type.is_number()
                     {
-                        if !index_type.is_number() {
-                            self.errors.push(format!(
-                                "Array index must be of number type, found {index_type:?}"
-                            ));
-                        }
+                        self.errors.push(format!(
+                            "Array index must be of number type, found {index_type:?}"
+                        ));
                     }
                     if array_type.is_array() {
                         *array_index_access_expression.type_info.borrow_mut() =
@@ -739,19 +738,19 @@ impl TypeChecker {
                     }
                     return None;
                 };
-                if let Some(arguments) = &function_call_expression.arguments {
-                    if arguments.len() != signature.param_types.len() {
-                        self.errors.push(format!(
-                            "Function `{}` expects {} arguments, but {} provided",
-                            function_call_expression.name(),
-                            signature.param_types.len(),
-                            arguments.len()
-                        ));
-                        for arg in arguments {
-                            self.infer_expression(&mut arg.1.borrow_mut());
-                        }
-                        return None;
+                if let Some(arguments) = &function_call_expression.arguments
+                    && arguments.len() != signature.param_types.len()
+                {
+                    self.errors.push(format!(
+                        "Function `{}` expects {} arguments, but {} provided",
+                        function_call_expression.name(),
+                        signature.param_types.len(),
+                        arguments.len()
+                    ));
+                    for arg in arguments {
+                        self.infer_expression(&mut arg.1.borrow_mut());
                     }
+                    return None;
                 }
 
                 if !signature.type_params.is_empty() {
@@ -894,12 +893,12 @@ impl TypeChecker {
                         {
                             for element in &elements[1..] {
                                 let element_type = self.infer_expression(&mut element.borrow_mut());
-                                if let Some(element_type) = element_type {
-                                    if element_type != element_type_info {
-                                        self.errors.push(format!(
+                                if let Some(element_type) = element_type
+                                    && element_type != element_type_info
+                                {
+                                    self.errors.push(format!(
                                         "Array elements must be of the same type, found {element_type:?} and {element_type_info:?}"
                                     ));
-                                    }
                                 }
                             }
                         } else {
@@ -970,33 +969,30 @@ impl TypeChecker {
                 if left_has_return_type != right_has_return_type {
                     return false;
                 }
-                if left_has_return_type {
-                    if let (Some(left_return_type), Some(right_return_type)) =
+                if left_has_return_type
+                    && let (Some(left_return_type), Some(right_return_type)) =
                         (&left.returns, &right.returns)
-                    {
-                        if !Self::types_equal(left_return_type, right_return_type) {
-                            return false;
-                        }
-                    }
+                    && !Self::types_equal(left_return_type, right_return_type)
+                {
+                    return false;
                 }
                 let left_has_parameters = left.parameters.is_some();
                 let right_has_parameters = right.parameters.is_some();
                 if left_has_parameters != right_has_parameters {
                     return false;
                 }
-                if left_has_parameters {
-                    if let (Some(left_parameters), Some(right_parameters)) =
+                if left_has_parameters
+                    && let (Some(left_parameters), Some(right_parameters)) =
                         (&left.parameters, &right.parameters)
+                {
+                    if left_parameters.len() != right_parameters.len() {
+                        return false;
+                    }
+                    for (left_param, right_param) in
+                        left_parameters.iter().zip(right_parameters.iter())
                     {
-                        if left_parameters.len() != right_parameters.len() {
+                        if !Self::types_equal(left_param, right_param) {
                             return false;
-                        }
-                        for (left_param, right_param) in
-                            left_parameters.iter().zip(right_parameters.iter())
-                        {
-                            if !Self::types_equal(left_param, right_param) {
-                                return false;
-                            }
                         }
                     }
                 }

@@ -110,8 +110,9 @@ fn test() -> HashMap {
     let use_dirs: Vec<_> = source_file
         .directives
         .iter()
-        .filter_map(|d| match d {
-            inference_ast::nodes::Directive::Use(use_dir) => Some(use_dir.clone()),
+        .filter(|d| matches!(d, inference_ast::nodes::Directive::Use(_)))
+        .map(|d| match d {
+            inference_ast::nodes::Directive::Use(use_dir) => use_dir.clone(),
         })
         .collect();
     assert_eq!(use_dirs.len(), 1);

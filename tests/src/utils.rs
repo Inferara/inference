@@ -71,14 +71,12 @@ pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::pat
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {
     let parts: Vec<&str> = module_path.split("::").collect();
 
-    let path_parts = parts
+    parts
         .iter()
         .skip(1) // skip "tests"
         .filter(|p| !p.ends_with("_tests")) // skip test module names
         .copied()
-        .collect();
-
-    path_parts
+        .collect()
 }
 
 pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {

@@ -11,7 +11,10 @@ use std::process::Command;
 fn example_file(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")) // cli/
         .parent()
+        .unwrap() // core/
+        .parent()
         .unwrap() // workspace root
+        .join("tests")
         .join("test_data")
         .join("inf")
         .join(name)
