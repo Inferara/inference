@@ -1,11 +1,10 @@
 use inference_ast::{builder::Builder, t_ast::TypedAst};
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
-    let current_dir = std::env::current_dir().unwrap();
-    current_dir
-        .parent() // inference
-        .unwrap()
-        .join("test_data")
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap());
+    manifest_dir.join("test_data")
 }
 
 pub(crate) fn build_ast(source_code: String) -> TypedAst {
@@ -32,7 +31,7 @@ pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
 ///
 /// # Example
 /// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `test_data/codegen/wasm/base/trivial.inf`
+/// this will resolve to `tests/test_data/codegen/wasm/base/trivial.inf`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
@@ -52,7 +51,7 @@ pub(crate) fn get_test_file_path(module_path: &str, test_name: &str) -> std::pat
 ///
 /// # Example
 /// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `test_data/codegen/wasm/base/trivial.wasm`
+/// this will resolve to `tests/test_data/codegen/wasm/base/trivial.wasm`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
