@@ -1,0 +1,15 @@
+[package]
+name = "inference-wasm-to-v-translator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+inf-wasmparser = "0.0.8"
+
+[dependencies.uuid]
+version = "1.10.0"
+features = ["v4", "fast-rng", "macro-diagnostics"]

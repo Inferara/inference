@@ -46,20 +46,17 @@ pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
     inference_wasm_codegen::codegen(t_ast)
 }
 
-/// Converts WebAssembly Text format (WAT) to WebAssembly binary format (WASM).
-///
-/// # Panics
-///
-/// This function will panic if the WAT string cannot be parsed.
-/// Converts WebAssembly Text format (WAT) to WebAssembly binary format (WASM).
+/// Translates WebAssembly binary format (WASM) to Coq format.
 ///
 /// # Errors
 ///
-/// This function will return an error if the WAT string cannot be parsed or if there is an error during the encoding process.
-#[must_use = "This function returns the WebAssembly binary format as a vector of bytes"]
-pub fn wat_to_wasm(wat: &str) -> anyhow::Result<Vec<u8>> {
-    let buf = inf_wast::parser::ParseBuffer::new(wat)?;
-    let mut module = inf_wast::parser::parse::<inf_wast::Wat>(&buf)?;
-    let wasm = module.encode()?;
-    Ok(wasm)
+/// This function will return an error if the translation process fails.
+pub fn wasm_to_v(mod_name: &str, wasm: &Vec<u8>) -> anyhow::Result<String> {
+    if let Ok(v) =
+        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm.as_slice())
+    {
+        Ok(v)
+    } else {
+        Err(anyhow::anyhow!("Error translating WebAssembly to V"))
+    }
 }

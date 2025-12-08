@@ -29,7 +29,7 @@
 
 mod parser;
 use clap::Parser;
-use inference::{analyze, codegen, parse};
+use inference::{analyze, codegen, parse, wasm_to_v};
 use parser::Cli;
 use std::{
     fs,
@@ -117,26 +117,26 @@ fn main() {
             }
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
-        // if args.generate_v_output {
-        //     match wasm_to_v(source_fname, &wasm) {
-        //         Ok(v_output) => {
-        //             let v_file_path = output_path.join(format!("{source_fname}.v"));
-        //             if let Err(e) = fs::create_dir_all(&output_path) {
-        //                 eprintln!("Failed to create output directory: {e}");
-        //                 process::exit(1);
-        //             }
-        //             if let Err(e) = fs::write(&v_file_path, v_output) {
-        //                 eprintln!("Failed to write V file: {e}");
-        //                 process::exit(1);
-        //             }
-        //             println!("V generated at: {}", v_file_path.to_string_lossy());
-        //         }
-        //         Err(e) => {
-        //             eprintln!("WASM->V translation failed: {e}");
-        //             process::exit(1);
-        //         }
-        //     }
-        // }
+        if args.generate_v_output {
+            match wasm_to_v(source_fname, &wasm) {
+                Ok(v_output) => {
+                    let v_file_path = output_path.join(format!("{source_fname}.v"));
+                    if let Err(e) = fs::create_dir_all(&output_path) {
+                        eprintln!("Failed to create output directory: {e}");
+                        process::exit(1);
+                    }
+                    if let Err(e) = fs::write(&v_file_path, v_output) {
+                        eprintln!("Failed to write V file: {e}");
+                        process::exit(1);
+                    }
+                    println!("V generated at: {}", v_file_path.to_string_lossy());
+                }
+                Err(e) => {
+                    eprintln!("WASM->V translation failed: {e}");
+                    process::exit(1);
+                }
+            }
+        }
     }
     process::exit(0);
 }

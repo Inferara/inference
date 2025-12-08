@@ -7,7 +7,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-clap = { version = "4.5.51", features = ["derive"] }
+clap = { version = "4.5.53", features = ["derive"] }
 walkdir = "2.5.0"
 tempfile = "3.23.0"
 anyhow.workspace = true
