@@ -19,26 +19,23 @@ jobs:
       
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov
-      
+
       - name: Run tests with coverage
         run: |
           cargo llvm-cov --workspace --lib \
-            --exclude wasm-runner \
             --exclude inference-playground-server \
             --lcov --output-path lcov.info
-      
+
       - name: Generate coverage summary
         run: |
           cargo llvm-cov --workspace --lib \
-            --exclude wasm-runner \
             --exclude inference-playground-server \
             --summary-only
-      
+
       - name: Check AST module coverage threshold
         run: |
           # Extract coverage for AST files
           COVERAGE=$(cargo llvm-cov --workspace --lib \
-            --exclude wasm-runner \
             --exclude inference-playground-server \
             --summary-only 2>&1 | \
             grep 'ast/src' | \
@@ -54,7 +51,7 @@ jobs:
             echo "Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
             exit 1
           fi
-      
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         continue-on-error: true
