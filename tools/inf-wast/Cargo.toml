@@ -1,0 +1,65 @@
+[package]
+name = "inf-wast"
+version = "0.0.9"
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["parser", "WebAssembly", "wat"]
+
+authors = ["Alex Crichton <alex@alexcrichton.com>", "Georgii Plotnikov <accembler@gmail.com>"]
+license-file = "./LICENSE-Apache-2.0_WITH_LLVM-exception"
+readme = "README.md"
+description = """
+inf-wasm-tool inf-wast crate fork with Inference non-detenministic instructions extension
+"""
+
+# This is inherited from the origin. Shutting down all clippy warnings would require
+# many chages in the codebase.
+[lints.clippy]
+# The default set of lints in Clippy is viewed as "too noisy" right now so
+# they're all turned off by default. Selective lints are then enabled below as
+# necessary.
+all = { level = 'allow', priority = -1 }
+clone_on_copy = 'warn'
+map_clone = 'warn'
+unnecessary_to_owned = 'warn'
+manual_strip = 'warn'
+
+[dependencies]
+leb128.workspace = true
+wasm-encoder = "0.228.0"
+unicode-width = "0.2.0"
+memchr = "2.4.1"
+bumpalo = "3.14.0"
+gimli = { version = "0.32.3", optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
+inf-wasmparser.workspace = true
+libtest-mimic = "0.8.1"
+wat = "1.225.0"
+rand = { version = "0.9.0", features = ["small_rng"] }
+
+[features]
+default = ['wasm-module', 'component-model']
+
+# Includes default parsing support for `*.wat` and `*.wast` files (wasm
+# modules). This isn't always needed though if you're parsing just an
+# s-expression based format. If you'd like to slim down this dependency to just
+# the lexer, parser framework, and token support, this feature can be disabled.
+#
+# This feature is turned on by default.
+wasm-module = []
+
+# Off-by-default feature to support emitting DWARF debugging information in
+# parsed binaries pointing back to source locations in the original `*.wat`
+# source.
+dwarf = ["dep:gimli"]
+
+# On-by-default this builds in support for parsing the text format of
+# components.
+component-model = ['wasm-module', 'wasm-encoder/component-model']
+
+[[test]]
+name = "parse-fail"
+harness = false
