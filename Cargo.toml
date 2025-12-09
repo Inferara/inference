@@ -29,10 +29,10 @@ inference-tests = { path = "./tests", version = "0.0.1" }
 # Various supplementary tools
 inference-playground-server = { path = "./tools/playground-server", version = "0.0.1" }
 wasm-fmt = { path = "./tools/wasm-fmt", version = "0.0.1" }
+wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 
 inf-wast = "0.0.8"
 inf-wasmparser = "0.0.8"
-wat-fmt = "0.0.8"
 tree-sitter = "0.25.10"
 tree-sitter-inference = "0.0.37"
 anyhow = "1.0.100"

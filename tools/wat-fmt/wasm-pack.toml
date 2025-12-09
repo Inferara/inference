@@ -1,0 +1,10 @@
+name = "wat-fmt"
+version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["wasm", "rust", "webassembly"]
+
+[package.metadata.wasm-pack]
+publish = true
+target = "wasm32-unknown-unknown"

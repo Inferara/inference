@@ -7,7 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow.workspace = true
 inf-wasmparser = "0.0.8"
 
 [dependencies.uuid]
