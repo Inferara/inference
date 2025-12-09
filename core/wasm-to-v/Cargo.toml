@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-inf-wasmparser = "0.0.8"
+inf-wasmparser.workspace = true
 
 [dependencies.uuid]
 version = "1.10.0"

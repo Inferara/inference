@@ -22,21 +22,33 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          cargo llvm-cov --workspace --lib \
-            --exclude inference-playground-server \
+          cargo llvm-cov --lib \
+            --package inference-ast \
+            --package inference-cli \
+            --package inference \
+            --package inference-wasm-codegen \
+            --package inference-wasm-to-v-translator \
             --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: |
-          cargo llvm-cov --workspace --lib \
-            --exclude inference-playground-server \
+          cargo llvm-cov --lib \
+            --package inference-ast \
+            --package inference-cli \
+            --package inference \
+            --package inference-wasm-codegen \
+            --package inference-wasm-to-v-translator \
             --summary-only
 
       - name: Check AST module coverage threshold
         run: |
           # Extract coverage for AST files
-          COVERAGE=$(cargo llvm-cov --workspace --lib \
-            --exclude inference-playground-server \
+          COVERAGE=$(cargo llvm-cov --lib \
+            --package inference-ast \
+            --package inference-cli \
+            --package inference \
+            --package inference-wasm-codegen \
+            --package inference-wasm-to-v-translator \
             --summary-only 2>&1 | \
             grep 'ast/src' | \
             awk '{sum+=$7; count++} END {if (count>0) print sum/count; else print 0}')
