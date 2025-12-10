@@ -14,6 +14,9 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         let actual = wasm_codegen(&source_code);
+        // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
+        // std::fs::write(test_dir.join("actual.wasm"), &actual)
+        // .unwrap_or_else(|e| panic!("Failed to write actual.wasm: {}", e));
         assert_wasms_modules_equivalence(&expected, &actual);
     }
 

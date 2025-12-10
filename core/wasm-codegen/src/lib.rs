@@ -9,6 +9,7 @@ use inkwell::{
 use crate::compiler::Compiler;
 
 mod compiler;
+mod utils;
 
 /// Generates WebAssembly bytecode from a typed AST.
 ///

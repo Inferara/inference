@@ -1,9 +1,9 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
+use crate::utils;
 use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement, Type};
 use inkwell::{builder::Builder, context::Context, module::Module, values::FunctionValue};
-use std::{process::Command, rc::Rc};
-use tempfile::tempdir;
+use std::rc::Rc;
 
 const UZUMAKI_I32_INTRINSIC: &str = "llvm.wasm.uzumaki.i32";
 const UZUMAKI_I64_INTRINSIC: &str = "llvm.wasm.uzumaki.i64";
@@ -222,78 +222,11 @@ impl<'ctx> Compiler<'ctx> {
             })
     }
 
-    // Compilation methods
     pub(crate) fn compile_to_wasm(
         &self,
         output_fname: &str,
         optimization_level: u32,
     ) -> anyhow::Result<Vec<u8>> {
-        let llc_path = Compiler::get_inf_llc_path()?;
-        let temp_dir = tempdir()?;
-        let output_path = temp_dir.path().join(output_fname);
-        let ir_path = output_path.with_extension("ll");
-
-        let ir_str = self.module.print_to_string().to_string();
-        std::fs::write(&ir_path, ir_str)?;
-        let opt_flag = format!("-O{}", optimization_level.min(3));
-        let output = Command::new(&llc_path)
-            .arg("-march=wasm32")
-            .arg("-mcpu=mvp")
-            // .arg("-mattr=+mutable-globals") https://doc.rust-lang.org/beta/rustc/platform-support/wasm32v1-none.html
-            .arg("-filetype=obj")
-            .arg(&ir_path)
-            .arg(&opt_flag)
-            .arg("-o")
-            .arg(&output_path)
-            .output()?;
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "inf-llc failed with status: {}\nstderr: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-        let wasm_bytes = std::fs::read(&output_path)?;
-        std::fs::remove_file(output_path)?;
-        Ok(wasm_bytes)
-    }
-
-    fn get_inf_llc_path() -> anyhow::Result<std::path::PathBuf> {
-        let llc_name = if cfg!(windows) { "llc.exe" } else { "llc" };
-
-        let exe_path = std::env::current_exe()
-            .map_err(|e| anyhow::anyhow!("Failed to get current executable path: {e}"))?;
-
-        let exe_dir = exe_path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get executable directory"))?;
-
-        // Try multiple possible locations:
-        // 1. For regular binaries: <exe_dir>/bin/llc
-        // 2. For test binaries in deps/: <exe_dir>/../bin/llc
-        let candidates = vec![
-            exe_dir.join("bin").join(llc_name), // target/debug/bin/llc or target/release/bin/llc
-            exe_dir.parent().map_or_else(
-                || exe_dir.join("bin").join(llc_name),
-                |p| p.join("bin").join(llc_name), // target/debug/bin/llc when exe is in target/debug/deps/
-            ),
-        ];
-
-        for llc_path in &candidates {
-            if llc_path.exists() {
-                return Ok(llc_path.clone());
-            }
-        }
-
-        Err(anyhow::anyhow!(
-            "🚫 Inference llc binary not found\n\
-            \n\
-            This package requires LLVM with custom intrinsics support.\n\n\
-            Executable: {}\n\
-            Searched locations:\n  - {}\n  - {}",
-            exe_path.display(),
-            candidates[0].display(),
-            candidates[1].display()
-        ))
+        utils::compile_to_wasm(&self.module, output_fname, optimization_level)
     }
 }
