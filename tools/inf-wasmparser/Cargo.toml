@@ -1,0 +1,104 @@
+[package]
+name = "inf-wasmparser"
+version = "0.0.9"
+edition.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["parser", "WebAssembly", "wasm"]
+
+authors = ["Yury Delendik <ydelendik@mozilla.com>", "Georgii Plotnikov <accembler@gmail.com>"]
+license-file = "./LICENSE-Apache-2.0_WITH_LLVM-exception"
+readme = "README.md"
+description = """
+A simple event-driven library for parsing Inferara non-deterministic WASM extension WebAssembly binary files.
+"""
+exclude = ["benches/*.wasm"]
+
+# This is inherited from the origin. Shutting down all clippy warnings would require
+# many chages in the codebase.
+[lints.clippy]
+# The default set of lints in Clippy is viewed as "too noisy" right now so
+# they're all turned off by default. Selective lints are then enabled below as
+# necessary.
+all = { level = 'allow', priority = -1 }
+clone_on_copy = 'warn'
+map_clone = 'warn'
+unnecessary_to_owned = 'warn'
+manual_strip = 'warn'
+
+[lints.rust]
+mismatched_lifetime_syntaxes = 'allow'
+unused_parens = 'allow'
+dead_code = 'allow'
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+bitflags = "2.4.1"
+indexmap = { version = "2.7.1", optional = true }
+semver = { version = "1.0.25", optional = true }
+hashbrown = { version = "0.16.1", optional = true }
+serde = { version = "1.0.130", optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true
+inf-wast.workspace = true
+wasm-encoder = "0.228.0"
+env_logger = "0.11.6"
+log = "0.4.14"
+criterion = "0.8.1"
+wat = "1.224.0"
+rayon = "1.5.1"
+once_cell = "1.13.0"
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[features]
+default = ['std', 'validate', 'serde', 'features', 'component-model', 'hash-collections', 'simd']
+
+# A feature which enables implementations of `std::error::Error` as appropriate
+# along with other convenience APIs. This additionally uses the standard
+# library's source of randomness for seeding hash maps.
+std = ['indexmap?/std']
+
+# Tells the `wasmparser` crate to provide (and use) hash-based collections internally.
+#
+# Disabling this crate feature allows to drop `hashbrown`, `indexmap` dependencies
+# entirely, reducing compilation times and shrink binary sizes.
+hash-collections = [
+  'dep:hashbrown',
+  'dep:indexmap',
+]
+# Tells the `wasmparser` crate to prefer using its built-in btree-based collections 
+# even if `hash-collections` is enabled.
+prefer-btree-collections = []
+
+# A feature that enables validating WebAssembly files. This is enabled by
+# default but not required if you're only parsing a file, for example, as
+# opposed to validating all of its contents.
+validate = []
+
+# Enable Serialize/Deserialize implementations for types in
+# `wasmparser::collections`
+serde = ['dep:serde', 'indexmap?/serde', 'hashbrown?/serde']
+
+# A feature that enables the guts of the `WasmFeatures` type in this crate.
+#
+# This feature is enabled by default. When disabled this crate does not support
+# runtime configuration of WebAssembly features. Instead the set of WebAssembly
+# features/proposals support are fixed at compile time to `wasmparser`'s default
+# set of supported features.
+features = []
+
+# A feature that enables parsing and validating the component-model proposal for
+# WebAssembly. This is enabled by default but if your use case is only
+# interested in working with core modules then this feature can be disabled.
+component-model = ['dep:semver']
+
+# A feature that enables parsing and validating the `simd` and `relaxed-simd`
+# proposals for WebAssembly. This is enabled by default but if your use case is
+# only interested in working on non-SIMD code then this feature can be disabled.
+simd = []

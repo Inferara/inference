@@ -1,0 +1,15 @@
+[package]
+name = "inference"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+anyhow.workspace = true
+tree-sitter.workspace = true
+tree-sitter-inference.workspace = true
+inference-ast.workspace = true
+inference-wasm-codegen.workspace = true
+inference-wasm-to-v-translator.workspace = true
