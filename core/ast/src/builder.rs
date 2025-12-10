@@ -91,7 +91,7 @@ impl<'a> Builder<'a, InitState> {
             let mut ast = SourceFile::new(id, location);
 
             for i in 0..root.child_count() {
-                if let Some(child) = root.child(i) {
+                if let Some(child) = root.child(u32::try_from(i).unwrap()) {
                     let child_kind = child.kind();
 
                     match child_kind {
@@ -187,7 +187,7 @@ impl<'a> Builder<'a, InitState> {
 
         // first child is name
         for i in 1..node.named_child_count() {
-            let child = node.named_child(i).unwrap();
+            let child = node.named_child(u32::try_from(i).unwrap()).unwrap();
             let definition = self.build_definition(id, &child, code);
             definitions.push(definition);
         }

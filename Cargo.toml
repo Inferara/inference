@@ -34,7 +34,7 @@ wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 
-tree-sitter = "0.25.10"
+tree-sitter = "0.26.2"
 tree-sitter-inference = "0.0.37"
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive", "rc"] }

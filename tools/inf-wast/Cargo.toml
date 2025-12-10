@@ -31,7 +31,7 @@ wasm-encoder = "0.228.0"
 unicode-width = "0.2.0"
 memchr = "2.4.1"
 bumpalo = "3.14.0"
-gimli = { version = "0.32.3", optional = true }
+gimli = { version = "0.31.1", optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true
