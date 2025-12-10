@@ -239,6 +239,7 @@ impl<'ctx> Compiler<'ctx> {
         let output = Command::new(&llc_path)
             .arg("-march=wasm32")
             .arg("-mcpu=mvp")
+            // .arg("-mattr=+mutable-globals") https://doc.rust-lang.org/beta/rustc/platform-support/wasm32v1-none.html
             .arg("-filetype=obj")
             .arg(&ir_path)
             .arg(&opt_flag)
