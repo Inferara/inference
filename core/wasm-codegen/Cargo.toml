@@ -7,9 +7,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-wasm-encoder="0.240.0"
+inkwell = { version = "0.7.1", features = ["llvm21-1"] }
+wasm-encoder="0.243.0"
 inference-ast.workspace = true
 anyhow.workspace = true
-
-[dev-dependencies]
-wasmtime="38.0.4"
