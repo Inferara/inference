@@ -9,5 +9,6 @@ repository = { workspace = true }
 [dependencies]
 inkwell = { version = "0.7.1", features = ["llvm21-1"] }
 wasm-encoder="0.243.0"
+tempfile = "3.3.0"
 inference-ast.workspace = true
 anyhow.workspace = true

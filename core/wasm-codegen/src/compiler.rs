@@ -1,9 +1,9 @@
-#![allow(dead_code)]
-use std::{process::Command, rc::Rc};
-
-use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement, Type};
 //TODO: don't forget to remove
+#![allow(dead_code)]
+use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement, Type};
 use inkwell::{builder::Builder, context::Context, module::Module, values::FunctionValue};
+use std::{process::Command, rc::Rc};
+use tempfile::tempdir;
 
 const UZUMAKI_I32_INTRINSIC: &str = "llvm.wasm.uzumaki.i32";
 const UZUMAKI_I64_INTRINSIC: &str = "llvm.wasm.uzumaki.i64";
@@ -225,24 +225,26 @@ impl<'ctx> Compiler<'ctx> {
     // Compilation methods
     pub(crate) fn compile_to_wasm(
         &self,
-        output: &str,
+        output_fname: &str,
         optimization_level: u32,
     ) -> anyhow::Result<Vec<u8>> {
         let llc_path = Compiler::get_inf_llc_path()?;
-        let output_path = std::path::Path::new(output);
+        let temp_dir = tempdir()?;
+        let output_path = temp_dir.path().join(output_fname);
         let ir_path = output_path.with_extension("ll");
+
         let ir_str = self.module.print_to_string().to_string();
         std::fs::write(&ir_path, ir_str)?;
         let opt_flag = format!("-O{}", optimization_level.min(3));
         let output = Command::new(&llc_path)
             .arg("-march=wasm32")
+            .arg("-mcpu=mvp")
             .arg("-filetype=obj")
             .arg(&ir_path)
             .arg(&opt_flag)
             .arg("-o")
-            .arg(output_path)
+            .arg(&output_path)
             .output()?;
-        std::fs::remove_file(ir_path)?;
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "inf-llc failed with status: {}\nstderr: {}",
@@ -250,7 +252,7 @@ impl<'ctx> Compiler<'ctx> {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        let wasm_bytes = std::fs::read(output_path)?;
+        let wasm_bytes = std::fs::read(&output_path)?;
         std::fs::remove_file(output_path)?;
         Ok(wasm_bytes)
     }
