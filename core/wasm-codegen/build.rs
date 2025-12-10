@@ -61,10 +61,10 @@ fn main() {
             fs::set_permissions(&dest_llc, perms).expect("Failed to set executable permissions");
         }
 
-        println!("cargo:warning=Copied inf-llc to {}", dest_llc.display());
+        println!("cargo:info=Copied inf-llc to {}", dest_llc.display());
     } else {
         println!(
-            "cargo:warning=inf-llc not found at {}, skipping copy",
+            "cargo:info=inf-llc not found at {}, skipping copy",
             source_llc.display()
         );
     }

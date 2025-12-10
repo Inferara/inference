@@ -55,6 +55,15 @@ impl<'ctx> Compiler<'ctx> {
             None => self.context.void_type().fn_type(&[], false),
         };
         let function = self.module.add_function(fn_name.as_str(), fn_type, None);
+
+        let export_name_attr = self
+            .context
+            .create_string_attribute("wasm-export-name", fn_name.as_str());
+        function.add_attribute(
+            inkwell::attributes::AttributeLoc::Function,
+            export_name_attr,
+        );
+
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         self.visit_statements(function_definition.body.statements());

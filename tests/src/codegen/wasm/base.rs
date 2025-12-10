@@ -19,7 +19,7 @@ mod base_codegen_tests {
 
     #[test]
     fn trivial_test_execution() {
-        use wasmtime::{Engine, Instance, Module, Store, TypedFunc};
+        use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store, TypedFunc};
 
         let test_name = "trivial";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -30,18 +30,29 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes)
             .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
         let mut store = Store::new(&engine, ());
-        let instance = Instance::new(&mut store, &module, &[])
+
+        let mut linker = Linker::new(&engine);
+        let memory_type = MemoryType::new(1, None);
+        let memory = Memory::new(&mut store, memory_type)
+            .unwrap_or_else(|e| panic!("Failed to create memory: {}", e));
+        linker
+            .define(&mut store, "env", "__linear_memory", memory)
+            .unwrap_or_else(|e| panic!("Failed to define memory import: {}", e));
+
+        let instance = linker
+            .instantiate(&mut store, &module)
             .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
 
-        let run_func: TypedFunc<(), i32> = instance
-            .get_typed_func(&mut store, "run")
-            .unwrap_or_else(|e| panic!("Failed to get 'run' function: {}", e));
+        let hello_world_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "hello_world")
+            .unwrap_or_else(|e| panic!("Failed to get 'hello_world' function: {}", e));
 
-        let result = run_func
+        let result = hello_world_func
             .call(&mut store, ())
-            .unwrap_or_else(|e| panic!("Failed to execute 'run' function: {}", e));
+            .unwrap_or_else(|e| panic!("Failed to execute 'hello_world' function: {}", e));
 
-        assert_eq!(result, 42, "Expected 'run' function to return 42");
+        assert_eq!(result, 42, "Expected 'hello_world' function to return 42");
     }
 }
