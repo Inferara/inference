@@ -5,6 +5,7 @@ use crate::nodes::{
     TypeMemberAccessExpression,
 };
 use crate::type_infer::TypeChecker;
+use crate::type_info::TypeInfo;
 use crate::{
     arena::Arena,
     nodes::{
@@ -1257,6 +1258,9 @@ impl<'a> Builder<'a, InitState> {
             node.utf8_text(code).unwrap().to_string()
         };
         let node = Rc::new(SimpleType::new(id, location, name));
+        node.type_info
+            .borrow_mut()
+            .replace(TypeInfo::new(&Type::Simple(node.clone())));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),
             parent_id,

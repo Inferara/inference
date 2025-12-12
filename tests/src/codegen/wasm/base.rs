@@ -21,6 +21,22 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn const_test() {
+        let test_name = "const";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        // let expected = get_test_wasm_path(module_path!(), test_name);
+        //let expected = std::fs::read(&expected)
+        // .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
+        std::fs::write(test_dir.join("actual-const.wasm"), &actual)
+            .unwrap_or_else(|e| panic!("Failed to write actual-const.wasm: {}", e));
+        // assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
     fn trivial_test_execution() {
         use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store, TypedFunc};
 

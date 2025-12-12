@@ -1,7 +1,10 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
 use crate::utils;
-use inference_ast::nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type};
+use inference_ast::{
+    nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type},
+    type_info::{NumberTypeKindNumberType, TypeInfoKind},
+};
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
     builder::Builder,
@@ -82,7 +85,7 @@ impl<'ctx> Compiler<'ctx> {
         }
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
-        self.visit_statement(
+        self.lower_statement(
             std::iter::once(Statement::Block(function_definition.body.clone())).peekable(),
             &mut vec![function_definition.body.clone()],
         );
@@ -91,7 +94,8 @@ impl<'ctx> Compiler<'ctx> {
         }
     }
 
-    fn visit_statement<I: Iterator<Item = Statement>>(
+    #[allow(clippy::too_many_lines)]
+    fn lower_statement<I: Iterator<Item = Statement>>(
         &self,
         mut statements_iterator: Peekable<I>,
         parent_blocks_stack: &mut Vec<BlockType>,
@@ -102,7 +106,7 @@ impl<'ctx> Compiler<'ctx> {
                 BlockType::Block(block) => {
                     parent_blocks_stack.push(BlockType::Block(block.clone()));
                     for stmt in block.statements.clone() {
-                        self.visit_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
                     }
                     parent_blocks_stack.pop();
                 }
@@ -113,7 +117,7 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build forall intrinsic call");
                     parent_blocks_stack.push(BlockType::Forall(forall_block.clone()));
                     for stmt in forall_block.statements.clone() {
-                        self.visit_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
                     }
                     let forall_end = self.forall_end_intrinsic();
                     self.builder
@@ -128,7 +132,7 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build assume intrinsic call");
                     parent_blocks_stack.push(BlockType::Assume(assume_block.clone()));
                     for stmt in assume_block.statements.clone() {
-                        self.visit_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
                     }
                     let assume_end = self.assume_end_intrinsic();
                     self.builder
@@ -143,7 +147,7 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build exists intrinsic call");
                     parent_blocks_stack.push(BlockType::Exists(exists_block.clone()));
                     for stmt in exists_block.statements.clone() {
-                        self.visit_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
                     }
                     let exists_end = self.exists_end_intrinsic();
                     self.builder
@@ -158,7 +162,7 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build unique intrinsic call");
                     parent_blocks_stack.push(BlockType::Unique(unique_block.clone()));
                     for stmt in unique_block.statements.clone() {
-                        self.visit_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
                     }
                     let unique_end = self.unique_end_intrinsic();
                     self.builder
@@ -168,7 +172,7 @@ impl<'ctx> Compiler<'ctx> {
                 }
             },
             Statement::Expression(expression) => {
-                let expr = self.evaluate_expression(&expression);
+                let expr = self.lower_expression(&expression);
                 //FIXME: revisit this logic #45
                 if statements_iterator.peek().is_none()
                     && parent_blocks_stack.first().unwrap().is_non_det()
@@ -180,20 +184,84 @@ impl<'ctx> Compiler<'ctx> {
             }
             Statement::Assign(_assign_statement) => todo!(),
             Statement::Return(return_statement) => {
-                let ret = self.evaluate_expression(&return_statement.expression.borrow());
+                let ret = self.lower_expression(&return_statement.expression.borrow());
                 self.builder.build_return(Some(&ret)).unwrap();
             }
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
             Statement::If(_if_statement) => todo!(),
-            Statement::VariableDefinition(_variable_definition_statement) => todo!(),
+            Statement::VariableDefinition(_variable_definition_statement) => {
+                // let ctx_type = self.context.i32_type(); //TODO: support other types
+                // if let Some(value) = &variable_definition_statement.value {
+                //     if matches!(*value.borrow(), Expression::Uzumaki(_))
+                //         || matches!(*value.borrow(), Expression::Literal(_))
+                //     {
+                //     } else {
+                //         todo!()
+                //     }
+                // }
+            }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
-            Statement::ConstantDefinition(_constant_definition) => todo!(),
+            Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
+                Type::Array(_type_array) => todo!(),
+                Type::Simple(simple_type) => {
+                    match &simple_type.type_info.borrow().as_ref().expect("").kind {
+                        TypeInfoKind::Unit => todo!(),
+                        TypeInfoKind::Bool => todo!(),
+                        TypeInfoKind::String => todo!(),
+                        TypeInfoKind::Number(number_type_kind_number_type) => {
+                            match number_type_kind_number_type {
+                                NumberTypeKindNumberType::I8 => todo!(),
+                                NumberTypeKindNumberType::I16 => todo!(),
+                                NumberTypeKindNumberType::I32 => {
+                                    let ctx_type = self.context.i32_type();
+                                    match &constant_definition.value {
+                                        Literal::Number(number_literal) => {
+                                            let val = ctx_type.const_int(
+                                                number_literal.value.parse::<u64>().unwrap_or(0),
+                                                false,
+                                            );
+                                            let local = self
+                                                .builder
+                                                .build_alloca(ctx_type, &constant_definition.name())
+                                                .unwrap();
+                                            self.builder.build_store(local, val).unwrap();
+                                        }
+                                        _ => panic!(
+                                            "Constant value for i32 should be a number literal. Found: {:?}",
+                                            constant_definition.value
+                                        ),
+                                    }
+                                }
+                                NumberTypeKindNumberType::I64 => todo!(),
+                                NumberTypeKindNumberType::U8 => todo!(),
+                                NumberTypeKindNumberType::U16 => todo!(),
+                                NumberTypeKindNumberType::U32 => todo!(),
+                                NumberTypeKindNumberType::U64 => todo!(),
+                            }
+                        }
+                        TypeInfoKind::Custom(_) => todo!(),
+                        TypeInfoKind::Array(_type_info, _) => todo!(),
+                        TypeInfoKind::Generic(_) => todo!(),
+                        TypeInfoKind::QualifiedName(_) => todo!(),
+                        TypeInfoKind::Qualified(_) => todo!(),
+                        TypeInfoKind::Function(_) => todo!(),
+                        TypeInfoKind::Struct(_) => todo!(),
+                        TypeInfoKind::Enum(_) => todo!(),
+                        TypeInfoKind::Spec(_) => todo!(),
+                    }
+                }
+                Type::Generic(_generic_type) => todo!(),
+                Type::Function(_function_type) => todo!(),
+                Type::QualifiedName(_qualified_name) => todo!(),
+                Type::Qualified(_type_qualified_name) => todo!(),
+                Type::Custom(_identifier) => todo!(),
+            },
         }
     }
 
-    fn evaluate_expression(&self, expression: &Expression) -> inkwell::values::IntValue<'ctx> {
+    fn lower_expression(&self, expression: &Expression) -> inkwell::values::IntValue<'ctx> {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
             Expression::Binary(_binary_expression) => todo!(),
@@ -203,29 +271,49 @@ impl<'ctx> Compiler<'ctx> {
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
             Expression::Parenthesized(_parenthesized_expression) => todo!(),
-            Expression::Literal(literal) => match literal {
-                Literal::Array(_array_literal) => todo!(),
-                Literal::Bool(_bool_literal) => todo!(),
-                Literal::String(_string_literal) => todo!(),
-                Literal::Number(number_literal) => self
-                    .context
-                    .i32_type()
-                    .const_int(number_literal.value.parse::<u64>().unwrap_or(0), false),
-                Literal::Unit(_unit_literal) => todo!(),
-            },
-            Expression::Identifier(_identifier) => todo!(),
+            Expression::Literal(literal) => self.lower_literal(literal),
+            Expression::Identifier(_identifier) => {}
             Expression::Type(_) => todo!(),
-            Expression::Uzumaki(_uzumaki_expression) => {
-                let uzumaki_i32_intr = self.uzumaki_i32_intrinsic();
-                let call = self
-                    .builder
-                    .build_call(uzumaki_i32_intr, &[], "uz_i32")
-                    .expect("Failed to build uzumaki_i32_intrinsic call");
-                let call_kind = call.try_as_basic_value();
-                let basic = call_kind.unwrap_basic();
-                basic.into_int_value()
-            }
+            Expression::Uzumaki(_uzumaki_expression) => self.lower_uzumaki_i32_expression(),
         }
+    }
+
+    fn lower_literal(&self, literal: &Literal) -> inkwell::values::IntValue<'ctx> {
+        match literal {
+            Literal::Array(_array_literal) => todo!(),
+            Literal::Bool(bool_literal) => self
+                .context
+                .i32_type()
+                .const_int(u64::from(bool_literal.value), false),
+            Literal::String(_string_literal) => todo!(),
+            Literal::Number(number_literal) => self
+                .context
+                .i32_type()
+                .const_int(number_literal.value.parse::<u64>().unwrap_or(0), false),
+            Literal::Unit(_unit_literal) => todo!(),
+        }
+    }
+
+    fn lower_uzumaki_i32_expression(&self) -> inkwell::values::IntValue<'ctx> {
+        let uzumaki_i32_intr = self.uzumaki_i32_intrinsic();
+        let call = self
+            .builder
+            .build_call(uzumaki_i32_intr, &[], "uz_i32")
+            .expect("Failed to build uzumaki_i32_intrinsic call");
+        let call_kind = call.try_as_basic_value();
+        let basic = call_kind.unwrap_basic();
+        basic.into_int_value()
+    }
+
+    fn lower_uzumaki_i64_expression(&self) -> inkwell::values::IntValue<'ctx> {
+        let uzumaki_i64_intr = self.uzumaki_i64_intrinsic();
+        let call = self
+            .builder
+            .build_call(uzumaki_i64_intr, &[], "uz_i64")
+            .expect("Failed to build uzumaki_i64_intrinsic call");
+        let call_kind = call.try_as_basic_value();
+        let basic = call_kind.unwrap_basic();
+        basic.into_int_value()
     }
 
     fn uzumaki_i32_intrinsic(&self) -> FunctionValue<'ctx> {
