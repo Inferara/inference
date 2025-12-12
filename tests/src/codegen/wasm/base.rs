@@ -16,7 +16,7 @@ mod base_codegen_tests {
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
         // std::fs::write(test_dir.join("actual.wasm"), &actual)
-        // .unwrap_or_else(|e| panic!("Failed to write actual.wasm: {}", e));
+        //     .unwrap_or_else(|e| panic!("Failed to write actual.wasm: {}", e));
         assert_wasms_modules_equivalence(&expected, &actual);
     }
 
@@ -68,12 +68,12 @@ mod base_codegen_tests {
         let actual = wasm_codegen(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
-        // let expected = get_test_wasm_path(module_path!(), test_name);
-        // let expected = std::fs::read(&expected)
-        //     .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
-        let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
-        std::fs::write(test_dir.join("actual-nondet.wasm"), &actual)
-            .unwrap_or_else(|e| panic!("Failed to write actual-nondet.wasm: {}", e));
-        // assert_wasms_modules_equivalence(&expected, &actual);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
+        // std::fs::write(test_dir.join("actual-nondet.wasm"), &actual)
+        //     .unwrap_or_else(|e| panic!("Failed to write actual-nondet.wasm: {}", e));
+        assert_wasms_modules_equivalence(&expected, &actual);
     }
 }

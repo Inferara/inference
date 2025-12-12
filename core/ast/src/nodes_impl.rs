@@ -130,6 +130,24 @@ impl BlockType {
             _ => true,
         }
     }
+    #[must_use]
+    pub fn is_void(&self) -> bool {
+        let fn_find_ret_stmt = |statements: &Vec<Statement>| -> bool {
+            for stmt in statements {
+                match stmt {
+                    Statement::Return(_) => return true,
+                    Statement::Block(block_type) => {
+                        if block_type.is_void() {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        };
+        !fn_find_ret_stmt(&self.statements())
+    }
 }
 
 impl Statement {

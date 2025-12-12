@@ -1,3 +1,19 @@
-fn hello_forall() -> i32 forall {
+fn hello_uzumaki() -> i32 {
     return @;
+}
+
+fn hello_world() forall {
+    @;
+}
+
+fn hello_exists() exists {
+    @;
+}
+
+fn hello_assume() assume {
+    @;
+}
+
+fn hello_unique() unique {
+    @;
 }
