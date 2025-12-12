@@ -120,6 +120,45 @@ impl BlockType {
             | BlockType::Unique(block) => block.statements.clone(),
         }
     }
+    #[must_use]
+    pub fn is_non_det(&self) -> bool {
+        match self {
+            BlockType::Block(block) => block
+                .statements
+                .iter()
+                .any(super::nodes::Statement::is_non_det),
+            _ => true,
+        }
+    }
+}
+
+impl Statement {
+    #[must_use]
+    pub fn is_non_det(&self) -> bool {
+        match self {
+            Statement::Block(block_type) => !matches!(block_type, BlockType::Block(_)),
+            Statement::Expression(expr_stmt) => expr_stmt.is_non_det(),
+            Statement::Return(ret_stmt) => ret_stmt.expression.borrow().is_non_det(),
+            Statement::Loop(loop_stmt) => loop_stmt
+                .condition
+                .borrow()
+                .as_ref()
+                .is_some_and(super::nodes::Expression::is_non_det),
+            Statement::If(if_stmt) => {
+                if_stmt.condition.borrow().is_non_det()
+                    || if_stmt.if_arm.is_non_det()
+                    || if_stmt
+                        .else_arm
+                        .as_ref()
+                        .is_some_and(super::nodes::BlockType::is_non_det)
+            }
+            Statement::VariableDefinition(var_def) => var_def
+                .value
+                .as_ref()
+                .is_some_and(|value| value.borrow().is_non_det()),
+            _ => false,
+        }
+    }
 }
 
 impl Expression {
@@ -139,6 +178,10 @@ impl Expression {
             Expression::Type(e) => Some(TypeInfo::new(e)),
             Expression::Uzumaki(e) => e.type_info.borrow().clone(),
         }
+    }
+    #[must_use]
+    pub fn is_non_det(&self) -> bool {
+        matches!(self, Expression::Uzumaki(_))
     }
 }
 
@@ -344,6 +387,11 @@ impl FunctionDefinition {
         self.returns
             .as_ref()
             .is_none_or(super::nodes::Type::is_unit_type)
+    }
+
+    #[must_use]
+    pub fn is_non_det(&self) -> bool {
+        self.body.is_non_det()
     }
 }
 

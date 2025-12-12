@@ -1,8 +1,14 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
 use crate::utils;
-use inference_ast::nodes::{Expression, FunctionDefinition, Literal, Statement, Type};
-use inkwell::{builder::Builder, context::Context, module::Module, values::FunctionValue};
+use inference_ast::nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type};
+use inkwell::{
+    attributes::{Attribute, AttributeLoc},
+    builder::Builder,
+    context::Context,
+    module::Module,
+    values::FunctionValue,
+};
 use std::rc::Rc;
 
 const UZUMAKI_I32_INTRINSIC: &str = "llvm.wasm.uzumaki.i32";
@@ -34,6 +40,17 @@ impl<'ctx> Compiler<'ctx> {
         }
     }
 
+    fn add_optimization_barriers(&self, function: FunctionValue<'ctx>) {
+        let attr_kind_optnone = Attribute::get_named_enum_kind_id("optnone");
+        let attr_kind_noinline = Attribute::get_named_enum_kind_id("noinline");
+
+        let optnone = self.context.create_enum_attribute(attr_kind_optnone, 0);
+        let noinline = self.context.create_enum_attribute(attr_kind_noinline, 0);
+
+        function.add_attribute(AttributeLoc::Function, optnone);
+        function.add_attribute(AttributeLoc::Function, noinline);
+    }
+
     pub(crate) fn visit_function_definition(&self, function_definition: &Rc<FunctionDefinition>) {
         let fn_name = function_definition.name();
         let fn_type = match &function_definition.returns {
@@ -59,56 +76,83 @@ impl<'ctx> Compiler<'ctx> {
         let export_name_attr = self
             .context
             .create_string_attribute("wasm-export-name", fn_name.as_str());
-        function.add_attribute(
-            inkwell::attributes::AttributeLoc::Function,
-            export_name_attr,
-        );
+        function.add_attribute(AttributeLoc::Function, export_name_attr);
+        if function_definition.is_non_det() {
+            self.add_optimization_barriers(function);
+        }
 
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
-        self.visit_statements(function_definition.body.statements());
+        self.visit_statement(Statement::Block(function_definition.body.clone()));
     }
 
-    fn visit_statements(&self, statements: Vec<Statement>) {
-        for stmt in statements {
-            match stmt {
-                Statement::Block(_block_type) => todo!(),
-                Statement::Expression(_expression) => todo!(),
-                Statement::Assign(_assign_statement) => todo!(),
-                Statement::Return(return_statement) => {
-                    let ret = match &*return_statement.expression.borrow() {
-                        Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
-                        Expression::Binary(_binary_expression) => todo!(),
-                        Expression::MemberAccess(_member_access_expression) => todo!(),
-                        Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
-                        Expression::FunctionCall(_function_call_expression) => todo!(),
-                        Expression::Struct(_struct_expression) => todo!(),
-                        Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
-                        Expression::Parenthesized(_parenthesized_expression) => todo!(),
-                        Expression::Literal(literal) => match literal {
-                            Literal::Array(_array_literal) => todo!(),
-                            Literal::Bool(_bool_literal) => todo!(),
-                            Literal::String(_string_literal) => todo!(),
-                            Literal::Number(number_literal) => self
-                                .context
-                                .i32_type()
-                                .const_int(number_literal.value.parse::<u64>().unwrap_or(0), false),
-                            Literal::Unit(_unit_literal) => todo!(),
-                        },
-                        Expression::Identifier(_identifier) => todo!(),
-                        Expression::Type(_) => todo!(),
-                        Expression::Uzumaki(_uzumaki_expression) => todo!(),
-                    };
-                    self.builder.build_return(Some(&ret)).unwrap();
+    fn visit_statement(&self, statement: Statement) {
+        match statement {
+            Statement::Block(block_type) => match block_type {
+                BlockType::Block(block) => {
+                    for stmt in block.statements.clone() {
+                        self.visit_statement(stmt);
+                    }
                 }
-                Statement::Loop(_loop_statement) => todo!(),
-                Statement::Break(_break_statement) => todo!(),
-                Statement::If(_if_statement) => todo!(),
-                Statement::VariableDefinition(_variable_definition_statement) => todo!(),
-                Statement::TypeDefinition(_type_definition_statement) => todo!(),
-                Statement::Assert(_assert_statement) => todo!(),
-                Statement::ConstantDefinition(_constant_definition) => todo!(),
+                BlockType::Forall(forall_block) => {
+                    let forall_start = self.forall_start_intrinsic();
+                    self.builder
+                        .build_call(forall_start, &[], "")
+                        .expect("Failed to build forall intrinsic call");
+                    for stmt in forall_block.statements.clone() {
+                        self.visit_statement(stmt);
+                    }
+                    let forall_end = self.forall_end_intrinsic();
+                    self.builder
+                        .build_call(forall_end, &[], "")
+                        .expect("Failed to build forall end intrinsic call");
+                }
+                _ => todo!(),
+            },
+            Statement::Expression(_expression) => todo!(),
+            Statement::Assign(_assign_statement) => todo!(),
+            Statement::Return(return_statement) => {
+                let ret = match &*return_statement.expression.borrow() {
+                    Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
+                    Expression::Binary(_binary_expression) => todo!(),
+                    Expression::MemberAccess(_member_access_expression) => todo!(),
+                    Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
+                    Expression::FunctionCall(_function_call_expression) => todo!(),
+                    Expression::Struct(_struct_expression) => todo!(),
+                    Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
+                    Expression::Parenthesized(_parenthesized_expression) => todo!(),
+                    Expression::Literal(literal) => match literal {
+                        Literal::Array(_array_literal) => todo!(),
+                        Literal::Bool(_bool_literal) => todo!(),
+                        Literal::String(_string_literal) => todo!(),
+                        Literal::Number(number_literal) => self
+                            .context
+                            .i32_type()
+                            .const_int(number_literal.value.parse::<u64>().unwrap_or(0), false),
+                        Literal::Unit(_unit_literal) => todo!(),
+                    },
+                    Expression::Identifier(_identifier) => todo!(),
+                    Expression::Type(_) => todo!(),
+                    Expression::Uzumaki(_uzumaki_expression) => {
+                        let uzumaki_i32_intr = self.uzumaki_i32_intrinsic();
+                        let call = self
+                            .builder
+                            .build_call(uzumaki_i32_intr, &[], "uz_i32")
+                            .expect("Failed to build uzumaki_i32_intrinsic call");
+                        let call_kind = call.try_as_basic_value();
+                        let basic = call_kind.unwrap_basic();
+                        basic.into_int_value()
+                    }
+                };
+                self.builder.build_return(Some(&ret)).unwrap();
             }
+            Statement::Loop(_loop_statement) => todo!(),
+            Statement::Break(_break_statement) => todo!(),
+            Statement::If(_if_statement) => todo!(),
+            Statement::VariableDefinition(_variable_definition_statement) => todo!(),
+            Statement::TypeDefinition(_type_definition_statement) => todo!(),
+            Statement::Assert(_assert_statement) => todo!(),
+            Statement::ConstantDefinition(_constant_definition) => todo!(),
         }
     }
 

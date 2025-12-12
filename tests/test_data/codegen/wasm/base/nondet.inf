@@ -1,0 +1,3 @@
+fn hello_forall() -> i32 forall {
+    return @;
+}

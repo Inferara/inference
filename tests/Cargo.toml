@@ -10,6 +10,7 @@ repository = { workspace = true }
 inference-ast.workspace = true
 inference-wasm-codegen.workspace = true
 inference.workspace = true
+inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
 anyhow.workspace = true
