@@ -209,7 +209,7 @@ impl<'ctx> Compiler<'ctx> {
             Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
                 Type::Array(_type_array) => todo!(),
                 Type::Simple(simple_type) => {
-                    match &simple_type.type_info.borrow().as_ref().expect("").kind {
+                    match &simple_type.type_info.borrow().as_ref().expect("SimpleType should have type_info set").kind {
                         TypeInfoKind::Unit => todo!(),
                         TypeInfoKind::Bool => todo!(),
                         TypeInfoKind::String => todo!(),
