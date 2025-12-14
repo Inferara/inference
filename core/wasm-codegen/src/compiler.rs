@@ -209,7 +209,13 @@ impl<'ctx> Compiler<'ctx> {
             Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
                 Type::Array(_type_array) => todo!(),
                 Type::Simple(simple_type) => {
-                    match &simple_type.type_info.borrow().as_ref().expect("SimpleType should have type_info set").kind {
+                    match &simple_type
+                        .type_info
+                        .borrow()
+                        .as_ref()
+                        .expect("SimpleType should have type_info set")
+                        .kind
+                    {
                         TypeInfoKind::Unit => todo!(),
                         TypeInfoKind::Bool => todo!(),
                         TypeInfoKind::String => todo!(),
@@ -292,7 +298,15 @@ impl<'ctx> Compiler<'ctx> {
                     .into_int_value()
             }
             Expression::Type(_) => todo!(),
-            Expression::Uzumaki(_uzumaki_expression) => self.lower_uzumaki_i32_expression(),
+            Expression::Uzumaki(uzumaki_expression) => {
+                if uzumaki_expression.is_i32() {
+                    return self.lower_uzumaki_i32_expression();
+                }
+                if uzumaki_expression.is_i64() {
+                    return self.lower_uzumaki_i64_expression();
+                }
+                panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");
+            }
         }
     }
 

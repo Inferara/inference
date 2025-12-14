@@ -112,10 +112,12 @@ impl<'a> Builder<'a, InitState> {
         let mut type_checker = TypeChecker::new();
         let _ = type_checker.infer_types(&mut res);
 
-        // let symbol_table = SymbolTable::build(&res, &self.types, &self.arena);
+        // let mut type_checker = TypeChecker::new();
         let t_ast = TypedAst::new(res, self.arena.clone());
+        t_ast.infer_expression_types();
         // run type inference over all expressions
-        // type_infer::traverse_source_files(&t_ast.source_files, &t_ast.symbol_table)
+        // type_checker
+        //     .infer_types(&t_ast.source_files)
         //     .map_err(|e| anyhow::Error::msg(format!("Type error: {e:?}")))?;
         Ok(Builder {
             arena: Arena::default(),

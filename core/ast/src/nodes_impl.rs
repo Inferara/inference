@@ -4,7 +4,7 @@ use crate::{
     nodes::{
         ArgumentType, IgnoreArgument, SelfReference, StructExpression, TypeMemberAccessExpression,
     },
-    type_info::{TypeInfo, TypeInfoKind},
+    type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
 };
 
 use super::nodes::{
@@ -755,6 +755,26 @@ impl UzumakiExpression {
             location,
             type_info: RefCell::new(None),
         }
+    }
+    #[must_use]
+    pub fn is_i32(&self) -> bool {
+        if let Some(type_info) = self.type_info.borrow().as_ref() {
+            return matches!(
+                type_info.kind,
+                TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+            );
+        }
+        false
+    }
+    #[must_use]
+    pub fn is_i64(&self) -> bool {
+        if let Some(type_info) = self.type_info.borrow().as_ref() {
+            return matches!(
+                type_info.kind,
+                TypeInfoKind::Number(NumberTypeKindNumberType::I64)
+            );
+        }
+        false
     }
 }
 
