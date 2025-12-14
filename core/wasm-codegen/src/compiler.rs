@@ -10,9 +10,10 @@ use inkwell::{
     builder::Builder,
     context::Context,
     module::Module,
-    values::FunctionValue,
+    types::BasicTypeEnum,
+    values::{FunctionValue, PointerValue},
 };
-use std::{iter::Peekable, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, iter::Peekable, rc::Rc};
 
 const UZUMAKI_I32_INTRINSIC: &str = "llvm.wasm.uzumaki.i32";
 const UZUMAKI_I64_INTRINSIC: &str = "llvm.wasm.uzumaki.i64";
@@ -29,6 +30,7 @@ pub(crate) struct Compiler<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
+    variables: RefCell<HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>>,
 }
 
 impl<'ctx> Compiler<'ctx> {
@@ -40,6 +42,7 @@ impl<'ctx> Compiler<'ctx> {
             context,
             module,
             builder,
+            variables: RefCell::new(HashMap::new()),
         }
     }
 
@@ -227,6 +230,10 @@ impl<'ctx> Compiler<'ctx> {
                                                 .build_alloca(ctx_type, &constant_definition.name())
                                                 .unwrap();
                                             self.builder.build_store(local, val).unwrap();
+                                            self.variables.borrow_mut().insert(
+                                                constant_definition.name(),
+                                                (local, ctx_type.into()),
+                                            );
                                         }
                                         _ => panic!(
                                             "Constant value for i32 should be a number literal. Found: {:?}",
@@ -272,7 +279,18 @@ impl<'ctx> Compiler<'ctx> {
             Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
             Expression::Parenthesized(_parenthesized_expression) => todo!(),
             Expression::Literal(literal) => self.lower_literal(literal),
-            Expression::Identifier(_identifier) => {}
+            Expression::Identifier(identifier) => {
+                let (ptr, ty) = self
+                    .variables
+                    .borrow()
+                    .get(&identifier.name)
+                    .copied()
+                    .expect("Variable not found");
+                self.builder
+                    .build_load(ty, ptr, &identifier.name)
+                    .unwrap()
+                    .into_int_value()
+            }
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(_uzumaki_expression) => self.lower_uzumaki_i32_expression(),
         }

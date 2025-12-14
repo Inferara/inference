@@ -19,3 +19,4 @@ Cargo.lock
 *.wat
 out
 test_data/**/*.json
+.*
