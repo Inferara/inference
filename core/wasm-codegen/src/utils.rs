@@ -35,7 +35,7 @@ pub(crate) fn compile_to_wasm(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    let wasm_ld_path = get_wasm_ld_path()?;
+    let wasm_ld_path = get_rust_lld_path()?;
     let wasm_path = temp_dir.path().join(output_fname).with_extension("wasm");
     let wasm_ld_output = Command::new(&wasm_ld_path)
         .arg("-flavor")
@@ -61,8 +61,22 @@ pub(crate) fn compile_to_wasm(
 }
 
 pub(crate) fn get_inf_llc_path() -> anyhow::Result<std::path::PathBuf> {
+    get_bin_path(
+        "inf-llc",
+        "This package requires LLVM with Inference intrinsics support.",
+    )
+}
+
+pub(crate) fn get_rust_lld_path() -> anyhow::Result<PathBuf> {
+    get_bin_path(
+        "rust-lld",
+        "This package requires rust-lld to link WebAssembly modules.",
+    )
+}
+
+fn get_bin_path(bin_name: &str, not_found_message: &str) -> anyhow::Result<PathBuf> {
     let exe_suffix = std::env::consts::EXE_SUFFIX;
-    let llc_name = format!("inf-llc{exe_suffix}");
+    let llc_name = format!("{bin_name}{exe_suffix}");
 
     let exe_path = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Failed to get current executable path: {e}"))?;
@@ -89,58 +103,13 @@ pub(crate) fn get_inf_llc_path() -> anyhow::Result<std::path::PathBuf> {
     }
 
     Err(anyhow::anyhow!(
-        "🚫 Inference llc binary not found\n\
+        "🚫 {bin_name} binary not found\n\
             \n\
-            This package requires LLVM with custom intrinsics support.\n\n\
+            {not_found_message}\n\n\
             Executable: {}\n\
             Searched locations:\n  - {}\n  - {}",
         exe_path.display(),
         candidates[0].display(),
         candidates[1].display()
-    ))
-}
-
-pub(crate) fn get_wasm_ld_path() -> anyhow::Result<PathBuf> {
-    let sysroot = String::from_utf8(
-        Command::new("rustc")
-            .arg("--print")
-            .arg("sysroot")
-            .output()?
-            .stdout,
-    )?
-    .trim()
-    .to_string();
-
-    let rustc_vv = String::from_utf8(Command::new("rustc").arg("-vV").output()?.stdout)?;
-    let host_triple = rustc_vv
-        .lines()
-        .find_map(|line| line.strip_prefix("host: "))
-        .ok_or_else(|| anyhow::anyhow!("failed to parse rustc -vV host triple"))?
-        .to_string();
-
-    let exe_suffix = std::env::consts::EXE_SUFFIX;
-    let host_ld = PathBuf::from(&sysroot)
-        .join("lib")
-        .join("rustlib")
-        .join(&host_triple)
-        .join("bin")
-        .join(format!("rust-lld{exe_suffix}"));
-
-    if host_ld.is_file() {
-        return Ok(host_ld);
-    }
-
-    if let Ok(path) = which::which(format!("rust-lld{exe_suffix}")) {
-        return Ok(path);
-    }
-
-    if let Ok(path) = which::which(format!("wasm-ld{exe_suffix}")) {
-        return Ok(path);
-    }
-
-    Err(anyhow::anyhow!(
-        "Could not find rust-lld or wasm-ld.\n\
-         - rust-lld is usually at <sysroot>/lib/rustlib/<host>/bin/rust-lld\n\
-         - or install LLVM lld and ensure `wasm-ld` is on PATH."
     ))
 }
