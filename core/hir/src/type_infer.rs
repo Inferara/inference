@@ -1,11 +1,12 @@
 use anyhow::bail;
 
 use crate::nodes::{
-    ArgumentType, Definition, FunctionDefinition, Identifier, Literal, OperatorKind, Statement,
+    ArgumentType, Definition, FunctionDefinition, Literal, OperatorKind, Statement,
     UnaryOperatorKind,
 };
-use crate::nodes::{Expression, Location, SimpleType, SourceFile, Type};
+use crate::nodes::{Expression, SimpleType, SourceFile};
 use crate::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
+use inference_ast::nodes::Type;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -16,6 +17,7 @@ struct FuncSignature {
     return_type: TypeInfo,
 }
 
+#[derive(Clone, Default)]
 struct SymbolTable {
     types: HashMap<String, TypeInfo>, // map of type name -> type info
     functions: HashMap<String, FuncSignature>, // map of function name -> signature
@@ -221,6 +223,7 @@ impl SymbolTable {
     }
 }
 
+#[derive(Clone, Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<String>,
@@ -263,41 +266,41 @@ impl TypeChecker {
                 match definition {
                     Definition::Type(type_definition) => {
                         self.symbol_table
-                            .register_type(&type_definition.name(), Some(&type_definition.ty))
+                            .register_type(&type_definition.name, Some(&type_definition.ty))
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
-                                    type_definition.name()
+                                    type_definition.name
                                 ));
                             });
                     }
                     Definition::Struct(struct_definition) => {
                         self.symbol_table
-                            .register_struct(&struct_definition.name())
+                            .register_struct(&struct_definition.name)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
-                                    struct_definition.name()
+                                    struct_definition.name
                                 ));
                             });
                     }
                     Definition::Enum(enum_definition) => {
                         self.symbol_table
-                            .register_enum(&enum_definition.name())
+                            .register_enum(&enum_definition.name)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
-                                    enum_definition.name()
+                                    enum_definition.name
                                 ));
                             });
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
-                            .register_spec(&spec_definition.name())
+                            .register_spec(&spec_definition.name)
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
-                                    spec_definition.name()
+                                    spec_definition.name
                                 ));
                             });
                     }
@@ -316,7 +319,7 @@ impl TypeChecker {
                 match definition {
                     Definition::Constant(constant_definition) => {
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
-                            constant_definition.name(),
+                            constant_definition.name,
                             TypeInfo::new(&constant_definition.ty),
                         ) {
                             self.errors.push(err.to_string());
@@ -358,14 +361,12 @@ impl TypeChecker {
                             continue;
                         }
                         if let Err(err) = self.symbol_table.register_function(
-                            &function_definition.name(),
+                            &function_definition.name,
                             function_definition
                                 .type_parameters
                                 .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .map(|param| param.name())
-                                .collect::<Vec<_>>(),
+                                .cloned()
+                                .unwrap_or_else(Vec::new),
                             &function_definition
                                 .arguments
                                 .as_ref()
@@ -385,7 +386,6 @@ impl TypeChecker {
                                 .as_ref()
                                 .unwrap_or(&Type::Simple(Rc::new(SimpleType::new(
                                     0,
-                                    Location::default(),
                                     "Unit".into(),
                                 ))))
                                 .clone(),
@@ -395,7 +395,7 @@ impl TypeChecker {
                     }
                     Definition::ExternalFunction(external_function_definition) => {
                         if let Err(err) = self.symbol_table.register_function(
-                            &external_function_definition.name(),
+                            &external_function_definition.name,
                             vec![],
                             &external_function_definition
                                 .arguments
@@ -414,11 +414,10 @@ impl TypeChecker {
                             &external_function_definition
                                 .returns
                                 .as_ref()
-                                .unwrap_or(&Type::Simple(Rc::new(SimpleType::new(
-                                    0,
-                                    Location::default(),
-                                    "Unit".into(),
-                                ))))
+                                .unwrap_or(&Type::Simple(Rc::new(SimpleType {
+                                    name: "Unit".into(),
+                                    type_info: TypeInfo::default(),
+                                })))
                                 .clone(),
                         ) {
                             self.errors.push(err);
@@ -432,7 +431,7 @@ impl TypeChecker {
         }
     }
 
-    fn validate_type(&mut self, ty: &Type, type_parameters: Option<&Vec<Rc<Identifier>>>) {
+    fn validate_type(&mut self, ty: &Type, type_parameters: Option<&Vec<String>>) {
         match ty {
             Type::Array(type_array) => self.validate_type(&type_array.element_type, None),
             Type::Simple(simple_type) => {
@@ -442,19 +441,15 @@ impl TypeChecker {
                 }
             }
             Type::Generic(generic_type) => {
-                if self
-                    .symbol_table
-                    .lookup_type(&generic_type.base.name())
-                    .is_none()
-                {
+                if self.symbol_table.lookup_type(&generic_type.base).is_none() {
                     self.errors
-                        .push(format!("Unknown type `{}`", generic_type.base.name()));
+                        .push(format!("Unknown type `{}`", generic_type.base));
                 }
                 if let Some(type_params) = &type_parameters {
                     if type_params.len() != generic_type.parameters.len() {
                         self.errors.push(format!(
                             "Type parameter count mismatch for `{}`: expected {}, found {}",
-                            generic_type.base.name(),
+                            generic_type.base,
                             generic_type.parameters.len(),
                             type_params.len()
                         ));
@@ -462,14 +457,13 @@ impl TypeChecker {
                     let generic_param_names: Vec<String> = generic_type
                         .parameters
                         .iter()
-                        .map(|param| param.name())
+                        .map(|param| param.clone())
                         .collect();
                     for param in &generic_type.parameters {
-                        if !generic_param_names.contains(&param.name()) {
+                        if !generic_param_names.contains(param) {
                             self.errors.push(format!(
                                 "Type parameter `{}` not found in `{}`",
-                                param.name(),
-                                generic_type.base.name()
+                                param, generic_type.base
                             ));
                         }
                     }
@@ -497,7 +491,7 @@ impl TypeChecker {
                     ArgumentType::Argument(arg) => {
                         if let Err(err) = self
                             .symbol_table
-                            .push_variable_to_scope(arg.name(), TypeInfo::new(&arg.ty))
+                            .push_variable_to_scope(arg.name, TypeInfo::new(&arg.ty))
                         {
                             self.errors.push(err.to_string());
                         }
@@ -617,7 +611,7 @@ impl TypeChecker {
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
-                    variable_definition_statement.name(),
+                    &variable_definition_statement.name,
                     TypeInfo::new(&variable_definition_statement.ty),
                 ) {
                     self.errors.push(err.to_string());
@@ -647,7 +641,7 @@ impl TypeChecker {
                 let constant_type = TypeInfo::new(&constant_definition.ty);
                 if let Err(err) = self
                     .symbol_table
-                    .push_variable_to_scope(constant_definition.name(), constant_type)
+                    .push_variable_to_scope(constant_definition.name, constant_type)
                 {
                     self.errors.push(err.to_string());
                 }
@@ -723,13 +717,13 @@ impl TypeChecker {
             Expression::FunctionCall(function_call_expression) => {
                 let signature = if let Some(s) = self
                     .symbol_table
-                    .lookup_function(&function_call_expression.name())
+                    .lookup_function(&function_call_expression.name)
                 {
                     s.clone()
                 } else {
                     self.errors.push(format!(
                         "Call to undefined function `{}`",
-                        function_call_expression.name()
+                        function_call_expression.name
                     ));
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
@@ -743,7 +737,7 @@ impl TypeChecker {
                 {
                     self.errors.push(format!(
                         "Function `{}` expects {} arguments, but {} provided",
-                        function_call_expression.name(),
+                        function_call_expression.name,
                         signature.param_types.len(),
                         arguments.len()
                     ));
@@ -781,7 +775,7 @@ impl TypeChecker {
                 }
                 let struct_type = self
                     .symbol_table
-                    .lookup_type(&struct_expression.name())
+                    .lookup_type(&struct_expression.name)
                     .cloned();
                 if let Some(struct_type) = struct_type {
                     *struct_expression.type_info.borrow_mut() = Some(struct_type.clone());
@@ -789,7 +783,7 @@ impl TypeChecker {
                 }
                 self.errors.push(format!(
                     "Struct `{}` is not defined",
-                    struct_expression.name()
+                    struct_expression.name
                 ));
                 None
             }
@@ -956,13 +950,13 @@ impl TypeChecker {
             }
             (Type::Simple(left), Type::Simple(right)) => left.name == right.name,
             (Type::Generic(left), Type::Generic(right)) => {
-                left.base.name() == right.base.name() && left.parameters == right.parameters
+                left.base == right.base && left.parameters == right.parameters
             }
-            (Type::Qualified(left), Type::Qualified(right)) => left.name() == right.name(),
+            (Type::Qualified(left), Type::Qualified(right)) => left.name == right.name,
             (Type::QualifiedName(left), Type::QualifiedName(right)) => {
-                left.qualifier() == right.qualifier() && left.name() == right.name()
+                left.qualifier == right.qualifier && left.name == right.name
             }
-            (Type::Custom(left), Type::Custom(right)) => left.name() == right.name(),
+            (Type::Custom(left), Type::Custom(right)) => left.name == right.name,
             (Type::Function(left), Type::Function(right)) => {
                 let left_has_return_type = left.returns.is_some();
                 let right_has_return_type = right.returns.is_some();

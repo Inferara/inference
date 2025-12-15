@@ -1,7 +1,7 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
 use crate::utils;
-use inference_ast::{
+use inference_hir::{
     nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type},
     type_info::{NumberTypeKindNumberType, TypeInfoKind},
 };

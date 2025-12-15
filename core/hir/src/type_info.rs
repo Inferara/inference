@@ -1,7 +1,7 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::nodes::Type;
+use inference_ast::nodes::Type;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum NumberTypeKindNumberType {
@@ -113,19 +113,23 @@ impl TypeInfo {
                 type_params: vec![],
             },
             Type::Generic(generic) => Self {
-                kind: TypeInfoKind::Generic(generic.base.name.clone()),
-                type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
+                kind: TypeInfoKind::Generic(generic.base.name().clone()),
+                type_params: generic
+                    .parameters
+                    .iter()
+                    .map(|p| p.name().clone())
+                    .collect(),
             },
             Type::QualifiedName(qualified_name) => Self {
                 kind: TypeInfoKind::QualifiedName(format!(
                     "{}::{}",
-                    qualified_name.qualifier(),
-                    qualified_name.name()
+                    qualified_name.qualifier.name(),
+                    qualified_name.name.name()
                 )),
                 type_params: vec![],
             },
             Type::Qualified(qualified) => Self {
-                kind: TypeInfoKind::Qualified(qualified.name.name.clone()),
+                kind: TypeInfoKind::Qualified(qualified.name.name().clone()),
                 type_params: vec![],
             },
             Type::Array(array) => Self {

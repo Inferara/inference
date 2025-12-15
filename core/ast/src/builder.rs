@@ -4,8 +4,6 @@ use crate::nodes::{
     ArgumentType, Directive, IgnoreArgument, Misc, SelfReference, StructExpression,
     TypeMemberAccessExpression,
 };
-use crate::type_infer::TypeChecker;
-use crate::type_info::TypeInfo;
 use crate::{
     arena::Arena,
     nodes::{
@@ -20,7 +18,6 @@ use crate::{
         TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
         VariableDefinitionStatement,
     },
-    t_ast::TypedAst,
 };
 use tree_sitter::Node;
 
@@ -40,7 +37,6 @@ pub type CompletedBuilder<'a> = Builder<'a, CompleteState>;
 pub struct Builder<'a, S> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    t_ast: Option<TypedAst>,
     _state: PhantomData<S>,
 }
 
@@ -56,7 +52,6 @@ impl<'a> Builder<'a, InitState> {
         Self {
             arena: Arena::default(),
             source_code: Vec::new(),
-            t_ast: None,
             _state: PhantomData,
         }
     }
@@ -109,20 +104,9 @@ impl<'a> Builder<'a, InitState> {
             }
             res.push(ast);
         }
-        let mut type_checker = TypeChecker::new();
-        let _ = type_checker.infer_types(&mut res);
-
-        // let mut type_checker = TypeChecker::new();
-        let t_ast = TypedAst::new(res, self.arena.clone());
-        t_ast.infer_expression_types();
-        // run type inference over all expressions
-        // type_checker
-        //     .infer_types(&t_ast.source_files)
-        //     .map_err(|e| anyhow::Error::msg(format!("Type error: {e:?}")))?;
         Ok(Builder {
             arena: Arena::default(),
             source_code: Vec::new(),
-            t_ast: Some(t_ast),
             _state: PhantomData,
         })
     }
@@ -1260,9 +1244,6 @@ impl<'a> Builder<'a, InitState> {
             node.utf8_text(code).unwrap().to_string()
         };
         let node = Rc::new(SimpleType::new(id, location, name));
-        node.type_info
-            .borrow_mut()
-            .replace(TypeInfo::new(&Type::Simple(node.clone())));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),
             parent_id,
@@ -1418,14 +1399,4 @@ impl<'a> Builder<'a, InitState> {
     }
 }
 
-impl Builder<'_, CompleteState> {
-    /// Returns typed AST
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if resulted `TypedAst` is `None` which means an error occured during the parsing process.
-    #[must_use]
-    pub fn t_ast(self) -> TypedAst {
-        self.t_ast.unwrap()
-    }
-}
+impl Builder<'_, CompleteState> {}
