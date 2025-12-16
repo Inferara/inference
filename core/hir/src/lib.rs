@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 pub mod hir;
-mod nodes;
+pub mod nodes;
 mod nodes_impl;
 mod symbol_table;
 // mod type_inference;

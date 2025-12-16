@@ -10,6 +10,11 @@ pub struct Arena {
 }
 
 impl Arena {
+    /// Adds a node to the arena with the specified parent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the node ID is zero or if a node with the same ID already exists in the arena.
     pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
         // println!("Adding node with ID: {node:?}");
         assert!(node.id() != 0, "Node ID must be non-zero");
@@ -37,10 +42,12 @@ impl Arena {
         self.node_routes.push(node);
     }
 
+    #[must_use]
     pub fn find_node(&self, id: u32) -> Option<AstNode> {
         self.nodes.get(&id).cloned()
     }
 
+    #[must_use]
     pub fn find_parent_node(&self, id: u32) -> Option<u32> {
         self.node_routes
             .iter()
@@ -74,6 +81,7 @@ impl Arena {
         result
     }
 
+    #[must_use]
     pub fn list_type_definitions(&self) -> Vec<Rc<TypeDefinition>> {
         self.list_nodes_cmp(|node| {
             if let AstNode::Definition(Definition::Type(type_def)) = node {

@@ -1,5 +1,7 @@
+use std::rc::Rc;
+
 use crate::{
-    nodes::{Expression, Literal, UzumakiExpression},
+    nodes::{Definition, Expression, FunctionDefinition, Literal, SourceFile, UzumakiExpression},
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -47,16 +49,32 @@ impl Literal {
 impl UzumakiExpression {
     #[must_use]
     pub fn is_i32(&self) -> bool {
-        return matches!(
+        matches!(
             self.type_info.kind,
             TypeInfoKind::Number(NumberTypeKindNumberType::I32)
-        );
+        )
     }
     #[must_use]
     pub fn is_i64(&self) -> bool {
-        return matches!(
+        matches!(
             self.type_info.kind,
             TypeInfoKind::Number(NumberTypeKindNumberType::I64)
-        );
+        )
+    }
+}
+
+impl SourceFile {
+    #[must_use]
+    pub fn function_definitions(&self) -> Vec<Rc<FunctionDefinition>> {
+        self.definitions
+            .iter()
+            .filter_map(|item| {
+                if let Definition::Function(func_def) = item {
+                    Some(func_def.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }

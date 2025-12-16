@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 use crate::utils;
 use inference_hir::{
-    nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type},
+    nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement},
     type_info::{NumberTypeKindNumberType, TypeInfoKind},
 };
 use inkwell::{
@@ -58,9 +58,9 @@ impl<'ctx> Compiler<'ctx> {
     }
 
     pub(crate) fn visit_function_definition(&self, function_definition: &Rc<FunctionDefinition>) {
-        let fn_name = function_definition.name();
+        let fn_name = function_definition.name;
         let fn_type = match &function_definition.returns {
-            Some(ret_type) => match ret_type {
+             match &ret_type.kind {
                 Type::Array(_array_type) => todo!(),
                 Type::Simple(simple_type) => match simple_type.name.to_lowercase().as_str() {
                     "i32" => self.context.i32_type().fn_type(&[], false),
@@ -74,8 +74,7 @@ impl<'ctx> Compiler<'ctx> {
                 Type::QualifiedName(_qualified_name) => todo!(),
                 Type::Qualified(_type_qualified_name) => todo!(),
                 Type::Custom(_identifier) => todo!(),
-            },
-            None => self.context.void_type().fn_type(&[], false),
+            }
         };
         let function = self.module.add_function(fn_name.as_str(), fn_type, None);
 
@@ -206,7 +205,7 @@ impl<'ctx> Compiler<'ctx> {
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
-            Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
+            Statement::ConstantDefinition(constant_definition) => match &constant_definition.type_info {
                 Type::Array(_type_array) => todo!(),
                 Type::Simple(simple_type) => {
                     match &simple_type

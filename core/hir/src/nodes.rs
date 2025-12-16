@@ -168,6 +168,7 @@ pub struct ExternalFunctionDefinition {
     pub returns: Option<TypeInfo>,
 }
 
+//TODO delete me
 #[derive(Clone, Debug)]
 pub struct TypeDefinition {
     pub name: String,
@@ -230,6 +231,7 @@ pub struct VariableDefinitionStatement {
     pub is_uzumaki: bool,
 }
 
+//TODO delete me
 #[derive(Clone, Debug)]
 pub struct TypeDefinitionStatement {
     pub name: String,
