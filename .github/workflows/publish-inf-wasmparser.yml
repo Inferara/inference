@@ -11,7 +11,7 @@ env:
 jobs:
   publish:
     name: Publish inf-wasmparser to crates.io
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, X64, Linux]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

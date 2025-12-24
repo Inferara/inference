@@ -10,7 +10,7 @@ jobs:
   coverage:
     strategy:
       matrix:
-        os: [Ubuntu]
+        os: [Linux]
         toolchain:
           - nightly
     runs-on: [self-hosted, X64, "${{ matrix.os }}"]
