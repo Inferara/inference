@@ -32,7 +32,7 @@ cargo run -p inference-cli -- infc path/to/file.inf --parse
 After building you can call the binary directly:
 
 ```bash
-./target/debug/infc path/to/file.inf --parse --codegen -o
+./infc path/to/file.inf --codegen -o
 ```
 
 ### Show version

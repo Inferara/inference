@@ -19,7 +19,7 @@ fn main() {
     let libllvm_lib = if cfg!(target_os = "windows") {
         "libLLVM.dll"
     } else {
-        "libLLVM.so"
+        "libLLVM.so.21.1-rust-1.94.0-nightly"
     };
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -30,9 +30,9 @@ fn main() {
     let source_bin_dir = workspace_root.join("external").join("bin").join(platform);
     let source_lib_dir = workspace_root.join("external").join("lib").join(platform);
 
-    let source_llc = source_bin_dir.join(platform).join(&llc_binary);
-    let source_rust_lld = source_bin_dir.join(platform).join(&rust_lld_binary);
-    let source_lib_llvm = source_lib_dir.join(platform).join(libllvm_lib);
+    let source_llc = source_bin_dir.join(&llc_binary);
+    let source_rust_lld = source_bin_dir.join(&rust_lld_binary);
+    let source_lib_llvm = source_lib_dir.join(libllvm_lib);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target_profile_dir = out_dir
