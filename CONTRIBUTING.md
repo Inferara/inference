@@ -58,6 +58,51 @@ Every PR (except for documentation-only changes and renaming) must include tests
 When writing unit tests, you probably need to have Inference source code as input. In this case, locate the code on top of the test with in a compact format. For example:
 
 ```rust
+#[test]
+fn test_parse_simple_function() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let ast = build_ast(source.to_string());
+    let source_files = &ast.source_files;
+    assert_eq!(source_files.len(), 1);
+
+    let definitions = &source_files[0].definitions;
+    assert_eq!(definitions.len(), 1);
+}
 ```
 
+As you can see, the source code is compact and fits within one line. When it makes sense, compact the code because spaces are ignored by the parser anyway.
+
 ### Code Generation Tests
+
+Code generation (codegen) tests validates if the actual lowering matches the exppected one. With the help of some utilities, you can write such tests easily. Directories `tests/src/codegen` and `tests/test_data/codegen` are paired and helps to organize codegen tests.
+
+Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial.inf` and an expected binary next to it. And if it is, then you can a test as easy as:
+
+```rust
+    #[test]
+    fn trivial_test() {
+        let test_name = "trivial";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+```
+
+Of course, before setting up such a test, it is absolutely required to check binaries and provide an execution test suit for them. After review, execution tests can be removed. For running wasm binaries, you can use `wasmtime` CLI tool.
+
+### `#[should_panic]`
+
+Do not use `#[should_panic]` tests. Instead, explicitly check for None, Err, etc.
+
+Rationale: `#[should_panic]` is a tool for library authors to make sure that the API does not fail silently when misused. `infc` is not a library, we don't need to test for API misuse, and we have to handle any user input without panics. Panic messages in the logs from the `#[should_panic]` tests are confusing.
+
+### `#[ignore]`
+
+Do not `#[ignore]` tests. If the test currently does not work, assert the wrong behavior and add a fixme explaining why it is wrong.
+
+Rationale: noticing when the behavior is fixed, making sure that even the wrong behavior is acceptable (ie, not a panic).
