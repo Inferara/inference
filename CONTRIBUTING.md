@@ -1,9 +1,9 @@
-# Contributing guide
+# Contributing Guide
 
 ## Style
 
-We keep code clean and constantly refactoring it for better readability, maintainability, and performance.
-- It is totally fine and encouraged to refactor existing code and send PRs for that. Event if it is a small renaming or a typo fix.
+We keep code clean and constantly refactor it for better readability, maintainability, and performance.
+- It is totally fine and encouraged to refactor existing code and send PRs for that, even if it is a small renaming or a typo fix.
 - Do not mix up refactoring with new features/bug fixes in a single PR.
 
 ## AI Generated Code
@@ -27,7 +27,7 @@ We prefer to keep dependencies to a minimum so we can control the code quality, 
 
 We use the `main` branch as the default branch and create tags for releases. For new features and bug fixes, please create feature branches from `main` and open pull requests against `main`.
 
-Prior starting work on a PR, please ensure that you have an issue created for it and assinged to yourself. If a scope of work is less than existing issue, create a new issue and link it to the parent one.
+Before starting work on a PR, please ensure that there is an issue created for it and that it is assigned to you. If your planned work is only a subset of an existing issue, create a new issue for your specific task and link it to the parent one.
 
 ## Branch Naming
 
@@ -43,13 +43,13 @@ Please, do not use emoji in commit messages. Keep them simple and descriptive. A
 
 ## Clippy
 
-We use `clippy` but sometimes it is too lound. In this case, it is ok to disable specific warnings.
+We use `clippy`, but sometimes it is too noisy. In those cases, it is OK to disable specific warnings.
 
 # Code
 
 ## Tests
 
-We tend to have as good test coverage as possible. At the same time we keep a balance between writing redundant test that can be make the codebase less readable and maintainable. Please keep in mind this balance when writing tests.
+We tend to have as good test coverage as possible. At the same time we keep a balance between writing redundant tests that can make the codebase less readable and maintainable. Please keep in mind this balance when writing tests.
 
 Every PR (except for documentation-only changes and renaming) must include tests that cover the changes made.
 
@@ -74,7 +74,7 @@ As you can see, the source code is compact and fits within one line. When it mak
 
 ### Code Generation Tests
 
-Code generation (codegen) tests validates if the actual lowering matches the exppected one. With the help of some utilities, you can write such tests easily. Directories `tests/src/codegen` and `tests/test_data/codegen` are paired and helps to organize codegen tests.
+Code generation (codegen) tests validate that the actual lowering matches the expected one. With the help of some utilities, you can write such tests easily. Directories `tests/src/codegen` and `tests/test_data/codegen` are paired and help to organize codegen tests.
 
 Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial.inf` and an expected binary next to it. And if it is, then you can a test as easy as:
 
@@ -93,7 +93,7 @@ Modules in the `codegen` directory must reflect the structure of the `test_data/
     }
 ```
 
-Of course, before setting up such a test, it is absolutely required to check binaries and provide an execution test suit for them. After review, execution tests can be removed. For running wasm binaries, you can use `wasmtime` CLI tool.
+Of course, before setting up such a test, it is absolutely required to check binaries and provide an execution test suite for them. After review, execution tests can be removed. For running wasm binaries, you can use the `wasmtime` CLI tool.
 
 ### `#[should_panic]`
 
@@ -106,3 +106,82 @@ Rationale: `#[should_panic]` is a tool for library authors to make sure that the
 Do not `#[ignore]` tests. If the test currently does not work, assert the wrong behavior and add a fixme explaining why it is wrong.
 
 Rationale: noticing when the behavior is fixed, making sure that even the wrong behavior is acceptable (ie, not a panic).
+
+## Provide Constructed Function Parameters
+
+When writing a function, prefer to provide already constructed parameters instead of `Option`s or similar structs. This makes the function easier to use and understand.
+For example, instead of something like this:
+
+```rust
+fn string_len(input: Option<String>) -> i32 {
+    input.unwrap_or_default().len() as i32
+}
+```
+
+So `string_len` checks if the `input` is available. Instead, prefer this:
+
+```rust
+fn string_len(input: String) -> i32 {
+    input.len() as i32
+}
+```
+So `string_len` always receives a valid `String`, and the caller is responsible for providing it.
+
+Similarly, a function should not validate its parameters and split control flow based on that. Instead, it should assume that the parameters are within the expected range and behave accordingly. This makes the function more predictable and easier to test.
+
+For example, instead of this:
+
+```rust
+fn divide(a: i32, b: i32) -> Option<i32> {
+    if b == 0 {
+        None
+    } else {
+        Some(a / b)
+    }
+}
+```
+
+Prefer this, where validation happens at the call site and the function assumes valid inputs:
+
+```rust
+fn divide(a: i32, b: i32) -> i32 {
+    a / b
+}
+
+fn foo() {
+    let x: i32 = ...;
+    let y: i32 = ...;
+
+    if y == 0 {
+        panic!("Division by zero");
+    }
+
+    let result = divide(x, y);
+    // Use result
+}
+```
+
+## Idiomatic Condition Checks
+
+Use `if let` and `let match` constructs for condition checks instead of manual `is_some`, `is_none`, etc. This makes the code more idiomatic and easier to read.
+
+## Type Invariants
+
+If a type has invariants, then invariant fields must be private, set during construction, and never exposed via setters.
+
+## Useless Types
+
+Always prefer types on the left
+
+```rust
+// GOOD      BAD
+&[T]         &Vec<T>
+&str         &String
+Option<&T>   &Option<T>
+&Path        &PathBuf
+```
+
+## Constructors
+
+Prefer `Default` to zero-argument new function.
+Prefer `Default` even if it has to be implemented manually.
