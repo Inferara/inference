@@ -10,7 +10,7 @@ Inference is a programming language designed for building verifiable software. I
 
 ## Learn
 
-- Access our Inference [book](https://inference-lang.org/book) for how to get started guide
+- Access our Inference [book](https://inference-lang.org/book) for a guide on how to get started
 - Inference Programming Language [specification](https://github.com/Inferara/inference-language-spec)
 
 ## Inference Compiler CLI (`infc`)
