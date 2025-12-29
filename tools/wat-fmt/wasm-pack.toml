@@ -7,4 +7,4 @@ keywords = ["wasm", "rust", "webassembly"]
 
 [package.metadata.wasm-pack]
 publish = true
-target = "wasm32-unknown-unknown"
+target = "wasm32v1-none"

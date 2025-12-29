@@ -3,4 +3,4 @@ PATH = { value = "external/bin", relative = true }
 LD_LIBRARY_PATH = { value = "external/lib", relative = true }
 
 [build]
-rustflags = ["-L", "native=external/lib"]
+rustflags = ["-L", "native=external/lib", "-C", "link-arg=-Wl,--allow-multiple-definition"]

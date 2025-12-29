@@ -141,4 +141,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", source_llc.display());
     println!("cargo:rerun-if-changed={}", source_rust_lld.display());
     println!("cargo:rerun-if-changed={}", source_lib_llvm.display());
+
+    // Link libffi which is required by LLVM's ExternalFunctions
+    #[cfg(target_os = "windows")]
+    println!("cargo:rustc-link-lib=ffi");
 }

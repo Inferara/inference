@@ -2,6 +2,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 #[command(
+    name = "infc",
     author,
     version,
     about = "Inference compiler CLI (infc)",

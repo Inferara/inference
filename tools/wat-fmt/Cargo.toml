@@ -9,14 +9,13 @@ description = "A pretty formatter for WebAssembly Text Format"
 
 [dependencies]
 wasm-bindgen = { version = "0.2.84", optional = true }
-wee_alloc = { version = "0.4", default-features = false, optional = true }
 
 [profile.release]
 opt-level = "s"
 panic = "abort"
 
 [features]
-wasm = ["wasm-bindgen", "wee_alloc"]
+wasm = ["wasm-bindgen"]
 
 # [lib]
 # crate-type = ["cdylib"]
