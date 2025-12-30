@@ -7,7 +7,7 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug CLI",
+            "name": "CLI",
             "preLaunchTask": "BuildCompiler",
             "cargo": {
                 "args": [
@@ -32,7 +32,7 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug playground",
+            "name": "Playground",
             "preLaunchTask": "BuildCompiler",
             "cargo": {
                 "args": [

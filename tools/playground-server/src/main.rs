@@ -1,6 +1,8 @@
 use actix_cors::Cors;
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{App, HttpResponse, HttpServer, Responder, post, web};
 use serde::{Deserialize, Serialize};
+
+use inference::{codegen, parse, wasm_to_v};
 
 #[derive(Deserialize)]
 struct CompileRequest {
@@ -9,55 +11,62 @@ struct CompileRequest {
 
 #[derive(Deserialize, Serialize)]
 struct Response {
-    wat: String,
+    ll: String,
     wasm: Vec<u8>,
     wasm_str: String,
     v: String,
     errors: Vec<String>,
 }
 
-fn parse_inf_file(_: &str) -> Response {
-    // let mut wasm = vec![];
-    let v = String::new();
+fn parse_inf_file(inf_code: &str) -> Response {
     let errors = vec![];
 
-    // let wat = match compile_to_wat(input) {
-    //     Ok(w) => w,
-    //     Err(e) => {
-    //         errors.push(e.to_string());
-    //         return Response {
-    //             wat: String::new(),
-    //             wasm: vec![],
-    //             wasm_str: String::new(),
-    //             v: String::new(),
-    //             errors,
-    //         };
-    //     }
-    // };
+    let parse_result = match parse(inf_code) {
+        Ok(result) => result,
+        Err(e) => {
+            return Response {
+                ll: String::new(),
+                wasm: vec![],
+                wasm_str: String::new(),
+                v: String::new(),
+                errors: vec![e.to_string()],
+            };
+        }
+    };
 
-    // if !wat.is_empty() {
-    //     wat_to_wasm(&wat)
-    //         .map(|w| wasm = w)
-    //         .unwrap_or_else(|e| errors.push(e.to_string()));
+    let wasm_bytes = match codegen(&parse_result) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return Response {
+                ll: String::new(),
+                wasm: vec![],
+                wasm_str: String::new(),
+                v: String::new(),
+                errors: vec![e.to_string()],
+            };
+        }
+    };
 
-    //     wasm_to_v("playground", &wasm)
-    //         .map(|v_str| v = v_str)
-    //         .unwrap_or_else(|e| errors.push(e.to_string()));
+    let v = match wasm_to_v("playground", &wasm_bytes) {
+        Ok(v_str) => v_str,
+        Err(e) => {
+            return Response {
+                ll: String::new(),
+                wasm: vec![],
+                wasm_str: String::new(),
+                v: String::new(),
+                errors: vec![e.to_string()],
+            };
+        }
+    };
 
-    //     let wat = wat_format(&wat);
-    //     let wasm_str = wasm_format(&wasm);
-    //     Response {
-    //         wat,
-    //         wasm,
-    //         wasm_str,
-    //         v,
-    //         errors,
-    //     }
-    // } else {
     Response {
-        wat: String::new(),
-        wasm: vec![],
-        wasm_str: String::new(),
+        ll: String::new(),
+        wasm: wasm_bytes.clone(),
+        wasm_str: wasm_bytes
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>(),
         v,
         errors,
     }
@@ -78,13 +87,14 @@ async fn main() -> std::io::Result<()> {
             .wrap(
                 Cors::default()
                     .allowed_origin("http://localhost:3000")
+                    .allowed_origin("http://localhost:3001")
                     .allowed_methods(vec!["POST", "GET"])
                     .allowed_headers(vec!["Content-Type"])
                     .supports_credentials(),
             )
             .service(compile_code)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("127.0.0.1", 8181))?
     .run()
     .await
 }

@@ -40,9 +40,22 @@ pub(crate) fn compile_to_wasm(
     }
     let rust_lld_path = get_rust_lld_path()?;
     let wasm_path = temp_dir.path().join(output_fname).with_extension("wasm");
-    let mut lld_cmd = Command::new(&rust_lld_path);
-    configure_llvm_env(&mut lld_cmd)?;
-    let wasm_lld_output = lld_cmd
+
+    // Make rust-lld self-contained by pointing the dynamic linker to the directory
+    // where rust-lld and the copied LLVM libraries live (see build.rs).
+    let mut wasm_ld_cmd = Command::new(&wasm_ld_path);
+    if let Some(bin_dir) = wasm_ld_path.parent() {
+        if let Ok(existing_ld_path) = std::env::var("LD_LIBRARY_PATH") {
+            wasm_ld_cmd.env(
+                "LD_LIBRARY_PATH",
+                format!("{}:{existing_ld_path}", bin_dir.display()),
+            );
+        } else {
+            wasm_ld_cmd.env("LD_LIBRARY_PATH", bin_dir.as_os_str());
+        }
+    }
+
+    let wasm_ld_output = wasm_ld_cmd
         .arg("-flavor")
         .arg("wasm")
         .arg(&obj_path)
