@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::types::{Expression, FunctionDefinition, OperatorKind, Statement, Type};
+use crate::nodes::{Expression, OperatorKind, Type};
 
 /// The `type_inference` module provides functionality for performing multi-pass
 /// type checking and inference on a Rust-like abstract syntax tree (AST).
@@ -47,7 +47,6 @@ use crate::types::{Expression, FunctionDefinition, OperatorKind, Statement, Type
 /// `TypeChecker.infer_types(&mut ast)` to annotate it or produce errors.)
 ///
 ///
-
 /// Symbol table entry for a type definition.
 #[derive(Debug)]
 struct TypeInfo {

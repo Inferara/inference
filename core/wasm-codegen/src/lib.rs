@@ -1,12 +1,11 @@
 #![warn(clippy::pedantic)]
 
-use inference_ast::t_ast::TypedAst;
+use crate::compiler::Compiler;
+use inference_hir::hir::Hir;
 use inkwell::{
     context::Context,
     targets::{InitializationConfig, Target},
 };
-
-use crate::compiler::Compiler;
 
 mod compiler;
 mod utils;
@@ -19,26 +18,25 @@ mod utils;
 /// support is not yet implemented.
 ///
 /// Returns an error if code generation fails.
-pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
+pub fn codegen(hir: &Hir) -> anyhow::Result<Vec<u8>> {
     Target::initialize_webassembly(&InitializationConfig::default());
     let context = Context::create();
     let compiler = Compiler::new(&context, "wasm_module");
 
-    if t_ast.source_files.is_empty() {
+    if hir.arena.sources.is_empty() {
         return compiler.compile_to_wasm("output.wasm", 3);
     }
-    if t_ast.source_files.len() > 1 {
+    if hir.arena.sources.len() > 1 {
         todo!("Multi-file support not yet implemented");
     }
 
-    traverse_t_ast_with_compiler(t_ast, &compiler);
-
+    traverse_hir_with_compiler(hir, &compiler);
     let wasm_bytes = compiler.compile_to_wasm("output.wasm", 3)?;
     Ok(wasm_bytes)
 }
 
-fn traverse_t_ast_with_compiler(t_ast: &TypedAst, compiler: &Compiler) {
-    for source_file in &t_ast.source_files {
+fn traverse_hir_with_compiler(hir: &Hir, compiler: &Compiler) {
+    for source_file in &hir.arena.sources {
         for func_def in source_file.function_definitions() {
             compiler.visit_function_definition(&func_def);
         }

@@ -20,6 +20,7 @@ repository = "https://github.com/Inferara/inference"
 # Core Inference crates
 inference = { path = "./core/inference", version = "0.0.1" }
 inference-ast = { path = "./core/ast", version = "0.0.1" }
+inference-hir = { path = "./core/hir", version = "0.0.1" }
 inference-cli = { path = "./core/cli", version = "0.0.1" }
 inference-wasm-to-v-translator = { path = "./core/wasm-to-v", version = "0.0.1" }
 inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
@@ -34,7 +35,7 @@ wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 
-tree-sitter = "0.26.2"
+tree-sitter = "0.26.3"
 tree-sitter-inference = "0.0.37"
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive", "rc"] }

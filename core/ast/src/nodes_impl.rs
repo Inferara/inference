@@ -1,10 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::{
-    nodes::{
-        ArgumentType, IgnoreArgument, SelfReference, StructExpression, TypeMemberAccessExpression,
-    },
-    type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
+use crate::nodes::{
+    ArgumentType, IgnoreArgument, SelfReference, StructExpression, TypeMemberAccessExpression,
 };
 
 use super::nodes::{
@@ -106,122 +103,6 @@ impl SourceFile {
                 _ => None,
             })
             .collect()
-    }
-}
-
-impl BlockType {
-    #[must_use]
-    pub fn statements(&self) -> Vec<Statement> {
-        match self {
-            BlockType::Block(block)
-            | BlockType::Forall(block)
-            | BlockType::Assume(block)
-            | BlockType::Exists(block)
-            | BlockType::Unique(block) => block.statements.clone(),
-        }
-    }
-    #[must_use]
-    pub fn is_non_det(&self) -> bool {
-        match self {
-            BlockType::Block(block) => block
-                .statements
-                .iter()
-                .any(super::nodes::Statement::is_non_det),
-            _ => true,
-        }
-    }
-    #[must_use]
-    pub fn is_void(&self) -> bool {
-        let fn_find_ret_stmt = |statements: &Vec<Statement>| -> bool {
-            for stmt in statements {
-                match stmt {
-                    Statement::Return(_) => return true,
-                    Statement::Block(block_type) => {
-                        if block_type.is_void() {
-                            return true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            false
-        };
-        !fn_find_ret_stmt(&self.statements())
-    }
-}
-
-impl Statement {
-    #[must_use]
-    pub fn is_non_det(&self) -> bool {
-        match self {
-            Statement::Block(block_type) => !matches!(block_type, BlockType::Block(_)),
-            Statement::Expression(expr_stmt) => expr_stmt.is_non_det(),
-            Statement::Return(ret_stmt) => ret_stmt.expression.borrow().is_non_det(),
-            Statement::Loop(loop_stmt) => loop_stmt
-                .condition
-                .borrow()
-                .as_ref()
-                .is_some_and(super::nodes::Expression::is_non_det),
-            Statement::If(if_stmt) => {
-                if_stmt.condition.borrow().is_non_det()
-                    || if_stmt.if_arm.is_non_det()
-                    || if_stmt
-                        .else_arm
-                        .as_ref()
-                        .is_some_and(super::nodes::BlockType::is_non_det)
-            }
-            Statement::VariableDefinition(var_def) => var_def
-                .value
-                .as_ref()
-                .is_some_and(|value| value.borrow().is_non_det()),
-            _ => false,
-        }
-    }
-}
-
-impl Expression {
-    #[must_use]
-    pub fn type_info(&self) -> Option<TypeInfo> {
-        match self {
-            Expression::ArrayIndexAccess(e) => e.type_info.borrow().clone(),
-            Expression::MemberAccess(e) => e.type_info.borrow().clone(),
-            Expression::TypeMemberAccess(e) => e.type_info.borrow().clone(),
-            Expression::FunctionCall(e) => e.type_info.borrow().clone(),
-            Expression::Struct(e) => e.type_info.borrow().clone(),
-            Expression::PrefixUnary(e) => e.type_info.borrow().clone(),
-            Expression::Parenthesized(e) => e.type_info.borrow().clone(),
-            Expression::Binary(e) => e.type_info.borrow().clone(),
-            Expression::Literal(l) => l.type_info(),
-            Expression::Identifier(e) => e.type_info.borrow().clone(),
-            Expression::Type(e) => Some(TypeInfo::new(e)),
-            Expression::Uzumaki(e) => e.type_info.borrow().clone(),
-        }
-    }
-    #[must_use]
-    pub fn is_non_det(&self) -> bool {
-        matches!(self, Expression::Uzumaki(_))
-    }
-}
-
-impl Literal {
-    #[must_use]
-    pub fn type_info(&self) -> Option<TypeInfo> {
-        match self {
-            Literal::Bool(_) => Some(TypeInfo {
-                kind: TypeInfoKind::Bool,
-                type_params: vec![],
-            }),
-            Literal::Number(literal) => literal.type_info.borrow().clone(),
-            Literal::String(_) => Some(TypeInfo {
-                kind: TypeInfoKind::String,
-                type_params: vec![],
-            }),
-            Literal::Unit(_) => Some(TypeInfo {
-                kind: TypeInfoKind::Unit,
-                type_params: vec![],
-            }),
-            Literal::Array(literal) => literal.type_info.borrow().clone(),
-        }
     }
 }
 
@@ -327,12 +208,7 @@ impl EnumDefinition {
 impl Identifier {
     #[must_use]
     pub fn new(id: u32, name: String, location: Location) -> Self {
-        Identifier {
-            id,
-            location,
-            name,
-            type_info: RefCell::new(None),
-        }
+        Identifier { id, location, name }
     }
 
     #[must_use]
@@ -629,7 +505,6 @@ impl ArrayIndexAccessExpression {
             location,
             array: RefCell::new(array),
             index: RefCell::new(index),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -642,7 +517,6 @@ impl MemberAccessExpression {
             location,
             expression: RefCell::new(expression),
             name,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -660,7 +534,6 @@ impl TypeMemberAccessExpression {
             location,
             expression: RefCell::new(type_expression),
             name,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -685,7 +558,6 @@ impl FunctionCallExpression {
             function,
             type_parameters,
             arguments,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -719,7 +591,6 @@ impl StructExpression {
             location,
             name,
             fields,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -742,7 +613,6 @@ impl PrefixUnaryExpression {
             location,
             expression: RefCell::new(expression),
             operator,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -750,31 +620,7 @@ impl PrefixUnaryExpression {
 impl UzumakiExpression {
     #[must_use]
     pub fn new(id: u32, location: Location) -> Self {
-        UzumakiExpression {
-            id,
-            location,
-            type_info: RefCell::new(None),
-        }
-    }
-    #[must_use]
-    pub fn is_i32(&self) -> bool {
-        if let Some(type_info) = self.type_info.borrow().as_ref() {
-            return matches!(
-                type_info.kind,
-                TypeInfoKind::Number(NumberTypeKindNumberType::I32)
-            );
-        }
-        false
-    }
-    #[must_use]
-    pub fn is_i64(&self) -> bool {
-        if let Some(type_info) = self.type_info.borrow().as_ref() {
-            return matches!(
-                type_info.kind,
-                TypeInfoKind::Number(NumberTypeKindNumberType::I64)
-            );
-        }
-        false
+        UzumakiExpression { id, location }
     }
 }
 
@@ -796,7 +642,6 @@ impl ParenthesizedExpression {
             id,
             location,
             expression: RefCell::new(expression),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -816,7 +661,6 @@ impl BinaryExpression {
             left: RefCell::new(left),
             operator,
             right: RefCell::new(right),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -839,7 +683,6 @@ impl ArrayLiteral {
             id,
             location,
             elements: elements.map(|vec| vec.into_iter().map(RefCell::new).collect()),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -862,7 +705,6 @@ impl NumberLiteral {
             id,
             location,
             value,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -877,12 +719,7 @@ impl UnitLiteral {
 impl SimpleType {
     #[must_use]
     pub fn new(id: u32, location: Location, name: String) -> Self {
-        SimpleType {
-            id,
-            location,
-            name,
-            type_info: RefCell::new(None),
-        }
+        SimpleType { id, location, name }
     }
 }
 
@@ -899,7 +736,6 @@ impl GenericType {
             location,
             base,
             parameters,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -917,7 +753,6 @@ impl FunctionType {
             location,
             parameters,
             returns,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -935,7 +770,6 @@ impl QualifiedName {
             location,
             qualifier,
             name,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -958,7 +792,6 @@ impl TypeQualifiedName {
             location,
             alias,
             name,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -981,7 +814,6 @@ impl TypeArray {
             location,
             element_type,
             size,
-            type_info: RefCell::new(None),
         }
     }
 }
