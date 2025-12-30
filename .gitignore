@@ -20,3 +20,10 @@ Cargo.lock
 out
 test_data/**/*.json
 .*
+!.github/
+.github/*
+!.github/workflows/
+!.cargo/
+!.gitattributes
+
+external/lib/linux/libLLVM.so
