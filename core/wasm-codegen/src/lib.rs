@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 
-use inference_ast::t_ast::TypedAst;
+use inference_ast::ast::Ast;
 use inkwell::{
     context::Context,
     targets::{InitializationConfig, Target},
@@ -19,7 +19,7 @@ mod utils;
 /// support is not yet implemented.
 ///
 /// Returns an error if code generation fails.
-pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
+pub fn codegen(t_ast: &Ast) -> anyhow::Result<Vec<u8>> {
     Target::initialize_webassembly(&InitializationConfig::default());
     let context = Context::create();
     let compiler = Compiler::new(&context, "wasm_module");
@@ -37,7 +37,7 @@ pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
     Ok(wasm_bytes)
 }
 
-fn traverse_t_ast_with_compiler(t_ast: &TypedAst, compiler: &Compiler) {
+fn traverse_t_ast_with_compiler(t_ast: &Ast, compiler: &Compiler) {
     for source_file in &t_ast.source_files {
         for func_def in source_file.function_definitions() {
             compiler.visit_function_definition(&func_def);

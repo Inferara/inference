@@ -46,7 +46,13 @@ impl Display for Location {
         write!(
             f,
             "Location {{ offset_start: {}, offset_end: {}, start_line: {}, start_column: {}, end_line: {}, end_column: {}, source: {} }}",
-            self.offset_start, self.offset_end, self.start_line, self.start_column, self.end_line, self.end_column, self.source
+            self.offset_start,
+            self.offset_end,
+            self.start_line,
+            self.start_column,
+            self.end_line,
+            self.end_column,
+            self.source
         )
     }
 }
@@ -339,7 +345,6 @@ ast_nodes! {
 
     pub struct Identifier {
         pub name: String,
-        pub type_info: RefCell<Option<TypeInfo>> //TODO revisit
     }
 
     pub struct ConstantDefinition {
@@ -426,42 +431,34 @@ ast_nodes! {
     pub struct ArrayIndexAccessExpression {
         pub array: RefCell<Expression>,
         pub index: RefCell<Expression>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct MemberAccessExpression {
         pub expression: RefCell<Expression>,
         pub name: Rc<Identifier>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeMemberAccessExpression {
         pub expression: RefCell<Expression>,
         pub name: Rc<Identifier>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct FunctionCallExpression {
         pub function: Expression,
         pub type_parameters: Option<Vec<Rc<Identifier>>>,
         pub arguments: Option<Vec<(Option<Rc<Identifier>>, RefCell<Expression>)>>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct StructExpression {
         pub name: Rc<Identifier>,
         pub fields: Option<Vec<(Rc<Identifier>, RefCell<Expression>)>>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
-    pub struct UzumakiExpression {
-        pub type_info: RefCell<Option<TypeInfo>>
-    }
+    pub struct UzumakiExpression {}
 
     pub struct PrefixUnaryExpression {
         pub expression: RefCell<Expression>,
         pub operator: UnaryOperatorKind,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct AssertStatement {
@@ -470,19 +467,16 @@ ast_nodes! {
 
     pub struct ParenthesizedExpression {
         pub expression: RefCell<Expression>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct BinaryExpression {
         pub left: RefCell<Expression>,
         pub operator: OperatorKind,
         pub right: RefCell<Expression>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct ArrayLiteral {
         pub elements: Option<Vec<RefCell<Expression>>>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct BoolLiteral {
@@ -495,7 +489,6 @@ ast_nodes! {
 
     pub struct NumberLiteral {
         pub value: String,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct UnitLiteral {
@@ -503,37 +496,31 @@ ast_nodes! {
 
     pub struct SimpleType {
         pub name: String,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct GenericType {
         pub base: Rc<Identifier>,
         pub parameters: Vec<Rc<Identifier>>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct FunctionType {
         pub parameters: Option<Vec<Type>>,
         pub returns: Option<Type>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct QualifiedName {
         pub qualifier: Rc<Identifier>,
         pub name: Rc<Identifier>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeQualifiedName {
         pub alias: Rc<Identifier>,
         pub name: Rc<Identifier>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
     pub struct TypeArray {
         pub element_type: Type,
         pub size: Option<Expression>,
-        pub type_info: RefCell<Option<TypeInfo>>
     }
 
 }

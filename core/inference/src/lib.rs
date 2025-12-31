@@ -1,7 +1,7 @@
 #![warn(clippy::pedantic)]
 //! Inference is a programming language that is designed to be easy to learn and use.
 
-use inference_ast::{builder::Builder, t_ast::TypedAst};
+use inference_ast::{builder::Builder, ast::Ast};
 
 /// Parses the given source code and returns a Typed AST.
 ///
@@ -12,7 +12,7 @@ use inference_ast::{builder::Builder, t_ast::TypedAst};
 /// # Panics
 ///
 /// This function will panic if there is an error loading the Inference grammar.
-pub fn parse(source_code: &str) -> anyhow::Result<TypedAst> {
+pub fn parse(source_code: &str) -> anyhow::Result<Ast> {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -32,7 +32,7 @@ pub fn parse(source_code: &str) -> anyhow::Result<TypedAst> {
 /// # Errors
 ///
 /// This function will return an error if the type analysis fails.
-pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
+pub fn analyze(_: &Ast) -> anyhow::Result<()> {
     // todo!("Type analysis not yet implemented");
     Ok(())
 }
@@ -42,7 +42,7 @@ pub fn analyze(_: &TypedAst) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// This function will return an error if the code generation fails.
-pub fn codegen(t_ast: &TypedAst) -> anyhow::Result<Vec<u8>> {
+pub fn codegen(t_ast: &Ast) -> anyhow::Result<Vec<u8>> {
     inference_wasm_codegen::codegen(t_ast)
 }
 

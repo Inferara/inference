@@ -1,4 +1,4 @@
-use inference_ast::{builder::Builder, t_ast::TypedAst};
+use inference_ast::{builder::Builder, ast::Ast};
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -7,7 +7,7 @@ pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     manifest_dir.join("test_data")
 }
 
-pub(crate) fn build_ast(source_code: String) -> TypedAst {
+pub(crate) fn build_ast(source_code: String) -> Ast {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser

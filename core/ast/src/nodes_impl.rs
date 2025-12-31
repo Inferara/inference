@@ -327,12 +327,7 @@ impl EnumDefinition {
 impl Identifier {
     #[must_use]
     pub fn new(id: u32, name: String, location: Location) -> Self {
-        Identifier {
-            id,
-            location,
-            name,
-            type_info: RefCell::new(None),
-        }
+        Identifier { id, location, name }
     }
 
     #[must_use]
@@ -629,7 +624,6 @@ impl ArrayIndexAccessExpression {
             location,
             array: RefCell::new(array),
             index: RefCell::new(index),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -642,7 +636,6 @@ impl MemberAccessExpression {
             location,
             expression: RefCell::new(expression),
             name,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -660,7 +653,6 @@ impl TypeMemberAccessExpression {
             location,
             expression: RefCell::new(type_expression),
             name,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -685,7 +677,6 @@ impl FunctionCallExpression {
             function,
             type_parameters,
             arguments,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -719,7 +710,6 @@ impl StructExpression {
             location,
             name,
             fields,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -742,7 +732,6 @@ impl PrefixUnaryExpression {
             location,
             expression: RefCell::new(expression),
             operator,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -750,11 +739,7 @@ impl PrefixUnaryExpression {
 impl UzumakiExpression {
     #[must_use]
     pub fn new(id: u32, location: Location) -> Self {
-        UzumakiExpression {
-            id,
-            location,
-            type_info: RefCell::new(None),
-        }
+        UzumakiExpression { id, location }
     }
     #[must_use]
     pub fn is_i32(&self) -> bool {
@@ -796,7 +781,6 @@ impl ParenthesizedExpression {
             id,
             location,
             expression: RefCell::new(expression),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -816,7 +800,6 @@ impl BinaryExpression {
             left: RefCell::new(left),
             operator,
             right: RefCell::new(right),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -839,7 +822,6 @@ impl ArrayLiteral {
             id,
             location,
             elements: elements.map(|vec| vec.into_iter().map(RefCell::new).collect()),
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -862,7 +844,6 @@ impl NumberLiteral {
             id,
             location,
             value,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -877,12 +858,7 @@ impl UnitLiteral {
 impl SimpleType {
     #[must_use]
     pub fn new(id: u32, location: Location, name: String) -> Self {
-        SimpleType {
-            id,
-            location,
-            name,
-            type_info: RefCell::new(None),
-        }
+        SimpleType { id, location, name }
     }
 }
 
@@ -899,7 +875,6 @@ impl GenericType {
             location,
             base,
             parameters,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -917,7 +892,6 @@ impl FunctionType {
             location,
             parameters,
             returns,
-            type_info: RefCell::new(None),
         }
     }
 }
@@ -935,7 +909,6 @@ impl QualifiedName {
             location,
             qualifier,
             name,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -958,7 +931,6 @@ impl TypeQualifiedName {
             location,
             alias,
             name,
-            type_info: RefCell::new(None),
         }
     }
 
@@ -981,7 +953,6 @@ impl TypeArray {
             location,
             element_type,
             size,
-            type_info: RefCell::new(None),
         }
     }
 }

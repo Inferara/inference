@@ -5,12 +5,12 @@ use crate::{
 };
 
 #[derive(Clone, Default)]
-pub struct TypedAst {
+pub struct Ast {
     pub source_files: Vec<SourceFile>,
     arena: Arena,
 }
 
-impl TypedAst {
+impl Ast {
     #[must_use]
     pub fn new(source_files: Vec<SourceFile>, arena: Arena) -> Self {
         Self {

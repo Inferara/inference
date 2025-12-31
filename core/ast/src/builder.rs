@@ -8,6 +8,7 @@ use crate::type_infer::TypeChecker;
 use crate::type_info::TypeInfo;
 use crate::{
     arena::Arena,
+    ast::Ast,
     nodes::{
         Argument, ArrayIndexAccessExpression, ArrayLiteral, AssertStatement, AssignStatement,
         AstNode, BinaryExpression, Block, BlockType, BoolLiteral, BreakStatement,
@@ -20,7 +21,6 @@ use crate::{
         TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
         VariableDefinitionStatement,
     },
-    t_ast::TypedAst,
 };
 use tree_sitter::Node;
 
@@ -40,7 +40,7 @@ pub type CompletedBuilder<'a> = Builder<'a, CompleteState>;
 pub struct Builder<'a, S> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    t_ast: Option<TypedAst>,
+    t_ast: Option<Ast>,
     _state: PhantomData<S>,
 }
 
@@ -113,7 +113,7 @@ impl<'a> Builder<'a, InitState> {
         let _ = type_checker.infer_types(&mut res);
 
         // let mut type_checker = TypeChecker::new();
-        let t_ast = TypedAst::new(res, self.arena.clone());
+        let t_ast = Ast::new(res, self.arena.clone());
         t_ast.infer_expression_types();
         // run type inference over all expressions
         // type_checker
@@ -1425,7 +1425,7 @@ impl Builder<'_, CompleteState> {
     ///
     /// This function will panic if resulted `TypedAst` is `None` which means an error occured during the parsing process.
     #[must_use]
-    pub fn t_ast(self) -> TypedAst {
+    pub fn t_ast(self) -> Ast {
         self.t_ast.unwrap()
     }
 }

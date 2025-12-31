@@ -1,7 +1,7 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::nodes::Type;
+use inference_ast::nodes::Type;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum NumberTypeKindNumberType {
