@@ -9,10 +9,10 @@ jobs:
     name: Build and test infc
     strategy:
       matrix:
-        os: [Linux, Windows]
+        os: [ubuntu-latest, windows-latest, macos-14]
         toolchain:
           - nightly
-    runs-on: [self-hosted, X64, "${{ matrix.os }}"]
+    runs-on: ["${{ matrix.os }}"]
     steps:
       - name: Setup Rust
         uses: actions/checkout@v4.1.3
@@ -34,7 +34,7 @@ jobs:
       - name: Audit
         run: cargo audit
       - name: Prepare Artifact Package (Windows)
-        if: matrix.os == 'Windows'
+        if: runner.os == 'Windows'
         run: |
           New-Item -ItemType Directory -Force -Path artifact\bin
           New-Item -ItemType Directory -Force -Path artifact\lib
@@ -43,7 +43,7 @@ jobs:
           Copy-Item target\release\bin\* artifact\bin\
           Copy-Item target\release\lib\* artifact\lib\
       - name: Prepare Artifact Package (Linux)
-        if: matrix.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           mkdir -p artifact/bin
           mkdir -p artifact/lib
@@ -51,12 +51,25 @@ jobs:
           cp target/release/bin/* artifact/bin/
           cp target/release/lib/* artifact/lib/
       - name: Package Artifact (Windows)
-        if: matrix.os == 'Windows'
+        if: runner.os == 'Windows'
         run: |
           7z a -tzip infc-${{ matrix.os }}-64.zip artifact .
           certutil -hashfile infc-${{ matrix.os }}-64.zip SHA256 > infc-${{ matrix.os }}-64.zip.sha256
       - name: Package Artifact (Linux)
-        if: matrix.os == 'Linux'
+        if: runner.os == 'Linux'
+        run: |
+          tar -czf infc-${{ matrix.os }}-64.tar.gz -C artifact .
+          sha256sum infc-${{ matrix.os }}-64.tar.gz > infc-${{ matrix.os }}-64.tar.gz.sha256
+      - name: Prepare Artifact Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p artifact/bin
+          mkdir -p artifact/lib
+          cp target/release/infc artifact/
+          cp target/release/bin/* artifact/bin/ || true
+          # cp target/release/lib/* artifact/lib/ || true # No libs for macOS currently
+      - name: Package Artifact (macOS)
+        if: runner.os == 'macOS'
         run: |
           tar -czf infc-${{ matrix.os }}-64.tar.gz -C artifact .
           sha256sum infc-${{ matrix.os }}-64.tar.gz > infc-${{ matrix.os }}-64.tar.gz.sha256

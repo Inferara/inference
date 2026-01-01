@@ -189,7 +189,7 @@ fn configure_llvm_env(_cmd: &mut Command) -> anyhow::Result<()> {
 }
 
 /// Fallback for unsupported platforms
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 #[allow(clippy::unnecessary_wraps)]
 fn configure_llvm_env(_cmd: &mut Command) -> anyhow::Result<()> {
     Ok(())

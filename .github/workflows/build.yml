@@ -12,10 +12,10 @@ jobs:
     name: Build and test infc
     strategy:
       matrix:
-        os: [Linux, Windows]
+        os: [ubuntu-latest, windows-latest, macos-14]
         toolchain:
           - nightly
-    runs-on: [self-hosted, X64, "${{ matrix.os }}"]
+    runs-on: ["${{ matrix.os }}"]
     steps:
       - name: Setup Rust
         uses: actions/checkout@v4.1.3
@@ -41,17 +41,17 @@ jobs:
     name: Codegen tests
     strategy:
       matrix:
-        os: [Linux, Windows]
+        os: [ubuntu-latest, windows-latest, macos-14]
         toolchain:
           - nightly
-    runs-on: [self-hosted, X64, "${{ matrix.os }}"]
+    runs-on: ["${{ matrix.os }}"]
     steps:
       - name: Setup Rust
         uses: actions/checkout@v4.1.3
         with:
           lfs: true
       - name: Setup Git LFS (Linux)
-        if: matrix.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           git lfs install --local
           git lfs pull
@@ -64,6 +64,6 @@ jobs:
         run: |
           file external/lib/linux/libLLVM.so.21.1-rust-1.94.0-nightly || true
           file target/debug/lib/libLLVM.so.21.1-rust-1.94.0-nightly || true
-        if: matrix.os == 'Linux'
+        if: runner.os == 'Linux'
       - name: Test codegen
         run: "cargo test --lib --verbose codegen::"
