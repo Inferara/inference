@@ -94,6 +94,17 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Run tests with coverage for core crates
+        run: |
+          cargo llvm-cov \
+            --workspace \
+            --exclude inference-tests \
+            --exclude inference-playground-server \
+            --exclude wasm-fmt \
+            --exclude wat-fmt \
+            --exclude inf-wast \
+            --exclude inf-wasmparser
+
       - name: Generate coverage summary
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info
