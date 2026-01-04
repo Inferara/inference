@@ -72,6 +72,50 @@ Prebuilt `infc` binaries distributables are arranged in the following directory 
 - The `infc` binary automatically locates these dependencies relative to its own location.
 - No system LLVM installation is required for end users.
 
+## Building from Source
+
+To build Inference from source, you'll need the required binary dependencies for your platform.
+
+### Required Binaries
+
+Download the following files for your platform and place them in the specified directories:
+
+#### Linux
+- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip) → Extract to `external/bin/linux/`
+- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip) → Extract to `external/bin/linux/`
+- **libLLVM**: [Download](https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.zip) → Extract to `external/lib/linux/`
+
+#### macOS
+- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/inf-llc.zip) → Extract to `external/bin/macos/`
+- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/rust-lld.zip) → Extract to `external/bin/macos/`
+
+#### Windows
+- **inf-llc.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip) → Extract to `external/bin/windows/`
+- **rust-lld.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/rust-lld.zip) → Extract to `external/bin/windows/`
+
+### Build Steps
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Inferara/inference.git
+   cd inference
+   ```
+
+2. Download and extract the required binaries for your platform (see links above)
+
+3. Make the binaries executable (Linux/macOS only):
+   ```bash
+   chmod +x external/bin/linux/inf-llc external/bin/linux/rust-lld    # Linux
+   chmod +x external/bin/macos/inf-llc external/bin/macos/rust-lld    # macOS
+   ```
+
+4. Build the project:
+   ```bash
+   cargo build --release
+   ```
+
+The compiled `infc` binary will be in `target/release/infc`.
+
 ## Roadmap
 
 Check out open [issues](https://github.com/Inferara/inference/issues).

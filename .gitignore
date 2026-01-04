@@ -34,4 +34,4 @@ cobertura.xml
 !.cargo/
 !.gitattributes
 
-external/lib/linux/libLLVM.so
+external/
