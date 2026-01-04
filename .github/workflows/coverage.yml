@@ -7,6 +7,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -101,26 +104,16 @@ jobs:
             --exclude wat-fmt \
             --exclude inf-wast \
             --exclude inf-wasmparser \
-            --lcov \
-            --output-path lcov.info
+            --no-report
 
-      - name: Generate coverage summary
+      - name: Generate lcov report from collected coverage
         run: |
-          cargo llvm-cov \
-            --workspace \
-            --exclude inference-tests \
-            --exclude inference-playground-server \
-            --exclude wasm-fmt \
-            --exclude wat-fmt \
-            --exclude inf-wast \
-            --exclude inf-wasmparser \
-            --summary-only
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./lcov.info
-          flags: core
           fail_ci_if_error: true
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
