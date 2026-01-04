@@ -21,10 +21,47 @@ jobs:
           lfs: true
           fetch-depth: 0
       
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Cache external binaries
+        uses: actions/cache@v4
+        id: cache-binaries
         with:
-          components: llvm-tools-preview
+          path: external/
+          key: ${{ runner.os }}-binaries-v4
+          restore-keys: |
+            ${{ runner.os }}-binaries-
+      
+      - name: Download binaries (Linux)
+        if: steps.cache-binaries.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p external/bin/linux external/lib/linux
+          # Download and extract inf-llc
+          curl -L "https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip" -o /tmp/inf-llc.zip
+          unzip -o /tmp/inf-llc.zip -d external/bin/linux/
+          # Download and extract rust-lld
+          curl -L "https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip" -o /tmp/rust-lld.zip
+          unzip -o /tmp/rust-lld.zip -d external/bin/linux/
+          # Download and extract libLLVM
+          curl -L "https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.zip" -o /tmp/libLLVM.zip
+          unzip -o /tmp/libLLVM.zip -d external/lib/linux/
+          # Make executables
+          chmod +x external/bin/linux/inf-llc external/bin/linux/rust-lld
+      
+      - name: Install Rust toolchain
+        run: |
+          rustup update nightly
+          rustup default nightly
+          rustup component add llvm-tools-preview
+      
+      - name: Install LLVM 21
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo apt-get install -y llvm-21-dev libpolly-21-dev
+      
+      - name: Set LLVM Prefix
+        run: |
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> $GITHUB_ENV
       
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -46,9 +83,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-build-target-
+            ${{ runner.os }}-cargo-build-coverage-
+            ${{ runner.os }}-cargo-build-
       
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
