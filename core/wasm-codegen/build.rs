@@ -18,6 +18,8 @@ fn main() {
     let rust_lld_binary = format!("rust-lld{exe_suffix}");
     let libllvm_lib = if cfg!(target_os = "windows") {
         "libLLVM.dll"
+    } else if cfg!(target_os = "macos") {
+        "libLLVM.dylib"
     } else {
         "libLLVM.so.21.1-rust-1.94.0-nightly"
     };
@@ -33,6 +35,39 @@ fn main() {
     let source_llc = source_bin_dir.join(&llc_binary);
     let source_rust_lld = source_bin_dir.join(&rust_lld_binary);
     let source_lib_llvm = source_lib_dir.join(libllvm_lib);
+
+    // Check for missing binaries and provide download instructions
+    let mut missing_files = Vec::new();
+    if !source_llc.exists() {
+        missing_files.push((
+            source_llc.display().to_string(),
+            get_download_url(platform, "inf-llc"),
+        ));
+    }
+    if !source_rust_lld.exists() {
+        missing_files.push((
+            source_rust_lld.display().to_string(),
+            get_download_url(platform, "rust-lld"),
+        ));
+    }
+    if platform == "linux" && !source_lib_llvm.exists() {
+        missing_files.push((
+            source_lib_llvm.display().to_string(),
+            get_download_url(platform, "libLLVM"),
+        ));
+    }
+
+    if !missing_files.is_empty() {
+        eprintln!("\n🚫 Required binaries not found:\n");
+        for (path, url) in &missing_files {
+            eprintln!("  Missing: {}", path);
+            eprintln!("  Download from: {}", url);
+            eprintln!();
+        }
+        eprintln!("Please download the required files and place them in the correct directories.");
+        eprintln!("See README.md for detailed instructions.\n");
+        panic!("Missing required binaries for platform: {}", platform);
+    }
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target_profile_dir = out_dir
@@ -72,11 +107,6 @@ fn main() {
         }
 
         println!("cargo:info=Copied inf-llc to {}", dest_llc.display());
-    } else {
-        println!(
-            "cargo:info=inf-llc not found at {}, skipping copy",
-            source_llc.display()
-        );
     }
 
     if source_rust_lld.exists() {
@@ -101,11 +131,6 @@ fn main() {
         }
 
         println!("cargo:info=Copied rust-lld to {}", dest_rust_lld.display());
-    } else {
-        println!(
-            "cargo:info=rust-lld not found at {}, skipping copy",
-            source_rust_lld.display()
-        );
     }
 
     if source_lib_llvm.exists() {
@@ -131,14 +156,38 @@ fn main() {
                 .expect("Failed to set executable permissions");
         }
         println!("cargo:info=Copied libLLVM to {}", dest_lib_llvm.display());
-    } else {
-        println!(
-            "cargo:info=libLLVM not found at {}, skipping copy",
-            source_lib_llvm.display()
-        );
     }
 
     println!("cargo:rerun-if-changed={}", source_llc.display());
     println!("cargo:rerun-if-changed={}", source_rust_lld.display());
     println!("cargo:rerun-if-changed={}", source_lib_llvm.display());
+}
+
+fn get_download_url(platform: &str, binary: &str) -> String {
+    match (platform, binary) {
+        ("linux", "inf-llc") => {
+            "https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip".to_string()
+        }
+        ("linux", "rust-lld") => {
+            "https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip"
+                .to_string()
+        }
+        ("linux", "libLLVM") => {
+            "https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.zip".to_string()
+        }
+        ("windows", "inf-llc") => {
+            "https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip"
+                .to_string()
+        }
+        ("windows", "rust-lld") => {
+            "https://storage.googleapis.com/external_binaries/windows/bin/rust-lld.zip".to_string()
+        }
+        ("macos", "inf-llc") => {
+            "https://storage.googleapis.com/external_binaries/macos/bin/inf-llc.zip".to_string()
+        }
+        ("macos", "rust-lld") => {
+            "https://storage.googleapis.com/external_binaries/macos/bin/rust-lld.zip".to_string()
+        }
+        _ => "https://github.com/Inferara/inference#building-from-source".to_string(),
+    }
 }

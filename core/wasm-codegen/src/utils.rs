@@ -179,6 +179,26 @@ fn configure_llvm_env(cmd: &mut Command) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Configure environment for macOS (use `DYLD_LIBRARY_PATH`)
+#[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)]
+fn configure_llvm_env(cmd: &mut Command) -> anyhow::Result<()> {
+    // On macOS, check if LLVM is installed via Homebrew
+    if let Ok(llvm_prefix) = std::env::var("LLVM_SYS_211_PREFIX") {
+        let lib_dir = std::path::Path::new(&llvm_prefix).join("lib");
+        if lib_dir.exists() {
+            let lib_dir_str = lib_dir.to_string_lossy();
+            let dyld_library_path = if let Ok(existing) = std::env::var("DYLD_LIBRARY_PATH") {
+                format!("{lib_dir_str}:{existing}")
+            } else {
+                lib_dir_str.to_string()
+            };
+            cmd.env("DYLD_LIBRARY_PATH", dyld_library_path);
+        }
+    }
+    Ok(())
+}
+
 /// Configure environment for Windows (DLLs are in bin/ next to executables, so no-op)
 #[cfg(target_os = "windows")]
 #[allow(clippy::unnecessary_wraps)]

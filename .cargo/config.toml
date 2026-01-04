@@ -1,6 +1,17 @@
 [env]
 PATH = { value = "external/bin", relative = true }
-LD_LIBRARY_PATH = { value = "external/lib", relative = true }
 
-[build]
-rustflags = ["-L", "native=external/lib"]
+[target.'cfg(target_os = "linux")']
+rustflags = ["-L", "native=external/lib/linux"]
+
+[target.'cfg(target_os = "linux")'.env]
+LD_LIBRARY_PATH = { value = "external/lib/linux", relative = true }
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = [
+    "-L", "native=external/lib/windows",
+    "-C", "link-arg=-Wl,--allow-multiple-definition",
+    "-C", "link-arg=-lffi",
+    "-C", "link-arg=-lzstd"
+]

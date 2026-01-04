@@ -26,4 +26,4 @@ test_data/**/*.json
 !.cargo/
 !.gitattributes
 
-external/lib/linux/libLLVM.so
+external/
