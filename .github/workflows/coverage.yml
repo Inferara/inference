@@ -103,16 +103,26 @@ jobs:
             --exclude wasm-fmt \
             --exclude wat-fmt \
             --exclude inf-wast \
-            --exclude inf-wasmparser
+            --exclude inf-wasmparser \
+            --no-report
 
-      - name: Generate coverage summary
+      - name: Generate lcov report from collected coverage
         run: |
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report \
+            --lcov \
+            --output-path lcov.info \
+            --workspace \
+            --exclude inference-tests \
+            --exclude inference-playground-server \
+            --exclude wasm-fmt \
+            --exclude wat-fmt \
+            --exclude inf-wast \
+            --exclude inf-wasmparser
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: lcov.info
+          files: ./lcov.info
           fail_ci_if_error: true
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
