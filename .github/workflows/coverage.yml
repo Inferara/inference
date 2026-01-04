@@ -94,7 +94,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Run tests with coverage for core crates
+      - name: Generate coverage summary
         run: |
           cargo llvm-cov \
             --workspace \
@@ -107,24 +107,10 @@ jobs:
             --lcov \
             --output-path lcov.info
 
-      - name: Generate coverage summary
-        run: |
-          cargo llvm-cov \
-            --workspace \
-            --exclude inference-tests \
-            --exclude inference-playground-server \
-            --exclude wasm-fmt \
-            --exclude wat-fmt \
-            --exclude inf-wast \
-            --exclude inf-wasmparser \
-
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: ./lcov.info
-          flags: core
+          files: lcov.info
           fail_ci_if_error: true
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
-          working-directory: ${{ github.workspace }}
-          root_dir: ${{ github.workspace }}
