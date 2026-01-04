@@ -117,13 +117,10 @@ jobs:
             --summary-only
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./lcov.info
           flags: core
           fail_ci_if_error: true
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
-          disable_search: true
-          working-directory: ${{ github.workspace }}
-          root_dir: ${{ github.workspace }}
