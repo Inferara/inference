@@ -108,16 +108,7 @@ jobs:
 
       - name: Generate lcov report from collected coverage
         run: |
-          cargo llvm-cov report \
-            --lcov \
-            --output-path lcov.info \
-            --workspace \
-            --exclude inference-tests \
-            --exclude inference-playground-server \
-            --exclude wasm-fmt \
-            --exclude wat-fmt \
-            --exclude inf-wast \
-            --exclude inf-wasmparser
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
