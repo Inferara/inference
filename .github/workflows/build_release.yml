@@ -191,7 +191,7 @@ jobs:
       - name: Package Artifact (Windows)
         if: runner.os == 'Windows'
         run: |
-          7z a -tzip infc-${{ matrix.os }}-64.zip artifact .
+          7z a -tzip infc-${{ matrix.os }}-64.zip .\artifact\*
           certutil -hashfile infc-${{ matrix.os }}-64.zip SHA256 > infc-${{ matrix.os }}-64.zip.sha256
       - name: Package Artifact (Linux)
         if: runner.os == 'Linux'
