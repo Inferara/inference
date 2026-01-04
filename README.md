@@ -1,4 +1,5 @@
 [![Build](https://github.com/Inferara/inference/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/Inferara/inference/actions/workflows/build.yml)
+[![codecov](https://codecov.io/gh/Inferara/inference/branch/main/graph/badge.svg)](https://codecov.io/gh/Inferara/inference)
 
 # 🌀 Inference Programming Language
 
@@ -78,3 +79,5 @@ Check out open [issues](https://github.com/Inferara/inference/issues).
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+For information about code coverage and testing, see [COVERAGE.md](.github/COVERAGE.md).

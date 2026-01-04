@@ -19,6 +19,14 @@ Cargo.lock
 *.wat
 out
 test_data/**/*.json
+
+# Coverage reports
+lcov.info
+*.profraw
+*.profdata
+coverage/
+cobertura.xml
+
 .*
 !.github/
 .github/*
