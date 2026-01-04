@@ -147,10 +147,10 @@ jobs:
         run: rustup component add clippy-preview
       - name: Build
         if: runner.os != 'Windows'
-        run: cargo build --verbose
+        run: cargo build --release --verbose
       - name: Build (Windows MinGW)
         if: runner.os == 'Windows'
-        run: cargo build --verbose --target x86_64-pc-windows-gnu
+        run: cargo build --release --verbose --target x86_64-pc-windows-gnu
       - name: Verify vendored LLVM
         run: |
           file external/lib/linux/libLLVM.so.21.1-rust-1.94.0-nightly || true
