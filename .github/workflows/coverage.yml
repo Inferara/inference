@@ -124,3 +124,6 @@ jobs:
           fail_ci_if_error: true
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
+          disable_search: true
+          working-directory: ${{ github.workspace }}
+          root_dir: ${{ github.workspace }}
