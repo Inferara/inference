@@ -5,11 +5,14 @@
 
 Inference is a programming language designed for building verifiable software. It is featured with static typing, explicit semantics, and formal verification capabilities available out of the box.
 
+**Inference allows for mathematically verifying code correctness without learning provers. Keep the implementation correct, even with vibecode.**
+
 > [!IMPORTANT]
 > The project is in early development. Internal design and implementation are subject to change. So please be patient with us as we build out the language and tools.
 
 ## Learn
 
+- Inference [homepage](https://inference-lang.org)
 - Access our Inference [book](https://inference-lang.org/book) for a guide on how to get started
 - Inference Programming Language [specification](https://github.com/Inferara/inference-language-spec)
 
@@ -121,9 +124,9 @@ The compiled `infc` binary will be in `target/release/infc`.
 The workspace is configured for efficient development:
 
 - **`cargo build`** - Builds only the `core/` crates (faster for core development)
-- **`cargo build-full`** - Builds the entire workspace including tools and tests
+- **`cargo build-full`** - Builds the entire workspace, including tools and tests
 - **`cargo test`** - Runs tests for `core/` crates and the `tests/` integration suite
-- **`cargo test-full`** - Runs tests for all workspace members including tools
+- **`cargo test-full`** - Runs tests for all workspace members, including tools
 
 ## Roadmap
 
@@ -132,5 +135,3 @@ Check out open [issues](https://github.com/Inferara/inference/issues).
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
-For information about code coverage and testing, see [COVERAGE.md](.github/COVERAGE.md).
