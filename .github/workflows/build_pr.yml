@@ -1,0 +1,14 @@
+name: Build & Test (PR)
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      enable-cache: true
+      release-build: false
+      package-artifacts: false

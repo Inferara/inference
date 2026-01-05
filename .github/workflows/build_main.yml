@@ -1,0 +1,14 @@
+name: Build & Test (Main)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      enable-cache: true
+      release-build: false
+      package-artifacts: false

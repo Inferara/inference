@@ -116,6 +116,15 @@ Download the following files for your platform and place them in the specified d
 
 The compiled `infc` binary will be in `target/release/infc`.
 
+### Build Commands
+
+The workspace is configured for efficient development:
+
+- **`cargo build`** - Builds only the `core/` crates (faster for core development)
+- **`cargo build-full`** - Builds the entire workspace including tools and tests
+- **`cargo test`** - Runs tests for `core/` crates and the `tests/` integration suite
+- **`cargo test-full`** - Runs tests for all workspace members including tools
+
 ## Roadmap
 
 Check out open [issues](https://github.com/Inferara/inference/issues).
