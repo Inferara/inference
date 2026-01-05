@@ -1,5 +1,4 @@
 [alias]
-test = "test -p 'inference-*' -p inference-tests"
 build-full = "build --workspace"
 test-full = "test --workspace"
 check-full = "check --workspace"

@@ -9,7 +9,8 @@ members = [
 ]
 
 default-members = [
-    "core/*"
+    "core/*",
+    "tests"
 ]
 
 [workspace.package]
