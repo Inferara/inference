@@ -1,4 +1,4 @@
-use inference_ast::{builder::Builder, ast::Ast};
+use inference_ast::{arena::Arena, builder::Builder};
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -7,7 +7,7 @@ pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     manifest_dir.join("test_data")
 }
 
-pub(crate) fn build_ast(source_code: String) -> Ast {
+pub(crate) fn build_ast(source_code: String) -> Arena {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -19,12 +19,15 @@ pub(crate) fn build_ast(source_code: String) -> Ast {
     let mut builder = Builder::new();
     builder.add_source_code(root_node, code);
     let builder = builder.build_ast().unwrap();
-    builder.t_ast()
+    builder.arena()
 }
 
 pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
-    let ast = build_ast(source_code.to_string());
-    inference_wasm_codegen::codegen(&ast).unwrap()
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    inference_wasm_codegen::codegen(&typed_context).unwrap()
 }
 
 /// Automatically resolves a test data file path based on the test's module path and name.

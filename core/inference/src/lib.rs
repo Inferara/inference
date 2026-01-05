@@ -1,7 +1,8 @@
 #![warn(clippy::pedantic)]
 //! Inference is a programming language that is designed to be easy to learn and use.
 
-use inference_ast::{builder::Builder, ast::Ast};
+use inference_ast::{arena::Arena, builder::Builder};
+use inference_type_checker::typed_context::TypedContext;
 
 /// Parses the given source code and returns a Typed AST.
 ///
@@ -12,7 +13,7 @@ use inference_ast::{builder::Builder, ast::Ast};
 /// # Panics
 ///
 /// This function will panic if there is an error loading the Inference grammar.
-pub fn parse(source_code: &str) -> anyhow::Result<Ast> {
+pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -24,7 +25,18 @@ pub fn parse(source_code: &str) -> anyhow::Result<Ast> {
     let mut builder = Builder::new();
     builder.add_source_code(root_node, code);
     let builder = builder.build_ast()?;
-    Ok(builder.t_ast())
+    Ok(builder.arena())
+}
+
+/// Performs type checking on the given AST and returns a typed context.
+///
+/// # Errors
+///
+/// This function will return an error if type checking fails while building the typed context.
+pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
+    let type_checker_builder =
+        inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?;
+    Ok(type_checker_builder.typed_context())
 }
 
 /// Analyzes the given Typed AST for type correctness.
@@ -32,7 +44,7 @@ pub fn parse(source_code: &str) -> anyhow::Result<Ast> {
 /// # Errors
 ///
 /// This function will return an error if the type analysis fails.
-pub fn analyze(_: &Ast) -> anyhow::Result<()> {
+pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
     // todo!("Type analysis not yet implemented");
     Ok(())
 }
@@ -42,8 +54,8 @@ pub fn analyze(_: &Ast) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// This function will return an error if the code generation fails.
-pub fn codegen(t_ast: &Ast) -> anyhow::Result<Vec<u8>> {
-    inference_wasm_codegen::codegen(t_ast)
+pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
+    inference_wasm_codegen::codegen(typed_context)
 }
 
 /// Translates WebAssembly binary format (WASM) to Coq format.

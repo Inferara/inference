@@ -45,6 +45,10 @@ Please, do not use emoji in commit messages. Keep them simple and descriptive. A
 
 We use `clippy`, but sometimes it is too noisy. In those cases, it is OK to disable specific warnings.
 
+### must_use
+
+When applicable, use the `#[must_use=reason]` version of the `must_use` attribute.
+
 # Code
 
 ## Tests
@@ -185,3 +189,7 @@ Option<&T>   &Option<T>
 
 Prefer `Default` to zero-argument new function.
 Prefer `Default` even if it has to be implemented manually.
+
+## Collectons
+
+Preffer `FxHashMap` and `FxHashSet` from `rustc-hash` crate over standard library collections for better performance.

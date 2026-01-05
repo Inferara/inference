@@ -1,4 +1,4 @@
-use inference_ast::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
+use inference_type_checker::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
 
 #[test]
 fn test_type_info_unit() {

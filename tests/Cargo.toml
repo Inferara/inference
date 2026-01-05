@@ -7,12 +7,14 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+anyhow.workspace = true
+serde_json = "1.0.99"
+wasmtime="40.0.0"
+
 inference-ast.workspace = true
 inference-wasm-codegen.workspace = true
+inference-type-checker.workspace = true
 inference.workspace = true
 inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
-anyhow.workspace = true
-serde_json = "1.0.99"
-wasmtime="40.0.0"

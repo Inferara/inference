@@ -5,8 +5,6 @@ use std::{
     rc::Rc,
 };
 
-use crate::type_info::TypeInfo;
-
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Location {
     pub offset_start: u32,
@@ -199,6 +197,10 @@ macro_rules! ast_enums {
 }
 
 ast_enums! {
+
+    pub enum Ast {
+        SourceFile(Rc<SourceFile>),
+    }
 
     pub enum Directive {
         Use(Rc<UseDirective>),

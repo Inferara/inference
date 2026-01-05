@@ -1,225 +1,16 @@
-use anyhow::bail;
-
-use crate::nodes::{
-    ArgumentType, Definition, FunctionDefinition, Identifier, Literal, OperatorKind, Statement,
-    UnaryOperatorKind,
-};
-use crate::nodes::{Expression, Location, SimpleType, SourceFile, Type};
-use crate::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
-use std::collections::HashMap;
 use std::rc::Rc;
 
-#[derive(Debug, Clone)]
-struct FuncSignature {
-    type_params: Vec<String>,
-    param_types: Vec<TypeInfo>,
-    return_type: TypeInfo,
-}
+use anyhow::bail;
+use inference_ast::nodes::{
+    ArgumentType, Definition, Expression, FunctionDefinition, Identifier, Literal, Location,
+    OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind,
+};
 
-struct SymbolTable {
-    types: HashMap<String, TypeInfo>, // map of type name -> type info
-    functions: HashMap<String, FuncSignature>, // map of function name -> signature
-    variables: Vec<HashMap<String, TypeInfo>>, // stack of variable name -> type for each scope
-}
-
-impl SymbolTable {
-    fn new() -> Self {
-        let mut table = SymbolTable {
-            types: HashMap::default(),
-            functions: HashMap::default(),
-            variables: Vec::default(),
-        };
-        table.types.insert(
-            "i8".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I8),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "i16".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I16),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "i32".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "i64".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "u8".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U8),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "u16".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U16),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "u32".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U32),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "u64".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::U64),
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "bool".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::Bool,
-                type_params: vec![],
-            },
-        );
-        table.types.insert(
-            "string".to_string(),
-            TypeInfo {
-                kind: TypeInfoKind::String,
-                type_params: vec![],
-            },
-        );
-        table
-    }
-
-    fn push_scope(&mut self) {
-        self.variables.push(HashMap::new());
-    }
-
-    fn pop_scope(&mut self) {
-        self.variables.pop();
-    }
-
-    fn push_variable_to_scope(&mut self, name: String, var_type: TypeInfo) -> anyhow::Result<()> {
-        if let Some(scope) = self.variables.last_mut() {
-            if scope.contains_key(&name) {
-                bail!("Variable `{name}` already declared in this scope");
-            }
-            scope.insert(name, var_type);
-            Ok(())
-        } else {
-            bail!("No active scope to push variables".to_string())
-        }
-    }
-
-    fn register_type(&mut self, name: &String, ty: Option<&Type>) -> anyhow::Result<()> {
-        if self.types.contains_key(name) {
-            bail!("Type `{name}` is already defined")
-        }
-        if let Some(ty) = ty {
-            self.types.insert(name.clone(), TypeInfo::new(ty));
-        } else {
-            self.types.insert(
-                name.clone(),
-                TypeInfo {
-                    kind: TypeInfoKind::Custom(name.clone()),
-                    type_params: vec![],
-                },
-            );
-        }
-        Ok(())
-    }
-
-    fn register_struct(&mut self, name: &String) -> anyhow::Result<()> {
-        if self.types.contains_key(name) {
-            bail!("Struct `{name}` is already defined")
-        }
-        self.types.insert(
-            name.clone(),
-            TypeInfo {
-                kind: TypeInfoKind::Struct(name.clone()),
-                type_params: vec![],
-            },
-        );
-        Ok(())
-    }
-
-    fn register_enum(&mut self, name: &String) -> anyhow::Result<()> {
-        if self.types.contains_key(name) {
-            bail!("Enum `{name}` is already defined")
-        }
-        self.types.insert(
-            name.clone(),
-            TypeInfo {
-                kind: TypeInfoKind::Enum(name.clone()),
-                type_params: vec![],
-            },
-        );
-        Ok(())
-    }
-
-    fn register_spec(&mut self, name: &String) -> anyhow::Result<()> {
-        if self.types.contains_key(name) {
-            bail!("Spec `{name}` is already defined")
-        }
-        self.types.insert(
-            name.clone(),
-            TypeInfo {
-                kind: TypeInfoKind::Spec(name.clone()),
-                type_params: vec![],
-            },
-        );
-        Ok(())
-    }
-
-    fn register_function(
-        &mut self,
-        name: &String,
-        type_params: Vec<String>,
-        param_types: &[Type],
-        return_type: &Type,
-    ) -> Result<(), String> {
-        if self.functions.contains_key(name) {
-            return Err(format!("Function `{name}` is already defined"));
-        }
-        self.functions.insert(
-            name.clone(),
-            FuncSignature {
-                type_params,
-                param_types: param_types.iter().map(TypeInfo::new).collect(),
-                return_type: TypeInfo::new(return_type),
-            },
-        );
-        Ok(())
-    }
-
-    fn lookup_type(&self, name: &str) -> Option<&TypeInfo> {
-        self.types.get(name)
-    }
-
-    fn lookup_variable(&self, name: &String) -> Option<TypeInfo> {
-        for scope in self.variables.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty.clone());
-            }
-        }
-        None
-    }
-
-    fn lookup_function(&self, name: &String) -> Option<&FuncSignature> {
-        self.functions.get(name)
-    }
-}
+use crate::{
+    symbol_table::SymbolTable,
+    type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
+    typed_context::TypedContext,
+};
 
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
@@ -234,31 +25,30 @@ impl TypeChecker {
         }
     }
 
-    //TODO `program` should be flattened to a single vector of definitions?
-    pub fn infer_types(&mut self, program: &mut Vec<SourceFile>) -> anyhow::Result<()> {
-        self.register_types(program);
-        self.collect_function_and_constant_definitions(program);
+    pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
+        self.register_types(ctx);
+        self.collect_function_and_constant_definitions(ctx);
         if !self.errors.is_empty() {
             bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
         }
         // Infer types for each function in each source file
-        for source_file in program {
+        for source_file in ctx.source_files() {
             // Directly iterate over definitions to ensure we operate on the actual AST nodes
             for def in &source_file.definitions {
                 if let Definition::Function(function_definition) = def {
                     // Clone the Rc to share the underlying FunctionDefinition
-                    self.infer_variables(function_definition.clone());
+                    self.infer_variables(function_definition.clone(), ctx);
                 }
             }
         }
         if !self.errors.is_empty() {
             bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
         }
-        Ok(())
+        Ok(self.symbol_table.clone())
     }
 
-    fn register_types(&mut self, program: &mut Vec<SourceFile>) {
-        for source_file in program {
+    fn register_types(&mut self, ctx: &mut TypedContext) {
+        for source_file in ctx.source_files() {
             for definition in &source_file.definitions {
                 match definition {
                     Definition::Type(type_definition) => {
@@ -310,8 +100,8 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn collect_function_and_constant_definitions(&mut self, program: &mut Vec<SourceFile>) {
-        for sf in program {
+    fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
+        for sf in ctx.source_files() {
             for definition in &sf.definitions {
                 match definition {
                     Definition::Constant(constant_definition) => {
@@ -489,7 +279,11 @@ impl TypeChecker {
     }
 
     #[allow(clippy::needless_pass_by_value)]
-    fn infer_variables(&mut self, function_definition: Rc<FunctionDefinition>) {
+    fn infer_variables(
+        &mut self,
+        function_definition: Rc<FunctionDefinition>,
+        ctx: &mut TypedContext,
+    ) {
         self.symbol_table.push_scope();
         if let Some(arguments) = &function_definition.arguments {
             for argument in arguments {
@@ -515,21 +309,34 @@ impl TypeChecker {
                     .as_ref()
                     .map(TypeInfo::new)
                     .unwrap_or_default(),
+                ctx,
             );
         }
         self.symbol_table.pop_scope();
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_statement(&mut self, statement: &mut Statement, return_type: &TypeInfo) {
+    fn infer_statement(
+        &mut self,
+        statement: &mut Statement,
+        return_type: &TypeInfo,
+        ctx: &mut TypedContext,
+    ) {
         match statement {
             Statement::Assign(assign_statement) => {
-                let target_type = self.infer_expression(&mut assign_statement.left.borrow_mut());
+                let target_type =
+                    self.infer_expression(&mut assign_statement.left.borrow_mut(), ctx);
                 let mut right_expr = assign_statement.right.borrow_mut();
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
-                    *uzumaki_rc.type_info.borrow_mut() = target_type;
+                    if let Some(target) = &target_type {
+                        ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
+                    } else {
+                        self.errors.push(
+                            String::from("Cannot infer type for Uzumaki expression assigned to variable of unknown type")
+                        );
+                    }
                 } else {
-                    let value_type = self.infer_expression(&mut right_expr);
+                    let value_type = self.infer_expression(&mut right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
                     {
@@ -542,16 +349,16 @@ impl TypeChecker {
             Statement::Block(block_type) => {
                 self.symbol_table.push_scope();
                 for stmt in &mut block_type.statements() {
-                    self.infer_statement(stmt, return_type);
+                    self.infer_statement(stmt, return_type, ctx);
                 }
                 self.symbol_table.pop_scope();
             }
             Statement::Expression(expression) => {
-                self.infer_expression(expression);
+                self.infer_expression(expression, ctx);
             }
             Statement::Return(return_statement) => {
                 let value_type =
-                    self.infer_expression(&mut return_statement.expression.borrow_mut());
+                    self.infer_expression(&mut return_statement.expression.borrow_mut(), ctx);
                 if *return_type != value_type.clone().unwrap_or_default() {
                     self.errors.push(format!(
                         "Return type mismatch: expected {return_type:?}, found {value_type:?}"
@@ -560,7 +367,7 @@ impl TypeChecker {
             }
             Statement::Loop(loop_statement) => {
                 if let Some(condition) = &mut *loop_statement.condition.borrow_mut() {
-                    let condition_type = self.infer_expression(condition);
+                    let condition_type = self.infer_expression(condition, ctx);
                     if condition_type.is_none()
                         || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                     {
@@ -571,14 +378,14 @@ impl TypeChecker {
                 }
                 self.symbol_table.push_scope();
                 for stmt in &mut loop_statement.body.statements() {
-                    self.infer_statement(stmt, return_type);
+                    self.infer_statement(stmt, return_type, ctx);
                 }
                 self.symbol_table.pop_scope();
             }
             Statement::Break(_) => {}
             Statement::If(if_statement) => {
                 let condition_type =
-                    self.infer_expression(&mut if_statement.condition.borrow_mut());
+                    self.infer_expression(&mut if_statement.condition.borrow_mut(), ctx);
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
@@ -589,13 +396,13 @@ impl TypeChecker {
 
                 self.symbol_table.push_scope();
                 for stmt in &mut if_statement.if_arm.statements() {
-                    self.infer_statement(stmt, return_type);
+                    self.infer_statement(stmt, return_type, ctx);
                 }
                 self.symbol_table.pop_scope();
                 if let Some(else_arm) = &if_statement.else_arm {
                     self.symbol_table.push_scope();
                     for stmt in &mut else_arm.statements() {
-                        self.infer_statement(stmt, return_type);
+                        self.infer_statement(stmt, return_type, ctx);
                     }
                     self.symbol_table.pop_scope();
                 }
@@ -606,8 +413,8 @@ impl TypeChecker {
                     // check for Uzumaki initializer
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
-                        *uzumaki_rc.type_info.borrow_mut() = Some(target_type);
-                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref)
+                        ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
+                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref, ctx)
                         && init_type != TypeInfo::new(&variable_definition_statement.ty)
                     {
                         self.errors.push(format!(
@@ -634,7 +441,7 @@ impl TypeChecker {
             }
             Statement::Assert(assert_statement) => {
                 let condition_type =
-                    self.infer_expression(&mut assert_statement.expression.borrow_mut());
+                    self.infer_expression(&mut assert_statement.expression.borrow_mut(), ctx);
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
@@ -656,25 +463,29 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_expression(&mut self, expression: &mut Expression) -> Option<TypeInfo> {
+    fn infer_expression(
+        &mut self,
+        expression: &mut Expression,
+        ctx: &mut TypedContext,
+    ) -> Option<TypeInfo> {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
-                if let Some(type_info) = array_index_access_expression.type_info.borrow().as_ref() {
+                if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
                     Some(type_info.clone())
-                } else if let Some(array_type) =
-                    self.infer_expression(&mut array_index_access_expression.array.borrow_mut())
+                } else if let Some(array_type) = self
+                    .infer_expression(&mut array_index_access_expression.array.borrow_mut(), ctx)
                 {
-                    if let Some(index_type) =
-                        self.infer_expression(&mut array_index_access_expression.index.borrow_mut())
-                        && !index_type.is_number()
+                    if let Some(index_type) = self.infer_expression(
+                        &mut array_index_access_expression.index.borrow_mut(),
+                        ctx,
+                    ) && !index_type.is_number()
                     {
                         self.errors.push(format!(
                             "Array index must be of number type, found {index_type:?}"
                         ));
                     }
                     if array_type.is_array() {
-                        *array_index_access_expression.type_info.borrow_mut() =
-                            Some(array_type.clone());
+                        ctx.set_node_typeinfo(array_index_access_expression.id, array_type.clone());
                         Some(array_type.clone())
                     } else {
                         self.errors
@@ -686,14 +497,13 @@ impl TypeChecker {
                 }
             }
             Expression::MemberAccess(member_access_expression) => {
-                if let Some(type_info) = member_access_expression.type_info.borrow().as_ref() {
+                if let Some(type_info) = ctx.get_node_typeinfo(member_access_expression.id) {
                     Some(type_info.clone())
-                } else if let Some(object_type) =
-                    self.infer_expression(&mut member_access_expression.expression.borrow_mut())
+                } else if let Some(object_type) = self
+                    .infer_expression(&mut member_access_expression.expression.borrow_mut(), ctx)
                 {
                     if object_type.is_struct() {
-                        *member_access_expression.type_info.borrow_mut() =
-                            Some(object_type.clone());
+                        ctx.set_node_typeinfo(member_access_expression.id, object_type.clone());
                         Some(object_type.clone())
                     } else {
                         self.errors.push(format!(
@@ -706,15 +516,18 @@ impl TypeChecker {
                 }
             }
             Expression::TypeMemberAccess(type_member_access_expression) => {
-                if let Some(type_info) = type_member_access_expression.type_info.borrow().as_ref() {
+                if let Some(type_info) = ctx.get_node_typeinfo(type_member_access_expression.id) {
                     Some(type_info.clone())
-                } else if let Some(type_expression_type) = self
-                    .infer_expression(&mut type_member_access_expression.expression.borrow_mut())
-                {
+                } else if let Some(type_expression_type) = self.infer_expression(
+                    &mut type_member_access_expression.expression.borrow_mut(),
+                    ctx,
+                ) {
                     // Here we would normally check if the member exists in the type
                     // For simplicity, we assume it does and return the type expression's type
-                    *type_member_access_expression.type_info.borrow_mut() =
-                        Some(type_expression_type.clone());
+                    ctx.set_node_typeinfo(
+                        type_member_access_expression.id,
+                        type_expression_type.clone(),
+                    );
                     Some(type_expression_type)
                 } else {
                     None
@@ -733,7 +546,7 @@ impl TypeChecker {
                     ));
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
-                            self.infer_expression(&mut arg.1.borrow_mut());
+                            self.infer_expression(&mut arg.1.borrow_mut(), ctx);
                         }
                     }
                     return None;
@@ -748,7 +561,7 @@ impl TypeChecker {
                         arguments.len()
                     ));
                     for arg in arguments {
-                        self.infer_expression(&mut arg.1.borrow_mut());
+                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
                     }
                     return None;
                 }
@@ -771,12 +584,11 @@ impl TypeChecker {
                         ));
                     }
                 }
-                *function_call_expression.type_info.borrow_mut() =
-                    Some(signature.return_type.clone());
+                ctx.set_node_typeinfo(function_call_expression.id, signature.return_type.clone());
                 Some(signature.return_type.clone())
             }
             Expression::Struct(struct_expression) => {
-                if let Some(type_info) = struct_expression.type_info.borrow().as_ref() {
+                if let Some(type_info) = ctx.get_node_typeinfo(struct_expression.id) {
                     return Some(type_info.clone());
                 }
                 let struct_type = self
@@ -784,7 +596,7 @@ impl TypeChecker {
                     .lookup_type(&struct_expression.name())
                     .cloned();
                 if let Some(struct_type) = struct_type {
-                    *struct_expression.type_info.borrow_mut() = Some(struct_type.clone());
+                    ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
                     return Some(struct_type);
                 }
                 self.errors.push(format!(
@@ -796,12 +608,16 @@ impl TypeChecker {
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Neg => {
-                        let expression_type_op = self
-                            .infer_expression(&mut prefix_unary_expression.expression.borrow_mut());
+                        let expression_type_op = self.infer_expression(
+                            &mut prefix_unary_expression.expression.borrow_mut(),
+                            ctx,
+                        );
                         if let Some(expression_type) = expression_type_op {
                             if expression_type.is_bool() {
-                                *prefix_unary_expression.type_info.borrow_mut() =
-                                    Some(expression_type.clone());
+                                ctx.set_node_typeinfo(
+                                    prefix_unary_expression.id,
+                                    expression_type.clone(),
+                                );
                                 return Some(expression_type);
                             }
                             self.errors.push(format!(
@@ -813,14 +629,16 @@ impl TypeChecker {
                 }
             }
             Expression::Parenthesized(parenthesized_expression) => {
-                self.infer_expression(&mut parenthesized_expression.expression.borrow_mut())
+                self.infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx)
             }
             Expression::Binary(binary_expression) => {
-                if let Some(type_info) = binary_expression.type_info.borrow().as_ref() {
+                if let Some(type_info) = ctx.get_node_typeinfo(binary_expression.id) {
                     return Some(type_info.clone());
                 }
-                let left_type = self.infer_expression(&mut binary_expression.left.borrow_mut());
-                let right_type = self.infer_expression(&mut binary_expression.right.borrow_mut());
+                let left_type =
+                    self.infer_expression(&mut binary_expression.left.borrow_mut(), ctx);
+                let right_type =
+                    self.infer_expression(&mut binary_expression.right.borrow_mut(), ctx);
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
                     if left_type != right_type {
                         self.errors.push(format!("Cannot apply operator {:?} to operands of different types: {:?} and {:?}", binary_expression.operator, left_type, right_type));
@@ -876,7 +694,7 @@ impl TypeChecker {
                             left_type.clone()
                         }
                     };
-                    *binary_expression.type_info.borrow_mut() = Some(res_type.clone());
+                    ctx.set_node_typeinfo(binary_expression.id, res_type.clone());
                     Some(left_type)
                 } else {
                     None
@@ -884,15 +702,16 @@ impl TypeChecker {
             }
             Expression::Literal(literal) => match literal {
                 Literal::Array(array_literal) => {
-                    if array_literal.type_info.borrow().is_some() {
-                        return Some(array_literal.type_info.borrow().clone().unwrap());
+                    if ctx.get_node_typeinfo(array_literal.id).is_some() {
+                        return ctx.get_node_typeinfo(array_literal.id);
                     }
                     if let Some(elements) = &array_literal.elements {
                         if let Some(element_type_info) =
-                            self.infer_expression(&mut elements[0].borrow_mut())
+                            self.infer_expression(&mut elements[0].borrow_mut(), ctx)
                         {
                             for element in &elements[1..] {
-                                let element_type = self.infer_expression(&mut element.borrow_mut());
+                                let element_type =
+                                    self.infer_expression(&mut element.borrow_mut(), ctx);
                                 if let Some(element_type) = element_type
                                     && element_type != element_type_info
                                 {
@@ -918,14 +737,14 @@ impl TypeChecker {
                     type_params: vec![],
                 }),
                 Literal::Number(number_literal) => {
-                    if number_literal.type_info.borrow().is_some() {
-                        return Some(number_literal.type_info.borrow().clone().unwrap());
+                    if ctx.get_node_typeinfo(number_literal.id).is_some() {
+                        return ctx.get_node_typeinfo(number_literal.id);
                     }
                     let res_type = TypeInfo {
                         kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
                         type_params: vec![],
                     };
-                    *number_literal.type_info.borrow_mut() = Some(res_type.clone());
+                    ctx.set_node_typeinfo(number_literal.id, res_type.clone());
                     Some(res_type)
                 }
                 Literal::Unit(_) => Some(TypeInfo {
@@ -935,7 +754,7 @@ impl TypeChecker {
             },
             Expression::Identifier(identifier) => {
                 if let Some(var_ty) = self.symbol_table.lookup_variable(&identifier.name) {
-                    *identifier.type_info.borrow_mut() = Some(var_ty.clone());
+                    ctx.set_node_typeinfo(identifier.id, var_ty.clone());
                     Some(var_ty)
                 } else {
                     self.errors
@@ -944,7 +763,7 @@ impl TypeChecker {
                 }
             }
             Expression::Type(type_expr) => Some(TypeInfo::new(type_expr)),
-            Expression::Uzumaki(uzumaki) => uzumaki.type_info.borrow().clone(),
+            Expression::Uzumaki(uzumaki) => ctx.get_node_typeinfo(uzumaki.id),
         }
     }
 
@@ -1002,15 +821,3 @@ impl TypeChecker {
         }
     }
 }
-
-// /// Errors during type inference
-// #[derive(Debug)]
-// pub enum TypeError {
-//     Mismatch {
-//         expected: Type,
-//         found: Type,
-//         loc: Location,
-//     },
-//     UnknownIdentifier(String, Location),
-//     Other(String, Location),
-// }

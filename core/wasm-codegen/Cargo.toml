@@ -11,4 +11,5 @@ inkwell = { version = "0.7.1", features = ["llvm21-1"] }
 tempfile = "3.3.0"
 which = "8.0.0"
 inference-ast.workspace = true
+inference-type-checker.workspace = true
 anyhow.workspace = true
