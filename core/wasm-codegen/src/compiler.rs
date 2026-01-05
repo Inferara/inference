@@ -233,69 +233,61 @@ impl<'ctx> Compiler<'ctx> {
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
-            Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
-                Type::Array(_type_array) => todo!(),
-                Type::Simple(simple_type) => {
-                    match ctx
-                        .get_node_typeinfo(simple_type.id)
-                        .expect("Constant definition must have a type info")
-                        .kind
-                    {
-                        TypeInfoKind::Unit => todo!(),
-                        TypeInfoKind::Bool => todo!(),
-                        TypeInfoKind::String => todo!(),
-                        TypeInfoKind::Number(number_type_kind_number_type) => {
-                            match number_type_kind_number_type {
-                                NumberTypeKindNumberType::I8 => todo!(),
-                                NumberTypeKindNumberType::I16 => todo!(),
-                                NumberTypeKindNumberType::I32 => {
-                                    let ctx_type = self.context.i32_type();
-                                    match &constant_definition.value {
-                                        Literal::Number(number_literal) => {
-                                            let val = ctx_type.const_int(
-                                                number_literal.value.parse::<u64>().unwrap_or(0),
-                                                false,
-                                            );
-                                            let local = self
-                                                .builder
-                                                .build_alloca(ctx_type, &constant_definition.name())
-                                                .unwrap();
-                                            self.builder.build_store(local, val).unwrap();
-                                            self.variables.borrow_mut().insert(
-                                                constant_definition.name(),
-                                                (local, ctx_type.into()),
-                                            );
-                                        }
-                                        _ => panic!(
-                                            "Constant value for i32 should be a number literal. Found: {:?}",
-                                            constant_definition.value
-                                        ),
+            Statement::ConstantDefinition(constant_definition) => {
+                match ctx
+                    .get_node_typeinfo(constant_definition.id)
+                    .expect("Constant definition must have a type info")
+                    .kind
+                {
+                    TypeInfoKind::Unit => todo!(),
+                    TypeInfoKind::Bool => todo!(),
+                    TypeInfoKind::String => todo!(),
+                    TypeInfoKind::Number(number_type_kind_number_type) => {
+                        match number_type_kind_number_type {
+                            NumberTypeKindNumberType::I8 => todo!(),
+                            NumberTypeKindNumberType::I16 => todo!(),
+                            NumberTypeKindNumberType::I32 => {
+                                let ctx_type = self.context.i32_type();
+                                match &constant_definition.value {
+                                    Literal::Number(number_literal) => {
+                                        let val = ctx_type.const_int(
+                                            number_literal.value.parse::<u64>().unwrap_or(0),
+                                            false,
+                                        );
+                                        let local = self
+                                            .builder
+                                            .build_alloca(ctx_type, &constant_definition.name())
+                                            .unwrap();
+                                        self.builder.build_store(local, val).unwrap();
+                                        self.variables.borrow_mut().insert(
+                                            constant_definition.name(),
+                                            (local, ctx_type.into()),
+                                        );
                                     }
+                                    _ => panic!(
+                                        "Constant value for i32 should be a number literal. Found: {:?}",
+                                        constant_definition.value
+                                    ),
                                 }
-                                NumberTypeKindNumberType::I64 => todo!(),
-                                NumberTypeKindNumberType::U8 => todo!(),
-                                NumberTypeKindNumberType::U16 => todo!(),
-                                NumberTypeKindNumberType::U32 => todo!(),
-                                NumberTypeKindNumberType::U64 => todo!(),
                             }
+                            NumberTypeKindNumberType::I64 => todo!(),
+                            NumberTypeKindNumberType::U8 => todo!(),
+                            NumberTypeKindNumberType::U16 => todo!(),
+                            NumberTypeKindNumberType::U32 => todo!(),
+                            NumberTypeKindNumberType::U64 => todo!(),
                         }
-                        TypeInfoKind::Custom(_) => todo!(),
-                        TypeInfoKind::Array(_type_info, _) => todo!(),
-                        TypeInfoKind::Generic(_) => todo!(),
-                        TypeInfoKind::QualifiedName(_) => todo!(),
-                        TypeInfoKind::Qualified(_) => todo!(),
-                        TypeInfoKind::Function(_) => todo!(),
-                        TypeInfoKind::Struct(_) => todo!(),
-                        TypeInfoKind::Enum(_) => todo!(),
-                        TypeInfoKind::Spec(_) => todo!(),
                     }
+                    TypeInfoKind::Custom(_) => todo!(),
+                    TypeInfoKind::Array(_type_info, _) => todo!(),
+                    TypeInfoKind::Generic(_) => todo!(),
+                    TypeInfoKind::QualifiedName(_) => todo!(),
+                    TypeInfoKind::Qualified(_) => todo!(),
+                    TypeInfoKind::Function(_) => todo!(),
+                    TypeInfoKind::Struct(_) => todo!(),
+                    TypeInfoKind::Enum(_) => todo!(),
+                    TypeInfoKind::Spec(_) => todo!(),
                 }
-                Type::Generic(_generic_type) => todo!(),
-                Type::Function(_function_type) => todo!(),
-                Type::QualifiedName(_qualified_name) => todo!(),
-                Type::Qualified(_type_qualified_name) => todo!(),
-                Type::Custom(_identifier) => todo!(),
-            },
+            }
         }
     }
 

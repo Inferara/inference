@@ -357,12 +357,22 @@ impl TypeChecker {
                 self.infer_expression(expression, ctx);
             }
             Statement::Return(return_statement) => {
-                let value_type =
-                    self.infer_expression(&mut return_statement.expression.borrow_mut(), ctx);
-                if *return_type != value_type.clone().unwrap_or_default() {
-                    self.errors.push(format!(
-                        "Return type mismatch: expected {return_type:?}, found {value_type:?}"
-                    ));
+                if matches!(
+                    &*return_statement.expression.borrow(),
+                    Expression::Uzumaki(_)
+                ) {
+                    ctx.set_node_typeinfo(
+                        return_statement.expression.borrow().id(),
+                        return_type.clone(),
+                    );
+                } else {
+                    let value_type =
+                        self.infer_expression(&mut return_statement.expression.borrow_mut(), ctx);
+                    if *return_type != value_type.clone().unwrap_or_default() {
+                        self.errors.push(format!(
+                            "Return type mismatch: expected {return_type:?}, found {value_type:?}"
+                        ));
+                    }
                 }
             }
             Statement::Loop(loop_statement) => {
@@ -429,6 +439,7 @@ impl TypeChecker {
                 ) {
                     self.errors.push(err.to_string());
                 }
+                ctx.set_node_typeinfo(variable_definition_statement.id, target_type);
             }
             Statement::TypeDefinition(type_definition_statement) => {
                 let type_name = type_definition_statement.name();
@@ -454,10 +465,11 @@ impl TypeChecker {
                 let constant_type = TypeInfo::new(&constant_definition.ty);
                 if let Err(err) = self
                     .symbol_table
-                    .push_variable_to_scope(constant_definition.name(), constant_type)
+                    .push_variable_to_scope(constant_definition.name(), constant_type.clone())
                 {
                     self.errors.push(err.to_string());
                 }
+                ctx.set_node_typeinfo(constant_definition.id, constant_type);
             }
         }
     }
