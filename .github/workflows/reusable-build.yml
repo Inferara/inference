@@ -43,7 +43,7 @@ jobs:
         id: cache-binaries
         with:
           path: external/
-          key: ${{ runner.os }}-binaries-v4
+          key: ${{ runner.os }}-binaries-v5
           restore-keys: |
             ${{ runner.os }}-binaries-
       
