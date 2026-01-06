@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 
 use inference_ast::nodes::Type;
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum NumberTypeKindNumberType {
     I8,
     I16,
@@ -15,7 +15,7 @@ pub enum NumberTypeKindNumberType {
     U64,
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum TypeInfoKind {
     Unit,
     Bool,
@@ -73,7 +73,7 @@ impl TypeInfoKind {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct TypeInfo {
     pub kind: TypeInfoKind,
     pub type_params: Vec<String>,
@@ -105,6 +105,20 @@ impl Display for TypeInfo {
 }
 
 impl TypeInfo {
+    pub fn boolean() -> Self {
+        Self {
+            kind: TypeInfoKind::Bool,
+            type_params: vec![],
+        }
+    }
+
+    pub fn string() -> Self {
+        Self {
+            kind: TypeInfoKind::String,
+            type_params: vec![],
+        }
+    }
+
     #[must_use]
     pub fn new(ty: &Type) -> Self {
         match ty {
@@ -163,23 +177,6 @@ impl TypeInfo {
         }
     }
 
-    fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
-        match simple_type_name.to_lowercase().as_str() {
-            "bool" => TypeInfoKind::Bool,
-            "string" => TypeInfoKind::String,
-            "unit" => TypeInfoKind::Unit,
-            "i8" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
-            "i16" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
-            "i32" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-            "i64" => TypeInfoKind::Number(NumberTypeKindNumberType::I64),
-            "u8" => TypeInfoKind::Number(NumberTypeKindNumberType::U8),
-            "u16" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
-            "u32" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
-            "u64" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
-            _ => panic!("Unknown simple type: {simple_type_name}"),
-        }
-    }
-
     #[must_use]
     pub fn is_number(&self) -> bool {
         self.kind.is_number()
@@ -198,5 +195,22 @@ impl TypeInfo {
     #[must_use]
     pub fn is_struct(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Struct(_))
+    }
+
+    fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
+        match simple_type_name.to_lowercase().as_str() {
+            "bool" => TypeInfoKind::Bool,
+            "string" => TypeInfoKind::String,
+            "unit" => TypeInfoKind::Unit,
+            "i8" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
+            "i16" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
+            "i32" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+            "i64" => TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+            "u8" => TypeInfoKind::Number(NumberTypeKindNumberType::U8),
+            "u16" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
+            "u32" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
+            "u64" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+            _ => panic!("Unknown simple type: {simple_type_name}"),
+        }
     }
 }

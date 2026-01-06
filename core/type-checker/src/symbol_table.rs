@@ -204,7 +204,7 @@ impl SymbolTable {
     }
 
     pub(crate) fn lookup_type(&self, name: &str) -> Option<&TypeInfo> {
-        self.types.get(name)
+        self.types.get(&name.to_lowercase())
     }
 
     pub(crate) fn lookup_variable(&self, name: &String) -> Option<TypeInfo> {

@@ -4,7 +4,10 @@ use crate::{
     symbol_table::SymbolTable,
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
 };
-use inference_ast::{arena::Arena, nodes::SourceFile};
+use inference_ast::{
+    arena::Arena,
+    nodes::{AstNode, SourceFile},
+};
 use rustc_hash::FxHashMap;
 
 #[derive(Default)]
@@ -25,6 +28,10 @@ impl TypedContext {
 
     pub fn source_files(&self) -> Vec<Rc<SourceFile>> {
         self.arena.source_files()
+    }
+
+    pub fn filter_nodes<T: Fn(&AstNode) -> bool>(&self, fn_predicate: T) -> Vec<AstNode> {
+        self.arena.filter_nodes(fn_predicate)
     }
 
     pub fn is_node_i32(&self, node_id: u32) -> bool {

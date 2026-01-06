@@ -555,3 +555,63 @@ fn test() -> i32 {
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
 }
+
+#[test]
+fn test_function_with_i32_return() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_function_with_bool_return() {
+    let source = r#"fn is_positive(x: i32) -> bool { return x > 0; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_custom_struct_type() {
+    let source = r#"struct Point { x: i32, y: i32 }
+fn test(p: Point) -> Point { return p; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_external_function() {
+    let source = r#"external fn print(String);"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_type_alias() {
+    let source = r#"type MyInt = i32;"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_constant_declarations() {
+    let source = r#"
+const FLAG: bool = true;
+const NUM: i32 = 42;
+"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_unit_return_type() {
+    let source = r#"fn test() { assert(true); }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_multiple_params() {
+    let source = r#"fn test(a: i32, b: i32, c: i32, d: i32) -> i32 { return a + b + c + d; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}

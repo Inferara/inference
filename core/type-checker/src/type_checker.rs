@@ -496,13 +496,19 @@ impl TypeChecker {
                             "Array index must be of number type, found {index_type:?}"
                         ));
                     }
-                    if array_type.is_array() {
-                        ctx.set_node_typeinfo(array_index_access_expression.id, array_type.clone());
-                        Some(array_type.clone())
-                    } else {
-                        self.errors
-                            .push(format!("Expected an array type, found {array_type:?}"));
-                        None
+                    match &array_type.kind {
+                        TypeInfoKind::Array(element_type, _) => {
+                            ctx.set_node_typeinfo(
+                                array_index_access_expression.id,
+                                (**element_type).clone(),
+                            );
+                            Some((**element_type).clone())
+                        }
+                        _ => {
+                            self.errors
+                                .push(format!("Expected an array type, found {array_type:?}"));
+                            None
+                        }
                     }
                 } else {
                     None
@@ -603,7 +609,7 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(struct_expression.id) {
                     return Some(type_info.clone());
                 }
-                let struct_type = self
+                let struct_type: Option<TypeInfo> = self
                     .symbol_table
                     .lookup_type(&struct_expression.name())
                     .cloned();
@@ -633,7 +639,7 @@ impl TypeChecker {
                                 return Some(expression_type);
                             }
                             self.errors.push(format!(
-                                "Unary operator `-` can only be applied to numbers, found {expression_type:?}"
+                                "Unary operator `-` can only be applied to booleans, found {expression_type:?}"
                             ));
                         }
                         None
@@ -707,7 +713,7 @@ impl TypeChecker {
                         }
                     };
                     ctx.set_node_typeinfo(binary_expression.id, res_type.clone());
-                    Some(left_type)
+                    Some(res_type)
                 } else {
                     None
                 }
@@ -740,14 +746,14 @@ impl TypeChecker {
 
                     None
                 }
-                Literal::Bool(_) => Some(TypeInfo {
-                    kind: TypeInfoKind::Bool,
-                    type_params: vec![],
-                }),
-                Literal::String(_) => Some(TypeInfo {
-                    kind: TypeInfoKind::String,
-                    type_params: vec![],
-                }),
+                Literal::Bool(_) => {
+                    ctx.set_node_typeinfo(literal.id(), TypeInfo::boolean());
+                    Some(TypeInfo::boolean())
+                }
+                Literal::String(sl) => {
+                    ctx.set_node_typeinfo(sl.id, TypeInfo::string());
+                    Some(TypeInfo::string())
+                }
                 Literal::Number(number_literal) => {
                     if ctx.get_node_typeinfo(number_literal.id).is_some() {
                         return ctx.get_node_typeinfo(number_literal.id);
@@ -759,10 +765,10 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(number_literal.id, res_type.clone());
                     Some(res_type)
                 }
-                Literal::Unit(_) => Some(TypeInfo {
-                    kind: TypeInfoKind::Unit,
-                    type_params: vec![],
-                }),
+                Literal::Unit(_) => {
+                    ctx.set_node_typeinfo(literal.id(), TypeInfo::default());
+                    Some(TypeInfo::default())
+                }
             },
             Expression::Identifier(identifier) => {
                 if let Some(var_ty) = self.symbol_table.lookup_variable(&identifier.name) {

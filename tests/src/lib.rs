@@ -4,6 +4,7 @@
 
 mod ast;
 mod codegen;
+mod type_checker;
 mod utils;
 
 #[cfg(test)]
