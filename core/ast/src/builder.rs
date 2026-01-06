@@ -280,7 +280,8 @@ impl<'a> Builder<'a, InitState> {
         }
         cursor = node.walk();
         let founded_methods = node
-            .children_by_field_name("method", &mut cursor)
+            .children_by_field_name("value", &mut cursor)
+            .filter(|n| n.kind() == "function_definition")
             .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
 

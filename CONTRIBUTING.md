@@ -190,6 +190,6 @@ Option<&T>   &Option<T>
 Prefer `Default` to zero-argument new function.
 Prefer `Default` even if it has to be implemented manually.
 
-## Collectons
+## Collections
 
-Preffer `FxHashMap` and `FxHashSet` from `rustc-hash` crate over standard library collections for better performance.
+Prefer `FxHashMap` and `FxHashSet` from `rustc-hash` crate over standard library collections for better performance.

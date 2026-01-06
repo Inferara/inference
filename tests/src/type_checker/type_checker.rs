@@ -858,6 +858,243 @@ mod type_inference_tests {
             }
         }
     }
+
+    /// Tests for method resolution and type inference (Phase 3)
+    mod methods {
+        use super::*;
+
+        #[test]
+        fn test_method_call_return_type() {
+            let source = r#"
+            struct Counter {
+                value: i32;
+
+                fn get() -> i32 { return 42; }
+            }
+            fn test(c: Counter) -> i32 { return c.get(); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                let return_type = typed_context.get_node_typeinfo(call.id);
+                assert!(
+                    return_type.is_some(),
+                    "Method call should have return type info"
+                );
+                assert!(
+                    matches!(
+                        return_type.unwrap().kind,
+                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                    ),
+                    "Method get() should return i32"
+                );
+            }
+        }
+
+        #[test]
+        fn test_method_with_parameter() {
+            let source = r#"
+            struct Calculator {
+                value: i32;
+
+                fn add(x: i32) -> i32 { return x; }
+            }
+            fn test(c: Calculator) -> i32 { return c.add(10); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                let return_type = typed_context.get_node_typeinfo(call.id);
+                assert!(
+                    return_type.is_some(),
+                    "Method call with parameter should have return type info"
+                );
+                assert!(
+                    matches!(
+                        return_type.unwrap().kind,
+                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                    ),
+                    "Method add() should return i32"
+                );
+            }
+        }
+
+        #[test]
+        fn test_method_returning_bool() {
+            let source = r#"
+            struct Checker {
+                valid: bool;
+
+                fn is_valid() -> bool { return true; }
+            }
+            fn test(c: Checker) -> bool { return c.is_valid(); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                let return_type = typed_context.get_node_typeinfo(call.id);
+                assert!(
+                    return_type.is_some(),
+                    "Method call should have return type info"
+                );
+                assert!(
+                    matches!(return_type.unwrap().kind, TypeInfoKind::Bool),
+                    "Method is_valid() should return bool"
+                );
+            }
+        }
+
+        #[test]
+        fn test_multiple_methods_on_struct() {
+            let source = r#"
+            struct Data {
+                x: i32;
+                y: i32;
+
+                fn get_x() -> i32 { return 1; }
+                fn get_y() -> i32 { return 2; }
+            }
+            fn test_x(d: Data) -> i32 { return d.get_x(); }
+            fn test_y(d: Data) -> i32 { return d.get_y(); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 2, "Expected 2 function call expressions");
+        }
+
+        #[test]
+        fn test_method_call_error_nonexistent_method() {
+            let source = r#"
+            struct Empty {}
+            fn test(e: Empty) -> i32 { return e.nonexistent(); }
+            "#;
+            let arena = build_ast(source.to_string());
+            let result = TypeCheckerBuilder::build_typed_context(arena);
+            assert!(
+                result.is_err(),
+                "Type checker should report error for nonexistent method"
+            );
+        }
+
+        #[test]
+        fn test_method_with_multiple_parameters() {
+            let source = r#"
+            struct Math {
+                base: i32;
+
+                fn compute(a: i32, b: i32) -> i32 { return a; }
+            }
+            fn test(m: Math) -> i32 { return m.compute(1, 2); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                let return_type = typed_context.get_node_typeinfo(call.id);
+                assert!(
+                    return_type.is_some(),
+                    "Method call with multiple parameters should have return type info"
+                );
+            }
+        }
+
+        #[test]
+        fn test_method_with_self_parameter() {
+            let source = r#"
+            struct Container {
+                data: i32;
+
+                fn process(self) -> i32 {
+                    return 42;
+                }
+            }
+            fn test(c: Container) -> i32 { return c.process(); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+        }
+
+        #[test]
+        fn test_method_wrong_argument_count_error() {
+            let source = r#"
+            struct Test {
+                value: i32;
+
+                fn needs_one(x: i32) -> i32 { return x; }
+            }
+            fn test(t: Test) -> i32 { return t.needs_one(); }
+            "#;
+            let arena = build_ast(source.to_string());
+            let result = TypeCheckerBuilder::build_typed_context(arena);
+            assert!(
+                result.is_err(),
+                "Type checker should report error for wrong argument count"
+            );
+        }
+
+        #[test]
+        fn test_method_call_on_non_struct_type_error() {
+            let source = r#"
+            fn test(x: i32) -> i32 { return x.method(); }
+            "#;
+            let arena = build_ast(source.to_string());
+            let result = TypeCheckerBuilder::build_typed_context(arena);
+            assert!(
+                result.is_err(),
+                "Type checker should report error for method call on non-struct type"
+            );
+        }
+
+        #[test]
+        fn test_self_access_in_method_body() {
+            let source = r#"
+            struct Container {
+                data: i32;
+
+                fn process(self) -> i32 {
+                    let x: i32 = self.data;
+                    return x;
+                }
+            }
+            fn test(c: Container) -> i32 { return c.process(); }
+            "#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let member_accesses = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
+            });
+            assert!(
+                member_accesses.len() >= 1,
+                "Expected at least 1 member access expression for self.data"
+            );
+        }
+    }
 }
 
 /// Tests that verify type errors are correctly reported.

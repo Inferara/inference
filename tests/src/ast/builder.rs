@@ -1,4 +1,5 @@
 use crate::utils::build_ast;
+use inference_ast::nodes::{AstNode, Definition};
 
 #[test]
 fn test_parse_simple_function() {
@@ -115,6 +116,29 @@ fn test_parse_struct_definition() {
     let arena = build_ast(source.to_string());
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
+}
+
+#[test]
+fn test_parse_struct_with_methods() {
+    let source = r#"
+    struct Counter {
+        value: i32;
+
+        fn get() -> i32 { return 42; }
+    }
+    "#;
+    let arena = build_ast(source.to_string());
+    let structs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Struct(_)))
+    });
+    assert_eq!(structs.len(), 1, "Expected 1 struct definition");
+
+    if let AstNode::Definition(Definition::Struct(struct_def)) = &structs[0] {
+        assert_eq!(struct_def.name.name, "Counter");
+        assert_eq!(struct_def.fields.len(), 1, "Expected 1 field");
+        assert_eq!(struct_def.methods.len(), 1, "Expected 1 method");
+        assert_eq!(struct_def.methods[0].name.name, "get");
+    }
 }
 
 #[test]

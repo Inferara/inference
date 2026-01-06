@@ -8,23 +8,15 @@ use inference_ast::nodes::{
 };
 
 use crate::{
-    symbol_table::SymbolTable,
+    symbol_table::{FuncSignature, SymbolTable},
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
 
+#[derive(Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<String>,
-}
-
-impl Default for TypeChecker {
-    fn default() -> Self {
-        TypeChecker {
-            symbol_table: SymbolTable::default(),
-            errors: vec![],
-        }
-    }
 }
 
 impl TypeChecker {
@@ -36,8 +28,24 @@ impl TypeChecker {
         }
         for source_file in ctx.source_files() {
             for def in &source_file.definitions {
-                if let Definition::Function(function_definition) = def {
-                    self.infer_variables(function_definition.clone(), ctx);
+                match def {
+                    Definition::Function(function_definition) => {
+                        self.infer_variables(function_definition.clone(), ctx);
+                    }
+                    Definition::Struct(struct_definition) => {
+                        let struct_type = TypeInfo {
+                            kind: TypeInfoKind::Struct(struct_definition.name()),
+                            type_params: vec![],
+                        };
+                        for method in &struct_definition.methods {
+                            self.infer_method_variables(
+                                method.clone(),
+                                struct_type.clone(),
+                                ctx,
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -86,6 +94,69 @@ impl TypeChecker {
                                     struct_definition.name()
                                 ));
                             });
+
+                        let struct_name = struct_definition.name();
+                        for method in &struct_definition.methods {
+                            let has_self = method
+                                .arguments
+                                .as_ref()
+                                .is_some_and(|args| {
+                                    args.iter()
+                                        .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
+                                });
+
+                            let param_types: Vec<TypeInfo> = method
+                                .arguments
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .filter_map(|param| match param {
+                                    ArgumentType::SelfReference(_) => None,
+                                    ArgumentType::IgnoreArgument(ignore_arg) => {
+                                        Some(TypeInfo::new(&ignore_arg.ty))
+                                    }
+                                    ArgumentType::Argument(arg) => Some(TypeInfo::new(&arg.ty)),
+                                    ArgumentType::Type(ty) => Some(TypeInfo::new(ty)),
+                                })
+                                .collect();
+
+                            let return_type = method
+                                .returns
+                                .as_ref()
+                                .map(TypeInfo::new)
+                                .unwrap_or_default();
+
+                            let type_params: Vec<String> = method
+                                .type_parameters
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .map(|p| p.name())
+                                .collect();
+
+                            let signature = FuncSignature {
+                                name: method.name(),
+                                type_params,
+                                param_types,
+                                return_type,
+                            };
+
+                            self.symbol_table
+                                .register_method(
+                                    &struct_name,
+                                    signature,
+                                    method.visibility.clone(),
+                                    has_self,
+                                )
+                                .unwrap_or_else(|err| {
+                                    self.errors.push(format!(
+                                        "Error registering method `{}` on `{}`: {}",
+                                        method.name(),
+                                        struct_name,
+                                        err
+                                    ));
+                                });
+                        }
                     }
                     Definition::Enum(enum_definition) => {
                         self.symbol_table
@@ -107,10 +178,10 @@ impl TypeChecker {
                                 ));
                             });
                     }
-                    Definition::Constant(constant_definition) => todo!(),
-                    Definition::Function(function_definition) => todo!(),
-                    Definition::ExternalFunction(external_function_definition) => todo!(),
-                    Definition::Module(module_definition) => todo!(),
+                    Definition::Constant(_)
+                    | Definition::Function(_)
+                    | Definition::ExternalFunction(_)
+                    | Definition::Module(_) => {}
                 }
             }
         }
@@ -231,11 +302,11 @@ impl TypeChecker {
                             self.errors.push(err);
                         }
                     }
-                    Definition::Spec(spec_definition) => todo!(),
-                    Definition::Struct(struct_definition) => todo!(),
-                    Definition::Enum(enum_definition) => todo!(),
-                    Definition::Type(type_definition) => todo!(),
-                    Definition::Module(module_definition) => todo!(),
+                    Definition::Spec(_)
+                    | Definition::Struct(_)
+                    | Definition::Enum(_)
+                    | Definition::Type(_)
+                    | Definition::Module(_) => {}
                 }
             }
         }
@@ -312,7 +383,11 @@ impl TypeChecker {
                             self.errors.push(err.to_string());
                         }
                     }
-                    ArgumentType::SelfReference(_) => todo!(),
+                    ArgumentType::SelfReference(_) => {
+                        self.errors.push(
+                            "Self reference is only allowed in methods, not functions".to_string(),
+                        );
+                    }
                     ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
                 }
             }
@@ -321,6 +396,51 @@ impl TypeChecker {
             self.infer_statement(
                 stmt,
                 &function_definition
+                    .returns
+                    .as_ref()
+                    .map(TypeInfo::new)
+                    .unwrap_or_default(),
+                ctx,
+            );
+        }
+        self.symbol_table.pop_scope();
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn infer_method_variables(
+        &mut self,
+        method_definition: Rc<FunctionDefinition>,
+        self_type: TypeInfo,
+        ctx: &mut TypedContext,
+    ) {
+        self.symbol_table.push_scope();
+        if let Some(arguments) = &method_definition.arguments {
+            for argument in arguments {
+                match argument {
+                    ArgumentType::Argument(arg) => {
+                        if let Err(err) = self
+                            .symbol_table
+                            .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
+                        {
+                            self.errors.push(err.to_string());
+                        }
+                    }
+                    ArgumentType::SelfReference(_) => {
+                        if let Err(err) = self
+                            .symbol_table
+                            .push_variable_to_scope("self", self_type.clone())
+                        {
+                            self.errors.push(err.to_string());
+                        }
+                    }
+                    ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
+                }
+            }
+        }
+        for stmt in &mut method_definition.body.statements() {
+            self.infer_statement(
+                stmt,
+                &method_definition
                     .returns
                     .as_ref()
                     .map(TypeInfo::new)
@@ -588,6 +708,70 @@ impl TypeChecker {
                 }
             }
             Expression::FunctionCall(function_call_expression) => {
+                if let Expression::MemberAccess(member_access) = &function_call_expression.function
+                {
+                    let receiver_type = self
+                        .infer_expression(&mut member_access.expression.borrow_mut(), ctx);
+
+                    if let Some(receiver_type) = receiver_type {
+                        let type_name = match &receiver_type.kind {
+                            TypeInfoKind::Struct(name) => Some(name.clone()),
+                            TypeInfoKind::Custom(name) => {
+                                if self.symbol_table.lookup_struct(name).is_some() {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(type_name) = type_name {
+                            let method_name = &member_access.name.name;
+                            if let Some(method_info) =
+                                self.symbol_table.lookup_method(&type_name, method_name)
+                            {
+                                let signature = &method_info.signature;
+                                let arg_count = function_call_expression
+                                    .arguments
+                                    .as_ref()
+                                    .map_or(0, Vec::len);
+
+                                if arg_count != signature.param_types.len() {
+                                    self.errors.push(format!(
+                                        "Method `{}::{}` expects {} arguments, but {} provided",
+                                        type_name,
+                                        method_name,
+                                        signature.param_types.len(),
+                                        arg_count
+                                    ));
+                                }
+
+                                if let Some(arguments) = &function_call_expression.arguments {
+                                    for arg in arguments {
+                                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                                    }
+                                }
+
+                                ctx.set_node_typeinfo(
+                                    function_call_expression.id,
+                                    signature.return_type.clone(),
+                                );
+                                return Some(signature.return_type.clone());
+                            }
+                            self.errors.push(format!(
+                                "Method `{method_name}` not found on type `{type_name}`"
+                            ));
+                            return None;
+                        }
+                        self.errors.push(format!(
+                            "Cannot call method on non-struct type `{receiver_type:?}`"
+                        ));
+                        return None;
+                    }
+                    return None;
+                }
+
                 let signature = if let Some(s) = self
                     .symbol_table
                     .lookup_function(&function_call_expression.name())
@@ -949,8 +1133,8 @@ impl TypeChecker {
                     Definition::Function(function_definition) => {
                         self.infer_variables(function_definition.clone(), ctx);
                     }
-                    Definition::Constant(constant_definition) => todo!(),
-                    Definition::ExternalFunction(external_function_definition) => todo!(),
+                    Definition::Constant(_constant_definition) => todo!(),
+                    Definition::ExternalFunction(_external_function_definition) => todo!(),
                 }
             }
         }

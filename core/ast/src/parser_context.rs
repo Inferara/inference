@@ -49,6 +49,7 @@ impl ParserContext {
 
     /// Push a new file onto the parse queue (for submodule resolution)
     /// TODO: Implement in Phase 1 when scope tree is ready
+    #[allow(clippy::unused_self)]
     pub fn push_file(&mut self, _scope_id: u32, _file_path: PathBuf) {
         // TODO: Implement me - add file to queue with parent scope
     }
@@ -74,7 +75,7 @@ impl ParserContext {
 
     /// Resolve and process a module definition
     /// TODO: Implement in Phase 1 when scope tree is ready
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::unused_self)]
     fn process_module(
         &mut self,
         _module: &Rc<ModuleDefinition>,

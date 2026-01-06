@@ -17,19 +17,42 @@ pub(crate) struct FuncSignature {
     pub(crate) return_type: TypeInfo,
 }
 
+/// Information about a struct field. Fields `name` and `visibility` are tracked
+/// for future phases (visibility checking, field access validation).
 #[derive(Debug, Clone)]
 pub(crate) struct StructFieldInfo {
+    #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) type_info: TypeInfo,
+    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
 }
 
+/// Information about a struct type. Field `visibility` is tracked for Phase 4+
+/// visibility checking during member access.
 #[derive(Debug, Clone)]
 pub(crate) struct StructInfo {
     pub(crate) name: String,
     pub(crate) fields: FxHashMap<String, StructFieldInfo>,
     pub(crate) type_params: Vec<String>,
+    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
+}
+
+/// Information about a method defined on a type.
+/// Fields visibility, scope_id, and has_self are populated for future phases:
+/// - visibility: for Phase 4+ visibility checking during method resolution
+/// - scope_id: to track which scope defines this method for qualified lookup
+/// - has_self: to distinguish instance methods from associated functions
+#[derive(Debug, Clone)]
+pub(crate) struct MethodInfo {
+    pub(crate) signature: FuncSignature,
+    #[allow(dead_code)]
+    pub(crate) visibility: Visibility,
+    #[allow(dead_code)]
+    pub(crate) scope_id: u32,
+    #[allow(dead_code)]
+    pub(crate) has_self: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +65,7 @@ pub(crate) enum Symbol {
 }
 
 impl Symbol {
+    #[allow(dead_code)]
     #[must_use = "discarding the name has no effect"]
     pub(crate) fn name(&self) -> String {
         match self {
@@ -91,16 +115,20 @@ impl Symbol {
     }
 }
 
+/// A scope in the symbol table tree. Fields `name` and `visibility` are tracked
+/// for future phases (qualified lookup, visibility enforcement).
 #[derive(Debug)]
 pub(crate) struct Scope {
     pub(crate) id: u32,
+    #[allow(dead_code)]
     pub(crate) name: String,
+    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
     pub(crate) parent: Option<ScopeRef>,
     pub(crate) children: Vec<ScopeRef>,
     pub(crate) symbols: FxHashMap<String, Symbol>,
     pub(crate) variables: FxHashMap<String, (u32, TypeInfo)>,
-    pub(crate) methods: FxHashMap<String, Vec<FuncSignature>>,
+    pub(crate) methods: FxHashMap<String, Vec<MethodInfo>>,
 }
 
 impl Scope {
@@ -180,11 +208,11 @@ impl Scope {
         None
     }
 
-    pub(crate) fn insert_method(&mut self, type_name: &str, sig: FuncSignature) {
+    pub(crate) fn insert_method(&mut self, type_name: &str, method_info: MethodInfo) {
         self.methods
             .entry(type_name.to_string())
             .or_default()
-            .push(sig);
+            .push(method_info);
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -192,13 +220,13 @@ impl Scope {
         &self,
         type_name: &str,
         method_name: &str,
-    ) -> Option<FuncSignature> {
-        if let Some(sig) = self
+    ) -> Option<MethodInfo> {
+        if let Some(method_info) = self
             .methods
             .get(type_name)
-            .and_then(|methods| methods.iter().find(|s| s.name == method_name))
+            .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
         {
-            return Some(sig.clone());
+            return Some(method_info.clone());
         }
         if let Some(parent) = &self.parent {
             return parent.borrow().lookup_method(type_name, method_name);
@@ -452,6 +480,39 @@ impl SymbolTable {
         })
     }
 
+    pub(crate) fn register_method(
+        &mut self,
+        type_name: &str,
+        signature: FuncSignature,
+        visibility: Visibility,
+        has_self: bool,
+    ) -> anyhow::Result<()> {
+        if let Some(scope) = &self.current_scope {
+            let scope_id = scope.borrow().id;
+            let method_info = MethodInfo {
+                signature,
+                visibility,
+                scope_id,
+                has_self,
+            };
+            scope.borrow_mut().insert_method(type_name, method_info);
+            Ok(())
+        } else {
+            bail!("No active scope to register method")
+        }
+    }
+
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_method(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<MethodInfo> {
+        self.current_scope
+            .as_ref()
+            .and_then(|scope| scope.borrow().lookup_method(type_name, method_name))
+    }
+
     #[must_use = "returns the scope ID which may be needed for later reference"]
     pub(crate) fn enter_module(&mut self, module: &Rc<ModuleDefinition>) -> u32 {
         let scope_id = self.push_scope_with_name(&module.name(), module.visibility.clone());
@@ -461,11 +522,13 @@ impl SymbolTable {
         scope_id
     }
 
+    #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn current_scope_id(&self) -> Option<u32> {
         self.current_scope.as_ref().map(|s| s.borrow().id)
     }
 
+    #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn get_scope(&self, scope_id: u32) -> Option<ScopeRef> {
         self.scopes.get(&scope_id).cloned()
