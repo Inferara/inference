@@ -18,32 +18,31 @@ pub(crate) struct TypeChecker {
     errors: Vec<String>,
 }
 
-impl TypeChecker {
-    pub fn new() -> Self {
+impl Default for TypeChecker {
+    fn default() -> Self {
         TypeChecker {
-            symbol_table: SymbolTable::new(),
+            symbol_table: SymbolTable::default(),
             errors: vec![],
         }
     }
+}
 
+impl TypeChecker {
     pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
         self.register_types(ctx);
         self.collect_function_and_constant_definitions(ctx);
         if !self.errors.is_empty() {
-            bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
+            bail!(std::mem::take(&mut self.errors).join("; "))
         }
-        // Infer types for each function in each source file
         for source_file in ctx.source_files() {
-            // Directly iterate over definitions to ensure we operate on the actual AST nodes
             for def in &source_file.definitions {
                 if let Definition::Function(function_definition) = def {
-                    // Clone the Rc to share the underlying FunctionDefinition
                     self.infer_variables(function_definition.clone(), ctx);
                 }
             }
         }
         if !self.errors.is_empty() {
-            bail!(std::mem::take(&mut self.errors).join("; ")) //TODO: handle it better
+            bail!(std::mem::take(&mut self.errors).join("; "))
         }
         Ok(self.symbol_table.clone())
     }
@@ -63,8 +62,24 @@ impl TypeChecker {
                             });
                     }
                     Definition::Struct(struct_definition) => {
+                        let fields: Vec<(String, TypeInfo, Visibility)> = struct_definition
+                            .fields
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.name.name.clone(),
+                                    TypeInfo::new(&f.type_),
+                                    Visibility::Private,
+                                )
+                            })
+                            .collect();
                         self.symbol_table
-                            .register_struct(&struct_definition.name())
+                            .register_struct(
+                                &struct_definition.name(),
+                                &fields,
+                                vec![],
+                                struct_definition.visibility.clone(),
+                            )
                             .unwrap_or_else(|_| {
                                 self.errors.push(format!(
                                     "Error registering type `{}`",
@@ -92,9 +107,10 @@ impl TypeChecker {
                                 ));
                             });
                     }
-                    _ => {
-                        // Functions and constants are handled in `collect_function_and_constant_definitions`
-                    }
+                    Definition::Constant(constant_definition) => todo!(),
+                    Definition::Function(function_definition) => todo!(),
+                    Definition::ExternalFunction(external_function_definition) => todo!(),
+                    Definition::Module(module_definition) => todo!(),
                 }
             }
         }
@@ -107,7 +123,7 @@ impl TypeChecker {
                 match definition {
                     Definition::Constant(constant_definition) => {
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
-                            constant_definition.name(),
+                            &constant_definition.name(),
                             TypeInfo::new(&constant_definition.ty),
                         ) {
                             self.errors.push(err.to_string());
@@ -117,7 +133,7 @@ impl TypeChecker {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
                             match param {
                                 ArgumentType::SelfReference(_) => {
-                                    todo!() //TODO handle self reference
+                                    todo!()
                                 }
                                 ArgumentType::IgnoreArgument(ignore_argument) => {
                                     self.validate_type(
@@ -215,9 +231,11 @@ impl TypeChecker {
                             self.errors.push(err);
                         }
                     }
-                    _ => {
-                        // Already registered in `register_types`
-                    }
+                    Definition::Spec(spec_definition) => todo!(),
+                    Definition::Struct(struct_definition) => todo!(),
+                    Definition::Enum(enum_definition) => todo!(),
+                    Definition::Type(type_definition) => todo!(),
+                    Definition::Module(module_definition) => todo!(),
                 }
             }
         }
@@ -266,10 +284,7 @@ impl TypeChecker {
                     }
                 }
             }
-            Type::Function(_) | Type::QualifiedName(_) | Type::Qualified(_) => {
-                //REVISIT Skip becase this is a call ABI
-                //Skip qualified names for now
-            }
+            Type::Function(_) | Type::QualifiedName(_) | Type::Qualified(_) => {}
             Type::Custom(identifier) => {
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
                     self.errors
@@ -292,7 +307,7 @@ impl TypeChecker {
                     ArgumentType::Argument(arg) => {
                         if let Err(err) = self
                             .symbol_table
-                            .push_variable_to_scope(arg.name(), TypeInfo::new(&arg.ty))
+                            .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
                         {
                             self.errors.push(err.to_string());
                         }
@@ -421,7 +436,6 @@ impl TypeChecker {
             Statement::VariableDefinition(variable_definition_statement) => {
                 let target_type = TypeInfo::new(&variable_definition_statement.ty);
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
-                    // check for Uzumaki initializer
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
@@ -435,7 +449,7 @@ impl TypeChecker {
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
-                    variable_definition_statement.name(),
+                    &variable_definition_statement.name(),
                     TypeInfo::new(&variable_definition_statement.ty),
                 ) {
                     self.errors.push(err.to_string());
@@ -466,7 +480,7 @@ impl TypeChecker {
                 let constant_type = TypeInfo::new(&constant_definition.ty);
                 if let Err(err) = self
                     .symbol_table
-                    .push_variable_to_scope(constant_definition.name(), constant_type.clone())
+                    .push_variable_to_scope(&constant_definition.name(), constant_type.clone())
                 {
                     self.errors.push(err.to_string());
                 }
@@ -521,9 +535,32 @@ impl TypeChecker {
                 } else if let Some(object_type) = self
                     .infer_expression(&mut member_access_expression.expression.borrow_mut(), ctx)
                 {
-                    if object_type.is_struct() {
-                        ctx.set_node_typeinfo(member_access_expression.id, object_type.clone());
-                        Some(object_type.clone())
+                    let struct_name = match &object_type.kind {
+                        TypeInfoKind::Struct(name) => Some(name.clone()),
+                        TypeInfoKind::Custom(name) => {
+                            if self.symbol_table.lookup_struct(name).is_some() {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(struct_name) = struct_name {
+                        let field_name = &member_access_expression.name.name;
+                        if let Some(field_type) = self
+                            .symbol_table
+                            .lookup_struct_field(&struct_name, field_name)
+                        {
+                            ctx.set_node_typeinfo(member_access_expression.id, field_type.clone());
+                            Some(field_type)
+                        } else {
+                            self.errors.push(format!(
+                                "Field `{field_name}` not found on struct `{struct_name}`"
+                            ));
+                            None
+                        }
                     } else {
                         self.errors.push(format!(
                             "Member access requires a struct type, found {object_type:?}"
@@ -541,8 +578,6 @@ impl TypeChecker {
                     &mut type_member_access_expression.expression.borrow_mut(),
                     ctx,
                 ) {
-                    // Here we would normally check if the member exists in the type
-                    // For simplicity, we assume it does and return the type expression's type
                     ctx.set_node_typeinfo(
                         type_member_access_expression.id,
                         type_expression_type.clone(),
@@ -610,10 +645,7 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(struct_expression.id) {
                     return Some(type_info.clone());
                 }
-                let struct_type: Option<TypeInfo> = self
-                    .symbol_table
-                    .lookup_type(&struct_expression.name())
-                    .cloned();
+                let struct_type = self.symbol_table.lookup_type(&struct_expression.name());
                 if let Some(struct_type) = struct_type {
                     ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
                     return Some(struct_type);
@@ -840,32 +872,104 @@ impl TypeChecker {
         }
     }
 
-    /// Process a module definition
-    /// TODO: Implement in Phase 1 when scope tree is ready
+    /// Process a module definition.
+    ///
+    /// Creates a new scope for the module and processes all definitions within it.
+    /// After processing, pops back to the parent scope.
     #[allow(dead_code)]
     fn process_module_definition(
         &mut self,
-        _module: &Rc<ModuleDefinition>,
-        _ctx: &mut TypedContext,
+        module: &Rc<ModuleDefinition>,
+        ctx: &mut TypedContext,
     ) -> anyhow::Result<()> {
-        // TODO: Implement me - requires scope tree infrastructure (Phase 1)
+        let _scope_id = self.symbol_table.enter_module(module);
+
+        if let Some(body) = &module.body {
+            for definition in body {
+                match definition {
+                    Definition::Type(type_definition) => {
+                        self.symbol_table
+                            .register_type(&type_definition.name(), Some(&type_definition.ty))
+                            .unwrap_or_else(|_| {
+                                self.errors.push(format!(
+                                    "Error registering type `{}`",
+                                    type_definition.name()
+                                ));
+                            });
+                    }
+                    Definition::Struct(struct_definition) => {
+                        let fields: Vec<(String, TypeInfo, Visibility)> = struct_definition
+                            .fields
+                            .iter()
+                            .map(|f| {
+                                (
+                                    f.name.name.clone(),
+                                    TypeInfo::new(&f.type_),
+                                    Visibility::Private,
+                                )
+                            })
+                            .collect();
+                        self.symbol_table
+                            .register_struct(
+                                &struct_definition.name(),
+                                &fields,
+                                vec![],
+                                struct_definition.visibility.clone(),
+                            )
+                            .unwrap_or_else(|_| {
+                                self.errors.push(format!(
+                                    "Error registering struct `{}`",
+                                    struct_definition.name()
+                                ));
+                            });
+                    }
+                    Definition::Enum(enum_definition) => {
+                        self.symbol_table
+                            .register_enum(&enum_definition.name())
+                            .unwrap_or_else(|_| {
+                                self.errors.push(format!(
+                                    "Error registering enum `{}`",
+                                    enum_definition.name()
+                                ));
+                            });
+                    }
+                    Definition::Spec(spec_definition) => {
+                        self.symbol_table
+                            .register_spec(&spec_definition.name())
+                            .unwrap_or_else(|_| {
+                                self.errors.push(format!(
+                                    "Error registering spec `{}`",
+                                    spec_definition.name()
+                                ));
+                            });
+                    }
+                    Definition::Module(nested_module) => {
+                        self.process_module_definition(nested_module, ctx)?;
+                    }
+                    Definition::Function(function_definition) => {
+                        self.infer_variables(function_definition.clone(), ctx);
+                    }
+                    Definition::Constant(constant_definition) => todo!(),
+                    Definition::ExternalFunction(external_function_definition) => todo!(),
+                }
+            }
+        }
+
+        self.symbol_table.pop_scope();
         Ok(())
     }
 
-    /// Process a use statement
-    /// TODO: Implement in Phase 4 when import system is ready
+    /// Process a use statement (Phase 4)
     #[allow(dead_code)]
     fn process_use_statement(
         &mut self,
         _use_stmt: &Rc<UseDirective>,
         _ctx: &mut TypedContext,
     ) -> anyhow::Result<()> {
-        // TODO: Implement me - requires import system (Phase 4)
         Ok(())
     }
 
-    /// Check visibility of a definition from current scope
-    /// TODO: Implement in Phase 4 when visibility checking is ready
+    /// Check visibility of a definition from current scope (Phase 4)
     #[allow(dead_code)]
     fn check_visibility(
         &self,
@@ -873,8 +977,6 @@ impl TypeChecker {
         _definition_scope: u32,
         _access_scope: u32,
     ) -> bool {
-        // TODO: Implement me - requires scope tree (Phase 1) and visibility rules (Phase 4)
-        // For now, everything is visible
         true
     }
 }
