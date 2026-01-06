@@ -55,6 +55,51 @@ pub(crate) struct MethodInfo {
     pub(crate) has_self: bool,
 }
 
+/// A single item in an import statement
+#[derive(Debug, Clone)]
+pub(crate) struct ImportItem {
+    /// The name being imported
+    pub(crate) name: String,
+    /// Optional alias (for `use path::item as alias`)
+    pub(crate) alias: Option<String>,
+}
+
+/// The kind of import statement
+#[derive(Debug, Clone)]
+pub(crate) enum ImportKind {
+    /// Plain import: `use path::item`
+    Plain,
+    /// Glob import: `use path::*` (Phase 5 - not yet implemented)
+    #[allow(dead_code)]
+    Glob,
+    /// Partial import with multiple items: `use path::{a, b as c}`
+    Partial(Vec<ImportItem>),
+}
+
+/// Represents an unresolved import in a scope
+#[derive(Debug, Clone)]
+pub(crate) struct Import {
+    /// The path segments of the import (e.g., ["std", "io", "File"])
+    pub(crate) path: Vec<String>,
+    /// The kind of import
+    pub(crate) kind: ImportKind,
+}
+
+/// Represents a resolved import binding.
+/// Fields `symbol` and `definition_scope_id` are used in future phases
+/// for visibility checking and resolved name lookup.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedImport {
+    /// The local name (either original or alias)
+    pub(crate) local_name: String,
+    /// The resolved symbol
+    #[allow(dead_code)]
+    pub(crate) symbol: Symbol,
+    /// The scope where the symbol is defined (for visibility checking)
+    #[allow(dead_code)]
+    pub(crate) definition_scope_id: u32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Symbol {
     Type(TypeInfo),
@@ -115,13 +160,12 @@ impl Symbol {
     }
 }
 
-/// A scope in the symbol table tree. Fields `name` and `visibility` are tracked
-/// for future phases (qualified lookup, visibility enforcement).
+/// A scope in the symbol table tree.
 #[derive(Debug)]
 pub(crate) struct Scope {
     pub(crate) id: u32,
-    #[allow(dead_code)]
     pub(crate) name: String,
+    /// Visibility of this scope (used in Phase 4+ visibility checking)
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
     pub(crate) parent: Option<ScopeRef>,
@@ -129,6 +173,10 @@ pub(crate) struct Scope {
     pub(crate) symbols: FxHashMap<String, Symbol>,
     pub(crate) variables: FxHashMap<String, (u32, TypeInfo)>,
     pub(crate) methods: FxHashMap<String, Vec<MethodInfo>>,
+    /// Unresolved imports registered in this scope
+    pub(crate) imports: Vec<Import>,
+    /// Resolved import bindings (populated after resolution phase)
+    pub(crate) resolved_imports: FxHashMap<String, ResolvedImport>,
 }
 
 impl Scope {
@@ -148,6 +196,8 @@ impl Scope {
             symbols: FxHashMap::default(),
             variables: FxHashMap::default(),
             methods: FxHashMap::default(),
+            imports: Vec::new(),
+            resolved_imports: FxHashMap::default(),
         }))
     }
 
@@ -232,6 +282,24 @@ impl Scope {
             return parent.borrow().lookup_method(type_name, method_name);
         }
         None
+    }
+
+    /// Add an unresolved import to this scope
+    pub(crate) fn add_import(&mut self, import: Import) {
+        self.imports.push(import);
+    }
+
+    /// Add a resolved import binding
+    pub(crate) fn add_resolved_import(&mut self, resolved: ResolvedImport) {
+        self.resolved_imports
+            .insert(resolved.local_name.clone(), resolved);
+    }
+
+    /// Look up a name in resolved imports (used in resolve_name for Phase 4+ name lookup)
+    #[allow(dead_code)]
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_resolved_import(&self, name: &str) -> Option<&ResolvedImport> {
+        self.resolved_imports.get(name)
     }
 }
 
@@ -528,9 +596,110 @@ impl SymbolTable {
         self.current_scope.as_ref().map(|s| s.borrow().id)
     }
 
-    #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn get_scope(&self, scope_id: u32) -> Option<ScopeRef> {
         self.scopes.get(&scope_id).cloned()
+    }
+
+    /// Register an import in the current scope (Phase A: registration)
+    pub(crate) fn register_import(&mut self, import: Import) -> anyhow::Result<()> {
+        if let Some(scope) = &self.current_scope {
+            scope.borrow_mut().add_import(import);
+            Ok(())
+        } else {
+            bail!("No active scope to register import")
+        }
+    }
+
+    /// Get all scope IDs for iteration
+    #[must_use = "discarding the scope IDs has no effect"]
+    pub(crate) fn all_scope_ids(&self) -> Vec<u32> {
+        self.scopes.keys().copied().collect()
+    }
+
+    /// Resolve a qualified name (e.g., ["mod1", "Type"]) from a given scope.
+    /// Returns the symbol and its defining scope ID for visibility checking.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn resolve_qualified_name(
+        &self,
+        path: &[String],
+        from_scope_id: u32,
+    ) -> Option<(Symbol, u32)> {
+        if path.is_empty() {
+            return None;
+        }
+
+        let first_segment = &path[0];
+
+        let start_scope = if first_segment == "self" {
+            self.get_scope(from_scope_id)?
+        } else {
+            self.root_scope.clone()?
+        };
+
+        let mut current_scope = start_scope;
+
+        let module_path = if first_segment == "self" {
+            &path[1..]
+        } else {
+            path
+        };
+
+        for (i, segment) in module_path.iter().enumerate() {
+            if i == module_path.len() - 1 {
+                let scope = current_scope.borrow();
+                if let Some(symbol) = scope.lookup_symbol_local(segment) {
+                    return Some((symbol.clone(), scope.id));
+                }
+                return None;
+            }
+
+            let scope = current_scope.borrow();
+            let child = scope
+                .children
+                .iter()
+                .find(|c| c.borrow().name == *segment)
+                .cloned();
+
+            match child {
+                Some(c) => {
+                    drop(scope);
+                    current_scope = c;
+                }
+                None => return None,
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a name considering local symbols and resolved imports.
+    /// Priority: local symbols > parent symbols > resolved imports.
+    /// Uses iteration to avoid stack overflow on deep scope trees.
+    /// (Used in Phase 4+ for name resolution with import awareness)
+    #[allow(dead_code)]
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn resolve_name(&self, name: &str) -> Option<(Symbol, u32)> {
+        let mut current_scope = self.current_scope.clone()?;
+
+        loop {
+            {
+                let scope_ref = current_scope.borrow();
+                if let Some(symbol) = scope_ref.lookup_symbol_local(name) {
+                    return Some((symbol.clone(), scope_ref.id));
+                }
+                if let Some(resolved) = scope_ref.lookup_resolved_import(name) {
+                    return Some((resolved.symbol.clone(), resolved.definition_scope_id));
+                }
+            }
+
+            let parent = current_scope.borrow().parent.clone();
+            match parent {
+                Some(p) => current_scope = p,
+                None => break,
+            }
+        }
+
+        None
     }
 }

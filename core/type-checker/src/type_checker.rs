@@ -2,13 +2,13 @@ use std::rc::Rc;
 
 use anyhow::bail;
 use inference_ast::nodes::{
-    ArgumentType, Definition, Expression, FunctionDefinition, Identifier, Literal, Location,
-    ModuleDefinition, OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind, UseDirective,
-    Visibility,
+    ArgumentType, Definition, Directive, Expression, FunctionDefinition, Identifier, Literal,
+    Location, ModuleDefinition, OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind,
+    UseDirective, Visibility,
 };
 
 use crate::{
-    symbol_table::{FuncSignature, SymbolTable},
+    symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -20,8 +20,18 @@ pub(crate) struct TypeChecker {
 }
 
 impl TypeChecker {
+    /// Infer types for all definitions in the context.
+    ///
+    /// Phase ordering:
+    /// 1. `process_directives()` - Register raw imports in scopes
+    /// 2. `register_types()` - Collect type definitions into symbol table
+    /// 3. `resolve_imports()` - Bind import paths to symbols
+    /// 4. `collect_function_and_constant_definitions()` - Register functions
+    /// 5. Infer variable types in function bodies
     pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
+        self.process_directives(ctx);
         self.register_types(ctx);
+        self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
         if !self.errors.is_empty() {
             bail!(std::mem::take(&mut self.errors).join("; "))
@@ -1143,24 +1153,169 @@ impl TypeChecker {
         Ok(())
     }
 
-    /// Process a use statement (Phase 4)
-    #[allow(dead_code)]
-    fn process_use_statement(
-        &mut self,
-        _use_stmt: &Rc<UseDirective>,
-        _ctx: &mut TypedContext,
-    ) -> anyhow::Result<()> {
-        Ok(())
+    /// Process all use directives in source files (Phase A of import resolution).
+    fn process_directives(&mut self, ctx: &mut TypedContext) {
+        for source_file in ctx.source_files() {
+            for directive in &source_file.directives {
+                match directive {
+                    Directive::Use(use_directive) => {
+                        if let Err(err) = self.process_use_statement(use_directive, ctx) {
+                            self.errors.push(err.to_string());
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    /// Check visibility of a definition from current scope (Phase 4)
+    /// Process a use statement (Phase A: registration only).
+    /// Converts UseDirective AST to Import and registers in current scope.
+    fn process_use_statement(
+        &mut self,
+        use_stmt: &Rc<UseDirective>,
+        _ctx: &mut TypedContext,
+    ) -> anyhow::Result<()> {
+        let path: Vec<String> = use_stmt
+            .segments
+            .as_ref()
+            .map(|segs| segs.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+
+        let kind = match &use_stmt.imported_types {
+            None => ImportKind::Plain,
+            Some(types) if types.is_empty() => ImportKind::Plain,
+            Some(types) => {
+                let items: Vec<ImportItem> = types
+                    .iter()
+                    .map(|t| ImportItem {
+                        name: t.name.clone(),
+                        alias: None,
+                    })
+                    .collect();
+                ImportKind::Partial(items)
+            }
+        };
+
+        let import = Import { path, kind };
+        self.symbol_table.register_import(import)
+    }
+
+    /// Resolve all imports (Phase B of import resolution).
+    /// This runs after register_types() so symbols are available.
+    fn resolve_imports(&mut self) {
+        let scope_ids: Vec<u32> = self.symbol_table.all_scope_ids();
+
+        for scope_id in scope_ids {
+            self.resolve_imports_in_scope(scope_id);
+        }
+    }
+
+    /// Resolve imports within a single scope
+    fn resolve_imports_in_scope(&mut self, scope_id: u32) {
+        let imports = {
+            let scope = match self.symbol_table.get_scope(scope_id) {
+                Some(s) => s,
+                None => return,
+            };
+            scope.borrow().imports.clone()
+        };
+
+        for import in imports {
+            match &import.kind {
+                ImportKind::Plain => {
+                    if let Some(symbol_name) = import.path.last() {
+                        if let Some((symbol, def_scope_id)) = self
+                            .symbol_table
+                            .resolve_qualified_name(&import.path, scope_id)
+                        {
+                            let resolved = ResolvedImport {
+                                local_name: symbol_name.clone(),
+                                symbol,
+                                definition_scope_id: def_scope_id,
+                            };
+                            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
+                                scope.borrow_mut().add_resolved_import(resolved);
+                            }
+                        } else {
+                            self.errors.push(format!(
+                                "Cannot resolve import path: {}",
+                                import.path.join("::")
+                            ));
+                        }
+                    }
+                }
+                ImportKind::Partial(items) => {
+                    for item in items {
+                        let mut full_path = import.path.clone();
+                        full_path.push(item.name.clone());
+
+                        if let Some((symbol, def_scope_id)) = self
+                            .symbol_table
+                            .resolve_qualified_name(&full_path, scope_id)
+                        {
+                            let local_name =
+                                item.alias.clone().unwrap_or_else(|| item.name.clone());
+                            let resolved = ResolvedImport {
+                                local_name,
+                                symbol,
+                                definition_scope_id: def_scope_id,
+                            };
+                            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
+                                scope.borrow_mut().add_resolved_import(resolved);
+                            }
+                        } else {
+                            self.errors.push(format!(
+                                "Cannot resolve import: {}::{}",
+                                import.path.join("::"),
+                                item.name
+                            ));
+                        }
+                    }
+                }
+                ImportKind::Glob => {
+                    self.errors.push(format!(
+                        "Glob imports not yet supported: {}::*",
+                        import.path.join("::")
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Check visibility of a definition from current scope.
+    ///
+    /// A private item is visible to the same scope and all descendant scopes.
+    /// A public item is visible everywhere.
     #[allow(dead_code)]
     fn check_visibility(
         &self,
-        _visibility: &Visibility,
-        _definition_scope: u32,
-        _access_scope: u32,
+        visibility: &Visibility,
+        definition_scope: u32,
+        access_scope: u32,
     ) -> bool {
-        true
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Private => self.is_scope_descendant_of(access_scope, definition_scope),
+        }
+    }
+
+    /// Check if access_scope is the same as or a descendant of target_scope.
+    /// Uses iteration to avoid stack overflow on deep scope trees.
+    fn is_scope_descendant_of(&self, access_scope: u32, target_scope: u32) -> bool {
+        let mut current = access_scope;
+        loop {
+            if current == target_scope {
+                return true;
+            }
+            if let Some(scope) = self.symbol_table.get_scope(current) {
+                if let Some(parent) = &scope.borrow().parent {
+                    current = parent.borrow().id;
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
     }
 }
