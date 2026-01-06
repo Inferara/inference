@@ -1,8 +1,8 @@
 use std::{marker::PhantomData, rc::Rc};
 
 use crate::nodes::{
-    ArgumentType, Ast, Directive, IgnoreArgument, Misc, SelfReference, StructExpression,
-    TypeMemberAccessExpression,
+    ArgumentType, Ast, Directive, IgnoreArgument, Misc, ModuleDefinition, SelfReference,
+    StructExpression, TypeMemberAccessExpression, Visibility,
 };
 use crate::{
     arena::Arena,
@@ -104,15 +104,6 @@ impl<'a> Builder<'a, InitState> {
             self.arena
                 .add_node(AstNode::Ast(Ast::SourceFile(Rc::new(ast))), u32::MAX);
         }
-        // let mut type_checker = TypeChecker::new();
-        // let _ = type_checker.infer_types(&mut res);
-
-        // let mut type_checker = TypeChecker::new();
-        // run type inference over all expressions
-        // type_checker
-        //     .infer_types(&t_ast.source_files)
-        //     .map_err(|e| anyhow::Error::msg(format!("Type error: {e:?}")))?;
-        // let ast = Ast::new(res, self.arena.clone());
         Ok(Builder {
             arena: self.arena.clone(),
             source_code: Vec::new(),
@@ -188,7 +179,13 @@ impl<'a> Builder<'a, InitState> {
             definitions.push(definition);
         }
 
-        let node = Rc::new(SpecDefinition::new(id, name, definitions, location));
+        let node = Rc::new(SpecDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            definitions,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Spec(node.clone())),
             parent_id,
@@ -216,7 +213,13 @@ impl<'a> Builder<'a, InitState> {
             variants = founded_variants;
         }
 
-        let node = Rc::new(EnumDefinition::new(id, name, variants, location));
+        let node = Rc::new(EnumDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            variants,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Enum(node.clone())),
             parent_id,
@@ -281,7 +284,14 @@ impl<'a> Builder<'a, InitState> {
             .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
 
-        let node = Rc::new(StructDefinition::new(id, name, fields, methods, location));
+        let node = Rc::new(StructDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            fields,
+            methods,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Struct(node.clone())),
             parent_id,
@@ -313,7 +323,14 @@ impl<'a> Builder<'a, InitState> {
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let value = self.build_literal(id, &node.child_by_field_name("value").unwrap(), code);
 
-        let node = Rc::new(ConstantDefinition::new(id, name, ty, value, location));
+        let node = Rc::new(ConstantDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            ty,
+            value,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Constant(node.clone())),
             parent_id,
@@ -363,6 +380,7 @@ impl<'a> Builder<'a, InitState> {
         let body = self.build_block(id, &body_node, code);
         let node = Rc::new(FunctionDefinition::new(
             id,
+            Visibility::default(),
             name,
             type_parameters,
             arguments,
@@ -404,7 +422,12 @@ impl<'a> Builder<'a, InitState> {
         }
 
         let node = Rc::new(ExternalFunctionDefinition::new(
-            id, name, arguments, returns, location,
+            id,
+            Visibility::default(),
+            name,
+            arguments,
+            returns,
+            location,
         ));
         self.arena.add_node(
             AstNode::Definition(Definition::ExternalFunction(node.clone())),
@@ -423,12 +446,31 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let node = Rc::new(TypeDefinition::new(id, name, ty, location));
+        let node = Rc::new(TypeDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            ty,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Type(node.clone())),
             parent_id,
         );
         node
+    }
+
+    /// Build a module definition node
+    /// TODO: Implement module parsing when tree-sitter grammar supports it
+    #[allow(dead_code)]
+    fn build_module_definition(
+        &mut self,
+        _parent_id: u32,
+        _node: &Node,
+        _code: &[u8],
+    ) -> Rc<ModuleDefinition> {
+        // TODO: Implement me - currently tree-sitter grammar doesn't support modules
+        unimplemented!("Module definitions are not yet supported in the grammar")
     }
 
     fn build_argument_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> ArgumentType {

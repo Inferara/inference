@@ -214,6 +214,7 @@ ast_enums! {
         Function(Rc<FunctionDefinition>),
         ExternalFunction(Rc<ExternalFunctionDefinition>),
         Type(Rc<TypeDefinition>),
+        Module(Rc<ModuleDefinition>),
     }
 
     pub enum BlockType {
@@ -282,6 +283,13 @@ ast_enums! {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum Visibility {
+    #[default]
+    Private,
+    Public,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UnaryOperatorKind {
     Neg,
@@ -325,11 +333,13 @@ ast_nodes! {
     }
 
     pub struct SpecDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub definitions: Vec<Definition>,
     }
 
     pub struct StructDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub fields: Vec<Rc<StructField>>,
         pub methods: Vec<Rc<FunctionDefinition>>,
@@ -341,6 +351,7 @@ ast_nodes! {
     }
 
     pub struct EnumDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub variants: Vec<Rc<Identifier>>,
     }
@@ -350,12 +361,14 @@ ast_nodes! {
     }
 
     pub struct ConstantDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub ty: Type,
         pub value: Literal,
     }
 
     pub struct FunctionDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub type_parameters: Option<Vec<Rc<Identifier>>>,
         pub arguments: Option<Vec<ArgumentType>>,
@@ -364,14 +377,22 @@ ast_nodes! {
     }
 
     pub struct ExternalFunctionDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub arguments: Option<Vec<ArgumentType>>,
         pub returns: Option<Type>,
     }
 
     pub struct TypeDefinition {
+        pub visibility: Visibility,
         pub name: Rc<Identifier>,
         pub ty: Type,
+    }
+
+    pub struct ModuleDefinition {
+        pub visibility: Visibility,
+        pub name: Rc<Identifier>,
+        pub body: Option<Vec<Definition>>,
     }
 
     pub struct Argument {

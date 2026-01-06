@@ -470,14 +470,14 @@ mod type_inference_tests {
             // FIXME: Type checker doesn't populate type info for identifiers yet.
             // When implemented, parameter references should have their declared type.
             for id_node in &identifiers {
-                if let AstNode::Expression(Expression::Identifier(id)) = id_node {
-                    if id.name == "x" {
-                        let type_info = typed_context.get_node_typeinfo(id.id);
-                        assert!(
-                            type_info.is_none(),
-                            "FIXME: Parameter identifier type info not yet populated"
-                        );
-                    }
+                if let AstNode::Expression(Expression::Identifier(id)) = id_node
+                    && id.name == "x"
+                {
+                    let type_info = typed_context.get_node_typeinfo(id.id);
+                    assert!(
+                        type_info.is_none(),
+                        "FIXME: Parameter identifier type info not yet populated"
+                    );
                 }
             }
         }
@@ -498,14 +498,14 @@ mod type_inference_tests {
 
             // FIXME: Type checker doesn't populate type info for variable identifiers yet.
             for id_node in &identifiers {
-                if let AstNode::Expression(Expression::Identifier(id)) = id_node {
-                    if id.name == "flag" {
-                        let type_info = typed_context.get_node_typeinfo(id.id);
-                        assert!(
-                            type_info.is_none(),
-                            "FIXME: Local variable identifier type info not yet populated"
-                        );
-                    }
+                if let AstNode::Expression(Expression::Identifier(id)) = id_node
+                    && id.name == "flag"
+                {
+                    let type_info = typed_context.get_node_typeinfo(id.id);
+                    assert!(
+                        type_info.is_none(),
+                        "FIXME: Local variable identifier type info not yet populated"
+                    );
                 }
             }
         }

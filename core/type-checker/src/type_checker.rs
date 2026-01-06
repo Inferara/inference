@@ -3,7 +3,8 @@ use std::rc::Rc;
 use anyhow::bail;
 use inference_ast::nodes::{
     ArgumentType, Definition, Expression, FunctionDefinition, Identifier, Literal, Location,
-    OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind,
+    ModuleDefinition, OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind, UseDirective,
+    Visibility,
 };
 
 use crate::{
@@ -837,5 +838,43 @@ impl TypeChecker {
             }
             _ => false,
         }
+    }
+
+    /// Process a module definition
+    /// TODO: Implement in Phase 1 when scope tree is ready
+    #[allow(dead_code)]
+    fn process_module_definition(
+        &mut self,
+        _module: &Rc<ModuleDefinition>,
+        _ctx: &mut TypedContext,
+    ) -> anyhow::Result<()> {
+        // TODO: Implement me - requires scope tree infrastructure (Phase 1)
+        Ok(())
+    }
+
+    /// Process a use statement
+    /// TODO: Implement in Phase 4 when import system is ready
+    #[allow(dead_code)]
+    fn process_use_statement(
+        &mut self,
+        _use_stmt: &Rc<UseDirective>,
+        _ctx: &mut TypedContext,
+    ) -> anyhow::Result<()> {
+        // TODO: Implement me - requires import system (Phase 4)
+        Ok(())
+    }
+
+    /// Check visibility of a definition from current scope
+    /// TODO: Implement in Phase 4 when visibility checking is ready
+    #[allow(dead_code)]
+    fn check_visibility(
+        &self,
+        _visibility: &Visibility,
+        _definition_scope: u32,
+        _access_scope: u32,
+    ) -> bool {
+        // TODO: Implement me - requires scope tree (Phase 1) and visibility rules (Phase 4)
+        // For now, everything is visible
+        true
     }
 }

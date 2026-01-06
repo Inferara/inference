@@ -1,7 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::nodes::{
-    ArgumentType, IgnoreArgument, SelfReference, StructExpression, TypeMemberAccessExpression,
+    ArgumentType, IgnoreArgument, ModuleDefinition, SelfReference, StructExpression,
+    TypeMemberAccessExpression, Visibility,
 };
 
 use super::nodes::{
@@ -206,6 +207,7 @@ impl SpecDefinition {
     #[must_use]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         definitions: Vec<Definition>,
         location: Location,
@@ -213,6 +215,7 @@ impl SpecDefinition {
         SpecDefinition {
             id,
             location,
+            visibility,
             name,
             definitions,
         }
@@ -228,6 +231,7 @@ impl StructDefinition {
     #[must_use]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         fields: Vec<Rc<StructField>>,
         methods: Vec<Rc<FunctionDefinition>>,
@@ -236,6 +240,7 @@ impl StructDefinition {
         StructDefinition {
             id,
             location,
+            visibility,
             name,
             fields,
             methods,
@@ -264,6 +269,7 @@ impl EnumDefinition {
     #[must_use]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         variants: Vec<Rc<Identifier>>,
         location: Location,
@@ -271,6 +277,7 @@ impl EnumDefinition {
         EnumDefinition {
             id,
             location,
+            visibility,
             name,
             variants,
         }
@@ -298,6 +305,7 @@ impl ConstantDefinition {
     #[must_use]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         type_: Type,
         value: Literal,
@@ -306,6 +314,7 @@ impl ConstantDefinition {
         ConstantDefinition {
             id,
             location,
+            visibility,
             name,
             ty: type_,
             value,
@@ -320,8 +329,10 @@ impl ConstantDefinition {
 
 impl FunctionDefinition {
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         type_parameters: Option<Vec<Rc<Identifier>>>,
         arguments: Option<Vec<ArgumentType>>,
@@ -332,6 +343,7 @@ impl FunctionDefinition {
         FunctionDefinition {
             id,
             location,
+            visibility,
             name,
             type_parameters,
             arguments,
@@ -370,6 +382,7 @@ impl ExternalFunctionDefinition {
     #[must_use]
     pub fn new(
         id: u32,
+        visibility: Visibility,
         name: Rc<Identifier>,
         arguments: Option<Vec<ArgumentType>>,
         returns: Option<Type>,
@@ -378,6 +391,7 @@ impl ExternalFunctionDefinition {
         ExternalFunctionDefinition {
             id,
             location,
+            visibility,
             name,
             arguments,
             returns,
@@ -392,12 +406,43 @@ impl ExternalFunctionDefinition {
 
 impl TypeDefinition {
     #[must_use]
-    pub fn new(id: u32, name: Rc<Identifier>, type_: Type, location: Location) -> Self {
+    pub fn new(
+        id: u32,
+        visibility: Visibility,
+        name: Rc<Identifier>,
+        type_: Type,
+        location: Location,
+    ) -> Self {
         TypeDefinition {
             id,
             location,
+            visibility,
             name,
             ty: type_,
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.name.name()
+    }
+}
+
+impl ModuleDefinition {
+    #[must_use]
+    pub fn new(
+        id: u32,
+        visibility: Visibility,
+        name: Rc<Identifier>,
+        body: Option<Vec<Definition>>,
+        location: Location,
+    ) -> Self {
+        ModuleDefinition {
+            id,
+            location,
+            visibility,
+            name,
+            body,
         }
     }
 
