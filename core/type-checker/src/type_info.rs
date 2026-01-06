@@ -210,7 +210,7 @@ impl TypeInfo {
             "u16" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
             "u32" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
             "u64" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
-            _ => panic!("Unknown simple type: {simple_type_name}"),
+            _ => TypeInfoKind::Custom(simple_type_name.to_string()),
         }
     }
 }

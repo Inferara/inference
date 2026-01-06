@@ -45,7 +45,7 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
         arena: Arena,
     ) -> anyhow::Result<TypeCheckerBuilder<TypeCheckerCompleteState>> {
         let mut ctx = TypedContext::new(arena);
-        let mut type_checker = TypeChecker::new();
+        let mut type_checker = TypeChecker::default();
         match type_checker.infer_types(&mut ctx) {
             Ok(symbol_table) => {
                 ctx.symbol_table = symbol_table;
