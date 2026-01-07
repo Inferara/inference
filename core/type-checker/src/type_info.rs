@@ -162,7 +162,10 @@ impl TypeInfo {
             },
             Type::Array(array) => Self {
                 kind: TypeInfoKind::Array(
-                    Box::new(Self::new_with_type_params(&array.element_type, type_param_names)),
+                    Box::new(Self::new_with_type_params(
+                        &array.element_type,
+                        type_param_names,
+                    )),
                     None,
                 ),
                 type_params: vec![],

@@ -10,7 +10,7 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext},
+    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -102,7 +102,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Type,
                                     name: type_definition.name(),
                                     reason: None,
-                                    location:type_definition.location.clone(),
+                                    location: type_definition.location.clone(),
                                 });
                             });
                     }
@@ -130,7 +130,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Struct,
                                     name: struct_definition.name(),
                                     reason: None,
-                                    location:struct_definition.location.clone(),
+                                    location: struct_definition.location.clone(),
                                 });
                             });
 
@@ -170,12 +170,15 @@ impl TypeChecker {
                                 .map(|p| p.name())
                                 .collect();
 
+                            let definition_scope_id =
+                                self.symbol_table.current_scope_id().unwrap_or(0);
                             let signature = FuncSignature {
                                 name: method.name(),
                                 type_params,
                                 param_types,
                                 return_type,
                                 visibility: method.visibility.clone(),
+                                definition_scope_id,
                             };
 
                             self.symbol_table
@@ -190,7 +193,7 @@ impl TypeChecker {
                                         kind: RegistrationKind::Method,
                                         name: format!("{struct_name}::{}", method.name()),
                                         reason: Some(err.to_string()),
-                                        location:method.location.clone(),
+                                        location: method.location.clone(),
                                     });
                                 });
                         }
@@ -212,7 +215,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Enum,
                                     name: enum_definition.name(),
                                     reason: None,
-                                    location:enum_definition.location.clone(),
+                                    location: enum_definition.location.clone(),
                                 });
                             });
                     }
@@ -224,7 +227,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Spec,
                                     name: spec_definition.name(),
                                     reason: None,
-                                    location:spec_definition.location.clone(),
+                                    location: spec_definition.location.clone(),
                                 });
                             });
                     }
@@ -251,7 +254,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: constant_definition.name(),
                                 reason: Some(err.to_string()),
-                                location:constant_definition.location.clone(),
+                                location: constant_definition.location.clone(),
                             });
                         }
                     }
@@ -261,7 +264,7 @@ impl TypeChecker {
                                 ArgumentType::SelfReference(self_ref) => {
                                     self.errors.push(TypeCheckError::SelfReferenceInFunction {
                                         function_name: function_definition.name(),
-                                        location:self_ref.location.clone(),
+                                        location: self_ref.location.clone(),
                                     });
                                 }
                                 ArgumentType::IgnoreArgument(ignore_argument) => {
@@ -329,7 +332,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Function,
                                 name: function_definition.name(),
                                 reason: Some(err),
-                                location:function_definition.location.clone(),
+                                location: function_definition.location.clone(),
                             });
                         }
                     }
@@ -365,7 +368,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Function,
                                 name: external_function_definition.name(),
                                 reason: Some(err),
-                                location:external_function_definition.location.clone(),
+                                location: external_function_definition.location.clone(),
                             });
                         }
                     }
@@ -397,7 +400,7 @@ impl TypeChecker {
                 if self.symbol_table.lookup_type(&simple_type.name).is_none() {
                     self.push_error_dedup(TypeCheckError::UnknownType {
                         name: simple_type.name.clone(),
-                        location:simple_type.location.clone(),
+                        location: simple_type.location.clone(),
                     });
                 }
             }
@@ -409,7 +412,7 @@ impl TypeChecker {
                 {
                     self.push_error_dedup(TypeCheckError::UnknownType {
                         name: generic_type.base.name(),
-                        location:generic_type.base.location.clone(),
+                        location: generic_type.base.location.clone(),
                     });
                 }
                 // Validate each parameter in the generic type
@@ -420,7 +423,7 @@ impl TypeChecker {
                     {
                         self.push_error_dedup(TypeCheckError::UnknownType {
                             name: param.name(),
-                            location:param.location.clone(),
+                            location: param.location.clone(),
                         });
                     }
                 }
@@ -434,7 +437,7 @@ impl TypeChecker {
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
                     self.push_error_dedup(TypeCheckError::UnknownType {
                         name: identifier.name.clone(),
-                        location:identifier.location.clone(),
+                        location: identifier.location.clone(),
                     });
                 }
             }
@@ -474,9 +477,10 @@ impl TypeChecker {
                         }
                     }
                     ArgumentType::SelfReference(self_ref) => {
-                        self.errors.push(TypeCheckError::SelfReferenceOutsideMethod {
-                            location: self_ref.location.clone(),
-                        });
+                        self.errors
+                            .push(TypeCheckError::SelfReferenceOutsideMethod {
+                                location: self_ref.location.clone(),
+                            });
                     }
                     ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
                 }
@@ -804,12 +808,33 @@ impl TypeChecker {
 
                     if let Some(struct_name) = struct_name {
                         let field_name = &member_access_expression.name.name;
-                        if let Some(field_type) = self
-                            .symbol_table
-                            .lookup_struct_field(&struct_name, field_name)
-                        {
-                            ctx.set_node_typeinfo(member_access_expression.id, field_type.clone());
-                            Some(field_type)
+                        // Look up struct to get field info including visibility
+                        if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
+                            if let Some(field_info) = struct_info.fields.get(field_name) {
+                                // Check field visibility
+                                self.check_and_report_visibility(
+                                    &field_info.visibility,
+                                    struct_info.definition_scope_id,
+                                    &member_access_expression.location,
+                                    VisibilityContext::Field {
+                                        struct_name: struct_name.clone(),
+                                        field_name: field_name.clone(),
+                                    },
+                                );
+                                let field_type = field_info.type_info.clone();
+                                ctx.set_node_typeinfo(
+                                    member_access_expression.id,
+                                    field_type.clone(),
+                                );
+                                Some(field_type)
+                            } else {
+                                self.errors.push(TypeCheckError::FieldNotFound {
+                                    struct_name,
+                                    field_name: field_name.clone(),
+                                    location: member_access_expression.location.clone(),
+                                });
+                                None
+                            }
                         } else {
                             self.errors.push(TypeCheckError::FieldNotFound {
                                 struct_name,
@@ -847,7 +872,7 @@ impl TypeChecker {
                                 // Array, Generic, Function, QualifiedName, Qualified are not valid for enum access
                                 self.errors.push(TypeCheckError::ExpectedEnumType {
                                     found: TypeInfo::new(ty),
-                                    location:type_member_access_expression.location.clone(),
+                                    location: type_member_access_expression.location.clone(),
                                 });
                                 return None;
                             }
@@ -866,7 +891,7 @@ impl TypeChecker {
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
-                                        location:type_member_access_expression.location.clone(),
+                                        location: type_member_access_expression.location.clone(),
                                     });
                                     return None;
                                 }
@@ -892,14 +917,14 @@ impl TypeChecker {
                         self.errors.push(TypeCheckError::VariantNotFound {
                             enum_name,
                             variant_name: variant_name.clone(),
-                            location:type_member_access_expression.location.clone(),
+                            location: type_member_access_expression.location.clone(),
                         });
                         None
                     }
                 } else {
                     self.push_error_dedup(TypeCheckError::UndefinedEnum {
                         name: enum_name,
-                        location:type_member_access_expression.location.clone(),
+                        location: type_member_access_expression.location.clone(),
                     });
                     None
                 }
@@ -928,6 +953,17 @@ impl TypeChecker {
                             if let Some(method_info) =
                                 self.symbol_table.lookup_method(&type_name, method_name)
                             {
+                                // Check visibility of the method
+                                self.check_and_report_visibility(
+                                    &method_info.visibility,
+                                    method_info.scope_id,
+                                    &member_access.location,
+                                    VisibilityContext::Method {
+                                        type_name: type_name.clone(),
+                                        method_name: method_name.clone(),
+                                    },
+                                );
+
                                 let signature = &method_info.signature;
                                 let arg_count = function_call_expression
                                     .arguments
@@ -988,11 +1024,20 @@ impl TypeChecker {
                     .symbol_table
                     .lookup_function(&function_call_expression.name())
                 {
+                    // Check visibility of the function
+                    self.check_and_report_visibility(
+                        &s.visibility,
+                        s.definition_scope_id,
+                        &function_call_expression.location,
+                        VisibilityContext::Function {
+                            name: function_call_expression.name(),
+                        },
+                    );
                     s.clone()
                 } else {
                     self.push_error_dedup(TypeCheckError::UndefinedFunction {
                         name: function_call_expression.name(),
-                        location:function_call_expression.location.clone(),
+                        location: function_call_expression.location.clone(),
                     });
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
@@ -1094,7 +1139,7 @@ impl TypeChecker {
                 }
                 self.push_error_dedup(TypeCheckError::UndefinedStruct {
                     name: struct_expression.name(),
-                    location:struct_expression.location.clone(),
+                    location: struct_expression.location.clone(),
                 });
                 None
             }
@@ -1266,7 +1311,7 @@ impl TypeChecker {
                 } else {
                     self.push_error_dedup(TypeCheckError::UnknownIdentifier {
                         name: identifier.name.clone(),
-                        location:identifier.location.clone(),
+                        location: identifier.location.clone(),
                     });
                     None
                 }
@@ -1353,7 +1398,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Type,
                                     name: type_definition.name(),
                                     reason: None,
-                                    location:type_definition.location.clone(),
+                                    location: type_definition.location.clone(),
                                 });
                             });
                     }
@@ -1381,7 +1426,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Struct,
                                     name: struct_definition.name(),
                                     reason: None,
-                                    location:struct_definition.location.clone(),
+                                    location: struct_definition.location.clone(),
                                 });
                             });
                     }
@@ -1573,6 +1618,17 @@ impl TypeChecker {
                             .symbol_table
                             .resolve_qualified_name(&import.path, scope_id)
                         {
+                            // Check if the symbol is public - private symbols can't be imported
+                            if !symbol.is_public() {
+                                self.check_and_report_visibility(
+                                    &Visibility::Private,
+                                    def_scope_id,
+                                    &import.location,
+                                    VisibilityContext::Import {
+                                        path: import.path.join("::"),
+                                    },
+                                );
+                            }
                             let resolved = ResolvedImport {
                                 local_name: symbol_name.clone(),
                                 symbol,
@@ -1598,6 +1654,17 @@ impl TypeChecker {
                             .symbol_table
                             .resolve_qualified_name(&full_path, scope_id)
                         {
+                            // Check if the symbol is public - private symbols can't be imported
+                            if !symbol.is_public() {
+                                self.check_and_report_visibility(
+                                    &Visibility::Private,
+                                    def_scope_id,
+                                    &import.location,
+                                    VisibilityContext::Import {
+                                        path: full_path.join("::"),
+                                    },
+                                );
+                            }
                             let local_name =
                                 item.alias.clone().unwrap_or_else(|| item.name.clone());
                             let resolved = ResolvedImport {
@@ -1626,8 +1693,9 @@ impl TypeChecker {
     /// Resolve a glob import (`use path::*`) by importing all public symbols from the target module.
     fn resolve_glob_import(&mut self, path: &[String], location: &Location, into_scope_id: u32) {
         if path.is_empty() {
-            self.errors
-                .push(TypeCheckError::EmptyGlobImport { location: location.clone() });
+            self.errors.push(TypeCheckError::EmptyGlobImport {
+                location: location.clone(),
+            });
             return;
         }
 
@@ -1674,7 +1742,6 @@ impl TypeChecker {
     ///
     /// A private item is visible to the same scope and all descendant scopes.
     /// A public item is visible everywhere.
-    #[allow(dead_code)]
     fn check_visibility(
         &self,
         visibility: &Visibility,
@@ -1684,6 +1751,27 @@ impl TypeChecker {
         match visibility {
             Visibility::Public => true,
             Visibility::Private => self.is_scope_descendant_of(access_scope, definition_scope),
+        }
+    }
+
+    /// Check visibility and report error if access is not allowed.
+    /// Returns true if access is allowed, false if error was reported.
+    fn check_and_report_visibility(
+        &mut self,
+        visibility: &Visibility,
+        definition_scope: u32,
+        location: &Location,
+        context: VisibilityContext,
+    ) -> bool {
+        let access_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        if self.check_visibility(visibility, definition_scope, access_scope) {
+            true
+        } else {
+            self.errors.push(TypeCheckError::PrivateAccessViolation {
+                context,
+                location: location.clone(),
+            });
+            false
         }
     }
 

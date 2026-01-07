@@ -128,9 +128,8 @@ fn test_parse_struct_with_methods() {
     }
     "#;
     let arena = build_ast(source.to_string());
-    let structs = arena.filter_nodes(|node| {
-        matches!(node, AstNode::Definition(Definition::Struct(_)))
-    });
+    let structs =
+        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
     assert_eq!(structs.len(), 1, "Expected 1 struct definition");
 
     if let AstNode::Definition(Definition::Struct(struct_def)) = &structs[0] {

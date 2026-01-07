@@ -62,10 +62,7 @@ impl Display for TypeMismatchContext {
             TypeMismatchContext::FunctionArgument {
                 function_name,
                 arg_index,
-            } => write!(
-                f,
-                "in argument {arg_index} of function `{function_name}`"
-            ),
+            } => write!(f, "in argument {arg_index} of function `{function_name}`"),
             TypeMismatchContext::MethodArgument {
                 type_name,
                 method_name,
@@ -75,6 +72,50 @@ impl Display for TypeMismatchContext {
                 "in argument {arg_index} of method `{type_name}::{method_name}`"
             ),
             TypeMismatchContext::ArrayElement => write!(f, "in array element"),
+        }
+    }
+}
+
+/// Context for visibility violation errors to provide specific error messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisibilityContext {
+    Function {
+        name: String,
+    },
+    Struct {
+        name: String,
+    },
+    Enum {
+        name: String,
+    },
+    Field {
+        struct_name: String,
+        field_name: String,
+    },
+    Method {
+        type_name: String,
+        method_name: String,
+    },
+    Import {
+        path: String,
+    },
+}
+
+impl Display for VisibilityContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            VisibilityContext::Function { name } => write!(f, "function `{name}`"),
+            VisibilityContext::Struct { name } => write!(f, "struct `{name}`"),
+            VisibilityContext::Enum { name } => write!(f, "enum `{name}`"),
+            VisibilityContext::Field {
+                struct_name,
+                field_name,
+            } => write!(f, "field `{field_name}` of struct `{struct_name}`"),
+            VisibilityContext::Method {
+                type_name,
+                method_name,
+            } => write!(f, "method `{method_name}` on type `{type_name}`"),
+            VisibilityContext::Import { path } => write!(f, "item `{path}`"),
         }
     }
 }
@@ -139,7 +180,9 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: type parameter count mismatch for `{name}`: expected {expected}, found {found}")]
+    #[error(
+        "{location}: type parameter count mismatch for `{name}`: expected {expected}, found {found}"
+    )]
     TypeParameterCountMismatch {
         name: String,
         expected: usize,
@@ -147,14 +190,18 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: function `{function_name}` requires {expected} type parameters, but none were provided")]
+    #[error(
+        "{location}: function `{function_name}` requires {expected} type parameters, but none were provided"
+    )]
     MissingTypeParameters {
         function_name: String,
         expected: usize,
         location: Location,
     },
 
-    #[error("{location}: {expected_kind} operator `{operator:?}` cannot be applied to {operand_desc}")]
+    #[error(
+        "{location}: {expected_kind} operator `{operator:?}` cannot be applied to {operand_desc}"
+    )]
     InvalidBinaryOperand {
         operator: OperatorKind,
         expected_kind: &'static str,
@@ -163,7 +210,9 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: unary operator `{operator:?}` can only be applied to {expected_type}, found `{found_type}`")]
+    #[error(
+        "{location}: unary operator `{operator:?}` can only be applied to {expected_type}, found `{found_type}`"
+    )]
     InvalidUnaryOperand {
         operator: UnaryOperatorKind,
         expected_type: &'static str,
@@ -171,7 +220,9 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`")]
+    #[error(
+        "{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`"
+    )]
     BinaryOperandTypeMismatch {
         operator: OperatorKind,
         left: TypeInfo,
@@ -217,28 +268,42 @@ pub enum TypeCheckError {
     #[error("{location}: array index must be of number type, found `{found}`")]
     ArrayIndexNotNumeric { found: TypeInfo, location: Location },
 
-    #[error("{location}: array elements must be of the same type: expected `{expected}`, found `{found}`")]
+    #[error(
+        "{location}: array elements must be of the same type: expected `{expected}`, found `{found}`"
+    )]
     ArrayElementTypeMismatch {
         expected: TypeInfo,
         found: TypeInfo,
         location: Location,
     },
 
-    #[error("{location}: cannot infer type for uzumaki expression assigned to variable of unknown type")]
+    #[error(
+        "{location}: cannot infer type for uzumaki expression assigned to variable of unknown type"
+    )]
     CannotInferUzumakiType { location: Location },
 
-    #[error("{location}: cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments")]
+    #[error(
+        "{location}: cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments"
+    )]
     CannotInferTypeParameter {
         function_name: String,
         param_name: String,
         location: Location,
     },
 
-    #[error("{location}: conflicting types for type parameter `{param_name}`: inferred `{first}` and `{second}`")]
+    #[error(
+        "{location}: conflicting types for type parameter `{param_name}`: inferred `{first}` and `{second}`"
+    )]
     ConflictingTypeInference {
         param_name: String,
         first: TypeInfo,
         second: TypeInfo,
+        location: Location,
+    },
+
+    #[error("{location}: cannot access private {context}")]
+    PrivateAccessViolation {
+        context: VisibilityContext,
         location: Location,
     },
 }
@@ -277,7 +342,8 @@ impl TypeCheckError {
             | TypeCheckError::ArrayElementTypeMismatch { location, .. }
             | TypeCheckError::CannotInferUzumakiType { location }
             | TypeCheckError::CannotInferTypeParameter { location, .. }
-            | TypeCheckError::ConflictingTypeInference { location, .. } => location,
+            | TypeCheckError::ConflictingTypeInference { location, .. }
+            | TypeCheckError::PrivateAccessViolation { location, .. } => location,
         }
     }
 }
@@ -412,10 +478,7 @@ mod tests {
             name: "myFunc".to_string(),
             location: test_location(),
         };
-        assert_eq!(
-            err.to_string(),
-            "1:5: call to undefined function `myFunc`"
-        );
+        assert_eq!(err.to_string(), "1:5: call to undefined function `myFunc`");
     }
 
     #[test]
@@ -607,10 +670,7 @@ mod tests {
             },
             location: test_location(),
         };
-        assert_eq!(
-            err.to_string(),
-            "1:5: expected an array type, found `i32`"
-        );
+        assert_eq!(err.to_string(), "1:5: expected an array type, found `i32`");
     }
 
     #[test]
@@ -722,6 +782,100 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: type member access requires an enum type, found `i32`"
+        );
+    }
+
+    #[test]
+    fn display_visibility_context_function() {
+        let ctx = VisibilityContext::Function {
+            name: "helper".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "function `helper`");
+    }
+
+    #[test]
+    fn display_visibility_context_struct() {
+        let ctx = VisibilityContext::Struct {
+            name: "Data".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "struct `Data`");
+    }
+
+    #[test]
+    fn display_visibility_context_enum() {
+        let ctx = VisibilityContext::Enum {
+            name: "Color".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "enum `Color`");
+    }
+
+    #[test]
+    fn display_visibility_context_field() {
+        let ctx = VisibilityContext::Field {
+            struct_name: "Point".to_string(),
+            field_name: "x".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "field `x` of struct `Point`");
+    }
+
+    #[test]
+    fn display_visibility_context_method() {
+        let ctx = VisibilityContext::Method {
+            type_name: "Counter".to_string(),
+            method_name: "increment".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "method `increment` on type `Counter`");
+    }
+
+    #[test]
+    fn display_visibility_context_import() {
+        let ctx = VisibilityContext::Import {
+            path: "inner::private_fn".to_string(),
+        };
+        assert_eq!(ctx.to_string(), "item `inner::private_fn`");
+    }
+
+    #[test]
+    fn display_private_access_violation_function() {
+        let err = TypeCheckError::PrivateAccessViolation {
+            context: VisibilityContext::Function {
+                name: "helper".to_string(),
+            },
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot access private function `helper`"
+        );
+    }
+
+    #[test]
+    fn display_private_access_violation_field() {
+        let err = TypeCheckError::PrivateAccessViolation {
+            context: VisibilityContext::Field {
+                struct_name: "Point".to_string(),
+                field_name: "x".to_string(),
+            },
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot access private field `x` of struct `Point`"
+        );
+    }
+
+    #[test]
+    fn display_private_access_violation_method() {
+        let err = TypeCheckError::PrivateAccessViolation {
+            context: VisibilityContext::Method {
+                type_name: "Counter".to_string(),
+                method_name: "reset".to_string(),
+            },
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot access private method `reset` on type `Counter`"
         );
     }
 }

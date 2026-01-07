@@ -19,37 +19,41 @@ pub(crate) struct FuncSignature {
     pub(crate) param_types: Vec<TypeInfo>,
     pub(crate) return_type: TypeInfo,
     pub(crate) visibility: Visibility,
+    pub(crate) definition_scope_id: u32,
 }
 
-/// Information about a struct field. Fields `name` and `visibility` are tracked
-/// for future phases (visibility checking, field access validation).
+/// Information about a struct field.
 #[derive(Debug, Clone)]
 pub(crate) struct StructFieldInfo {
     #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) type_info: TypeInfo,
-    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
 }
 
-/// Information about a struct type. Field `visibility` is tracked for Phase 4+
-/// visibility checking during member access.
+/// Information about a struct type. Visibility and definition_scope_id are used
+/// for Phase 9+ visibility checking during member access.
 #[derive(Debug, Clone)]
 pub(crate) struct StructInfo {
     pub(crate) name: String,
     pub(crate) fields: FxHashMap<String, StructFieldInfo>,
     pub(crate) type_params: Vec<String>,
-    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
+    pub(crate) definition_scope_id: u32,
 }
 
 /// Information about an enum type including its variants.
 /// Simple unit variants only - associated data support is out of scope.
+/// Visibility and definition_scope_id are used for Phase 9+ visibility checking.
 #[derive(Debug, Clone)]
 pub(crate) struct EnumInfo {
     pub(crate) name: String,
     pub(crate) variants: FxHashSet<String>,
     pub(crate) visibility: Visibility,
+    /// Scope where this enum is defined (for visibility checking during type member access).
+    /// Currently unused - will be utilized when enum visibility is fully implemented.
+    #[allow(dead_code)]
+    pub(crate) definition_scope_id: u32,
 }
 
 /// Information about a method defined on a type.
@@ -476,6 +480,7 @@ impl SymbolTable {
         visibility: Visibility,
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
+            let scope_id = scope.borrow().id;
             let mut field_map = FxHashMap::default();
             for (field_name, field_type, field_visibility) in fields {
                 field_map.insert(
@@ -492,6 +497,7 @@ impl SymbolTable {
                 fields: field_map,
                 type_params,
                 visibility,
+                definition_scope_id: scope_id,
             };
             scope
                 .borrow_mut()
@@ -508,10 +514,12 @@ impl SymbolTable {
         visibility: Visibility,
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
+            let scope_id = scope.borrow().id;
             let enum_info = EnumInfo {
                 name: name.to_string(),
                 variants: variants.iter().map(|s| (*s).to_string()).collect(),
                 visibility,
+                definition_scope_id: scope_id,
             };
             scope
                 .borrow_mut()
@@ -556,6 +564,7 @@ impl SymbolTable {
         visibility: Visibility,
     ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
+            let scope_id = scope.borrow().id;
             // Use type_params when constructing TypeInfo so that
             // type parameters like T, U are recognized as Generic types
             let sig = FuncSignature {
@@ -567,6 +576,7 @@ impl SymbolTable {
                     .collect(),
                 return_type: TypeInfo::new_with_type_params(return_type, &type_params),
                 visibility,
+                definition_scope_id: scope_id,
             };
             scope
                 .borrow_mut()
@@ -625,6 +635,7 @@ impl SymbolTable {
             .and_then(|symbol| symbol.as_struct().cloned())
     }
 
+    #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct_field(
         &self,
@@ -723,7 +734,6 @@ impl SymbolTable {
         self.root_scope.clone()
     }
 
-    #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn current_scope_id(&self) -> Option<u32> {
         self.current_scope.as_ref().map(|s| s.borrow().id)

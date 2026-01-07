@@ -439,7 +439,10 @@ fn test_parse_function_with_self_param() {
     // Verify the function has arguments (including self)
     if let Some(def) = source_files[0].definitions.first() {
         if let inference_ast::nodes::Definition::Function(func) = def {
-            let args = func.arguments.as_ref().expect("Function should have arguments");
+            let args = func
+                .arguments
+                .as_ref()
+                .expect("Function should have arguments");
             assert!(
                 args.iter()
                     .any(|arg| matches!(arg, inference_ast::nodes::ArgumentType::SelfReference(_))),
