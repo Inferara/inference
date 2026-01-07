@@ -301,6 +301,23 @@ pub enum TypeCheckError {
         location: Option<Location>,
     },
 
+    #[error("cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments")]
+    CannotInferTypeParameter {
+        function_name: String,
+        param_name: String,
+        #[allow(dead_code)]
+        location: Option<Location>,
+    },
+
+    #[error("conflicting types for type parameter `{param_name}`: inferred `{first}` and `{second}`")]
+    ConflictingTypeInference {
+        param_name: String,
+        first: TypeInfo,
+        second: TypeInfo,
+        #[allow(dead_code)]
+        location: Option<Location>,
+    },
+
     #[error("{0}")]
     General(String),
 }
@@ -337,7 +354,9 @@ impl TypeCheckError {
             | TypeCheckError::MethodCallOnNonStruct { location, .. }
             | TypeCheckError::ArrayIndexNotNumeric { location, .. }
             | TypeCheckError::ArrayElementTypeMismatch { location, .. }
-            | TypeCheckError::CannotInferUzumakiType { location } => location.as_ref(),
+            | TypeCheckError::CannotInferUzumakiType { location }
+            | TypeCheckError::CannotInferTypeParameter { location, .. }
+            | TypeCheckError::ConflictingTypeInference { location, .. } => location.as_ref(),
             TypeCheckError::General(_) => None,
         }
     }

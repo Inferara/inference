@@ -7,7 +7,7 @@ use inference_ast::nodes::{
     Location, ModuleDefinition, OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind,
     UseDirective, Visibility,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     errors::{RegistrationKind, TypeCheckError, TypeMismatchContext},
@@ -385,9 +385,20 @@ impl TypeChecker {
     }
 
     fn validate_type(&mut self, ty: &Type, type_parameters: Option<&Vec<Rc<Identifier>>>) {
+        // Collect type parameter names for checking
+        let type_param_names: Vec<String> = type_parameters
+            .map(|params| params.iter().map(|p| p.name()).collect())
+            .unwrap_or_default();
+
         match ty {
-            Type::Array(type_array) => self.validate_type(&type_array.element_type, None),
+            Type::Array(type_array) => {
+                self.validate_type(&type_array.element_type, type_parameters)
+            }
             Type::Simple(simple_type) => {
+                // Type parameters (like T, U) are valid types within the function
+                if type_param_names.contains(&simple_type.name) {
+                    return;
+                }
                 if self.symbol_table.lookup_type(&simple_type.name).is_none() {
                     self.errors.push(TypeCheckError::UnknownType {
                         name: simple_type.name.clone(),
@@ -406,34 +417,25 @@ impl TypeChecker {
                         location: None,
                     });
                 }
-                if let Some(type_params) = &type_parameters {
-                    if type_params.len() != generic_type.parameters.len() {
-                        self.errors
-                            .push(TypeCheckError::TypeParameterCountMismatch {
-                                name: generic_type.base.name(),
-                                expected: generic_type.parameters.len(),
-                                found: type_params.len(),
-                                location: None,
-                            });
-                    }
-                    let generic_param_names: Vec<String> = generic_type
-                        .parameters
-                        .iter()
-                        .map(|param| param.name())
-                        .collect();
-                    for param in &generic_type.parameters {
-                        if !generic_param_names.contains(&param.name()) {
-                            self.errors.push(TypeCheckError::General(format!(
-                                "type parameter `{}` not found in `{}`",
-                                param.name(),
-                                generic_type.base.name()
-                            )));
-                        }
+                // Validate each parameter in the generic type
+                for param in &generic_type.parameters {
+                    // Check if it's a declared type parameter or a known type
+                    if !type_param_names.contains(&param.name())
+                        && self.symbol_table.lookup_type(&param.name()).is_none()
+                    {
+                        self.errors.push(TypeCheckError::UnknownType {
+                            name: param.name(),
+                            location: None,
+                        });
                     }
                 }
             }
             Type::Function(_) | Type::QualifiedName(_) | Type::Qualified(_) => {}
             Type::Custom(identifier) => {
+                // Type parameters (like T, U) are valid types within the function
+                if type_param_names.contains(&identifier.name) {
+                    return;
+                }
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
                     self.errors.push(TypeCheckError::UnknownType {
                         name: identifier.name.clone(),
@@ -451,13 +453,22 @@ impl TypeChecker {
         ctx: &mut TypedContext,
     ) {
         self.symbol_table.push_scope();
+
+        // Collect type parameter names for proper TypeInfo construction
+        let type_param_names: Vec<String> = function_definition
+            .type_parameters
+            .as_ref()
+            .map(|params| params.iter().map(|p| p.name()).collect())
+            .unwrap_or_default();
+
         if let Some(arguments) = &function_definition.arguments {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
+                        let arg_type = TypeInfo::new_with_type_params(&arg.ty, &type_param_names);
                         if let Err(err) = self
                             .symbol_table
-                            .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
+                            .push_variable_to_scope(&arg.name(), arg_type)
                         {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
@@ -475,16 +486,16 @@ impl TypeChecker {
                 }
             }
         }
+
+        // Build return type with type parameter awareness
+        let return_type = function_definition
+            .returns
+            .as_ref()
+            .map(|r| TypeInfo::new_with_type_params(r, &type_param_names))
+            .unwrap_or_default();
+
         for stmt in &mut function_definition.body.statements() {
-            self.infer_statement(
-                stmt,
-                &function_definition
-                    .returns
-                    .as_ref()
-                    .map(TypeInfo::new)
-                    .unwrap_or_default(),
-                ctx,
-            );
+            self.infer_statement(stmt, &return_type, ctx);
         }
         self.symbol_table.pop_scope();
     }
@@ -997,7 +1008,8 @@ impl TypeChecker {
                     return None;
                 }
 
-                if !signature.type_params.is_empty() {
+                // Build substitution map for generic functions
+                let substitutions = if !signature.type_params.is_empty() {
                     if let Some(type_parameters) = &function_call_expression.type_parameters {
                         if type_parameters.len() != signature.type_params.len() {
                             self.errors
@@ -1007,17 +1019,59 @@ impl TypeChecker {
                                     found: type_parameters.len(),
                                     location: None,
                                 });
+                            FxHashMap::default()
+                        } else {
+                            // Build substitution map: type_param_name -> concrete type
+                            // Type parameters are identifiers representing type names
+                            signature
+                                .type_params
+                                .iter()
+                                .zip(type_parameters.iter())
+                                .map(|(param_name, type_ident)| {
+                                    // Convert identifier to TypeInfo by looking it up
+                                    let concrete_type = self
+                                        .symbol_table
+                                        .lookup_type(&type_ident.name)
+                                        .unwrap_or_else(|| TypeInfo {
+                                            kind: TypeInfoKind::Custom(type_ident.name.clone()),
+                                            type_params: vec![],
+                                        });
+                                    (param_name.clone(), concrete_type)
+                                })
+                                .collect::<FxHashMap<String, TypeInfo>>()
                         }
                     } else {
-                        self.errors.push(TypeCheckError::MissingTypeParameters {
-                            function_name: function_call_expression.name(),
-                            expected: signature.type_params.len(),
-                            location: None,
-                        });
+                        // Try to infer type parameters from arguments
+                        let inferred = self.infer_type_params_from_args(
+                            &signature,
+                            function_call_expression.arguments.as_ref(),
+                            ctx,
+                        );
+                        if inferred.is_empty() && !signature.type_params.is_empty() {
+                            self.errors.push(TypeCheckError::MissingTypeParameters {
+                                function_name: function_call_expression.name(),
+                                expected: signature.type_params.len(),
+                                location: None,
+                            });
+                        }
+                        inferred
+                    }
+                } else {
+                    FxHashMap::default()
+                };
+
+                // Apply substitution to return type
+                let return_type = signature.return_type.substitute(&substitutions);
+
+                // Infer argument types
+                if let Some(arguments) = &function_call_expression.arguments {
+                    for arg in arguments {
+                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
                     }
                 }
-                ctx.set_node_typeinfo(function_call_expression.id, signature.return_type.clone());
-                Some(signature.return_type.clone())
+
+                ctx.set_node_typeinfo(function_call_expression.id, return_type.clone());
+                Some(return_type)
             }
             Expression::Struct(struct_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(struct_expression.id) {
@@ -1629,5 +1683,68 @@ impl TypeChecker {
                 return false;
             }
         }
+    }
+
+    /// Attempt to infer type parameters from argument types.
+    ///
+    /// For each parameter that is a type variable (Generic), try to find a
+    /// concrete type from the corresponding argument.
+    ///
+    /// Returns a substitution map if inference succeeds, empty map otherwise.
+    #[allow(clippy::type_complexity)]
+    fn infer_type_params_from_args(
+        &mut self,
+        signature: &FuncSignature,
+        arguments: Option<&Vec<(Option<Rc<Identifier>>, std::cell::RefCell<Expression>)>>,
+        ctx: &mut TypedContext,
+    ) -> FxHashMap<String, TypeInfo> {
+        let mut substitutions = FxHashMap::default();
+
+        let args = match arguments {
+            Some(args) => args,
+            None => return substitutions,
+        };
+
+        // For each parameter, check if it contains a type variable
+        for (i, param_type) in signature.param_types.iter().enumerate() {
+            if i >= args.len() {
+                break;
+            }
+
+            // If the parameter type is a type variable, infer from argument
+            if let TypeInfoKind::Generic(type_param_name) = &param_type.kind {
+                // Infer the argument type
+                let arg_type = self.infer_expression(&mut args[i].1.borrow_mut(), ctx);
+
+                if let Some(arg_type) = arg_type {
+                    // Check for conflicting inference
+                    if let Some(existing) = substitutions.get(type_param_name) {
+                        if *existing != arg_type {
+                            self.errors.push(TypeCheckError::ConflictingTypeInference {
+                                param_name: type_param_name.clone(),
+                                first: existing.clone(),
+                                second: arg_type.clone(),
+                                location: None,
+                            });
+                        }
+                    } else {
+                        substitutions.insert(type_param_name.clone(), arg_type);
+                    }
+                }
+            }
+        }
+
+        // Check if we found substitutions for all type parameters
+        for type_param in &signature.type_params {
+            if !substitutions.contains_key(type_param) {
+                self.errors.push(TypeCheckError::CannotInferTypeParameter {
+                    function_name: signature.name.clone(),
+                    param_name: type_param.clone(),
+                    location: None,
+                });
+            }
+        }
+
+        substitutions
     }
 }

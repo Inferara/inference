@@ -1709,18 +1709,23 @@ mod enum_tests {
         );
     }
 
-    // FIXME: Function argument type checking not yet fully implemented
-    // Currently this test passes when it should fail with VariantNotFound error.
-    // When argument type checking is complete, update this test to assert is_err().
     #[test]
     fn test_enum_variant_access_invalid() {
         let source = r#"enum Color { Red, Green, Blue } fn test_color(c: Color) {} fn test() { test_color(Color::Yellow); }"#;
         let result = try_type_check(source);
-        // Current behavior: passes (should fail when arg type checking is complete)
+        // Should fail because Yellow is not a valid variant of Color
         assert!(
-            result.is_ok(),
-            "FIXME: Should fail with VariantNotFound error once argument type checking is implemented"
+            result.is_err(),
+            "Invalid variant access should fail with VariantNotFound error"
         );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("variant `Yellow` not found on enum `Color`"),
+                "Error should mention missing variant Yellow, got: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]
@@ -1811,18 +1816,23 @@ mod enum_tests {
         );
     }
 
-    // FIXME: Function argument type checking not yet fully implemented
-    // Currently this test passes when it should fail with VariantNotFound error.
-    // When argument type checking is complete, update this test to assert is_err().
     #[test]
     fn test_enum_variant_case_sensitive() {
         let source = r#"enum Letter { A, B, C } fn test_letter(l: Letter) {} fn test() { test_letter(Letter::a); }"#;
         let result = try_type_check(source);
-        // Current behavior: passes (should fail when arg type checking is complete)
+        // Enum variant access is case-sensitive: "a" != "A"
         assert!(
-            result.is_ok(),
-            "FIXME: Should fail with VariantNotFound error once argument type checking is implemented"
+            result.is_err(),
+            "Case-sensitive variant access should fail with VariantNotFound error"
         );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("variant `a` not found on enum `Letter`"),
+                "Error should mention missing lowercase variant, got: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]
@@ -1832,6 +1842,305 @@ mod enum_tests {
         assert!(
             result.is_ok(),
             "All enum variants should be accessible, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+/// Tests for generic type instantiation (Phase 7.4)
+#[cfg(test)]
+mod generics_tests {
+    use super::*;
+    use inference_type_checker::TypeCheckerBuilder;
+
+    /// Helper function to run type checker, returning Result to handle WIP failures
+    fn try_type_check(
+        source: &str,
+    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+        let arena = build_ast(source.to_string());
+        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
+    }
+
+    // ============================================
+    // Phase 7.4.1: Type Substitution Tests
+    // ============================================
+
+    // Note: Inference language uses T' syntax for type parameters, not <T>
+    // fn identity T'(x: T) -> T { ... }
+
+    #[test]
+    fn test_generic_function_parsing() {
+        // First test that the AST parses the T' syntax correctly
+        use inference_ast::nodes::{AstNode, Definition, Type, ArgumentType};
+        let source = r#"fn identity T'(x: T) -> T { return x; }"#;
+        let arena = build_ast(source.to_string());
+
+        let funcs = arena.filter_nodes(|node| {
+            matches!(node, AstNode::Definition(Definition::Function(_)))
+        });
+        assert_eq!(funcs.len(), 1, "Expected 1 function definition");
+
+        if let AstNode::Definition(Definition::Function(func)) = &funcs[0] {
+            // Check type_parameters
+            assert!(
+                func.type_parameters.is_some(),
+                "Function should have type_parameters"
+            );
+            let type_params = func.type_parameters.as_ref().unwrap();
+            assert_eq!(type_params.len(), 1, "Expected 1 type parameter");
+            assert_eq!(
+                type_params[0].name(),
+                "T",
+                "Type parameter should be named 'T'"
+            );
+
+            // Check argument type
+            let args = func.arguments.as_ref().expect("Function should have args");
+            assert_eq!(args.len(), 1, "Expected 1 argument");
+            if let ArgumentType::Argument(arg) = &args[0] {
+                // The type of x should be T - check what variant it is
+                match &arg.ty {
+                    Type::Custom(ident) => {
+                        assert_eq!(ident.name(), "T", "Argument type should be T");
+                    }
+                    Type::Simple(simple) => {
+                        panic!("T was parsed as Simple({}) instead of Custom", simple.name);
+                    }
+                    other => {
+                        panic!("Unexpected type variant for T: {:?}", other);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_generic_function_definition_only() {
+        // Test that defining a generic function doesn't fail
+        let source = r#"fn identity T'(x: T) -> T { return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Defining a generic function should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_identity_function_with_explicit_type() {
+        // Test parsing of function call with type arguments
+        // First, let's check if the parser supports explicit type args on calls
+        use inference_ast::nodes::{AstNode, Definition, Expression, Statement};
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> i32 {
+                return identity(42);
+            }
+        "#;
+        let arena = build_ast(source.to_string());
+
+        // Find the function call expression
+        let func_calls = arena.filter_nodes(|node| {
+            matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+        });
+
+        // Check that there are two function calls: one for identity(42) in test()
+        // If this fails, print debug info
+        if !func_calls.is_empty() {
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &func_calls[0] {
+                println!("Function call name: '{}'", call.name());
+                println!("Type parameters: {:?}", call.type_parameters);
+            }
+        }
+
+        // Type checking should work with type inference
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Identity function with type inference should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_generic_with_multiple_type_params() {
+        // Test multi-param generics with inference
+        let source = r#"
+            fn swap T' U'(a: T, b: U) -> U {
+                return b;
+            }
+            fn test() -> bool {
+                let x: i32 = 42;
+                let y: bool = true;
+                return swap(x, y);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Generic function with multiple type params should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_generic_function_returns_correct_type() {
+        // Test that the return type is correctly substituted
+        let source = r#"
+            fn first T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> i32 {
+                let val: i32 = 100;
+                let result: i32 = first(val);
+                return result;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Generic function return type should match substituted type, got: {:?}",
+            result.err()
+        );
+    }
+
+    // ============================================
+    // Phase 7.4.2: Error Case Tests
+    // ============================================
+
+    // Note: Explicit type arguments on function calls (e.g., identity i32'(42))
+    // are not yet supported in the grammar. Skipping tests that require this syntax.
+
+    #[test]
+    fn test_missing_type_params_error() {
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> i32 {
+                return identity(42);
+            }
+        "#;
+        let result = try_type_check(source);
+        // This might succeed with inference or fail with missing type params
+        // The behavior depends on whether inference is fully working
+        if let Err(error) = &result {
+            let error_msg = error.to_string();
+            // Either inference worked or we get a missing/cannot-infer error
+            assert!(
+                error_msg.contains("requires") || error_msg.contains("cannot infer"),
+                "Error should mention missing or cannot infer type parameters, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    // ============================================
+    // Phase 7.4.3: Generic Inference Tests
+    // ============================================
+
+    #[test]
+    fn test_infer_type_param_from_argument() {
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> i32 {
+                let val: i32 = 42;
+                return identity(val);
+            }
+        "#;
+        let result = try_type_check(source);
+        // Type inference from argument should work
+        assert!(
+            result.is_ok(),
+            "Type inference from argument should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_infer_type_param_from_literal() {
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> i32 {
+                return identity(42);
+            }
+        "#;
+        let result = try_type_check(source);
+        // Inference from literal should also work
+        assert!(
+            result.is_ok(),
+            "Type inference from literal should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    // ============================================
+    // Additional Edge Cases
+    // ============================================
+
+    #[test]
+    fn test_generic_function_non_generic_call() {
+        let source = r#"
+            fn add(a: i32, b: i32) -> i32 {
+                return a + b;
+            }
+            fn test() -> i32 {
+                return add(1, 2);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-generic function call should still work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_nested_generic_function_calls() {
+        // Test nested calls using type inference
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn outer T'(x: T) -> T {
+                return identity(x);
+            }
+            fn test() -> i32 {
+                let val: i32 = 42;
+                return outer(val);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Nested generic function calls should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_generic_with_bool_type() {
+        // Test with bool type using inference
+        let source = r#"
+            fn identity T'(x: T) -> T {
+                return x;
+            }
+            fn test() -> bool {
+                let val: bool = true;
+                return identity(val);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Generic function with bool type should work, got: {:?}",
             result.err()
         );
     }

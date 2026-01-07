@@ -554,11 +554,16 @@ impl SymbolTable {
         visibility: Visibility,
     ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
+            // Use type_params when constructing TypeInfo so that
+            // type parameters like T, U are recognized as Generic types
             let sig = FuncSignature {
                 name: name.to_string(),
-                type_params,
-                param_types: param_types.iter().map(TypeInfo::new).collect(),
-                return_type: TypeInfo::new(return_type),
+                type_params: type_params.clone(),
+                param_types: param_types
+                    .iter()
+                    .map(|t| TypeInfo::new_with_type_params(t, &type_params))
+                    .collect(),
+                return_type: TypeInfo::new_with_type_params(return_type, &type_params),
                 visibility,
             };
             scope

@@ -2,6 +2,7 @@ use core::fmt;
 use std::fmt::{Display, Formatter};
 
 use inference_ast::nodes::Type;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum NumberTypeKindNumberType {
@@ -121,11 +122,28 @@ impl TypeInfo {
 
     #[must_use]
     pub fn new(ty: &Type) -> Self {
+        Self::new_with_type_params(ty, &[])
+    }
+
+    /// Create TypeInfo from an AST Type, with awareness of type parameters.
+    ///
+    /// When `type_param_names` contains "T" and we see type "T", it becomes
+    /// `TypeInfoKind::Generic("T")` instead of `TypeInfoKind::Custom("T")`.
+    pub fn new_with_type_params(ty: &Type, type_param_names: &[String]) -> Self {
         match ty {
-            Type::Simple(simple) => Self {
-                kind: Self::type_kind_from_simple_type(&simple.name),
-                type_params: vec![],
-            },
+            Type::Simple(simple) => {
+                // Check if this is a declared type parameter
+                if type_param_names.contains(&simple.name) {
+                    return Self {
+                        kind: TypeInfoKind::Generic(simple.name.clone()),
+                        type_params: vec![],
+                    };
+                }
+                Self {
+                    kind: Self::type_kind_from_simple_type(&simple.name),
+                    type_params: vec![],
+                }
+            }
             Type::Generic(generic) => Self {
                 kind: TypeInfoKind::Generic(generic.base.name.clone()),
                 type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
@@ -143,24 +161,28 @@ impl TypeInfo {
                 type_params: vec![],
             },
             Type::Array(array) => Self {
-                kind: TypeInfoKind::Array(Box::new(Self::new(&array.element_type)), None),
+                kind: TypeInfoKind::Array(
+                    Box::new(Self::new_with_type_params(&array.element_type, type_param_names)),
+                    None,
+                ),
                 type_params: vec![],
             },
             Type::Function(func) => {
-                //REVISIT
                 let param_types = func
                     .parameters
                     .as_ref()
-                    .map(|params| params.iter().map(TypeInfo::new).collect::<Vec<_>>())
+                    .map(|params| {
+                        params
+                            .iter()
+                            .map(|p| TypeInfo::new_with_type_params(p, type_param_names))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
-                let return_type = if func.returns.is_some() {
-                    func.returns.as_ref().map(TypeInfo::new).unwrap_or_default()
-                } else {
-                    Self {
-                        kind: TypeInfoKind::Unit,
-                        type_params: vec![],
-                    }
-                };
+                let return_type = func
+                    .returns
+                    .as_ref()
+                    .map(|r| TypeInfo::new_with_type_params(r, type_param_names))
+                    .unwrap_or_default();
                 Self {
                     kind: TypeInfoKind::Function(format!(
                         "Function<{}, {}>",
@@ -170,10 +192,19 @@ impl TypeInfo {
                     type_params: vec![],
                 }
             }
-            Type::Custom(custom) => Self {
-                kind: TypeInfoKind::Custom(custom.name.clone()),
-                type_params: vec![],
-            },
+            Type::Custom(custom) => {
+                // Check if this is a declared type parameter
+                if type_param_names.contains(&custom.name) {
+                    return Self {
+                        kind: TypeInfoKind::Generic(custom.name.clone()),
+                        type_params: vec![],
+                    };
+                }
+                Self {
+                    kind: TypeInfoKind::Custom(custom.name.clone()),
+                    type_params: vec![],
+                }
+            }
         }
     }
 
@@ -195,6 +226,69 @@ impl TypeInfo {
     #[must_use]
     pub fn is_struct(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Struct(_))
+    }
+
+    #[must_use]
+    pub fn is_generic(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Generic(_))
+    }
+
+    /// Substitute type parameters using the given mapping.
+    ///
+    /// If this TypeInfo is a `Generic("T")` and substitutions has `T -> i32`, returns i32.
+    /// For compound types (arrays, functions), recursively substitutes.
+    /// After successful substitution, `type_params` should be empty.
+    #[must_use = "substitution returns a new TypeInfo, original is unchanged"]
+    pub fn substitute(&self, substitutions: &FxHashMap<String, TypeInfo>) -> TypeInfo {
+        match &self.kind {
+            TypeInfoKind::Generic(name) => {
+                if let Some(concrete) = substitutions.get(name) {
+                    concrete.clone()
+                } else {
+                    self.clone()
+                }
+            }
+            TypeInfoKind::Array(elem_type, length) => {
+                let substituted_elem = elem_type.substitute(substitutions);
+                TypeInfo {
+                    kind: TypeInfoKind::Array(Box::new(substituted_elem), *length),
+                    type_params: vec![],
+                }
+            }
+            // Primitive and named types don't need substitution
+            TypeInfoKind::Unit
+            | TypeInfoKind::Bool
+            | TypeInfoKind::String
+            | TypeInfoKind::Number(_)
+            | TypeInfoKind::Custom(_)
+            | TypeInfoKind::QualifiedName(_)
+            | TypeInfoKind::Qualified(_)
+            | TypeInfoKind::Function(_)
+            | TypeInfoKind::Struct(_)
+            | TypeInfoKind::Enum(_)
+            | TypeInfoKind::Spec(_) => self.clone(),
+        }
+    }
+
+    /// Check if this type contains any unresolved type parameters.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn has_unresolved_params(&self) -> bool {
+        match &self.kind {
+            TypeInfoKind::Generic(_) => true,
+            TypeInfoKind::Array(elem_type, _) => elem_type.has_unresolved_params(),
+            // Primitive and named types have no type parameters
+            TypeInfoKind::Unit
+            | TypeInfoKind::Bool
+            | TypeInfoKind::String
+            | TypeInfoKind::Number(_)
+            | TypeInfoKind::Custom(_)
+            | TypeInfoKind::QualifiedName(_)
+            | TypeInfoKind::Qualified(_)
+            | TypeInfoKind::Function(_)
+            | TypeInfoKind::Struct(_)
+            | TypeInfoKind::Enum(_)
+            | TypeInfoKind::Spec(_) => false,
+        }
     }
 
     fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
