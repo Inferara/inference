@@ -4,7 +4,10 @@ use std::rc::Rc;
 use anyhow::bail;
 
 use crate::type_info::TypeInfo;
-use inference_ast::nodes::{ModuleDefinition, Type, Visibility};
+use inference_ast::arena::Arena;
+use inference_ast::nodes::{
+    ArgumentType, Definition, Location, ModuleDefinition, SimpleType, Type, Visibility,
+};
 use rustc_hash::FxHashMap;
 
 pub(crate) type ScopeRef = Rc<RefCell<Scope>>;
@@ -15,6 +18,7 @@ pub(crate) struct FuncSignature {
     pub(crate) type_params: Vec<String>,
     pub(crate) param_types: Vec<TypeInfo>,
     pub(crate) return_type: TypeInfo,
+    pub(crate) visibility: Visibility,
 }
 
 /// Information about a struct field. Fields `name` and `visibility` are tracked
@@ -158,6 +162,21 @@ impl Symbol {
             Symbol::Function(_) => None,
         }
     }
+
+    /// Check if this symbol has public visibility.
+    ///
+    /// Types, Enums, and Specs are currently treated as public.
+    /// Structs and Functions respect their visibility field.
+    #[must_use = "this is a pure check with no side effects"]
+    pub(crate) fn is_public(&self) -> bool {
+        match self {
+            Symbol::Type(_) => true,
+            Symbol::Struct(info) => matches!(info.visibility, Visibility::Public),
+            Symbol::Enum(_) => true,
+            Symbol::Spec(_) => true,
+            Symbol::Function(sig) => matches!(sig.visibility, Visibility::Public),
+        }
+    }
 }
 
 /// A scope in the symbol table tree.
@@ -165,6 +184,8 @@ impl Symbol {
 pub(crate) struct Scope {
     pub(crate) id: u32,
     pub(crate) name: String,
+    /// Full path from root (e.g., "mod1::mod2::mod3"), cached at creation time for O(1) lookup.
+    pub(crate) full_path: String,
     /// Visibility of this scope (used in Phase 4+ visibility checking)
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
@@ -184,12 +205,14 @@ impl Scope {
     pub(crate) fn new(
         id: u32,
         name: &str,
+        full_path: String,
         visibility: Visibility,
         parent: Option<ScopeRef>,
     ) -> ScopeRef {
         Rc::new(RefCell::new(Self {
             id,
             name: name.to_string(),
+            full_path,
             visibility,
             parent,
             children: Vec::new(),
@@ -266,11 +289,7 @@ impl Scope {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_method(
-        &self,
-        type_name: &str,
-        method_name: &str,
-    ) -> Option<MethodInfo> {
+    pub(crate) fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<MethodInfo> {
         if let Some(method_info) = self
             .methods
             .get(type_name)
@@ -329,9 +348,15 @@ impl Default for SymbolTable {
 
 impl SymbolTable {
     fn init_root_scope(&mut self) {
-        let root = Scope::new(self.next_scope_id, "root", Visibility::Public, None);
+        let root = Scope::new(
+            self.next_scope_id,
+            "root",
+            String::new(),
+            Visibility::Public,
+            None,
+        );
         self.scopes.insert(self.next_scope_id, Rc::clone(&root));
-        self.mod_scopes.insert("root".to_string(), Rc::clone(&root));
+        self.mod_scopes.insert(String::new(), Rc::clone(&root));
         self.next_scope_id += 1;
         self.root_scope = Some(Rc::clone(&root));
         self.current_scope = Some(root);
@@ -374,7 +399,19 @@ impl SymbolTable {
         let scope_id = self.next_scope_id;
         self.next_scope_id += 1;
 
-        let new_scope = Scope::new(scope_id, name, visibility, parent.clone());
+        let full_path = match &parent {
+            Some(p) => {
+                let parent_path = &p.borrow().full_path;
+                if parent_path.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{parent_path}::{name}")
+                }
+            }
+            None => name.to_string(),
+        };
+
+        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.clone());
 
         if let Some(current) = &parent {
             current.borrow_mut().add_child(Rc::clone(&new_scope));
@@ -470,12 +507,30 @@ impl SymbolTable {
         param_types: &[Type],
         return_type: &Type,
     ) -> Result<(), String> {
+        self.register_function_with_visibility(
+            name,
+            type_params,
+            param_types,
+            return_type,
+            Visibility::Private,
+        )
+    }
+
+    pub(crate) fn register_function_with_visibility(
+        &mut self,
+        name: &str,
+        type_params: Vec<String>,
+        param_types: &[Type],
+        return_type: &Type,
+        visibility: Visibility,
+    ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
             let sig = FuncSignature {
                 name: name.to_string(),
                 type_params,
                 param_types: param_types.iter().map(TypeInfo::new).collect(),
                 return_type: TypeInfo::new(return_type),
+                visibility,
             };
             scope
                 .borrow_mut()
@@ -571,11 +626,7 @@ impl SymbolTable {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_method(
-        &self,
-        type_name: &str,
-        method_name: &str,
-    ) -> Option<MethodInfo> {
+    pub(crate) fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<MethodInfo> {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_method(type_name, method_name))
@@ -585,9 +636,40 @@ impl SymbolTable {
     pub(crate) fn enter_module(&mut self, module: &Rc<ModuleDefinition>) -> u32 {
         let scope_id = self.push_scope_with_name(&module.name(), module.visibility.clone());
         if let Some(scope) = self.scopes.get(&scope_id) {
-            self.mod_scopes.insert(module.name(), Rc::clone(scope));
+            let full_path = scope.borrow().full_path.clone();
+            self.mod_scopes.insert(full_path, Rc::clone(scope));
         }
         scope_id
+    }
+
+    /// Find module scope by path using O(1) lookup.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn find_module_scope(&self, path: &[String]) -> Option<u32> {
+        let key = path.join("::");
+        self.mod_scopes.get(&key).map(|s| s.borrow().id)
+    }
+
+    /// Get all public symbols from a scope (for glob imports).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn get_public_symbols_from_scope(&self, scope_id: u32) -> Vec<(String, Symbol)> {
+        self.get_scope(scope_id)
+            .map(|scope| {
+                scope
+                    .borrow()
+                    .symbols
+                    .iter()
+                    .filter(|(_, sym)| sym.is_public())
+                    .map(|(name, sym)| (name.clone(), sym.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get the root scope reference.
+    #[allow(dead_code)]
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn root_scope(&self) -> Option<ScopeRef> {
+        self.root_scope.clone()
     }
 
     #[allow(dead_code)]
@@ -701,5 +783,113 @@ impl SymbolTable {
         }
 
         None
+    }
+
+    /// Load an external module's symbols into the symbol table.
+    ///
+    /// Creates a virtual child scope of root containing the module's public symbols.
+    /// The module is accessible via `mod_scopes` using the module name as key.
+    ///
+    /// # Arguments
+    /// * `module_name` - Name of the external module
+    /// * `arena` - The parsed AST arena of the external module
+    ///
+    /// # Returns
+    /// The scope ID of the created module scope
+    ///
+    /// # Errors
+    /// Returns an error if symbol registration fails
+    #[allow(dead_code)]
+    pub(crate) fn load_external_module(
+        &mut self,
+        module_name: &str,
+        arena: &Arena,
+    ) -> anyhow::Result<u32> {
+        let scope_id = self.push_scope_with_name(module_name, Visibility::Public);
+
+        if let Some(scope) = self.scopes.get(&scope_id) {
+            let full_path = scope.borrow().full_path.clone();
+            self.mod_scopes.insert(full_path, Rc::clone(scope));
+        }
+
+        for source_file in arena.source_files() {
+            for definition in &source_file.definitions {
+                self.register_definition_from_external(definition)?;
+            }
+        }
+
+        self.pop_scope();
+
+        Ok(scope_id)
+    }
+
+    /// Register a definition from an external module into the current scope.
+    ///
+    /// Currently handles: Struct, Enum, Spec, Function, Type.
+    /// Skips: Constant, ExternalFunction, Module (deferred to future phases).
+    #[allow(dead_code)]
+    fn register_definition_from_external(&mut self, definition: &Definition) -> anyhow::Result<()> {
+        match definition {
+            Definition::Struct(s) => {
+                let fields: Vec<(String, TypeInfo, Visibility)> = s
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.name.name.clone(),
+                            TypeInfo::new(&f.type_),
+                            Visibility::Private,
+                        )
+                    })
+                    .collect();
+                self.register_struct(&s.name(), &fields, vec![], s.visibility.clone())?;
+            }
+            Definition::Enum(e) => {
+                self.register_enum(&e.name())?;
+            }
+            Definition::Spec(sp) => {
+                self.register_spec(&sp.name())?;
+            }
+            Definition::Function(f) => {
+                let type_params = f
+                    .type_parameters
+                    .as_ref()
+                    .map(|tps| tps.iter().map(|p| p.name()).collect())
+                    .unwrap_or_default();
+                let param_types: Vec<_> = f
+                    .arguments
+                    .as_ref()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|a| match a {
+                        ArgumentType::Argument(arg) => Some(arg.ty.clone()),
+                        ArgumentType::IgnoreArgument(ig) => Some(ig.ty.clone()),
+                        ArgumentType::Type(t) => Some(t.clone()),
+                        ArgumentType::SelfReference(_) => None,
+                    })
+                    .collect();
+                let return_type = f.returns.clone().unwrap_or_else(|| {
+                    Type::Simple(Rc::new(SimpleType::new(
+                        0,
+                        Location::default(),
+                        "unit".into(),
+                    )))
+                });
+
+                self.register_function_with_visibility(
+                    &f.name(),
+                    type_params,
+                    &param_types,
+                    &return_type,
+                    f.visibility.clone(),
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+            }
+            Definition::Type(t) => {
+                self.register_type(&t.name(), Some(&t.ty))?;
+            }
+            Definition::Constant(_) | Definition::ExternalFunction(_) | Definition::Module(_) => {}
+        }
+        Ok(())
     }
 }

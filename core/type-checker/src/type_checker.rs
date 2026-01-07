@@ -1,11 +1,13 @@
 use std::rc::Rc;
 
 use anyhow::bail;
+use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::nodes::{
     ArgumentType, Definition, Directive, Expression, FunctionDefinition, Identifier, Literal,
     Location, ModuleDefinition, OperatorKind, SimpleType, Statement, Type, UnaryOperatorKind,
     UseDirective, Visibility,
 };
+use rustc_hash::FxHashSet;
 
 use crate::{
     symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
@@ -17,6 +19,28 @@ use crate::{
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<String>,
+    glob_resolution_in_progress: FxHashSet<u32>,
+}
+
+impl TypeChecker {
+    /// Load external modules from prelude before import resolution.
+    ///
+    /// The prelude is consumed (moved into symbol table as virtual scopes).
+    /// Call this before `infer_types()` to make external modules available.
+    ///
+    /// # Arguments
+    /// * `prelude` - The external prelude containing parsed external modules
+    ///
+    /// # Errors
+    /// Returns an error if symbol registration for any module fails
+    #[allow(dead_code)]
+    pub fn load_prelude(&mut self, prelude: ExternPrelude) -> anyhow::Result<()> {
+        for (name, parsed_module) in prelude {
+            self.symbol_table
+                .load_external_module(&name, &parsed_module.arena)?;
+        }
+        Ok(())
+    }
 }
 
 impl TypeChecker {
@@ -149,6 +173,7 @@ impl TypeChecker {
                                 type_params,
                                 param_types,
                                 return_type,
+                                visibility: method.visibility.clone(),
                             };
 
                             self.symbol_table
@@ -214,7 +239,10 @@ impl TypeChecker {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
                             match param {
                                 ArgumentType::SelfReference(_) => {
-                                    todo!()
+                                    self.errors.push(format!(
+                                        "Self reference not allowed in standalone function `{}`",
+                                        function_definition.name()
+                                    ));
                                 }
                                 ArgumentType::IgnoreArgument(ignore_argument) => {
                                     self.validate_type(
@@ -259,13 +287,13 @@ impl TypeChecker {
                                 .as_ref()
                                 .unwrap_or(&vec![])
                                 .iter()
-                                .map(|param| match param {
-                                    ArgumentType::SelfReference(_) => todo!(),
+                                .filter_map(|param| match param {
+                                    ArgumentType::SelfReference(_) => None,
                                     ArgumentType::IgnoreArgument(ignore_argument) => {
-                                        ignore_argument.ty.clone()
+                                        Some(ignore_argument.ty.clone())
                                     }
-                                    ArgumentType::Argument(argument) => argument.ty.clone(),
-                                    ArgumentType::Type(ty) => ty.clone(),
+                                    ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                                    ArgumentType::Type(ty) => Some(ty.clone()),
                                 })
                                 .collect::<Vec<_>>(),
                             &function_definition
@@ -290,13 +318,13 @@ impl TypeChecker {
                                 .as_ref()
                                 .unwrap_or(&vec![])
                                 .iter()
-                                .map(|param| match param {
-                                    ArgumentType::SelfReference(_) => todo!(),
+                                .filter_map(|param| match param {
+                                    ArgumentType::SelfReference(_) => None,
                                     ArgumentType::IgnoreArgument(ignore_argument) => {
-                                        ignore_argument.ty.clone()
+                                        Some(ignore_argument.ty.clone())
                                     }
-                                    ArgumentType::Argument(argument) => argument.ty.clone(),
-                                    ArgumentType::Type(ty) => ty.clone(),
+                                    ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                                    ArgumentType::Type(ty) => Some(ty.clone()),
                                 })
                                 .collect::<Vec<_>>(),
                             &external_function_definition
@@ -1143,8 +1171,45 @@ impl TypeChecker {
                     Definition::Function(function_definition) => {
                         self.infer_variables(function_definition.clone(), ctx);
                     }
-                    Definition::Constant(_constant_definition) => todo!(),
-                    Definition::ExternalFunction(_external_function_definition) => todo!(),
+                    Definition::Constant(constant_definition) => {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            &constant_definition.name(),
+                            TypeInfo::new(&constant_definition.ty),
+                        ) {
+                            self.errors.push(err.to_string());
+                        }
+                    }
+                    Definition::ExternalFunction(external_function_definition) => {
+                        if let Err(err) = self.symbol_table.register_function(
+                            &external_function_definition.name(),
+                            vec![],
+                            &external_function_definition
+                                .arguments
+                                .as_ref()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .filter_map(|param| match param {
+                                    ArgumentType::SelfReference(_) => None,
+                                    ArgumentType::IgnoreArgument(ignore_argument) => {
+                                        Some(ignore_argument.ty.clone())
+                                    }
+                                    ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                                    ArgumentType::Type(ty) => Some(ty.clone()),
+                                })
+                                .collect::<Vec<_>>(),
+                            &external_function_definition
+                                .returns
+                                .as_ref()
+                                .unwrap_or(&Type::Simple(Rc::new(SimpleType::new(
+                                    0,
+                                    Location::default(),
+                                    "Unit".into(),
+                                ))))
+                                .clone(),
+                        ) {
+                            self.errors.push(err);
+                        }
+                    }
                 }
             }
         }
@@ -1273,13 +1338,57 @@ impl TypeChecker {
                     }
                 }
                 ImportKind::Glob => {
-                    self.errors.push(format!(
-                        "Glob imports not yet supported: {}::*",
-                        import.path.join("::")
-                    ));
+                    self.resolve_glob_import(&import.path, scope_id);
                 }
             }
         }
+    }
+
+    /// Resolve a glob import (`use path::*`) by importing all public symbols from the target module.
+    fn resolve_glob_import(&mut self, path: &[String], into_scope_id: u32) {
+        if path.is_empty() {
+            self.errors
+                .push("Glob import path cannot be empty".to_string());
+            return;
+        }
+
+        let target_scope_id = match self.symbol_table.find_module_scope(path) {
+            Some(id) => id,
+            None => {
+                self.errors.push(format!(
+                    "Cannot resolve glob import: {}::* - module not found",
+                    path.join("::")
+                ));
+                return;
+            }
+        };
+
+        if self.glob_resolution_in_progress.contains(&target_scope_id) {
+            self.errors.push(format!(
+                "Circular glob import detected: {}::*",
+                path.join("::")
+            ));
+            return;
+        }
+
+        self.glob_resolution_in_progress.insert(target_scope_id);
+
+        let public_symbols = self
+            .symbol_table
+            .get_public_symbols_from_scope(target_scope_id);
+
+        if let Some(scope) = self.symbol_table.get_scope(into_scope_id) {
+            for (name, symbol) in public_symbols {
+                let resolved = ResolvedImport {
+                    local_name: name,
+                    symbol,
+                    definition_scope_id: target_scope_id,
+                };
+                scope.borrow_mut().add_resolved_import(resolved);
+            }
+        }
+
+        self.glob_resolution_in_progress.remove(&target_scope_id);
     }
 
     /// Check visibility of a definition from current scope.

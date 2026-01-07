@@ -527,14 +527,15 @@ mod type_inference_tests {
             let member_access = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_access.len(), 1, "Expected 1 member access expression");
+            assert_eq!(
+                member_access.len(),
+                1,
+                "Expected 1 member access expression"
+            );
 
             if let AstNode::Expression(Expression::MemberAccess(ma)) = &member_access[0] {
                 let field_type = typed_context.get_node_typeinfo(ma.id);
-                assert!(
-                    field_type.is_some(),
-                    "Field access should have type info"
-                );
+                assert!(field_type.is_some(), "Field access should have type info");
                 assert!(
                     matches!(
                         field_type.unwrap().kind,
@@ -558,7 +559,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 3, "Expected 3 member access expressions");
+            assert_eq!(
+                member_accesses.len(),
+                3,
+                "Expected 3 member access expressions"
+            );
 
             for ma_node in &member_accesses {
                 if let AstNode::Expression(Expression::MemberAccess(ma)) = ma_node {
@@ -605,7 +610,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 2, "Expected 2 member access expressions");
+            assert_eq!(
+                member_accesses.len(),
+                2,
+                "Expected 2 member access expressions"
+            );
 
             for ma_node in &member_accesses {
                 if let AstNode::Expression(Expression::MemberAccess(ma)) = ma_node {
@@ -687,7 +696,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 1, "Expected 1 member access expression");
+            assert_eq!(
+                member_accesses.len(),
+                1,
+                "Expected 1 member access expression"
+            );
 
             if let AstNode::Expression(Expression::MemberAccess(ma)) = &member_accesses[0] {
                 let field_type = typed_context.get_node_typeinfo(ma.id);
@@ -723,7 +736,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 8, "Expected 8 member access expressions");
+            assert_eq!(
+                member_accesses.len(),
+                8,
+                "Expected 8 member access expressions"
+            );
 
             for ma_node in &member_accesses {
                 if let AstNode::Expression(Expression::MemberAccess(ma)) = ma_node {
@@ -777,7 +794,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 3, "Expected 3 member access expressions");
+            assert_eq!(
+                member_accesses.len(),
+                3,
+                "Expected 3 member access expressions"
+            );
 
             let mut found_level2 = false;
             let mut found_level3 = false;
@@ -840,7 +861,11 @@ mod type_inference_tests {
             let member_accesses = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
-            assert_eq!(member_accesses.len(), 1, "Expected 1 member access expression");
+            assert_eq!(
+                member_accesses.len(),
+                1,
+                "Expected 1 member access expression"
+            );
 
             if let AstNode::Expression(Expression::MemberAccess(ma)) = &member_accesses[0] {
                 let field_type = typed_context.get_node_typeinfo(ma.id);
@@ -1090,7 +1115,7 @@ mod type_inference_tests {
                 matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
             });
             assert!(
-                member_accesses.len() >= 1,
+                !member_accesses.is_empty(),
                 "Expected at least 1 member access expression for self.data"
             );
         }
@@ -1123,16 +1148,23 @@ mod import_tests {
         fn test_visibility_public_accessible() {
             let source = r#"struct PublicItem { x: i32; } fn test() { let item: PublicItem; }"#;
             let result = try_type_check(source);
-            assert!(result.is_ok(), "Public symbols at root level should be accessible");
+            assert!(
+                result.is_ok(),
+                "Public symbols at root level should be accessible"
+            );
         }
 
         // FIXME: Module definitions with bodies not yet supported by parser
         // Test documents expected behavior for when modules are fully implemented
         #[test]
         fn test_visibility_private_same_scope() {
-            let source = r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem; }"#;
+            let source =
+                r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem; }"#;
             let result = try_type_check(source);
-            assert!(result.is_ok(), "Private symbols at root level should be accessible in same scope");
+            assert!(
+                result.is_ok(),
+                "Private symbols at root level should be accessible in same scope"
+            );
         }
 
         // FIXME: Module definitions with bodies not yet supported by parser
@@ -1148,9 +1180,13 @@ mod import_tests {
         // When implemented, this should test that private symbols are not accessible from sibling scopes
         #[test]
         fn test_visibility_private_sibling_scope_not_accessible() {
-            let source = r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem; }"#;
+            let source =
+                r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem; }"#;
             let result = try_type_check(source);
-            assert!(result.is_ok(), "Root-level symbols should be accessible at root");
+            assert!(
+                result.is_ok(),
+                "Root-level symbols should be accessible at root"
+            );
         }
     }
 
@@ -1164,7 +1200,10 @@ mod import_tests {
             fn test() -> i32 { return 42; }
             "#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Import should be registered but fail to resolve as std::io::File doesn't exist");
+            assert!(
+                result.is_err(),
+                "Import should be registered but fail to resolve as std::io::File doesn't exist"
+            );
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
@@ -1182,7 +1221,10 @@ mod import_tests {
             fn test() -> i32 { return 42; }
             "#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Partial import should be registered but fail to resolve as items don't exist");
+            assert!(
+                result.is_err(),
+                "Partial import should be registered but fail to resolve as items don't exist"
+            );
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
@@ -1203,7 +1245,10 @@ mod import_tests {
         fn test_qualified_name_resolution_simple() {
             let source = r#"struct MyType { x: i32; } fn test() { let val: MyType; }"#;
             let result = try_type_check(source);
-            assert!(result.is_ok(), "Simple type resolution should work at root level");
+            assert!(
+                result.is_ok(),
+                "Simple type resolution should work at root level"
+            );
         }
 
         // FIXME: Module definitions with bodies not yet supported by parser
@@ -1225,7 +1270,10 @@ mod import_tests {
         fn test_import_resolution_success() {
             let source = r#"struct MyType { x: i32; } fn test(val: MyType) -> i32 { return 42; }"#;
             let result = try_type_check(source);
-            assert!(result.is_ok(), "Type usage should work without imports at root level");
+            assert!(
+                result.is_ok(),
+                "Type usage should work without imports at root level"
+            );
         }
 
         #[test]
@@ -1264,7 +1312,10 @@ mod import_tests {
         fn test_duplicate_import_error() {
             let source = r#"use std::Type1; use std::Type2; fn test() -> i32 { return 42; }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Multiple imports of non-existent types should fail");
+            assert!(
+                result.is_err(),
+                "Multiple imports of non-existent types should fail"
+            );
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
@@ -1282,7 +1333,10 @@ mod import_tests {
             let source = r#"fn test() -> i32 { return 42; }"#;
             let arena = build_ast(source.to_string());
             let result = TypeCheckerBuilder::build_typed_context(arena);
-            assert!(result.is_ok(), "Simple function should compile without imports");
+            assert!(
+                result.is_ok(),
+                "Simple function should compile without imports"
+            );
         }
     }
 
@@ -1316,21 +1370,194 @@ mod import_tests {
             let source = r#"use ; fn test() -> i32 { return 42; }"#;
             let arena = build_ast(source.to_string());
             let result = TypeCheckerBuilder::build_typed_context(arena);
-            assert!(result.is_err(), "Empty import path should not parse or should fail type checking");
+            assert!(
+                result.is_err(),
+                "Empty import path should not parse or should fail type checking"
+            );
         }
 
         #[test]
         fn test_multiple_use_statements() {
             let source = r#"use foo::A; use bar::B; use baz::C; fn test() -> i32 { return 42; }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Multiple unresolvable imports should all fail");
+            assert!(
+                result.is_err(),
+                "Multiple unresolvable imports should all fail"
+            );
         }
 
         #[test]
         fn test_use_with_self_keyword() {
             let source = r#"use self::Item; fn test() -> i32 { return 42; }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "self::Item should fail to resolve when Item doesn't exist");
+            assert!(
+                result.is_err(),
+                "self::Item should fail to resolve when Item doesn't exist"
+            );
+        }
+    }
+
+    /// Tests for glob imports and external prelude (Phase 5)
+    mod extern_prelude_tests {
+        use super::*;
+
+        /// Phase 5A: Glob imports tests
+
+        // FIXME: Glob import syntax (use path::*) is not yet supported by the parser.
+        // FIXME: Standalone pub keyword is not yet supported by the parser (needs module context).
+        // These tests document expected behavior when both are implemented.
+        #[test]
+        fn test_glob_import_infrastructure_ready() {
+            let source = r#"struct Item1 { x: i32; } struct Item2 { y: i32; } fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_ok(), "Basic struct definitions work");
+        }
+
+        // FIXME: pub keyword support and glob imports not yet implemented in parser.
+        // When implemented:
+        // - test_glob_import_from_module: use path::* imports all public symbols
+        // - test_glob_import_public_only: Only public symbols imported, private excluded
+        // - test_glob_import_cycle_detection: Circular glob imports produce error
+        // - test_glob_import_empty_module: Glob from empty module succeeds
+        // - test_glob_import_nonexistent_module: Error for missing module
+        #[test]
+        fn test_visibility_tracking_in_symbol_table() {
+            let source =
+                r#"struct MyStruct { x: i32; } fn test(s: MyStruct) -> i32 { return s.x; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_ok(), "Symbol table tracks struct definitions");
+        }
+
+        /// Phase 5B: External prelude tests
+
+        #[test]
+        fn test_find_module_root_lib_inf() {
+            use std::fs;
+            use std::path::PathBuf;
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("test_module_root_{}", std::process::id()));
+            let src_dir = temp_dir.join("src");
+            fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+
+            let lib_file = src_dir.join("lib.inf");
+            fs::write(&lib_file, "pub struct TestStruct { x: i32; }")
+                .expect("Failed to write lib.inf");
+
+            let root = inference_ast::extern_prelude::find_module_root(&temp_dir);
+            assert!(root.is_some(), "Should find src/lib.inf");
+            assert_eq!(root.unwrap(), lib_file);
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn test_find_module_root_main_inf() {
+            use std::fs;
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("test_main_inf_{}", std::process::id()));
+            let src_dir = temp_dir.join("src");
+            fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+
+            let main_file = src_dir.join("main.inf");
+            fs::write(&main_file, "fn main() -> i32 { return 0; }")
+                .expect("Failed to write main.inf");
+
+            let root = inference_ast::extern_prelude::find_module_root(&temp_dir);
+            assert!(
+                root.is_some(),
+                "Should find src/main.inf when lib.inf absent"
+            );
+            assert_eq!(root.unwrap(), main_file);
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn test_find_module_root_fallback() {
+            use std::fs;
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("test_fallback_{}", std::process::id()));
+            fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+            let lib_file = temp_dir.join("lib.inf");
+            fs::write(&lib_file, "pub struct TestStruct { x: i32; }")
+                .expect("Failed to write lib.inf");
+
+            let root = inference_ast::extern_prelude::find_module_root(&temp_dir);
+            assert!(root.is_some(), "Should find lib.inf as fallback");
+            assert_eq!(root.unwrap(), lib_file);
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn test_find_module_root_not_found() {
+            use std::fs;
+
+            let temp_dir =
+                std::env::temp_dir().join(format!("test_not_found_{}", std::process::id()));
+            fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+
+            let root = inference_ast::extern_prelude::find_module_root(&temp_dir);
+            assert!(
+                root.is_none(),
+                "Should return None when no root file exists"
+            );
+
+            let _ = fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn test_visibility_private_structs() {
+            let source = r#"struct PrivateItem { x: i32; } fn use_private(p: PrivateItem) -> i32 { return p.x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Private structs should be usable in same scope"
+            );
+        }
+
+        #[test]
+        fn test_visibility_private_functions() {
+            let source = r#"fn private_helper() -> i32 { return 2; } fn caller() -> i32 { return private_helper(); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Private functions should be callable in same scope"
+            );
+        }
+
+        #[test]
+        fn test_private_enum_definition() {
+            let source = "enum Color { Red; Green; Blue; }\nfn test() -> i32 { return 42; }";
+            let arena = build_ast(source.to_string());
+            let result = TypeCheckerBuilder::build_typed_context(arena);
+            assert!(result.is_ok(), "Private enum should be registerable");
+        }
+
+        #[test]
+        fn test_struct_with_multiple_fields() {
+            let source =
+                r#"struct Point { x: i32; y: i32; } fn get_x(p: Point) -> i32 { return p.x; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_ok(), "Struct with multiple fields should work");
+        }
+
+        #[test]
+        fn test_multiple_struct_definitions() {
+            let source = r#"struct Point { x: i32; y: i32; } struct Vector { dx: i32; dy: i32; } fn use_both(p: Point, v: Vector) -> i32 { return p.x + v.dx; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_ok(), "Multiple struct definitions should work");
+        }
+
+        #[test]
+        fn test_empty_source_with_visibility() {
+            let source = r#""#;
+            let result = try_type_check(source);
+            assert!(result.is_ok(), "Empty source should succeed");
         }
     }
 }
