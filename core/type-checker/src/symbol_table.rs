@@ -8,7 +8,7 @@ use inference_ast::arena::Arena;
 use inference_ast::nodes::{
     ArgumentType, Definition, Location, ModuleDefinition, SimpleType, Type, Visibility,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(crate) type ScopeRef = Rc<RefCell<Scope>>;
 
@@ -40,6 +40,15 @@ pub(crate) struct StructInfo {
     pub(crate) fields: FxHashMap<String, StructFieldInfo>,
     pub(crate) type_params: Vec<String>,
     #[allow(dead_code)]
+    pub(crate) visibility: Visibility,
+}
+
+/// Information about an enum type including its variants.
+/// Simple unit variants only - associated data support is out of scope.
+#[derive(Debug, Clone)]
+pub(crate) struct EnumInfo {
+    pub(crate) name: String,
+    pub(crate) variants: FxHashSet<String>,
     pub(crate) visibility: Visibility,
 }
 
@@ -108,7 +117,7 @@ pub(crate) struct ResolvedImport {
 pub(crate) enum Symbol {
     Type(TypeInfo),
     Struct(StructInfo),
-    Enum(String),
+    Enum(EnumInfo),
     Spec(String),
     Function(FuncSignature),
 }
@@ -120,7 +129,8 @@ impl Symbol {
         match self {
             Symbol::Type(ti) => ti.to_string(),
             Symbol::Struct(info) => info.name.clone(),
-            Symbol::Enum(name) | Symbol::Spec(name) => name.clone(),
+            Symbol::Enum(info) => info.name.clone(),
+            Symbol::Spec(name) => name.clone(),
             Symbol::Function(sig) => sig.name.clone(),
         }
     }
@@ -143,6 +153,15 @@ impl Symbol {
         }
     }
 
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn as_enum(&self) -> Option<&EnumInfo> {
+        if let Symbol::Enum(info) = self {
+            Some(info)
+        } else {
+            None
+        }
+    }
+
     #[must_use = "this is a pure conversion with no side effects"]
     pub(crate) fn as_type_info(&self) -> Option<TypeInfo> {
         match self {
@@ -151,8 +170,8 @@ impl Symbol {
                 kind: crate::type_info::TypeInfoKind::Struct(info.name.clone()),
                 type_params: info.type_params.clone(),
             }),
-            Symbol::Enum(name) => Some(TypeInfo {
-                kind: crate::type_info::TypeInfoKind::Enum(name.clone()),
+            Symbol::Enum(info) => Some(TypeInfo {
+                kind: crate::type_info::TypeInfoKind::Enum(info.name.clone()),
                 type_params: vec![],
             }),
             Symbol::Spec(name) => Some(TypeInfo {
@@ -165,14 +184,14 @@ impl Symbol {
 
     /// Check if this symbol has public visibility.
     ///
-    /// Types, Enums, and Specs are currently treated as public.
-    /// Structs and Functions respect their visibility field.
+    /// Structs, Enums, and Functions respect their visibility field.
+    /// Types and Specs are currently treated as public.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_public(&self) -> bool {
         match self {
             Symbol::Type(_) => true,
             Symbol::Struct(info) => matches!(info.visibility, Visibility::Public),
-            Symbol::Enum(_) => true,
+            Symbol::Enum(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Spec(_) => true,
             Symbol::Function(sig) => matches!(sig.visibility, Visibility::Public),
         }
@@ -480,11 +499,21 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn register_enum(&mut self, name: &str) -> anyhow::Result<()> {
+    pub(crate) fn register_enum(
+        &mut self,
+        name: &str,
+        variants: &[&str],
+        visibility: Visibility,
+    ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
+            let enum_info = EnumInfo {
+                name: name.to_string(),
+                variants: variants.iter().map(|s| (*s).to_string()).collect(),
+                visibility,
+            };
             scope
                 .borrow_mut()
-                .insert_symbol(name, Symbol::Enum(name.to_string()))
+                .insert_symbol(name, Symbol::Enum(enum_info))
         } else {
             bail!("No active scope to register enum")
         }
@@ -601,6 +630,21 @@ impl SymbolTable {
                 .get(field_name)
                 .map(|f| f.type_info.clone())
         })
+    }
+
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
+        self.current_scope
+            .as_ref()
+            .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .and_then(|symbol| symbol.as_enum().cloned())
+    }
+
+    #[allow(dead_code)]
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_enum_variant(&self, enum_name: &str, variant_name: &str) -> bool {
+        self.lookup_enum(enum_name)
+            .is_some_and(|info| info.variants.contains(variant_name))
     }
 
     pub(crate) fn register_method(
@@ -845,7 +889,8 @@ impl SymbolTable {
                 self.register_struct(&s.name(), &fields, vec![], s.visibility.clone())?;
             }
             Definition::Enum(e) => {
-                self.register_enum(&e.name())?;
+                let variants: Vec<&str> = e.variants.iter().map(|v| v.name.as_str()).collect();
+                self.register_enum(&e.name(), &variants, e.visibility.clone())?;
             }
             Definition::Spec(sp) => {
                 self.register_spec(&sp.name())?;

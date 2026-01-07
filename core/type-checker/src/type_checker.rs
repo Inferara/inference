@@ -200,8 +200,17 @@ impl TypeChecker {
                         }
                     }
                     Definition::Enum(enum_definition) => {
+                        let variants: Vec<&str> = enum_definition
+                            .variants
+                            .iter()
+                            .map(|v| v.name.as_str())
+                            .collect();
                         self.symbol_table
-                            .register_enum(&enum_definition.name())
+                            .register_enum(
+                                &enum_definition.name(),
+                                &variants,
+                                enum_definition.visibility.clone(),
+                            )
                             .unwrap_or_else(|_| {
                                 self.errors.push(TypeCheckError::RegistrationFailed {
                                     kind: RegistrationKind::Enum,
@@ -814,17 +823,76 @@ impl TypeChecker {
             }
             Expression::TypeMemberAccess(type_member_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(type_member_access_expression.id) {
-                    Some(type_info.clone())
-                } else if let Some(type_expression_type) = self.infer_expression(
-                    &mut type_member_access_expression.expression.borrow_mut(),
-                    ctx,
-                ) {
-                    ctx.set_node_typeinfo(
-                        type_member_access_expression.id,
-                        type_expression_type.clone(),
-                    );
-                    Some(type_expression_type)
+                    return Some(type_info.clone());
+                }
+
+                let inner_expr = type_member_access_expression.expression.borrow();
+
+                // Extract enum name from the expression - handle Type enum properly
+                let enum_name = match &*inner_expr {
+                    Expression::Type(ty) => {
+                        // Type enum does NOT have a .name() method - must match variants
+                        match ty {
+                            Type::Simple(simple_type) => simple_type.name.clone(),
+                            Type::Custom(ident) => ident.name.clone(),
+                            _ => {
+                                // Array, Generic, Function, QualifiedName, Qualified are not valid for enum access
+                                self.errors.push(TypeCheckError::ExpectedEnumType {
+                                    found: TypeInfo::new(ty),
+                                    location: None,
+                                });
+                                return None;
+                            }
+                        }
+                    }
+                    Expression::Identifier(id) => id.name.clone(),
+                    _ => {
+                        // For other expressions, try to infer the type
+                        drop(inner_expr); // Release borrow before mutable borrow
+                        if let Some(expr_type) = self.infer_expression(
+                            &mut type_member_access_expression.expression.borrow_mut(),
+                            ctx,
+                        ) {
+                            match &expr_type.kind {
+                                TypeInfoKind::Enum(name) => name.clone(),
+                                _ => {
+                                    self.errors.push(TypeCheckError::ExpectedEnumType {
+                                        found: expr_type,
+                                        location: None,
+                                    });
+                                    return None;
+                                }
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                };
+
+                let variant_name = &type_member_access_expression.name.name;
+
+                // Look up the enum and validate variant
+                if let Some(enum_info) = self.symbol_table.lookup_enum(&enum_name) {
+                    if enum_info.variants.contains(variant_name) {
+                        let enum_type = TypeInfo {
+                            kind: TypeInfoKind::Enum(enum_name),
+                            type_params: vec![],
+                        };
+                        ctx.set_node_typeinfo(type_member_access_expression.id, enum_type.clone());
+                        Some(enum_type)
+                    } else {
+                        self.errors.push(TypeCheckError::VariantNotFound {
+                            enum_name,
+                            variant_name: variant_name.clone(),
+                            location: None,
+                        });
+                        None
+                    }
                 } else {
+                    self.errors.push(TypeCheckError::UndefinedEnum {
+                        name: enum_name,
+                        location: None,
+                    });
                     None
                 }
             }
@@ -1259,8 +1327,17 @@ impl TypeChecker {
                             });
                     }
                     Definition::Enum(enum_definition) => {
+                        let variants: Vec<&str> = enum_definition
+                            .variants
+                            .iter()
+                            .map(|v| v.name.as_str())
+                            .collect();
                         self.symbol_table
-                            .register_enum(&enum_definition.name())
+                            .register_enum(
+                                &enum_definition.name(),
+                                &variants,
+                                enum_definition.visibility.clone(),
+                            )
                             .unwrap_or_else(|_| {
                                 self.errors.push(TypeCheckError::RegistrationFailed {
                                     kind: RegistrationKind::Enum,

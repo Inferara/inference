@@ -127,6 +127,28 @@ pub enum TypeCheckError {
         location: Option<Location>,
     },
 
+    #[error("variant `{variant_name}` not found on enum `{enum_name}`")]
+    VariantNotFound {
+        enum_name: String,
+        variant_name: String,
+        #[allow(dead_code)]
+        location: Option<Location>,
+    },
+
+    #[error("enum `{name}` is not defined")]
+    UndefinedEnum {
+        name: String,
+        #[allow(dead_code)]
+        location: Option<Location>,
+    },
+
+    #[error("type member access requires an enum type, found `{found}`")]
+    ExpectedEnumType {
+        found: TypeInfo,
+        #[allow(dead_code)]
+        location: Option<Location>,
+    },
+
     #[error("method `{method_name}` not found on type `{type_name}`")]
     MethodNotFound {
         type_name: String,
@@ -294,6 +316,9 @@ impl TypeCheckError {
             | TypeCheckError::UndefinedFunction { location, .. }
             | TypeCheckError::UndefinedStruct { location, .. }
             | TypeCheckError::FieldNotFound { location, .. }
+            | TypeCheckError::VariantNotFound { location, .. }
+            | TypeCheckError::UndefinedEnum { location, .. }
+            | TypeCheckError::ExpectedEnumType { location, .. }
             | TypeCheckError::MethodNotFound { location, .. }
             | TypeCheckError::ArgumentCountMismatch { location, .. }
             | TypeCheckError::TypeParameterCountMismatch { location, .. }
@@ -938,5 +963,92 @@ mod tests {
     fn location_general() {
         let err = TypeCheckError::General("test".to_string());
         assert!(err.location().is_none());
+    }
+
+    #[test]
+    fn display_variant_not_found() {
+        let err = TypeCheckError::VariantNotFound {
+            enum_name: "Color".to_string(),
+            variant_name: "Yellow".to_string(),
+            location: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "variant `Yellow` not found on enum `Color`"
+        );
+    }
+
+    #[test]
+    fn display_undefined_enum() {
+        let err = TypeCheckError::UndefinedEnum {
+            name: "UnknownEnum".to_string(),
+            location: None,
+        };
+        assert_eq!(err.to_string(), "enum `UnknownEnum` is not defined");
+    }
+
+    #[test]
+    fn display_expected_enum_type() {
+        let err = TypeCheckError::ExpectedEnumType {
+            found: TypeInfo {
+                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                type_params: vec![],
+            },
+            location: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "type member access requires an enum type, found `i32`"
+        );
+    }
+
+    #[test]
+    fn location_variant_not_found() {
+        let loc = Location::default();
+        let err = TypeCheckError::VariantNotFound {
+            enum_name: "Color".to_string(),
+            variant_name: "Yellow".to_string(),
+            location: Some(loc.clone()),
+        };
+        assert_eq!(err.location(), Some(&loc));
+
+        let err_no_loc = TypeCheckError::VariantNotFound {
+            enum_name: "Color".to_string(),
+            variant_name: "Yellow".to_string(),
+            location: None,
+        };
+        assert!(err_no_loc.location().is_none());
+    }
+
+    #[test]
+    fn location_undefined_enum() {
+        let loc = Location::default();
+        let err = TypeCheckError::UndefinedEnum {
+            name: "UnknownEnum".to_string(),
+            location: Some(loc.clone()),
+        };
+        assert_eq!(err.location(), Some(&loc));
+
+        let err_no_loc = TypeCheckError::UndefinedEnum {
+            name: "UnknownEnum".to_string(),
+            location: None,
+        };
+        assert!(err_no_loc.location().is_none());
+    }
+
+    #[test]
+    fn location_expected_enum_type() {
+        let loc = Location::default();
+        let err = TypeCheckError::ExpectedEnumType {
+            found: TypeInfo::default(),
+            location: Some(loc.clone()),
+        };
+        assert_eq!(err.location(), Some(&loc));
+
+        let err_no_loc = TypeCheckError::ExpectedEnumType {
+            found: TypeInfo::default(),
+            location: None,
+        };
+        assert!(err_no_loc.location().is_none());
     }
 }

@@ -427,13 +427,30 @@ fn test_parse_array_of_arrays() {
     assert_eq!(source_files.len(), 1);
 }
 
-#[ignore = "self parameter not yet implemented in type inference"]
 #[test]
 fn test_parse_function_with_self_param() {
+    // Verify parsing succeeds for self parameter - self is a valid AST node
+    // Type checking validation is in type_checker.rs::test_self_in_standalone_function_error
     let source = r#"fn method(self, x: i32) -> i32 { return x; }"#;
     let arena = build_ast(source.to_string());
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
+
+    // Verify the function has arguments (including self)
+    if let Some(def) = source_files[0].definitions.first() {
+        if let inference_ast::nodes::Definition::Function(func) = def {
+            let args = func.arguments.as_ref().expect("Function should have arguments");
+            assert!(
+                args.iter()
+                    .any(|arg| matches!(arg, inference_ast::nodes::ArgumentType::SelfReference(_))),
+                "Function should have a self parameter"
+            );
+        } else {
+            panic!("Expected a function definition");
+        }
+    } else {
+        panic!("Expected at least one definition");
+    }
 }
 
 #[test]
