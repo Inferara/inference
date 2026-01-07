@@ -1,3 +1,15 @@
+//! Type Information
+//!
+//! This module defines the representation of types used throughout the type checker.
+//!
+//! The Inference language supports:
+//! - Primitive types: bool, string, unit, i8-i64, u8-u64
+//! - Compound types: arrays, structs, enums, functions
+//! - Generic types: type parameters that can be substituted
+//!
+//! Generic types use [`TypeInfoKind::Generic`] for unbound type parameters.
+//! The [`TypeInfo::substitute`] method replaces type parameters with concrete types.
+
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
@@ -106,6 +118,7 @@ impl Display for TypeInfo {
 }
 
 impl TypeInfo {
+    #[must_use]
     pub fn boolean() -> Self {
         Self {
             kind: TypeInfoKind::Bool,
@@ -113,6 +126,7 @@ impl TypeInfo {
         }
     }
 
+    #[must_use]
     pub fn string() -> Self {
         Self {
             kind: TypeInfoKind::String,
@@ -129,6 +143,7 @@ impl TypeInfo {
     ///
     /// When `type_param_names` contains "T" and we see type "T", it becomes
     /// `TypeInfoKind::Generic("T")` instead of `TypeInfoKind::Custom("T")`.
+    #[must_use]
     pub fn new_with_type_params(ty: &Type, type_param_names: &[String]) -> Self {
         match ty {
             Type::Simple(simple) => {

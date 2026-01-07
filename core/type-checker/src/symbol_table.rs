@@ -1,3 +1,18 @@
+//! Symbol Table
+//!
+//! This module implements a tree-based symbol table for managing scopes and symbols
+//! during type checking. It supports:
+//!
+//! - Hierarchical scopes with parent-child relationships
+//! - Type, struct, enum, spec, and function symbol registration
+//! - Variable tracking within scopes
+//! - Method resolution on types
+//! - Import registration and resolution
+//! - Visibility checking for access control
+//!
+//! Scopes form a tree structure where each scope can have multiple child scopes.
+//! Symbol lookup walks up the tree from current scope to root until a match is found.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -32,7 +47,7 @@ pub(crate) struct StructFieldInfo {
 }
 
 /// Information about a struct type. Visibility and definition_scope_id are used
-/// for Phase 9+ visibility checking during member access.
+/// for visibility checking during member access.
 #[derive(Debug, Clone)]
 pub(crate) struct StructInfo {
     pub(crate) name: String,
@@ -44,7 +59,7 @@ pub(crate) struct StructInfo {
 
 /// Information about an enum type including its variants.
 /// Simple unit variants only - associated data support is out of scope.
-/// Visibility and definition_scope_id are used for Phase 9+ visibility checking.
+/// Visibility and definition_scope_id are used for visibility checking.
 #[derive(Debug, Clone)]
 pub(crate) struct EnumInfo {
     pub(crate) name: String,
@@ -58,7 +73,7 @@ pub(crate) struct EnumInfo {
 
 /// Information about a method defined on a type.
 /// Fields visibility, scope_id, and has_self are populated for future phases:
-/// - visibility: for Phase 4+ visibility checking during method resolution
+/// - visibility: for visibility checking during method resolution
 /// - scope_id: to track which scope defines this method for qualified lookup
 /// - has_self: to distinguish instance methods from associated functions
 #[derive(Debug, Clone)]
@@ -86,7 +101,7 @@ pub(crate) struct ImportItem {
 pub(crate) enum ImportKind {
     /// Plain import: `use path::item`
     Plain,
-    /// Glob import: `use path::*` (Phase 5 - not yet implemented)
+    /// Glob import: `use path::*`
     #[allow(dead_code)]
     Glob,
     /// Partial import with multiple items: `use path::{a, b as c}`

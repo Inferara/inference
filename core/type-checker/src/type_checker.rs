@@ -1,3 +1,17 @@
+//! Type Checker Implementation
+//!
+//! This module contains the core type checking logic that infers and validates
+//! types throughout the AST. The type checker operates in multiple phases:
+//!
+//! 1. **process_directives** - Register raw imports from use statements
+//! 2. **register_types** - Collect type/struct/enum/spec definitions
+//! 3. **resolve_imports** - Bind import paths to symbols
+//! 4. **collect_function_and_constant_definitions** - Register functions
+//! 5. **infer_variables** - Type-check function bodies
+//!
+//! The type checker continues after encountering errors to collect all issues
+//! before returning. Errors are deduplicated to avoid repeated reports.
+
 use std::rc::Rc;
 
 use anyhow::bail;
