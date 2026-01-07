@@ -9,4 +9,5 @@ repository = { workspace = true }
 [dependencies]
 inference-ast.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 rustc-hash.workspace = true

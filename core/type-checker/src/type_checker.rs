@@ -10,6 +10,7 @@ use inference_ast::nodes::{
 use rustc_hash::FxHashSet;
 
 use crate::{
+    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext},
     symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -18,7 +19,7 @@ use crate::{
 #[derive(Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
-    errors: Vec<String>,
+    errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
 }
 
@@ -58,7 +59,11 @@ impl TypeChecker {
         self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
         if !self.errors.is_empty() {
-            bail!(std::mem::take(&mut self.errors).join("; "))
+            let error_messages: Vec<String> = std::mem::take(&mut self.errors)
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect();
+            bail!(error_messages.join("; "))
         }
         for source_file in ctx.source_files() {
             for def in &source_file.definitions {
@@ -72,11 +77,7 @@ impl TypeChecker {
                             type_params: vec![],
                         };
                         for method in &struct_definition.methods {
-                            self.infer_method_variables(
-                                method.clone(),
-                                struct_type.clone(),
-                                ctx,
-                            );
+                            self.infer_method_variables(method.clone(), struct_type.clone(), ctx);
                         }
                     }
                     _ => {}
@@ -84,7 +85,11 @@ impl TypeChecker {
             }
         }
         if !self.errors.is_empty() {
-            bail!(std::mem::take(&mut self.errors).join("; "))
+            let error_messages: Vec<String> = std::mem::take(&mut self.errors)
+                .into_iter()
+                .map(|e| e.to_string())
+                .collect();
+            bail!(error_messages.join("; "))
         }
         Ok(self.symbol_table.clone())
     }
@@ -97,10 +102,12 @@ impl TypeChecker {
                         self.symbol_table
                             .register_type(&type_definition.name(), Some(&type_definition.ty))
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering type `{}`",
-                                    type_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Type,
+                                    name: type_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Struct(struct_definition) => {
@@ -123,21 +130,20 @@ impl TypeChecker {
                                 struct_definition.visibility.clone(),
                             )
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering type `{}`",
-                                    struct_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Struct,
+                                    name: struct_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
 
                         let struct_name = struct_definition.name();
                         for method in &struct_definition.methods {
-                            let has_self = method
-                                .arguments
-                                .as_ref()
-                                .is_some_and(|args| {
-                                    args.iter()
-                                        .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
-                                });
+                            let has_self = method.arguments.as_ref().is_some_and(|args| {
+                                args.iter()
+                                    .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
+                            });
 
                             let param_types: Vec<TypeInfo> = method
                                 .arguments
@@ -184,12 +190,12 @@ impl TypeChecker {
                                     has_self,
                                 )
                                 .unwrap_or_else(|err| {
-                                    self.errors.push(format!(
-                                        "Error registering method `{}` on `{}`: {}",
-                                        method.name(),
-                                        struct_name,
-                                        err
-                                    ));
+                                    self.errors.push(TypeCheckError::RegistrationFailed {
+                                        kind: RegistrationKind::Method,
+                                        name: format!("{struct_name}::{}", method.name()),
+                                        reason: Some(err.to_string()),
+                                        location: None,
+                                    });
                                 });
                         }
                     }
@@ -197,20 +203,24 @@ impl TypeChecker {
                         self.symbol_table
                             .register_enum(&enum_definition.name())
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering type `{}`",
-                                    enum_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Enum,
+                                    name: enum_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
                             .register_spec(&spec_definition.name())
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering type `{}`",
-                                    spec_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Spec,
+                                    name: spec_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Constant(_)
@@ -232,17 +242,22 @@ impl TypeChecker {
                             &constant_definition.name(),
                             TypeInfo::new(&constant_definition.ty),
                         ) {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Variable,
+                                name: constant_definition.name(),
+                                reason: Some(err.to_string()),
+                                location: None,
+                            });
                         }
                     }
                     Definition::Function(function_definition) => {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
                             match param {
                                 ArgumentType::SelfReference(_) => {
-                                    self.errors.push(format!(
-                                        "Self reference not allowed in standalone function `{}`",
-                                        function_definition.name()
-                                    ));
+                                    self.errors.push(TypeCheckError::SelfReferenceInFunction {
+                                        function_name: function_definition.name(),
+                                        location: None,
+                                    });
                                 }
                                 ArgumentType::IgnoreArgument(ignore_argument) => {
                                     self.validate_type(
@@ -306,7 +321,12 @@ impl TypeChecker {
                                 ))))
                                 .clone(),
                         ) {
-                            self.errors.push(err);
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Function,
+                                name: function_definition.name(),
+                                reason: Some(err),
+                                location: None,
+                            });
                         }
                     }
                     Definition::ExternalFunction(external_function_definition) => {
@@ -337,7 +357,12 @@ impl TypeChecker {
                                 ))))
                                 .clone(),
                         ) {
-                            self.errors.push(err);
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Function,
+                                name: external_function_definition.name(),
+                                reason: Some(err),
+                                location: None,
+                            });
                         }
                     }
                     Definition::Spec(_)
@@ -355,8 +380,10 @@ impl TypeChecker {
             Type::Array(type_array) => self.validate_type(&type_array.element_type, None),
             Type::Simple(simple_type) => {
                 if self.symbol_table.lookup_type(&simple_type.name).is_none() {
-                    self.errors
-                        .push(format!("Unknown type `{}`", simple_type.name));
+                    self.errors.push(TypeCheckError::UnknownType {
+                        name: simple_type.name.clone(),
+                        location: None,
+                    });
                 }
             }
             Type::Generic(generic_type) => {
@@ -365,17 +392,20 @@ impl TypeChecker {
                     .lookup_type(&generic_type.base.name())
                     .is_none()
                 {
-                    self.errors
-                        .push(format!("Unknown type `{}`", generic_type.base.name()));
+                    self.errors.push(TypeCheckError::UnknownType {
+                        name: generic_type.base.name(),
+                        location: None,
+                    });
                 }
                 if let Some(type_params) = &type_parameters {
                     if type_params.len() != generic_type.parameters.len() {
-                        self.errors.push(format!(
-                            "Type parameter count mismatch for `{}`: expected {}, found {}",
-                            generic_type.base.name(),
-                            generic_type.parameters.len(),
-                            type_params.len()
-                        ));
+                        self.errors
+                            .push(TypeCheckError::TypeParameterCountMismatch {
+                                name: generic_type.base.name(),
+                                expected: generic_type.parameters.len(),
+                                found: type_params.len(),
+                                location: None,
+                            });
                     }
                     let generic_param_names: Vec<String> = generic_type
                         .parameters
@@ -384,11 +414,11 @@ impl TypeChecker {
                         .collect();
                     for param in &generic_type.parameters {
                         if !generic_param_names.contains(&param.name()) {
-                            self.errors.push(format!(
-                                "Type parameter `{}` not found in `{}`",
+                            self.errors.push(TypeCheckError::General(format!(
+                                "type parameter `{}` not found in `{}`",
                                 param.name(),
                                 generic_type.base.name()
-                            ));
+                            )));
                         }
                     }
                 }
@@ -396,8 +426,10 @@ impl TypeChecker {
             Type::Function(_) | Type::QualifiedName(_) | Type::Qualified(_) => {}
             Type::Custom(identifier) => {
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
-                    self.errors
-                        .push(format!("Unknown type `{}`", identifier.name));
+                    self.errors.push(TypeCheckError::UnknownType {
+                        name: identifier.name.clone(),
+                        location: None,
+                    });
                 }
             }
         }
@@ -418,13 +450,17 @@ impl TypeChecker {
                             .symbol_table
                             .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
                         {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Variable,
+                                name: arg.name(),
+                                reason: Some(err.to_string()),
+                                location: None,
+                            });
                         }
                     }
                     ArgumentType::SelfReference(_) => {
-                        self.errors.push(
-                            "Self reference is only allowed in methods, not functions".to_string(),
-                        );
+                        self.errors
+                            .push(TypeCheckError::SelfReferenceOutsideMethod { location: None });
                     }
                     ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
                 }
@@ -460,7 +496,12 @@ impl TypeChecker {
                             .symbol_table
                             .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
                         {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Variable,
+                                name: arg.name(),
+                                reason: Some(err.to_string()),
+                                location: None,
+                            });
                         }
                     }
                     ArgumentType::SelfReference(_) => {
@@ -468,7 +509,12 @@ impl TypeChecker {
                             .symbol_table
                             .push_variable_to_scope("self", self_type.clone())
                         {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Variable,
+                                name: "self".to_string(),
+                                reason: Some(err.to_string()),
+                                location: None,
+                            });
                         }
                     }
                     ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
@@ -505,18 +551,20 @@ impl TypeChecker {
                     if let Some(target) = &target_type {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
                     } else {
-                        self.errors.push(
-                            String::from("Cannot infer type for Uzumaki expression assigned to variable of unknown type")
-                        );
+                        self.errors
+                            .push(TypeCheckError::CannotInferUzumakiType { location: None });
                     }
                 } else {
                     let value_type = self.infer_expression(&mut right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
                     {
-                        self.errors.push(format!(
-                            "Cannot assign value of type {val:?} to variable of type {target:?}"
-                        ));
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: target,
+                            found: val,
+                            context: TypeMismatchContext::Assignment,
+                            location: None,
+                        });
                     }
                 }
             }
@@ -543,9 +591,12 @@ impl TypeChecker {
                     let value_type =
                         self.infer_expression(&mut return_statement.expression.borrow_mut(), ctx);
                     if *return_type != value_type.clone().unwrap_or_default() {
-                        self.errors.push(format!(
-                            "Return type mismatch: expected {return_type:?}, found {value_type:?}"
-                        ));
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: return_type.clone(),
+                            found: value_type.unwrap_or_default(),
+                            context: TypeMismatchContext::Return,
+                            location: None,
+                        });
                     }
                 }
             }
@@ -555,9 +606,12 @@ impl TypeChecker {
                     if condition_type.is_none()
                         || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                     {
-                        self.errors.push(format!(
-                            "Loop condition must be of type `bool`, found {condition_type:?}"
-                        ));
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: TypeInfo::boolean(),
+                            found: condition_type.unwrap_or_default(),
+                            context: TypeMismatchContext::Condition,
+                            location: None,
+                        });
                     }
                 }
                 self.symbol_table.push_scope();
@@ -573,9 +627,12 @@ impl TypeChecker {
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
-                    self.errors.push(format!(
-                        "If condition must be of type `bool`, found {condition_type:?}"
-                    ));
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: TypeInfo::boolean(),
+                        found: condition_type.unwrap_or_default(),
+                        context: TypeMismatchContext::Condition,
+                        location: None,
+                    });
                 }
 
                 self.symbol_table.push_scope();
@@ -600,17 +657,24 @@ impl TypeChecker {
                     } else if let Some(init_type) = self.infer_expression(&mut expr_ref, ctx)
                         && init_type != TypeInfo::new(&variable_definition_statement.ty)
                     {
-                        self.errors.push(format!(
-                            "Type mismatch in variable definition: expected {:?}, found {:?}",
-                            variable_definition_statement.ty, init_type
-                        ));
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: target_type.clone(),
+                            found: init_type,
+                            context: TypeMismatchContext::VariableDefinition,
+                            location: None,
+                        });
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &variable_definition_statement.name(),
                     TypeInfo::new(&variable_definition_statement.ty),
                 ) {
-                    self.errors.push(err.to_string());
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Variable,
+                        name: variable_definition_statement.name(),
+                        reason: Some(err.to_string()),
+                        location: None,
+                    });
                 }
                 ctx.set_node_typeinfo(variable_definition_statement.id, target_type);
             }
@@ -620,7 +684,12 @@ impl TypeChecker {
                     .symbol_table
                     .register_type(&type_name, Some(&type_definition_statement.ty))
                 {
-                    self.errors.push(err.to_string());
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Type,
+                        name: type_name,
+                        reason: Some(err.to_string()),
+                        location: None,
+                    });
                 }
             }
             Statement::Assert(assert_statement) => {
@@ -629,9 +698,12 @@ impl TypeChecker {
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
-                    self.errors.push(format!(
-                        "If condition must be of type `bool`, found {condition_type:?}"
-                    ));
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: TypeInfo::boolean(),
+                        found: condition_type.unwrap_or_default(),
+                        context: TypeMismatchContext::Condition,
+                        location: None,
+                    });
                 }
             }
             Statement::ConstantDefinition(constant_definition) => {
@@ -640,7 +712,12 @@ impl TypeChecker {
                     .symbol_table
                     .push_variable_to_scope(&constant_definition.name(), constant_type.clone())
                 {
-                    self.errors.push(err.to_string());
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Variable,
+                        name: constant_definition.name(),
+                        reason: Some(err.to_string()),
+                        location: None,
+                    });
                 }
                 ctx.set_node_typeinfo(constant_definition.id, constant_type);
             }
@@ -665,9 +742,10 @@ impl TypeChecker {
                         ctx,
                     ) && !index_type.is_number()
                     {
-                        self.errors.push(format!(
-                            "Array index must be of number type, found {index_type:?}"
-                        ));
+                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                            found: index_type,
+                            location: None,
+                        });
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -678,8 +756,10 @@ impl TypeChecker {
                             Some((**element_type).clone())
                         }
                         _ => {
-                            self.errors
-                                .push(format!("Expected an array type, found {array_type:?}"));
+                            self.errors.push(TypeCheckError::ExpectedArrayType {
+                                found: array_type,
+                                location: None,
+                            });
                             None
                         }
                     }
@@ -714,15 +794,18 @@ impl TypeChecker {
                             ctx.set_node_typeinfo(member_access_expression.id, field_type.clone());
                             Some(field_type)
                         } else {
-                            self.errors.push(format!(
-                                "Field `{field_name}` not found on struct `{struct_name}`"
-                            ));
+                            self.errors.push(TypeCheckError::FieldNotFound {
+                                struct_name,
+                                field_name: field_name.clone(),
+                                location: None,
+                            });
                             None
                         }
                     } else {
-                        self.errors.push(format!(
-                            "Member access requires a struct type, found {object_type:?}"
-                        ));
+                        self.errors.push(TypeCheckError::ExpectedStructType {
+                            found: object_type,
+                            location: None,
+                        });
                         None
                     }
                 } else {
@@ -748,8 +831,8 @@ impl TypeChecker {
             Expression::FunctionCall(function_call_expression) => {
                 if let Expression::MemberAccess(member_access) = &function_call_expression.function
                 {
-                    let receiver_type = self
-                        .infer_expression(&mut member_access.expression.borrow_mut(), ctx);
+                    let receiver_type =
+                        self.infer_expression(&mut member_access.expression.borrow_mut(), ctx);
 
                     if let Some(receiver_type) = receiver_type {
                         let type_name = match &receiver_type.kind {
@@ -776,13 +859,13 @@ impl TypeChecker {
                                     .map_or(0, Vec::len);
 
                                 if arg_count != signature.param_types.len() {
-                                    self.errors.push(format!(
-                                        "Method `{}::{}` expects {} arguments, but {} provided",
-                                        type_name,
-                                        method_name,
-                                        signature.param_types.len(),
-                                        arg_count
-                                    ));
+                                    self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                                        kind: "method",
+                                        name: format!("{}::{}", type_name, method_name),
+                                        expected: signature.param_types.len(),
+                                        found: arg_count,
+                                        location: None,
+                                    });
                                 }
 
                                 if let Some(arguments) = &function_call_expression.arguments {
@@ -797,14 +880,17 @@ impl TypeChecker {
                                 );
                                 return Some(signature.return_type.clone());
                             }
-                            self.errors.push(format!(
-                                "Method `{method_name}` not found on type `{type_name}`"
-                            ));
+                            self.errors.push(TypeCheckError::MethodNotFound {
+                                type_name,
+                                method_name: method_name.clone(),
+                                location: None,
+                            });
                             return None;
                         }
-                        self.errors.push(format!(
-                            "Cannot call method on non-struct type `{receiver_type:?}`"
-                        ));
+                        self.errors.push(TypeCheckError::MethodCallOnNonStruct {
+                            found: receiver_type,
+                            location: None,
+                        });
                         return None;
                     }
                     return None;
@@ -816,10 +902,10 @@ impl TypeChecker {
                 {
                     s.clone()
                 } else {
-                    self.errors.push(format!(
-                        "Call to undefined function `{}`",
-                        function_call_expression.name()
-                    ));
+                    self.errors.push(TypeCheckError::UndefinedFunction {
+                        name: function_call_expression.name(),
+                        location: None,
+                    });
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
                             self.infer_expression(&mut arg.1.borrow_mut(), ctx);
@@ -830,12 +916,13 @@ impl TypeChecker {
                 if let Some(arguments) = &function_call_expression.arguments
                     && arguments.len() != signature.param_types.len()
                 {
-                    self.errors.push(format!(
-                        "Function `{}` expects {} arguments, but {} provided",
-                        function_call_expression.name(),
-                        signature.param_types.len(),
-                        arguments.len()
-                    ));
+                    self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                        kind: "function",
+                        name: function_call_expression.name(),
+                        expected: signature.param_types.len(),
+                        found: arguments.len(),
+                        location: None,
+                    });
                     for arg in arguments {
                         self.infer_expression(&mut arg.1.borrow_mut(), ctx);
                     }
@@ -845,19 +932,20 @@ impl TypeChecker {
                 if !signature.type_params.is_empty() {
                     if let Some(type_parameters) = &function_call_expression.type_parameters {
                         if type_parameters.len() != signature.type_params.len() {
-                            self.errors.push(format!(
-                                "Function `{}` expects {} type parameters, but {} provided",
-                                function_call_expression.name(),
-                                signature.type_params.len(),
-                                type_parameters.len()
-                            ));
+                            self.errors
+                                .push(TypeCheckError::TypeParameterCountMismatch {
+                                    name: function_call_expression.name(),
+                                    expected: signature.type_params.len(),
+                                    found: type_parameters.len(),
+                                    location: None,
+                                });
                         }
                     } else {
-                        self.errors.push(format!(
-                            "Function `{}` requires {} type parameters, but none were provided",
-                            function_call_expression.name(),
-                            signature.type_params.len()
-                        ));
+                        self.errors.push(TypeCheckError::MissingTypeParameters {
+                            function_name: function_call_expression.name(),
+                            expected: signature.type_params.len(),
+                            location: None,
+                        });
                     }
                 }
                 ctx.set_node_typeinfo(function_call_expression.id, signature.return_type.clone());
@@ -872,10 +960,10 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
                     return Some(struct_type);
                 }
-                self.errors.push(format!(
-                    "Struct `{}` is not defined",
-                    struct_expression.name()
-                ));
+                self.errors.push(TypeCheckError::UndefinedStruct {
+                    name: struct_expression.name(),
+                    location: None,
+                });
                 None
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
@@ -893,9 +981,12 @@ impl TypeChecker {
                                 );
                                 return Some(expression_type);
                             }
-                            self.errors.push(format!(
-                                "Unary operator `-` can only be applied to booleans, found {expression_type:?}"
-                            ));
+                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                                operator: UnaryOperatorKind::Neg,
+                                expected_type: "booleans",
+                                found_type: expression_type,
+                                location: None,
+                            });
                         }
                         None
                     }
@@ -914,7 +1005,12 @@ impl TypeChecker {
                     self.infer_expression(&mut binary_expression.right.borrow_mut(), ctx);
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
                     if left_type != right_type {
-                        self.errors.push(format!("Cannot apply operator {:?} to operands of different types: {:?} and {:?}", binary_expression.operator, left_type, right_type));
+                        self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
+                            operator: binary_expression.operator.clone(),
+                            left: left_type.clone(),
+                            right: right_type.clone(),
+                            location: None,
+                        });
                     }
                     let res_type = match binary_expression.operator {
                         OperatorKind::And | OperatorKind::Or => {
@@ -924,10 +1020,13 @@ impl TypeChecker {
                                     type_params: vec![],
                                 }
                             } else {
-                                self.errors.push(format!(
-                                    "Logical operator `{:?}` can only be applied to boolean types, found {:?} and {:?}",
-                                    binary_expression.operator, left_type, right_type
-                                ));
+                                self.errors.push(TypeCheckError::InvalidBinaryOperand {
+                                    operator: binary_expression.operator.clone(),
+                                    expected_kind: "logical",
+                                    operand_desc: "non-boolean types",
+                                    found_types: (left_type, right_type),
+                                    location: None,
+                                });
                                 return None;
                             }
                         }
@@ -953,16 +1052,21 @@ impl TypeChecker {
                         | OperatorKind::Shl
                         | OperatorKind::Shr => {
                             if !left_type.is_number() || !right_type.is_number() {
-                                self.errors.push(format!(
-                                    "Arithmetic operator `{:?}` can only be applied to number types, found {:?} and {:?}",
-                                    binary_expression.operator, left_type, right_type
-                                ));
+                                self.errors.push(TypeCheckError::InvalidBinaryOperand {
+                                    operator: binary_expression.operator.clone(),
+                                    expected_kind: "arithmetic",
+                                    operand_desc: "non-number types",
+                                    found_types: (left_type.clone(), right_type.clone()),
+                                    location: None,
+                                });
                             }
                             if left_type != right_type {
-                                self.errors.push(format!(
-                                    "Cannot apply operator `{:?}` to operands of different types: {:?} and {:?}",
-                                    binary_expression.operator, left_type, right_type
-                                ));
+                                self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
+                                    operator: binary_expression.operator.clone(),
+                                    left: left_type.clone(),
+                                    right: right_type,
+                                    location: None,
+                                });
                             }
                             left_type.clone()
                         }
@@ -988,14 +1092,17 @@ impl TypeChecker {
                                 if let Some(element_type) = element_type
                                     && element_type != element_type_info
                                 {
-                                    self.errors.push(format!(
-                                        "Array elements must be of the same type, found {element_type:?} and {element_type_info:?}"
-                                    ));
+                                    self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                        expected: element_type_info.clone(),
+                                        found: element_type,
+                                        location: None,
+                                    });
                                 }
                             }
                         } else {
-                            self.errors
-                                .push("Array elements must be of the same type".to_string());
+                            self.errors.push(TypeCheckError::General(
+                                "array elements must be of the same type".to_string(),
+                            ));
                         }
                     }
 
@@ -1030,8 +1137,10 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(identifier.id, var_ty.clone());
                     Some(var_ty)
                 } else {
-                    self.errors
-                        .push(format!("Use of undeclared variable `{}`", identifier.name));
+                    self.errors.push(TypeCheckError::UnknownIdentifier {
+                        name: identifier.name.clone(),
+                        location: None,
+                    });
                     None
                 }
             }
@@ -1113,10 +1222,12 @@ impl TypeChecker {
                         self.symbol_table
                             .register_type(&type_definition.name(), Some(&type_definition.ty))
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering type `{}`",
-                                    type_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Type,
+                                    name: type_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Struct(struct_definition) => {
@@ -1139,30 +1250,36 @@ impl TypeChecker {
                                 struct_definition.visibility.clone(),
                             )
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering struct `{}`",
-                                    struct_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Struct,
+                                    name: struct_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Enum(enum_definition) => {
                         self.symbol_table
                             .register_enum(&enum_definition.name())
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering enum `{}`",
-                                    enum_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Enum,
+                                    name: enum_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
                             .register_spec(&spec_definition.name())
                             .unwrap_or_else(|_| {
-                                self.errors.push(format!(
-                                    "Error registering spec `{}`",
-                                    spec_definition.name()
-                                ));
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Spec,
+                                    name: spec_definition.name(),
+                                    reason: None,
+                                    location: None,
+                                });
                             });
                     }
                     Definition::Module(nested_module) => {
@@ -1176,7 +1293,12 @@ impl TypeChecker {
                             &constant_definition.name(),
                             TypeInfo::new(&constant_definition.ty),
                         ) {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Variable,
+                                name: constant_definition.name(),
+                                reason: Some(err.to_string()),
+                                location: None,
+                            });
                         }
                     }
                     Definition::ExternalFunction(external_function_definition) => {
@@ -1207,7 +1329,12 @@ impl TypeChecker {
                                 ))))
                                 .clone(),
                         ) {
-                            self.errors.push(err);
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Function,
+                                name: external_function_definition.name(),
+                                reason: Some(err),
+                                location: None,
+                            });
                         }
                     }
                 }
@@ -1225,7 +1352,7 @@ impl TypeChecker {
                 match directive {
                     Directive::Use(use_directive) => {
                         if let Err(err) = self.process_use_statement(use_directive, ctx) {
-                            self.errors.push(err.to_string());
+                            self.errors.push(TypeCheckError::General(err.to_string()));
                         }
                     }
                 }
@@ -1302,10 +1429,10 @@ impl TypeChecker {
                                 scope.borrow_mut().add_resolved_import(resolved);
                             }
                         } else {
-                            self.errors.push(format!(
-                                "Cannot resolve import path: {}",
-                                import.path.join("::")
-                            ));
+                            self.errors.push(TypeCheckError::ImportResolutionFailed {
+                                path: import.path.join("::"),
+                                location: None,
+                            });
                         }
                     }
                 }
@@ -1329,11 +1456,10 @@ impl TypeChecker {
                                 scope.borrow_mut().add_resolved_import(resolved);
                             }
                         } else {
-                            self.errors.push(format!(
-                                "Cannot resolve import: {}::{}",
-                                import.path.join("::"),
-                                item.name
-                            ));
+                            self.errors.push(TypeCheckError::ImportResolutionFailed {
+                                path: format!("{}::{}", import.path.join("::"), item.name),
+                                location: None,
+                            });
                         }
                     }
                 }
@@ -1348,26 +1474,26 @@ impl TypeChecker {
     fn resolve_glob_import(&mut self, path: &[String], into_scope_id: u32) {
         if path.is_empty() {
             self.errors
-                .push("Glob import path cannot be empty".to_string());
+                .push(TypeCheckError::EmptyGlobImport { location: None });
             return;
         }
 
         let target_scope_id = match self.symbol_table.find_module_scope(path) {
             Some(id) => id,
             None => {
-                self.errors.push(format!(
-                    "Cannot resolve glob import: {}::* - module not found",
-                    path.join("::")
-                ));
+                self.errors.push(TypeCheckError::ImportResolutionFailed {
+                    path: format!("{}::* - module not found", path.join("::")),
+                    location: None,
+                });
                 return;
             }
         };
 
         if self.glob_resolution_in_progress.contains(&target_scope_id) {
-            self.errors.push(format!(
-                "Circular glob import detected: {}::*",
-                path.join("::")
-            ));
+            self.errors.push(TypeCheckError::CircularImport {
+                path: path.join("::"),
+                location: None,
+            });
             return;
         }
 

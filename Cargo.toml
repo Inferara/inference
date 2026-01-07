@@ -43,6 +43,7 @@ inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 tree-sitter = "0.26.2"
 tree-sitter-inference = "0.0.37"
 anyhow = "1.0.100"
+thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 leb128 = "0.2.5"
 rustc-hash = "2.1.1"

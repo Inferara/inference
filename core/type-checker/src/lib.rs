@@ -4,6 +4,7 @@ use inference_ast::arena::Arena;
 
 use crate::{type_checker::TypeChecker, typed_context::TypedContext};
 
+pub mod errors;
 mod symbol_table;
 mod type_checker;
 pub mod type_info;

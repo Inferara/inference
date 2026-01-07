@@ -193,3 +193,55 @@ Prefer `Default` even if it has to be implemented manually.
 ## Collections
 
 Prefer `FxHashMap` and `FxHashSet` from `rustc-hash` crate over standard library collections for better performance.
+
+## Error Handling in Core Crates
+
+Each crate in `core/` except `cli` must have a `src/errors.rs` file that defines a consolidated error enum for all errors that can occur within that crate. This provides structured, typed errors instead of ad-hoc string messages.
+
+### Structure
+
+```rust
+// src/errors.rs
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum MycrateError {
+    #[error("specific error: {0}")]
+    SpecificError(String),
+
+    #[error("validation failed for {field}: {reason}")]
+    ValidationError { field: String, reason: String },
+
+    #[error("general error: {0}")]
+    General(String),
+}
+```
+
+### Usage with anyhow
+
+When returning `anyhow::Result`, wrap errors in the appropriate enum variant:
+
+```rust
+use anyhow::{Result, anyhow};
+use crate::errors::MycrateError;
+
+fn process_item(item: &Item) -> Result<Output> {
+    if !item.is_valid() {
+        return Err(anyhow!(MycrateError::ValidationError {
+            field: "item".to_string(),
+            reason: "item must be valid".to_string(),
+        }));
+    }
+    // ...
+}
+```
+
+### Guidelines
+
+- **Specific variants first**: Create specific error variants for known error cases
+- **Enum values hold context**: Include relevant data (field names, values, positions) in enum variants
+- **General fallback**: Use the `General(String)` variant only when no specific category applies
+- **Avoid bare strings**: Never use `anyhow!("some error")` without wrapping in an error enum variant
+
+## CLI crate as a user-faced interface should raise anyhow errors directly
+

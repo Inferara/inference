@@ -657,7 +657,7 @@ mod type_inference_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Field `y` not found on struct `Point`"),
+                    error_msg.contains("field `y` not found on struct `Point`"),
                     "Error message should mention the missing field, got: {}",
                     error_msg
                 );
@@ -678,7 +678,7 @@ mod type_inference_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Member access requires a struct type"),
+                    error_msg.contains("member access requires a struct type"),
                     "Error message should mention struct requirement, got: {}",
                     error_msg
                 );
@@ -1207,7 +1207,7 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Cannot resolve import path"),
+                    error_msg.contains("cannot resolve import path"),
                     "Error should mention unresolved import path, got: {}",
                     error_msg
                 );
@@ -1228,7 +1228,7 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Cannot resolve import"),
+                    error_msg.contains("cannot resolve import path"),
                     "Error should mention unresolved imports, got: {}",
                     error_msg
                 );
@@ -1284,7 +1284,7 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Cannot resolve import path"),
+                    error_msg.contains("cannot resolve import path"),
                     "Error should mention unresolved import path, got: {}",
                     error_msg
                 );
@@ -1319,7 +1319,7 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Cannot resolve import"),
+                    error_msg.contains("cannot resolve import path"),
                     "Error should mention unresolved imports, got: {}",
                     error_msg
                 );
@@ -1358,7 +1358,7 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("Cannot resolve import"),
+                    error_msg.contains("cannot resolve import path"),
                     "Error should mention import resolution failure, got: {}",
                     error_msg
                 );
