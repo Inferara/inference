@@ -21,6 +21,7 @@ pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
+    reported_error_keys: FxHashSet<String>,
 }
 
 impl TypeChecker {
@@ -58,13 +59,8 @@ impl TypeChecker {
         self.register_types(ctx);
         self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
-        if !self.errors.is_empty() {
-            let error_messages: Vec<String> = std::mem::take(&mut self.errors)
-                .into_iter()
-                .map(|e| e.to_string())
-                .collect();
-            bail!(error_messages.join("; "))
-        }
+        // Continue to inference phase even if registration had errors
+        // to collect all errors before returning
         for source_file in ctx.source_files() {
             for def in &source_file.definitions {
                 match def {
@@ -106,7 +102,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Type,
                                     name: type_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:type_definition.location.clone(),
                                 });
                             });
                     }
@@ -134,7 +130,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Struct,
                                     name: struct_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:struct_definition.location.clone(),
                                 });
                             });
 
@@ -194,7 +190,7 @@ impl TypeChecker {
                                         kind: RegistrationKind::Method,
                                         name: format!("{struct_name}::{}", method.name()),
                                         reason: Some(err.to_string()),
-                                        location: None,
+                                        location:method.location.clone(),
                                     });
                                 });
                         }
@@ -216,7 +212,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Enum,
                                     name: enum_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:enum_definition.location.clone(),
                                 });
                             });
                     }
@@ -228,7 +224,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Spec,
                                     name: spec_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:spec_definition.location.clone(),
                                 });
                             });
                     }
@@ -255,17 +251,17 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: constant_definition.name(),
                                 reason: Some(err.to_string()),
-                                location: None,
+                                location:constant_definition.location.clone(),
                             });
                         }
                     }
                     Definition::Function(function_definition) => {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
                             match param {
-                                ArgumentType::SelfReference(_) => {
+                                ArgumentType::SelfReference(self_ref) => {
                                     self.errors.push(TypeCheckError::SelfReferenceInFunction {
                                         function_name: function_definition.name(),
-                                        location: None,
+                                        location:self_ref.location.clone(),
                                     });
                                 }
                                 ArgumentType::IgnoreArgument(ignore_argument) => {
@@ -294,9 +290,8 @@ impl TypeChecker {
                                 function_definition.type_parameters.as_ref(),
                             );
                         }
-                        if !self.errors.is_empty() {
-                            continue;
-                        }
+                        // Register function even if parameter validation had errors
+                        // to allow error recovery and prevent spurious UndefinedFunction errors
                         if let Err(err) = self.symbol_table.register_function(
                             &function_definition.name(),
                             function_definition
@@ -334,7 +329,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Function,
                                 name: function_definition.name(),
                                 reason: Some(err),
-                                location: None,
+                                location:function_definition.location.clone(),
                             });
                         }
                     }
@@ -370,7 +365,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Function,
                                 name: external_function_definition.name(),
                                 reason: Some(err),
-                                location: None,
+                                location:external_function_definition.location.clone(),
                             });
                         }
                     }
@@ -400,9 +395,9 @@ impl TypeChecker {
                     return;
                 }
                 if self.symbol_table.lookup_type(&simple_type.name).is_none() {
-                    self.errors.push(TypeCheckError::UnknownType {
+                    self.push_error_dedup(TypeCheckError::UnknownType {
                         name: simple_type.name.clone(),
-                        location: None,
+                        location:simple_type.location.clone(),
                     });
                 }
             }
@@ -412,9 +407,9 @@ impl TypeChecker {
                     .lookup_type(&generic_type.base.name())
                     .is_none()
                 {
-                    self.errors.push(TypeCheckError::UnknownType {
+                    self.push_error_dedup(TypeCheckError::UnknownType {
                         name: generic_type.base.name(),
-                        location: None,
+                        location:generic_type.base.location.clone(),
                     });
                 }
                 // Validate each parameter in the generic type
@@ -423,9 +418,9 @@ impl TypeChecker {
                     if !type_param_names.contains(&param.name())
                         && self.symbol_table.lookup_type(&param.name()).is_none()
                     {
-                        self.errors.push(TypeCheckError::UnknownType {
+                        self.push_error_dedup(TypeCheckError::UnknownType {
                             name: param.name(),
-                            location: None,
+                            location:param.location.clone(),
                         });
                     }
                 }
@@ -437,9 +432,9 @@ impl TypeChecker {
                     return;
                 }
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
-                    self.errors.push(TypeCheckError::UnknownType {
+                    self.push_error_dedup(TypeCheckError::UnknownType {
                         name: identifier.name.clone(),
-                        location: None,
+                        location:identifier.location.clone(),
                     });
                 }
             }
@@ -474,13 +469,14 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: arg.name(),
                                 reason: Some(err.to_string()),
-                                location: None,
+                                location: arg.location.clone(),
                             });
                         }
                     }
-                    ArgumentType::SelfReference(_) => {
-                        self.errors
-                            .push(TypeCheckError::SelfReferenceOutsideMethod { location: None });
+                    ArgumentType::SelfReference(self_ref) => {
+                        self.errors.push(TypeCheckError::SelfReferenceOutsideMethod {
+                            location: self_ref.location.clone(),
+                        });
                     }
                     ArgumentType::IgnoreArgument(_) | ArgumentType::Type(_) => {}
                 }
@@ -520,11 +516,11 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: arg.name(),
                                 reason: Some(err.to_string()),
-                                location: None,
+                                location: arg.location.clone(),
                             });
                         }
                     }
-                    ArgumentType::SelfReference(_) => {
+                    ArgumentType::SelfReference(self_ref) => {
                         if let Err(err) = self
                             .symbol_table
                             .push_variable_to_scope("self", self_type.clone())
@@ -533,7 +529,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: "self".to_string(),
                                 reason: Some(err.to_string()),
-                                location: None,
+                                location: self_ref.location.clone(),
                             });
                         }
                     }
@@ -571,8 +567,9 @@ impl TypeChecker {
                     if let Some(target) = &target_type {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
                     } else {
-                        self.errors
-                            .push(TypeCheckError::CannotInferUzumakiType { location: None });
+                        self.errors.push(TypeCheckError::CannotInferUzumakiType {
+                            location: uzumaki_rc.location.clone(),
+                        });
                     }
                 } else {
                     let value_type = self.infer_expression(&mut right_expr, ctx);
@@ -583,7 +580,7 @@ impl TypeChecker {
                             expected: target,
                             found: val,
                             context: TypeMismatchContext::Assignment,
-                            location: None,
+                            location: assign_statement.location.clone(),
                         });
                     }
                 }
@@ -615,7 +612,7 @@ impl TypeChecker {
                             expected: return_type.clone(),
                             found: value_type.unwrap_or_default(),
                             context: TypeMismatchContext::Return,
-                            location: None,
+                            location: return_statement.location.clone(),
                         });
                     }
                 }
@@ -630,7 +627,7 @@ impl TypeChecker {
                             expected: TypeInfo::boolean(),
                             found: condition_type.unwrap_or_default(),
                             context: TypeMismatchContext::Condition,
-                            location: None,
+                            location: loop_statement.location.clone(),
                         });
                     }
                 }
@@ -651,7 +648,7 @@ impl TypeChecker {
                         expected: TypeInfo::boolean(),
                         found: condition_type.unwrap_or_default(),
                         context: TypeMismatchContext::Condition,
-                        location: None,
+                        location: if_statement.location.clone(),
                     });
                 }
 
@@ -681,7 +678,7 @@ impl TypeChecker {
                             expected: target_type.clone(),
                             found: init_type,
                             context: TypeMismatchContext::VariableDefinition,
-                            location: None,
+                            location: variable_definition_statement.location.clone(),
                         });
                     }
                 }
@@ -693,7 +690,7 @@ impl TypeChecker {
                         kind: RegistrationKind::Variable,
                         name: variable_definition_statement.name(),
                         reason: Some(err.to_string()),
-                        location: None,
+                        location: variable_definition_statement.location.clone(),
                     });
                 }
                 ctx.set_node_typeinfo(variable_definition_statement.id, target_type);
@@ -708,7 +705,7 @@ impl TypeChecker {
                         kind: RegistrationKind::Type,
                         name: type_name,
                         reason: Some(err.to_string()),
-                        location: None,
+                        location: type_definition_statement.location.clone(),
                     });
                 }
             }
@@ -722,7 +719,7 @@ impl TypeChecker {
                         expected: TypeInfo::boolean(),
                         found: condition_type.unwrap_or_default(),
                         context: TypeMismatchContext::Condition,
-                        location: None,
+                        location: assert_statement.location.clone(),
                     });
                 }
             }
@@ -736,7 +733,7 @@ impl TypeChecker {
                         kind: RegistrationKind::Variable,
                         name: constant_definition.name(),
                         reason: Some(err.to_string()),
-                        location: None,
+                        location: constant_definition.location.clone(),
                     });
                 }
                 ctx.set_node_typeinfo(constant_definition.id, constant_type);
@@ -764,7 +761,7 @@ impl TypeChecker {
                     {
                         self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
                             found: index_type,
-                            location: None,
+                            location: array_index_access_expression.location.clone(),
                         });
                     }
                     match &array_type.kind {
@@ -778,7 +775,7 @@ impl TypeChecker {
                         _ => {
                             self.errors.push(TypeCheckError::ExpectedArrayType {
                                 found: array_type,
-                                location: None,
+                                location: array_index_access_expression.location.clone(),
                             });
                             None
                         }
@@ -817,14 +814,14 @@ impl TypeChecker {
                             self.errors.push(TypeCheckError::FieldNotFound {
                                 struct_name,
                                 field_name: field_name.clone(),
-                                location: None,
+                                location: member_access_expression.location.clone(),
                             });
                             None
                         }
                     } else {
                         self.errors.push(TypeCheckError::ExpectedStructType {
                             found: object_type,
-                            location: None,
+                            location: member_access_expression.location.clone(),
                         });
                         None
                     }
@@ -850,7 +847,7 @@ impl TypeChecker {
                                 // Array, Generic, Function, QualifiedName, Qualified are not valid for enum access
                                 self.errors.push(TypeCheckError::ExpectedEnumType {
                                     found: TypeInfo::new(ty),
-                                    location: None,
+                                    location:type_member_access_expression.location.clone(),
                                 });
                                 return None;
                             }
@@ -869,7 +866,7 @@ impl TypeChecker {
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
-                                        location: None,
+                                        location:type_member_access_expression.location.clone(),
                                     });
                                     return None;
                                 }
@@ -895,14 +892,14 @@ impl TypeChecker {
                         self.errors.push(TypeCheckError::VariantNotFound {
                             enum_name,
                             variant_name: variant_name.clone(),
-                            location: None,
+                            location:type_member_access_expression.location.clone(),
                         });
                         None
                     }
                 } else {
-                    self.errors.push(TypeCheckError::UndefinedEnum {
+                    self.push_error_dedup(TypeCheckError::UndefinedEnum {
                         name: enum_name,
-                        location: None,
+                        location:type_member_access_expression.location.clone(),
                     });
                     None
                 }
@@ -943,7 +940,7 @@ impl TypeChecker {
                                         name: format!("{}::{}", type_name, method_name),
                                         expected: signature.param_types.len(),
                                         found: arg_count,
-                                        location: None,
+                                        location: function_call_expression.location.clone(),
                                     });
                                 }
 
@@ -962,15 +959,27 @@ impl TypeChecker {
                             self.errors.push(TypeCheckError::MethodNotFound {
                                 type_name,
                                 method_name: method_name.clone(),
-                                location: None,
+                                location: member_access.location.clone(),
                             });
                             return None;
                         }
                         self.errors.push(TypeCheckError::MethodCallOnNonStruct {
                             found: receiver_type,
-                            location: None,
+                            location: function_call_expression.location.clone(),
                         });
+                        // Infer arguments even for non-struct receiver for better error recovery
+                        if let Some(arguments) = &function_call_expression.arguments {
+                            for arg in arguments {
+                                self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                            }
+                        }
                         return None;
+                    }
+                    // Receiver type inference failed; infer arguments for better error recovery
+                    if let Some(arguments) = &function_call_expression.arguments {
+                        for arg in arguments {
+                            self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                        }
                     }
                     return None;
                 }
@@ -981,9 +990,9 @@ impl TypeChecker {
                 {
                     s.clone()
                 } else {
-                    self.errors.push(TypeCheckError::UndefinedFunction {
+                    self.push_error_dedup(TypeCheckError::UndefinedFunction {
                         name: function_call_expression.name(),
-                        location: None,
+                        location:function_call_expression.location.clone(),
                     });
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
@@ -1000,7 +1009,7 @@ impl TypeChecker {
                         name: function_call_expression.name(),
                         expected: signature.param_types.len(),
                         found: arguments.len(),
-                        location: None,
+                        location: function_call_expression.location.clone(),
                     });
                     for arg in arguments {
                         self.infer_expression(&mut arg.1.borrow_mut(), ctx);
@@ -1017,7 +1026,7 @@ impl TypeChecker {
                                     name: function_call_expression.name(),
                                     expected: signature.type_params.len(),
                                     found: type_parameters.len(),
-                                    location: None,
+                                    location: function_call_expression.location.clone(),
                                 });
                             FxHashMap::default()
                         } else {
@@ -1045,13 +1054,14 @@ impl TypeChecker {
                         let inferred = self.infer_type_params_from_args(
                             &signature,
                             function_call_expression.arguments.as_ref(),
+                            &function_call_expression.location,
                             ctx,
                         );
                         if inferred.is_empty() && !signature.type_params.is_empty() {
                             self.errors.push(TypeCheckError::MissingTypeParameters {
                                 function_name: function_call_expression.name(),
                                 expected: signature.type_params.len(),
-                                location: None,
+                                location: function_call_expression.location.clone(),
                             });
                         }
                         inferred
@@ -1082,9 +1092,9 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
                     return Some(struct_type);
                 }
-                self.errors.push(TypeCheckError::UndefinedStruct {
+                self.push_error_dedup(TypeCheckError::UndefinedStruct {
                     name: struct_expression.name(),
-                    location: None,
+                    location:struct_expression.location.clone(),
                 });
                 None
             }
@@ -1107,7 +1117,7 @@ impl TypeChecker {
                                 operator: UnaryOperatorKind::Neg,
                                 expected_type: "booleans",
                                 found_type: expression_type,
-                                location: None,
+                                location: prefix_unary_expression.location.clone(),
                             });
                         }
                         None
@@ -1131,7 +1141,7 @@ impl TypeChecker {
                             operator: binary_expression.operator.clone(),
                             left: left_type.clone(),
                             right: right_type.clone(),
-                            location: None,
+                            location: binary_expression.location.clone(),
                         });
                     }
                     let res_type = match binary_expression.operator {
@@ -1147,7 +1157,7 @@ impl TypeChecker {
                                     expected_kind: "logical",
                                     operand_desc: "non-boolean types",
                                     found_types: (left_type, right_type),
-                                    location: None,
+                                    location: binary_expression.location.clone(),
                                 });
                                 return None;
                             }
@@ -1179,7 +1189,7 @@ impl TypeChecker {
                                     expected_kind: "arithmetic",
                                     operand_desc: "non-number types",
                                     found_types: (left_type.clone(), right_type.clone()),
-                                    location: None,
+                                    location: binary_expression.location.clone(),
                                 });
                             }
                             if left_type != right_type {
@@ -1187,7 +1197,7 @@ impl TypeChecker {
                                     operator: binary_expression.operator.clone(),
                                     left: left_type.clone(),
                                     right: right_type,
-                                    location: None,
+                                    location: binary_expression.location.clone(),
                                 });
                             }
                             left_type.clone()
@@ -1204,27 +1214,22 @@ impl TypeChecker {
                     if ctx.get_node_typeinfo(array_literal.id).is_some() {
                         return ctx.get_node_typeinfo(array_literal.id);
                     }
-                    if let Some(elements) = &array_literal.elements {
-                        if let Some(element_type_info) =
+                    if let Some(elements) = &array_literal.elements
+                        && let Some(element_type_info) =
                             self.infer_expression(&mut elements[0].borrow_mut(), ctx)
-                        {
-                            for element in &elements[1..] {
-                                let element_type =
-                                    self.infer_expression(&mut element.borrow_mut(), ctx);
-                                if let Some(element_type) = element_type
-                                    && element_type != element_type_info
-                                {
-                                    self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                        expected: element_type_info.clone(),
-                                        found: element_type,
-                                        location: None,
-                                    });
-                                }
+                    {
+                        for element in &elements[1..] {
+                            let element_type =
+                                self.infer_expression(&mut element.borrow_mut(), ctx);
+                            if let Some(element_type) = element_type
+                                && element_type != element_type_info
+                            {
+                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                    expected: element_type_info.clone(),
+                                    found: element_type,
+                                    location: array_literal.location.clone(),
+                                });
                             }
-                        } else {
-                            self.errors.push(TypeCheckError::General(
-                                "array elements must be of the same type".to_string(),
-                            ));
                         }
                     }
 
@@ -1259,9 +1264,9 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(identifier.id, var_ty.clone());
                     Some(var_ty)
                 } else {
-                    self.errors.push(TypeCheckError::UnknownIdentifier {
+                    self.push_error_dedup(TypeCheckError::UnknownIdentifier {
                         name: identifier.name.clone(),
-                        location: None,
+                        location:identifier.location.clone(),
                     });
                     None
                 }
@@ -1348,7 +1353,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Type,
                                     name: type_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:type_definition.location.clone(),
                                 });
                             });
                     }
@@ -1376,7 +1381,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Struct,
                                     name: struct_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location:struct_definition.location.clone(),
                                 });
                             });
                     }
@@ -1397,7 +1402,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Enum,
                                     name: enum_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location: enum_definition.location.clone(),
                                 });
                             });
                     }
@@ -1409,7 +1414,7 @@ impl TypeChecker {
                                     kind: RegistrationKind::Spec,
                                     name: spec_definition.name(),
                                     reason: None,
-                                    location: None,
+                                    location: spec_definition.location.clone(),
                                 });
                             });
                     }
@@ -1428,7 +1433,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Variable,
                                 name: constant_definition.name(),
                                 reason: Some(err.to_string()),
-                                location: None,
+                                location: constant_definition.location.clone(),
                             });
                         }
                     }
@@ -1464,7 +1469,7 @@ impl TypeChecker {
                                 kind: RegistrationKind::Function,
                                 name: external_function_definition.name(),
                                 reason: Some(err),
-                                location: None,
+                                location: external_function_definition.location.clone(),
                             });
                         }
                     }
@@ -1482,8 +1487,21 @@ impl TypeChecker {
             for directive in &source_file.directives {
                 match directive {
                     Directive::Use(use_directive) => {
-                        if let Err(err) = self.process_use_statement(use_directive, ctx) {
-                            self.errors.push(TypeCheckError::General(err.to_string()));
+                        if let Err(_err) = self.process_use_statement(use_directive, ctx) {
+                            let path = use_directive
+                                .segments
+                                .as_ref()
+                                .map(|segs| {
+                                    segs.iter()
+                                        .map(|s| s.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("::")
+                                })
+                                .unwrap_or_default();
+                            self.errors.push(TypeCheckError::ImportResolutionFailed {
+                                path,
+                                location: use_directive.location.clone(),
+                            });
                         }
                     }
                 }
@@ -1519,7 +1537,11 @@ impl TypeChecker {
             }
         };
 
-        let import = Import { path, kind };
+        let import = Import {
+            path,
+            kind,
+            location: use_stmt.location.clone(),
+        };
         self.symbol_table.register_import(import)
     }
 
@@ -1562,7 +1584,7 @@ impl TypeChecker {
                         } else {
                             self.errors.push(TypeCheckError::ImportResolutionFailed {
                                 path: import.path.join("::"),
-                                location: None,
+                                location: import.location.clone(),
                             });
                         }
                     }
@@ -1589,23 +1611,23 @@ impl TypeChecker {
                         } else {
                             self.errors.push(TypeCheckError::ImportResolutionFailed {
                                 path: format!("{}::{}", import.path.join("::"), item.name),
-                                location: None,
+                                location: import.location.clone(),
                             });
                         }
                     }
                 }
                 ImportKind::Glob => {
-                    self.resolve_glob_import(&import.path, scope_id);
+                    self.resolve_glob_import(&import.path, &import.location, scope_id);
                 }
             }
         }
     }
 
     /// Resolve a glob import (`use path::*`) by importing all public symbols from the target module.
-    fn resolve_glob_import(&mut self, path: &[String], into_scope_id: u32) {
+    fn resolve_glob_import(&mut self, path: &[String], location: &Location, into_scope_id: u32) {
         if path.is_empty() {
             self.errors
-                .push(TypeCheckError::EmptyGlobImport { location: None });
+                .push(TypeCheckError::EmptyGlobImport { location: location.clone() });
             return;
         }
 
@@ -1614,7 +1636,7 @@ impl TypeChecker {
             None => {
                 self.errors.push(TypeCheckError::ImportResolutionFailed {
                     path: format!("{}::* - module not found", path.join("::")),
-                    location: None,
+                    location: location.clone(),
                 });
                 return;
             }
@@ -1623,7 +1645,7 @@ impl TypeChecker {
         if self.glob_resolution_in_progress.contains(&target_scope_id) {
             self.errors.push(TypeCheckError::CircularImport {
                 path: path.join("::"),
-                location: None,
+                location: location.clone(),
             });
             return;
         }
@@ -1696,6 +1718,7 @@ impl TypeChecker {
         &mut self,
         signature: &FuncSignature,
         arguments: Option<&Vec<(Option<Rc<Identifier>>, std::cell::RefCell<Expression>)>>,
+        call_location: &Location,
         ctx: &mut TypedContext,
     ) -> FxHashMap<String, TypeInfo> {
         let mut substitutions = FxHashMap::default();
@@ -1724,7 +1747,7 @@ impl TypeChecker {
                                 param_name: type_param_name.clone(),
                                 first: existing.clone(),
                                 second: arg_type.clone(),
-                                location: None,
+                                location: call_location.clone(),
                             });
                         }
                     } else {
@@ -1740,11 +1763,35 @@ impl TypeChecker {
                 self.errors.push(TypeCheckError::CannotInferTypeParameter {
                     function_name: signature.name.clone(),
                     param_name: type_param.clone(),
-                    location: None,
+                    location: call_location.clone(),
                 });
             }
         }
 
         substitutions
+    }
+
+    /// Push an error, deduplicating errors for the same unknown type/function/identifier.
+    /// This prevents duplicate errors when registration fails but inference continues.
+    fn push_error_dedup(&mut self, error: TypeCheckError) {
+        let key = match &error {
+            TypeCheckError::UnknownType { name, .. } => Some(format!("UnknownType:{name}")),
+            TypeCheckError::UndefinedFunction { name, .. } => {
+                Some(format!("UndefinedFunction:{name}"))
+            }
+            TypeCheckError::UnknownIdentifier { name, .. } => {
+                Some(format!("UnknownIdentifier:{name}"))
+            }
+            TypeCheckError::UndefinedStruct { name, .. } => Some(format!("UndefinedStruct:{name}")),
+            TypeCheckError::UndefinedEnum { name, .. } => Some(format!("UndefinedEnum:{name}")),
+            _ => None,
+        };
+        if let Some(key) = key {
+            if self.reported_error_keys.contains(&key) {
+                return;
+            }
+            self.reported_error_keys.insert(key);
+        }
+        self.errors.push(error);
     }
 }

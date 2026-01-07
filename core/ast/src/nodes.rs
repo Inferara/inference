@@ -41,17 +41,7 @@ impl Location {
 
 impl Display for Location {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Location {{ offset_start: {}, offset_end: {}, start_line: {}, start_column: {}, end_line: {}, end_column: {}, source: {} }}",
-            self.offset_start,
-            self.offset_end,
-            self.start_line,
-            self.start_column,
-            self.end_line,
-            self.end_column,
-            self.source
-        )
+        write!(f, "{}:{}", self.start_line, self.start_column)
     }
 }
 

@@ -79,253 +79,174 @@ impl Display for TypeMismatchContext {
     }
 }
 
-/// Represents a type checking error with optional source location.
+/// Represents a type checking error with source location.
+/// All type errors are tied to AST nodes and must have a location.
 #[derive(Debug, Clone, Error)]
 pub enum TypeCheckError {
-    #[error("type mismatch {context}: expected `{expected}`, found `{found}`")]
+    #[error("{location}: type mismatch {context}: expected `{expected}`, found `{found}`")]
     TypeMismatch {
         expected: TypeInfo,
         found: TypeInfo,
         context: TypeMismatchContext,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("unknown type `{name}`")]
-    UnknownType {
-        name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: unknown type `{name}`")]
+    UnknownType { name: String, location: Location },
 
-    #[error("use of undeclared variable `{name}`")]
-    UnknownIdentifier {
-        name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: use of undeclared variable `{name}`")]
+    UnknownIdentifier { name: String, location: Location },
 
-    #[error("call to undefined function `{name}`")]
-    UndefinedFunction {
-        name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: call to undefined function `{name}`")]
+    UndefinedFunction { name: String, location: Location },
 
-    #[error("struct `{name}` is not defined")]
-    UndefinedStruct {
-        name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: struct `{name}` is not defined")]
+    UndefinedStruct { name: String, location: Location },
 
-    #[error("field `{field_name}` not found on struct `{struct_name}`")]
+    #[error("{location}: field `{field_name}` not found on struct `{struct_name}`")]
     FieldNotFound {
         struct_name: String,
         field_name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("variant `{variant_name}` not found on enum `{enum_name}`")]
+    #[error("{location}: variant `{variant_name}` not found on enum `{enum_name}`")]
     VariantNotFound {
         enum_name: String,
         variant_name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("enum `{name}` is not defined")]
-    UndefinedEnum {
-        name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: enum `{name}` is not defined")]
+    UndefinedEnum { name: String, location: Location },
 
-    #[error("type member access requires an enum type, found `{found}`")]
-    ExpectedEnumType {
-        found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: type member access requires an enum type, found `{found}`")]
+    ExpectedEnumType { found: TypeInfo, location: Location },
 
-    #[error("method `{method_name}` not found on type `{type_name}`")]
+    #[error("{location}: method `{method_name}` not found on type `{type_name}`")]
     MethodNotFound {
         type_name: String,
         method_name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("{kind} `{name}` expects {expected} arguments, but {found} provided")]
+    #[error("{location}: {kind} `{name}` expects {expected} arguments, but {found} provided")]
     ArgumentCountMismatch {
         kind: &'static str,
         name: String,
         expected: usize,
         found: usize,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("type parameter count mismatch for `{name}`: expected {expected}, found {found}")]
+    #[error("{location}: type parameter count mismatch for `{name}`: expected {expected}, found {found}")]
     TypeParameterCountMismatch {
         name: String,
         expected: usize,
         found: usize,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error(
-        "function `{function_name}` requires {expected} type parameters, but none were provided"
-    )]
+    #[error("{location}: function `{function_name}` requires {expected} type parameters, but none were provided")]
     MissingTypeParameters {
         function_name: String,
         expected: usize,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("{expected_kind} operator `{operator:?}` cannot be applied to {operand_desc}")]
+    #[error("{location}: {expected_kind} operator `{operator:?}` cannot be applied to {operand_desc}")]
     InvalidBinaryOperand {
         operator: OperatorKind,
         expected_kind: &'static str,
         operand_desc: &'static str,
-        #[allow(dead_code)]
         found_types: (TypeInfo, TypeInfo),
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error(
-        "unary operator `{operator:?}` can only be applied to {expected_type}, found `{found_type}`"
-    )]
+    #[error("{location}: unary operator `{operator:?}` can only be applied to {expected_type}, found `{found_type}`")]
     InvalidUnaryOperand {
         operator: UnaryOperatorKind,
         expected_type: &'static str,
         found_type: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`")]
+    #[error("{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`")]
     BinaryOperandTypeMismatch {
         operator: OperatorKind,
         left: TypeInfo,
         right: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("self reference not allowed in standalone function `{function_name}`")]
+    #[error("{location}: self reference not allowed in standalone function `{function_name}`")]
     SelfReferenceInFunction {
         function_name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("self reference is only allowed in methods, not functions")]
-    SelfReferenceOutsideMethod {
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: self reference is only allowed in methods, not functions")]
+    SelfReferenceOutsideMethod { location: Location },
 
-    #[error("cannot resolve import path: {path}")]
-    ImportResolutionFailed {
-        path: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: cannot resolve import path: {path}")]
+    ImportResolutionFailed { path: String, location: Location },
 
-    #[error("circular glob import detected: {path}::*")]
-    CircularImport {
-        path: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: circular glob import detected: {path}::*")]
+    CircularImport { path: String, location: Location },
 
-    #[error("glob import path cannot be empty")]
-    EmptyGlobImport {
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: glob import path cannot be empty")]
+    EmptyGlobImport { location: Location },
 
-    #[error("error registering {kind} `{name}`{}", reason.as_ref().map_or(String::new(), |r| format!(": {}", r)))]
+    #[error("{location}: error registering {kind} `{name}`{}", reason.as_ref().map_or(String::new(), |r| format!(": {}", r)))]
     RegistrationFailed {
         kind: RegistrationKind,
         name: String,
         reason: Option<String>,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("expected an array type, found `{found}`")]
-    ExpectedArrayType {
-        found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: expected an array type, found `{found}`")]
+    ExpectedArrayType { found: TypeInfo, location: Location },
 
-    #[error("member access requires a struct type, found `{found}`")]
-    ExpectedStructType {
-        found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: member access requires a struct type, found `{found}`")]
+    ExpectedStructType { found: TypeInfo, location: Location },
 
-    #[error("cannot call method on non-struct type `{found}`")]
-    MethodCallOnNonStruct {
-        found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: cannot call method on non-struct type `{found}`")]
+    MethodCallOnNonStruct { found: TypeInfo, location: Location },
 
-    #[error("array index must be of number type, found `{found}`")]
-    ArrayIndexNotNumeric {
-        found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: array index must be of number type, found `{found}`")]
+    ArrayIndexNotNumeric { found: TypeInfo, location: Location },
 
-    #[error("array elements must be of the same type: expected `{expected}`, found `{found}`")]
+    #[error("{location}: array elements must be of the same type: expected `{expected}`, found `{found}`")]
     ArrayElementTypeMismatch {
         expected: TypeInfo,
         found: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("cannot infer type for uzumaki expression assigned to variable of unknown type")]
-    CannotInferUzumakiType {
-        #[allow(dead_code)]
-        location: Option<Location>,
-    },
+    #[error("{location}: cannot infer type for uzumaki expression assigned to variable of unknown type")]
+    CannotInferUzumakiType { location: Location },
 
-    #[error("cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments")]
+    #[error("{location}: cannot infer type parameter `{param_name}` for `{function_name}` - consider adding explicit type arguments")]
     CannotInferTypeParameter {
         function_name: String,
         param_name: String,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
 
-    #[error("conflicting types for type parameter `{param_name}`: inferred `{first}` and `{second}`")]
+    #[error("{location}: conflicting types for type parameter `{param_name}`: inferred `{first}` and `{second}`")]
     ConflictingTypeInference {
         param_name: String,
         first: TypeInfo,
         second: TypeInfo,
-        #[allow(dead_code)]
-        location: Option<Location>,
+        location: Location,
     },
-
-    #[error("{0}")]
-    General(String),
 }
 
 impl TypeCheckError {
-    /// Returns the source location associated with this error, if any.
+    /// Returns the source location associated with this error.
     #[must_use]
-    pub fn location(&self) -> Option<&Location> {
+    pub fn location(&self) -> &Location {
         match self {
             TypeCheckError::TypeMismatch { location, .. }
             | TypeCheckError::UnknownType { location, .. }
@@ -356,8 +277,7 @@ impl TypeCheckError {
             | TypeCheckError::ArrayElementTypeMismatch { location, .. }
             | TypeCheckError::CannotInferUzumakiType { location }
             | TypeCheckError::CannotInferTypeParameter { location, .. }
-            | TypeCheckError::ConflictingTypeInference { location, .. } => location.as_ref(),
-            TypeCheckError::General(_) => None,
+            | TypeCheckError::ConflictingTypeInference { location, .. } => location,
         }
     }
 }
@@ -366,6 +286,18 @@ impl TypeCheckError {
 mod tests {
     use super::*;
     use crate::type_info::{NumberTypeKindNumberType, TypeInfoKind};
+
+    fn test_location() -> Location {
+        Location {
+            offset_start: 4,
+            offset_end: 9,
+            start_line: 1,
+            start_column: 5,
+            end_line: 1,
+            end_column: 10,
+            source: "test.inf".to_string(),
+        }
+    }
 
     #[test]
     fn display_type_mismatch() {
@@ -376,11 +308,11 @@ mod tests {
             },
             found: TypeInfo::default(),
             context: TypeMismatchContext::Assignment,
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "type mismatch in assignment: expected `Bool`, found `Unit`"
+            "1:5: type mismatch in assignment: expected `Bool`, found `Unit`"
         );
     }
 
@@ -388,9 +320,9 @@ mod tests {
     fn display_unknown_type() {
         let err = TypeCheckError::UnknownType {
             name: "Foo".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "unknown type `Foo`");
+        assert_eq!(err.to_string(), "1:5: unknown type `Foo`");
     }
 
     #[test]
@@ -398,9 +330,12 @@ mod tests {
         let err = TypeCheckError::FieldNotFound {
             struct_name: "Point".to_string(),
             field_name: "z".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "field `z` not found on struct `Point`");
+        assert_eq!(
+            err.to_string(),
+            "1:5: field `z` not found on struct `Point`"
+        );
     }
 
     #[test]
@@ -409,9 +344,9 @@ mod tests {
             kind: RegistrationKind::Type,
             name: "Foo".to_string(),
             reason: None,
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "error registering type `Foo`");
+        assert_eq!(err.to_string(), "1:5: error registering type `Foo`");
     }
 
     #[test]
@@ -420,11 +355,11 @@ mod tests {
             kind: RegistrationKind::Method,
             name: "bar".to_string(),
             reason: Some("duplicate definition".to_string()),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "error registering method `bar`: duplicate definition"
+            "1:5: error registering method `bar`: duplicate definition"
         );
     }
 
@@ -454,42 +389,42 @@ mod tests {
 
     #[test]
     fn error_location_accessor() {
-        let loc = Location::default();
+        let loc = test_location();
         let err = TypeCheckError::UnknownType {
             name: "Foo".to_string(),
-            location: Some(loc.clone()),
+            location: loc.clone(),
         };
-        assert_eq!(err.location(), Some(&loc));
-
-        let err_no_loc = TypeCheckError::General("test".to_string());
-        assert!(err_no_loc.location().is_none());
+        assert_eq!(err.location(), &loc);
     }
 
     #[test]
     fn display_unknown_identifier() {
         let err = TypeCheckError::UnknownIdentifier {
             name: "myVar".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "use of undeclared variable `myVar`");
+        assert_eq!(err.to_string(), "1:5: use of undeclared variable `myVar`");
     }
 
     #[test]
     fn display_undefined_function() {
         let err = TypeCheckError::UndefinedFunction {
             name: "myFunc".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "call to undefined function `myFunc`");
+        assert_eq!(
+            err.to_string(),
+            "1:5: call to undefined function `myFunc`"
+        );
     }
 
     #[test]
     fn display_undefined_struct() {
         let err = TypeCheckError::UndefinedStruct {
             name: "MyStruct".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "struct `MyStruct` is not defined");
+        assert_eq!(err.to_string(), "1:5: struct `MyStruct` is not defined");
     }
 
     #[test]
@@ -497,11 +432,11 @@ mod tests {
         let err = TypeCheckError::MethodNotFound {
             type_name: "Point".to_string(),
             method_name: "rotate".to_string(),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "method `rotate` not found on type `Point`"
+            "1:5: method `rotate` not found on type `Point`"
         );
     }
 
@@ -512,11 +447,11 @@ mod tests {
             name: "add".to_string(),
             expected: 2,
             found: 3,
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "function `add` expects 2 arguments, but 3 provided"
+            "1:5: function `add` expects 2 arguments, but 3 provided"
         );
     }
 
@@ -526,11 +461,11 @@ mod tests {
             name: "Vec".to_string(),
             expected: 1,
             found: 2,
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "type parameter count mismatch for `Vec`: expected 1, found 2"
+            "1:5: type parameter count mismatch for `Vec`: expected 1, found 2"
         );
     }
 
@@ -539,11 +474,11 @@ mod tests {
         let err = TypeCheckError::MissingTypeParameters {
             function_name: "generic_fn".to_string(),
             expected: 2,
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "function `generic_fn` requires 2 type parameters, but none were provided"
+            "1:5: function `generic_fn` requires 2 type parameters, but none were provided"
         );
     }
 
@@ -563,11 +498,11 @@ mod tests {
                     type_params: vec![],
                 },
             ),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "numeric operator `Add` cannot be applied to non-numeric types"
+            "1:5: numeric operator `Add` cannot be applied to non-numeric types"
         );
     }
 
@@ -580,11 +515,11 @@ mod tests {
                 kind: TypeInfoKind::Bool,
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "unary operator `Neg` can only be applied to numeric, found `Bool`"
+            "1:5: unary operator `Neg` can only be applied to numeric, found `Bool`"
         );
     }
 
@@ -600,11 +535,11 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "cannot apply operator `Add` to operands of different types: `i32` and `i64`"
+            "1:5: cannot apply operator `Add` to operands of different types: `i32` and `i64`"
         );
     }
 
@@ -612,20 +547,22 @@ mod tests {
     fn display_self_reference_in_function() {
         let err = TypeCheckError::SelfReferenceInFunction {
             function_name: "standalone_fn".to_string(),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "self reference not allowed in standalone function `standalone_fn`"
+            "1:5: self reference not allowed in standalone function `standalone_fn`"
         );
     }
 
     #[test]
     fn display_self_reference_outside_method() {
-        let err = TypeCheckError::SelfReferenceOutsideMethod { location: None };
+        let err = TypeCheckError::SelfReferenceOutsideMethod {
+            location: test_location(),
+        };
         assert_eq!(
             err.to_string(),
-            "self reference is only allowed in methods, not functions"
+            "1:5: self reference is only allowed in methods, not functions"
         );
     }
 
@@ -633,11 +570,11 @@ mod tests {
     fn display_import_resolution_failed() {
         let err = TypeCheckError::ImportResolutionFailed {
             path: "std::collections::HashMap".to_string(),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "cannot resolve import path: std::collections::HashMap"
+            "1:5: cannot resolve import path: std::collections::HashMap"
         );
     }
 
@@ -645,18 +582,20 @@ mod tests {
     fn display_circular_import() {
         let err = TypeCheckError::CircularImport {
             path: "mod_a::mod_b".to_string(),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "circular glob import detected: mod_a::mod_b::*"
+            "1:5: circular glob import detected: mod_a::mod_b::*"
         );
     }
 
     #[test]
     fn display_empty_glob_import() {
-        let err = TypeCheckError::EmptyGlobImport { location: None };
-        assert_eq!(err.to_string(), "glob import path cannot be empty");
+        let err = TypeCheckError::EmptyGlobImport {
+            location: test_location(),
+        };
+        assert_eq!(err.to_string(), "1:5: glob import path cannot be empty");
     }
 
     #[test]
@@ -666,9 +605,12 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "expected an array type, found `i32`");
+        assert_eq!(
+            err.to_string(),
+            "1:5: expected an array type, found `i32`"
+        );
     }
 
     #[test]
@@ -678,11 +620,11 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "member access requires a struct type, found `i32`"
+            "1:5: member access requires a struct type, found `i32`"
         );
     }
 
@@ -693,11 +635,11 @@ mod tests {
                 kind: TypeInfoKind::Bool,
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "cannot call method on non-struct type `Bool`"
+            "1:5: cannot call method on non-struct type `Bool`"
         );
     }
 
@@ -708,11 +650,11 @@ mod tests {
                 kind: TypeInfoKind::Bool,
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "array index must be of number type, found `Bool`"
+            "1:5: array index must be of number type, found `Bool`"
         );
     }
 
@@ -727,261 +669,23 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "array elements must be of the same type: expected `i32`, found `i64`"
+            "1:5: array elements must be of the same type: expected `i32`, found `i64`"
         );
     }
 
     #[test]
     fn display_cannot_infer_uzumaki_type() {
-        let err = TypeCheckError::CannotInferUzumakiType { location: None };
+        let err = TypeCheckError::CannotInferUzumakiType {
+            location: test_location(),
+        };
         assert_eq!(
             err.to_string(),
-            "cannot infer type for uzumaki expression assigned to variable of unknown type"
+            "1:5: cannot infer type for uzumaki expression assigned to variable of unknown type"
         );
-    }
-
-    #[test]
-    fn display_general() {
-        let err = TypeCheckError::General("custom error message".to_string());
-        assert_eq!(err.to_string(), "custom error message");
-    }
-
-    #[test]
-    fn location_unknown_identifier() {
-        let loc = Location::default();
-        let err = TypeCheckError::UnknownIdentifier {
-            name: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-
-        let err_no_loc = TypeCheckError::UnknownIdentifier {
-            name: "test".to_string(),
-            location: None,
-        };
-        assert!(err_no_loc.location().is_none());
-    }
-
-    #[test]
-    fn location_undefined_function() {
-        let loc = Location::default();
-        let err = TypeCheckError::UndefinedFunction {
-            name: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_undefined_struct() {
-        let loc = Location::default();
-        let err = TypeCheckError::UndefinedStruct {
-            name: "Test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_method_not_found() {
-        let loc = Location::default();
-        let err = TypeCheckError::MethodNotFound {
-            type_name: "Point".to_string(),
-            method_name: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_argument_count_mismatch() {
-        let loc = Location::default();
-        let err = TypeCheckError::ArgumentCountMismatch {
-            kind: "function",
-            name: "test".to_string(),
-            expected: 1,
-            found: 2,
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_type_parameter_count_mismatch() {
-        let loc = Location::default();
-        let err = TypeCheckError::TypeParameterCountMismatch {
-            name: "Test".to_string(),
-            expected: 1,
-            found: 2,
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_missing_type_parameters() {
-        let loc = Location::default();
-        let err = TypeCheckError::MissingTypeParameters {
-            function_name: "test".to_string(),
-            expected: 2,
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_invalid_binary_operand() {
-        let loc = Location::default();
-        let err = TypeCheckError::InvalidBinaryOperand {
-            operator: OperatorKind::Add,
-            expected_kind: "numeric",
-            operand_desc: "test",
-            found_types: (TypeInfo::default(), TypeInfo::default()),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_invalid_unary_operand() {
-        let loc = Location::default();
-        let err = TypeCheckError::InvalidUnaryOperand {
-            operator: UnaryOperatorKind::Neg,
-            expected_type: "numeric",
-            found_type: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_binary_operand_type_mismatch() {
-        let loc = Location::default();
-        let err = TypeCheckError::BinaryOperandTypeMismatch {
-            operator: OperatorKind::Add,
-            left: TypeInfo::default(),
-            right: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_self_reference_in_function() {
-        let loc = Location::default();
-        let err = TypeCheckError::SelfReferenceInFunction {
-            function_name: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_self_reference_outside_method() {
-        let loc = Location::default();
-        let err = TypeCheckError::SelfReferenceOutsideMethod {
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_import_resolution_failed() {
-        let loc = Location::default();
-        let err = TypeCheckError::ImportResolutionFailed {
-            path: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_circular_import() {
-        let loc = Location::default();
-        let err = TypeCheckError::CircularImport {
-            path: "test".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_empty_glob_import() {
-        let loc = Location::default();
-        let err = TypeCheckError::EmptyGlobImport {
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_expected_array_type() {
-        let loc = Location::default();
-        let err = TypeCheckError::ExpectedArrayType {
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_expected_struct_type() {
-        let loc = Location::default();
-        let err = TypeCheckError::ExpectedStructType {
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_method_call_on_non_struct() {
-        let loc = Location::default();
-        let err = TypeCheckError::MethodCallOnNonStruct {
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_array_index_not_numeric() {
-        let loc = Location::default();
-        let err = TypeCheckError::ArrayIndexNotNumeric {
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_array_element_type_mismatch() {
-        let loc = Location::default();
-        let err = TypeCheckError::ArrayElementTypeMismatch {
-            expected: TypeInfo::default(),
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_cannot_infer_uzumaki_type() {
-        let loc = Location::default();
-        let err = TypeCheckError::CannotInferUzumakiType {
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-    }
-
-    #[test]
-    fn location_general() {
-        let err = TypeCheckError::General("test".to_string());
-        assert!(err.location().is_none());
     }
 
     #[test]
@@ -989,11 +693,11 @@ mod tests {
         let err = TypeCheckError::VariantNotFound {
             enum_name: "Color".to_string(),
             variant_name: "Yellow".to_string(),
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "variant `Yellow` not found on enum `Color`"
+            "1:5: variant `Yellow` not found on enum `Color`"
         );
     }
 
@@ -1001,9 +705,9 @@ mod tests {
     fn display_undefined_enum() {
         let err = TypeCheckError::UndefinedEnum {
             name: "UnknownEnum".to_string(),
-            location: None,
+            location: test_location(),
         };
-        assert_eq!(err.to_string(), "enum `UnknownEnum` is not defined");
+        assert_eq!(err.to_string(), "1:5: enum `UnknownEnum` is not defined");
     }
 
     #[test]
@@ -1013,61 +717,11 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
                 type_params: vec![],
             },
-            location: None,
+            location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "type member access requires an enum type, found `i32`"
+            "1:5: type member access requires an enum type, found `i32`"
         );
-    }
-
-    #[test]
-    fn location_variant_not_found() {
-        let loc = Location::default();
-        let err = TypeCheckError::VariantNotFound {
-            enum_name: "Color".to_string(),
-            variant_name: "Yellow".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-
-        let err_no_loc = TypeCheckError::VariantNotFound {
-            enum_name: "Color".to_string(),
-            variant_name: "Yellow".to_string(),
-            location: None,
-        };
-        assert!(err_no_loc.location().is_none());
-    }
-
-    #[test]
-    fn location_undefined_enum() {
-        let loc = Location::default();
-        let err = TypeCheckError::UndefinedEnum {
-            name: "UnknownEnum".to_string(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-
-        let err_no_loc = TypeCheckError::UndefinedEnum {
-            name: "UnknownEnum".to_string(),
-            location: None,
-        };
-        assert!(err_no_loc.location().is_none());
-    }
-
-    #[test]
-    fn location_expected_enum_type() {
-        let loc = Location::default();
-        let err = TypeCheckError::ExpectedEnumType {
-            found: TypeInfo::default(),
-            location: Some(loc.clone()),
-        };
-        assert_eq!(err.location(), Some(&loc));
-
-        let err_no_loc = TypeCheckError::ExpectedEnumType {
-            found: TypeInfo::default(),
-            location: None,
-        };
-        assert!(err_no_loc.location().is_none());
     }
 }

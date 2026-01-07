@@ -96,6 +96,8 @@ pub(crate) struct Import {
     pub(crate) path: Vec<String>,
     /// The kind of import
     pub(crate) kind: ImportKind,
+    /// Source location of the import statement
+    pub(crate) location: Location,
 }
 
 /// Represents a resolved import binding.
