@@ -426,7 +426,8 @@ impl SymbolTable {
     }
 
     pub(crate) fn push_scope(&mut self) -> u32 {
-        self.push_scope_with_name("anonymous", Visibility::Private)
+        let name = format!("anonymous_{}", self.next_scope_id);
+        self.push_scope_with_name(&name, Visibility::Private)
     }
 
     pub(crate) fn push_scope_with_name(&mut self, name: &str, visibility: Visibility) -> u32 {
@@ -900,5 +901,284 @@ impl SymbolTable {
             Definition::Constant(_) | Definition::ExternalFunction(_) | Definition::Module(_) => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod anonymous_scope_naming {
+        use super::*;
+
+        #[test]
+        fn unique_names_for_consecutive_scopes() {
+            let mut table = SymbolTable::default();
+
+            let scope1_id = table.push_scope();
+            let scope2_id = table.push_scope();
+
+            let scope1 = table.get_scope(scope1_id).unwrap();
+            let scope2 = table.get_scope(scope2_id).unwrap();
+
+            assert_ne!(
+                scope1.borrow().name,
+                scope2.borrow().name,
+                "Consecutive anonymous scopes should have unique names"
+            );
+        }
+
+        #[test]
+        fn name_includes_scope_id() {
+            let mut table = SymbolTable::default();
+
+            let scope_id = table.push_scope();
+            let scope = table.get_scope(scope_id).unwrap();
+
+            assert!(
+                scope.borrow().name.starts_with("anonymous_"),
+                "Anonymous scope name should start with 'anonymous_'"
+            );
+
+            let expected_name = format!("anonymous_{scope_id}");
+            assert_eq!(
+                scope.borrow().name,
+                expected_name,
+                "Anonymous scope name should match pattern anonymous_{{scope_id}}"
+            );
+        }
+
+        #[test]
+        fn nested_scopes_have_distinguishable_paths() {
+            let mut table = SymbolTable::default();
+
+            table.push_scope_with_name("test_func", Visibility::Private);
+
+            let inner1_id = table.push_scope();
+            let inner2_id = table.push_scope();
+
+            let inner1 = table.get_scope(inner1_id).unwrap();
+            let inner2 = table.get_scope(inner2_id).unwrap();
+
+            assert_ne!(
+                inner1.borrow().full_path,
+                inner2.borrow().full_path,
+                "Nested anonymous scopes should have different full_paths"
+            );
+
+            assert!(
+                inner1.borrow().full_path.contains("test_func"),
+                "Full path should include parent function name"
+            );
+        }
+
+        #[test]
+        fn anonymous_scopes_not_in_mod_scopes() {
+            let mut table = SymbolTable::default();
+
+            let scope_id = table.push_scope();
+            let scope = table.get_scope(scope_id).unwrap();
+            let full_path = scope.borrow().full_path.clone();
+
+            let path_segments: Vec<String> = full_path.split("::").map(String::from).collect();
+            assert!(
+                table.find_module_scope(&path_segments).is_none(),
+                "Anonymous scopes should not be registered in mod_scopes"
+            );
+        }
+
+        #[test]
+        fn pop_push_maintains_correct_ids() {
+            let mut table = SymbolTable::default();
+
+            let scope1_id = table.push_scope();
+            table.pop_scope();
+
+            let scope2_id = table.push_scope();
+
+            assert_ne!(
+                scope1_id, scope2_id,
+                "Popping and pushing should create new scope with different ID"
+            );
+
+            assert_eq!(
+                scope2_id,
+                scope1_id + 1,
+                "Scope IDs should increment sequentially even after pop"
+            );
+        }
+
+        #[test]
+        fn deeply_nested_anonymous_scopes() {
+            let mut table = SymbolTable::default();
+
+            let depth = 10;
+            let mut scope_ids = Vec::new();
+
+            for _ in 0..depth {
+                scope_ids.push(table.push_scope());
+            }
+
+            for i in 0..depth {
+                let scope = table.get_scope(scope_ids[i]).unwrap();
+                let scope_borrow = scope.borrow();
+
+                let expected_depth = i + 1;
+                let path_parts: Vec<&str> = scope_borrow.full_path.split("::").collect();
+                assert_eq!(
+                    path_parts.len(),
+                    expected_depth,
+                    "Deeply nested scope at level {i} should have correct path depth"
+                );
+
+                assert!(
+                    scope_borrow.name.starts_with("anonymous_"),
+                    "All nested scopes should have anonymous_ prefix"
+                );
+            }
+        }
+
+        #[test]
+        fn sibling_anonymous_scopes_have_unique_names() {
+            let mut table = SymbolTable::default();
+
+            table.push_scope_with_name("parent", Visibility::Private);
+
+            let sibling1_id = table.push_scope();
+            table.pop_scope();
+
+            let sibling2_id = table.push_scope();
+            table.pop_scope();
+
+            let sibling3_id = table.push_scope();
+
+            let sibling1 = table.get_scope(sibling1_id).unwrap();
+            let sibling2 = table.get_scope(sibling2_id).unwrap();
+            let sibling3 = table.get_scope(sibling3_id).unwrap();
+
+            let names = vec![
+                sibling1.borrow().name.clone(),
+                sibling2.borrow().name.clone(),
+                sibling3.borrow().name.clone(),
+            ];
+
+            assert_eq!(
+                names.len(),
+                names.iter().collect::<FxHashSet<_>>().len(),
+                "All sibling anonymous scopes should have unique names"
+            );
+        }
+
+        #[test]
+        fn anonymous_scope_parent_relationship() {
+            let mut table = SymbolTable::default();
+
+            let parent_id = table.push_scope_with_name("parent_func", Visibility::Private);
+            let child_id = table.push_scope();
+
+            let child_scope = table.get_scope(child_id).unwrap();
+            let parent_scope = table.get_scope(parent_id).unwrap();
+
+            let child_parent = child_scope.borrow().parent.clone();
+            assert!(
+                child_parent.is_some(),
+                "Anonymous child scope should have parent"
+            );
+
+            let child_parent_id = child_parent.unwrap().borrow().id;
+            assert_eq!(
+                child_parent_id, parent_id,
+                "Anonymous scope's parent should be the enclosing scope"
+            );
+
+            let parent_children = &parent_scope.borrow().children;
+            assert_eq!(
+                parent_children.len(),
+                1,
+                "Parent should have the anonymous child in its children list"
+            );
+
+            assert_eq!(
+                parent_children[0].borrow().id,
+                child_id,
+                "Parent's child should be the anonymous scope"
+            );
+        }
+
+        #[test]
+        fn anonymous_scope_visibility_is_private() {
+            let mut table = SymbolTable::default();
+
+            let scope_id = table.push_scope();
+            let scope = table.get_scope(scope_id).unwrap();
+
+            assert!(
+                matches!(scope.borrow().visibility, Visibility::Private),
+                "Anonymous scopes should have private visibility"
+            );
+        }
+
+        #[test]
+        fn multiple_anonymous_scopes_increment_id_correctly() {
+            let mut table = SymbolTable::default();
+
+            let count = 20;
+            let mut scope_ids = Vec::new();
+
+            for _ in 0..count {
+                scope_ids.push(table.push_scope());
+            }
+
+            for i in 1..count {
+                assert_eq!(
+                    scope_ids[i],
+                    scope_ids[i - 1] + 1,
+                    "Scope IDs should increment by 1 for consecutive anonymous scopes"
+                );
+            }
+        }
+
+        #[test]
+        fn anonymous_scope_full_path_construction() {
+            let mut table = SymbolTable::default();
+
+            table.push_scope_with_name("mod1", Visibility::Private);
+            table.push_scope_with_name("mod2", Visibility::Private);
+
+            let anon_id = table.push_scope();
+            let anon_scope = table.get_scope(anon_id).unwrap();
+            let full_path = anon_scope.borrow().full_path.clone();
+            let name = anon_scope.borrow().name.clone();
+
+            let expected_path = format!("mod1::mod2::{name}");
+            assert_eq!(
+                full_path, expected_path,
+                "Anonymous scope full_path should include all parent module names"
+            );
+
+            assert!(
+                full_path.contains("::anonymous_"),
+                "Full path should contain the anonymous scope name with separator"
+            );
+        }
+
+        #[test]
+        fn root_level_anonymous_scope_no_separator_in_path() {
+            let mut table = SymbolTable::default();
+
+            let scope_id = table.push_scope();
+            let scope = table.get_scope(scope_id).unwrap();
+            let full_path = scope.borrow().full_path.clone();
+
+            assert!(
+                !full_path.starts_with("::"),
+                "Root-level anonymous scope should not start with ::"
+            );
+
+            assert!(
+                full_path.starts_with("anonymous_"),
+                "Root-level anonymous scope full_path should be just the name"
+            );
+        }
     }
 }
