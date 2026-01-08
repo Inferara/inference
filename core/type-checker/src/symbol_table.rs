@@ -226,7 +226,6 @@ pub(crate) struct Scope {
     pub(crate) name: String,
     /// Full path from root (e.g., "mod1::mod2::mod3"), cached at creation time for O(1) lookup.
     pub(crate) full_path: String,
-    /// Visibility of this scope (used in Phase 4+ visibility checking)
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
     pub(crate) parent: Option<ScopeRef>,
@@ -403,17 +402,17 @@ impl SymbolTable {
     }
 
     fn init_builtin_types(&mut self) {
-        use crate::type_info::{NumberTypeKindNumberType, TypeInfoKind};
+        use crate::type_info::{NumberType, TypeInfoKind};
 
         let builtins = [
-            ("i8", TypeInfoKind::Number(NumberTypeKindNumberType::I8)),
-            ("i16", TypeInfoKind::Number(NumberTypeKindNumberType::I16)),
-            ("i32", TypeInfoKind::Number(NumberTypeKindNumberType::I32)),
-            ("i64", TypeInfoKind::Number(NumberTypeKindNumberType::I64)),
-            ("u8", TypeInfoKind::Number(NumberTypeKindNumberType::U8)),
-            ("u16", TypeInfoKind::Number(NumberTypeKindNumberType::U16)),
-            ("u32", TypeInfoKind::Number(NumberTypeKindNumberType::U32)),
-            ("u64", TypeInfoKind::Number(NumberTypeKindNumberType::U64)),
+            ("i8", TypeInfoKind::Number(NumberType::I8)),
+            ("i16", TypeInfoKind::Number(NumberType::I16)),
+            ("i32", TypeInfoKind::Number(NumberType::I32)),
+            ("i64", TypeInfoKind::Number(NumberType::I64)),
+            ("u8", TypeInfoKind::Number(NumberType::U8)),
+            ("u16", TypeInfoKind::Number(NumberType::U16)),
+            ("u32", TypeInfoKind::Number(NumberType::U32)),
+            ("u64", TypeInfoKind::Number(NumberType::U64)),
             ("bool", TypeInfoKind::Bool),
             ("string", TypeInfoKind::String),
         ];
@@ -650,34 +649,12 @@ impl SymbolTable {
             .and_then(|symbol| symbol.as_struct().cloned())
     }
 
-    #[allow(dead_code)]
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_struct_field(
-        &self,
-        struct_name: &str,
-        field_name: &str,
-    ) -> Option<TypeInfo> {
-        self.lookup_struct(struct_name).and_then(|struct_info| {
-            struct_info
-                .fields
-                .get(field_name)
-                .map(|f| f.type_info.clone())
-        })
-    }
-
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
             .and_then(|symbol| symbol.as_enum().cloned())
-    }
-
-    #[allow(dead_code)]
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_enum_variant(&self, enum_name: &str, variant_name: &str) -> bool {
-        self.lookup_enum(enum_name)
-            .is_some_and(|info| info.variants.contains(variant_name))
     }
 
     pub(crate) fn register_method(
@@ -719,7 +696,6 @@ impl SymbolTable {
         scope_id
     }
 
-    /// Find module scope by path using O(1) lookup.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn find_module_scope(&self, path: &[String]) -> Option<u32> {
         let key = path.join("::");
@@ -742,13 +718,6 @@ impl SymbolTable {
             .unwrap_or_default()
     }
 
-    /// Get the root scope reference.
-    #[allow(dead_code)]
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn root_scope(&self) -> Option<ScopeRef> {
-        self.root_scope.clone()
-    }
-
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn current_scope_id(&self) -> Option<u32> {
         self.current_scope.as_ref().map(|s| s.borrow().id)
@@ -759,7 +728,6 @@ impl SymbolTable {
         self.scopes.get(&scope_id).cloned()
     }
 
-    /// Register an import in the current scope (Phase A: registration)
     pub(crate) fn register_import(&mut self, import: Import) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             scope.borrow_mut().add_import(import);
@@ -775,8 +743,6 @@ impl SymbolTable {
         self.scopes.keys().copied().collect()
     }
 
-    /// Resolve a qualified name (e.g., ["mod1", "Type"]) from a given scope.
-    /// Returns the symbol and its defining scope ID for visibility checking.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn resolve_qualified_name(
         &self,
@@ -825,36 +791,6 @@ impl SymbolTable {
                     current_scope = c;
                 }
                 None => return None,
-            }
-        }
-
-        None
-    }
-
-    /// Resolve a name considering local symbols and resolved imports.
-    /// Priority: local symbols > parent symbols > resolved imports.
-    /// Uses iteration to avoid stack overflow on deep scope trees.
-    /// (Used in Phase 4+ for name resolution with import awareness)
-    #[allow(dead_code)]
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn resolve_name(&self, name: &str) -> Option<(Symbol, u32)> {
-        let mut current_scope = self.current_scope.clone()?;
-
-        loop {
-            {
-                let scope_ref = current_scope.borrow();
-                if let Some(symbol) = scope_ref.lookup_symbol_local(name) {
-                    return Some((symbol.clone(), scope_ref.id));
-                }
-                if let Some(resolved) = scope_ref.lookup_resolved_import(name) {
-                    return Some((resolved.symbol.clone(), resolved.definition_scope_id));
-                }
-            }
-
-            let parent = current_scope.borrow().parent.clone();
-            match parent {
-                Some(p) => current_scope = p,
-                None => break,
             }
         }
 

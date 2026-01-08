@@ -3,7 +3,7 @@
 use crate::utils;
 use inference_ast::nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type};
 use inference_type_checker::{
-    type_info::{NumberTypeKindNumberType, TypeInfoKind},
+    type_info::{NumberType, TypeInfoKind},
     typed_context::TypedContext,
 };
 use inkwell::{
@@ -244,9 +244,9 @@ impl<'ctx> Compiler<'ctx> {
                     TypeInfoKind::String => todo!(),
                     TypeInfoKind::Number(number_type_kind_number_type) => {
                         match number_type_kind_number_type {
-                            NumberTypeKindNumberType::I8 => todo!(),
-                            NumberTypeKindNumberType::I16 => todo!(),
-                            NumberTypeKindNumberType::I32 => {
+                            NumberType::I8 => todo!(),
+                            NumberType::I16 => todo!(),
+                            NumberType::I32 => {
                                 let ctx_type = self.context.i32_type();
                                 match &constant_definition.value {
                                     Literal::Number(number_literal) => {
@@ -270,11 +270,11 @@ impl<'ctx> Compiler<'ctx> {
                                     ),
                                 }
                             }
-                            NumberTypeKindNumberType::I64 => todo!(),
-                            NumberTypeKindNumberType::U8 => todo!(),
-                            NumberTypeKindNumberType::U16 => todo!(),
-                            NumberTypeKindNumberType::U32 => todo!(),
-                            NumberTypeKindNumberType::U64 => todo!(),
+                            NumberType::I64 => todo!(),
+                            NumberType::U8 => todo!(),
+                            NumberType::U16 => todo!(),
+                            NumberType::U32 => todo!(),
+                            NumberType::U64 => todo!(),
                         }
                     }
                     TypeInfoKind::Custom(_) => todo!(),

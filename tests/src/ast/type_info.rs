@@ -1,4 +1,4 @@
-use inference_type_checker::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
+use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 
 #[test]
 fn test_type_info_unit() {
@@ -31,7 +31,7 @@ fn test_type_info_string() {
 #[test]
 fn test_type_info_i8() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I8),
+        kind: TypeInfoKind::Number(NumberType::I8),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "i8");
@@ -40,7 +40,7 @@ fn test_type_info_i8() {
 #[test]
 fn test_type_info_i16() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I16),
+        kind: TypeInfoKind::Number(NumberType::I16),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "i16");
@@ -49,7 +49,7 @@ fn test_type_info_i16() {
 #[test]
 fn test_type_info_i32() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "i32");
@@ -58,7 +58,7 @@ fn test_type_info_i32() {
 #[test]
 fn test_type_info_i64() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+        kind: TypeInfoKind::Number(NumberType::I64),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "i64");
@@ -67,7 +67,7 @@ fn test_type_info_i64() {
 #[test]
 fn test_type_info_u8() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::U8),
+        kind: TypeInfoKind::Number(NumberType::U8),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "u8");
@@ -76,7 +76,7 @@ fn test_type_info_u8() {
 #[test]
 fn test_type_info_u16() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::U16),
+        kind: TypeInfoKind::Number(NumberType::U16),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "u16");
@@ -85,7 +85,7 @@ fn test_type_info_u16() {
 #[test]
 fn test_type_info_u32() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::U32),
+        kind: TypeInfoKind::Number(NumberType::U32),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "u32");
@@ -94,7 +94,7 @@ fn test_type_info_u32() {
 #[test]
 fn test_type_info_u64() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+        kind: TypeInfoKind::Number(NumberType::U64),
         type_params: vec![],
     };
     assert_eq!(format!("{ty}"), "u64");
@@ -112,7 +112,7 @@ fn test_type_info_custom() {
 #[test]
 fn test_type_info_array_no_length() {
     let elem_ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     let ty = TypeInfo {
@@ -125,7 +125,7 @@ fn test_type_info_array_no_length() {
 #[test]
 fn test_type_info_array_with_length() {
     let elem_ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     let ty = TypeInfo {
@@ -216,7 +216,7 @@ fn test_type_info_default() {
 
 #[test]
 fn test_type_info_is_number() {
-    let num_ty = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
+    let num_ty = TypeInfoKind::Number(NumberType::I32);
     assert!(num_ty.is_number());
 
     let str_ty = TypeInfoKind::String;
@@ -229,7 +229,7 @@ fn test_type_info_is_number() {
 #[test]
 fn test_type_info_clone() {
     let ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec!["T".to_string()],
     };
     let cloned = ty.clone();
@@ -238,18 +238,18 @@ fn test_type_info_clone() {
 
 #[test]
 fn test_type_info_kind_eq() {
-    let ty1 = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
-    let ty2 = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
+    let ty1 = TypeInfoKind::Number(NumberType::I32);
+    let ty2 = TypeInfoKind::Number(NumberType::I32);
     assert_eq!(ty1, ty2);
 
-    let ty3 = TypeInfoKind::Number(NumberTypeKindNumberType::U32);
+    let ty3 = TypeInfoKind::Number(NumberType::U32);
     assert_ne!(ty1, ty3);
 }
 
 #[test]
 fn test_nested_array_types() {
     let inner_elem = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     let middle_array = TypeInfo {
@@ -268,7 +268,7 @@ fn test_type_info_is_array() {
     let array_ty = TypeInfo {
         kind: TypeInfoKind::Array(
             Box::new(TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             }),
             None,
@@ -293,7 +293,7 @@ fn test_type_info_is_bool() {
     assert!(bool_ty.is_bool());
 
     let non_bool_ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     assert!(!non_bool_ty.is_bool());
@@ -317,7 +317,7 @@ fn test_type_info_is_struct() {
 #[test]
 fn test_type_info_is_number_method() {
     let num_ty = TypeInfo {
-        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+        kind: TypeInfoKind::Number(NumberType::I32),
         type_params: vec![],
     };
     assert!(num_ty.is_number());

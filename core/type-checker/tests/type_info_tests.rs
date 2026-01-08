@@ -4,7 +4,7 @@
 //! They complement the integration tests in tests/src/type_checker/ which test
 //! end-to-end type checking with source code parsing.
 
-use inference_type_checker::type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind};
+use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use rustc_hash::FxHashMap;
 
 mod type_info_construction {
@@ -42,14 +42,14 @@ mod type_info_predicates {
     #[test]
     fn test_is_number_for_all_numeric_types() {
         let numeric_kinds = [
-            NumberTypeKindNumberType::I8,
-            NumberTypeKindNumberType::I16,
-            NumberTypeKindNumberType::I32,
-            NumberTypeKindNumberType::I64,
-            NumberTypeKindNumberType::U8,
-            NumberTypeKindNumberType::U16,
-            NumberTypeKindNumberType::U32,
-            NumberTypeKindNumberType::U64,
+            NumberType::I8,
+            NumberType::I16,
+            NumberType::I32,
+            NumberType::I64,
+            NumberType::U8,
+            NumberType::U16,
+            NumberType::U32,
+            NumberType::U64,
         ];
 
         for kind in numeric_kinds {
@@ -174,7 +174,7 @@ mod type_substitution {
         subs.insert(
             "T".to_string(),
             TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
         );
@@ -290,7 +290,7 @@ mod has_unresolved_params {
     #[test]
     fn test_numeric_no_unresolved() {
         let i32_type = TypeInfo {
-            kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+            kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
         };
         assert!(!i32_type.has_unresolved_params());
@@ -384,7 +384,7 @@ mod display {
     #[test]
     fn test_display_i32() {
         let ti = TypeInfo {
-            kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+            kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
         };
         assert_eq!(ti.to_string(), "i32");
@@ -393,14 +393,14 @@ mod display {
     #[test]
     fn test_display_all_numeric_types() {
         let cases = [
-            (NumberTypeKindNumberType::I8, "i8"),
-            (NumberTypeKindNumberType::I16, "i16"),
-            (NumberTypeKindNumberType::I32, "i32"),
-            (NumberTypeKindNumberType::I64, "i64"),
-            (NumberTypeKindNumberType::U8, "u8"),
-            (NumberTypeKindNumberType::U16, "u16"),
-            (NumberTypeKindNumberType::U32, "u32"),
-            (NumberTypeKindNumberType::U64, "u64"),
+            (NumberType::I8, "i8"),
+            (NumberType::I16, "i16"),
+            (NumberType::I32, "i32"),
+            (NumberType::I64, "i64"),
+            (NumberType::U8, "u8"),
+            (NumberType::U16, "u16"),
+            (NumberType::U32, "u32"),
+            (NumberType::U64, "u64"),
         ];
 
         for (kind, expected) in cases {
@@ -523,7 +523,7 @@ mod type_info_kind {
 
     #[test]
     fn test_kind_is_number() {
-        let numeric_kind = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
+        let numeric_kind = TypeInfoKind::Number(NumberType::I32);
         assert!(numeric_kind.is_number());
 
         let bool_kind = TypeInfoKind::Bool;
@@ -532,9 +532,9 @@ mod type_info_kind {
 
     #[test]
     fn test_kind_equality() {
-        let kind1 = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
-        let kind2 = TypeInfoKind::Number(NumberTypeKindNumberType::I32);
-        let kind3 = TypeInfoKind::Number(NumberTypeKindNumberType::I64);
+        let kind1 = TypeInfoKind::Number(NumberType::I32);
+        let kind2 = TypeInfoKind::Number(NumberType::I32);
+        let kind3 = TypeInfoKind::Number(NumberType::I64);
 
         assert_eq!(kind1, kind2);
         assert_ne!(kind1, kind3);

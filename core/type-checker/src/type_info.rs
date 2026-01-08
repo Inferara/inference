@@ -17,7 +17,7 @@ use inference_ast::nodes::Type;
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
-pub enum NumberTypeKindNumberType {
+pub enum NumberType {
     I8,
     I16,
     I32,
@@ -33,7 +33,7 @@ pub enum TypeInfoKind {
     Unit,
     Bool,
     String,
-    Number(NumberTypeKindNumberType),
+    Number(NumberType),
     Custom(String),
     Array(Box<TypeInfo>, Option<u32>),
     Generic(String),
@@ -52,14 +52,14 @@ impl Display for TypeInfoKind {
             TypeInfoKind::Bool => write!(f, "Bool"),
             TypeInfoKind::String => write!(f, "String"),
             TypeInfoKind::Number(number_type) => match number_type {
-                NumberTypeKindNumberType::I8 => write!(f, "i8"),
-                NumberTypeKindNumberType::I16 => write!(f, "i16"),
-                NumberTypeKindNumberType::I32 => write!(f, "i32"),
-                NumberTypeKindNumberType::I64 => write!(f, "i64"),
-                NumberTypeKindNumberType::U8 => write!(f, "u8"),
-                NumberTypeKindNumberType::U16 => write!(f, "u16"),
-                NumberTypeKindNumberType::U32 => write!(f, "u32"),
-                NumberTypeKindNumberType::U64 => write!(f, "u64"),
+                NumberType::I8 => write!(f, "i8"),
+                NumberType::I16 => write!(f, "i16"),
+                NumberType::I32 => write!(f, "i32"),
+                NumberType::I64 => write!(f, "i64"),
+                NumberType::U8 => write!(f, "u8"),
+                NumberType::U16 => write!(f, "u16"),
+                NumberType::U32 => write!(f, "u32"),
+                NumberType::U64 => write!(f, "u64"),
             },
             TypeInfoKind::Array(ty, length) => {
                 if let Some(length) = length {
@@ -314,14 +314,14 @@ impl TypeInfo {
             "bool" => TypeInfoKind::Bool,
             "string" => TypeInfoKind::String,
             "unit" => TypeInfoKind::Unit,
-            "i8" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
-            "i16" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
-            "i32" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-            "i64" => TypeInfoKind::Number(NumberTypeKindNumberType::I64),
-            "u8" => TypeInfoKind::Number(NumberTypeKindNumberType::U8),
-            "u16" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
-            "u32" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
-            "u64" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+            "i8" => TypeInfoKind::Number(NumberType::I8),
+            "i16" => TypeInfoKind::Number(NumberType::I16),
+            "i32" => TypeInfoKind::Number(NumberType::I32),
+            "i64" => TypeInfoKind::Number(NumberType::I64),
+            "u8" => TypeInfoKind::Number(NumberType::U8),
+            "u16" => TypeInfoKind::Number(NumberType::U16),
+            "u32" => TypeInfoKind::Number(NumberType::U32),
+            "u64" => TypeInfoKind::Number(NumberType::U64),
             _ => TypeInfoKind::Custom(simple_type_name.to_string()),
         }
     }

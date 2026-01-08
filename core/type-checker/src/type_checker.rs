@@ -26,7 +26,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
-    type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
+    type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
 
@@ -104,6 +104,7 @@ impl TypeChecker {
         Ok(self.symbol_table.clone())
     }
 
+    /// Registers `Definition::Type`, `Definition::Struct`, `Definition::Enum`, and `Definition::Spec`
     fn register_types(&mut self, ctx: &mut TypedContext) {
         for source_file in ctx.source_files() {
             for definition in &source_file.definitions {
@@ -254,6 +255,7 @@ impl TypeChecker {
         }
     }
 
+    /// Registers `Definition::Function`, `Definition::ExternalFunction`, and `Definition::Constant`
     #[allow(clippy::too_many_lines)]
     fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
         for sf in ctx.source_files() {
@@ -1307,7 +1309,7 @@ impl TypeChecker {
                         return ctx.get_node_typeinfo(number_literal.id);
                     }
                     let res_type = TypeInfo {
-                        kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                        kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     };
                     ctx.set_node_typeinfo(number_literal.id, res_type.clone());

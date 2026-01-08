@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::{
     symbol_table::SymbolTable,
-    type_info::{NumberTypeKindNumberType, TypeInfo, TypeInfoKind},
+    type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 use inference_ast::{
     arena::Arena,
@@ -47,14 +47,14 @@ impl TypedContext {
     #[must_use = "this is a pure type check with no side effects"]
     pub fn is_node_i32(&self, node_id: u32) -> bool {
         self.is_node_type(node_id, |kind| {
-            matches!(kind, TypeInfoKind::Number(NumberTypeKindNumberType::I32))
+            matches!(kind, TypeInfoKind::Number(NumberType::I32))
         })
     }
 
     #[must_use = "this is a pure type check with no side effects"]
     pub fn is_node_i64(&self, node_id: u32) -> bool {
         self.is_node_type(node_id, |kind| {
-            matches!(kind, TypeInfoKind::Number(NumberTypeKindNumberType::I64))
+            matches!(kind, TypeInfoKind::Number(NumberType::I64))
         })
     }
 

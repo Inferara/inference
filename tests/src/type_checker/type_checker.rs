@@ -15,7 +15,7 @@ mod type_inference_tests {
     use super::*;
     use inference_ast::nodes::{AstNode, Expression, Literal, Statement};
     use inference_type_checker::TypeCheckerBuilder;
-    use inference_type_checker::type_info::{NumberTypeKindNumberType, TypeInfoKind};
+    use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 
     /// Helper function to run type checker, returning Result to handle WIP failures
     fn try_type_check(
@@ -146,7 +146,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         type_info.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Binary add of i32 literals should return i32"
                 );
@@ -214,7 +214,7 @@ mod type_inference_tests {
                     assert!(
                         matches!(
                             type_info.unwrap().kind,
-                            TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                            TypeInfoKind::Number(NumberType::I32)
                         ),
                         "Nested arithmetic expression should return i32"
                     );
@@ -260,7 +260,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         type_info.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "helper() should return i32"
                 );
@@ -289,7 +289,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         type_info.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "add() should return i32"
                 );
@@ -320,7 +320,7 @@ mod type_inference_tests {
                     assert!(
                         matches!(
                             type_info.unwrap().kind,
-                            TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                            TypeInfoKind::Number(NumberType::I32)
                         ),
                         "double() should return i32"
                     );
@@ -419,14 +419,14 @@ mod type_inference_tests {
                 uzumaki_nodes.len()
             );
             let expected_types = [
-                TypeInfoKind::Number(NumberTypeKindNumberType::I8),
-                TypeInfoKind::Number(NumberTypeKindNumberType::I16),
-                TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-                TypeInfoKind::Number(NumberTypeKindNumberType::I64),
-                TypeInfoKind::Number(NumberTypeKindNumberType::U8),
-                TypeInfoKind::Number(NumberTypeKindNumberType::U16),
-                TypeInfoKind::Number(NumberTypeKindNumberType::U32),
-                TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+                TypeInfoKind::Number(NumberType::I8),
+                TypeInfoKind::Number(NumberType::I16),
+                TypeInfoKind::Number(NumberType::I32),
+                TypeInfoKind::Number(NumberType::I64),
+                TypeInfoKind::Number(NumberType::U8),
+                TypeInfoKind::Number(NumberType::U16),
+                TypeInfoKind::Number(NumberType::U32),
+                TypeInfoKind::Number(NumberType::U64),
             ];
             let mut uzumaki_nodes = uzumaki_nodes.iter().collect::<Vec<_>>();
             uzumaki_nodes.sort_by_key(|node| node.start_line());
@@ -468,7 +468,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         type_info.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Uzumaki should infer return type i32"
                 );
@@ -566,7 +566,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         field_type.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Field x should have type i32"
                 );
@@ -602,8 +602,8 @@ mod type_inference_tests {
                     );
 
                     let expected_kind = match ma.name.name.as_str() {
-                        "age" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-                        "height" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+                        "age" => TypeInfoKind::Number(NumberType::I32),
+                        "height" => TypeInfoKind::Number(NumberType::U64),
                         "active" => TypeInfoKind::Bool,
                         _ => panic!("Unexpected field name: {}", ma.name.name),
                     };
@@ -661,7 +661,7 @@ mod type_inference_tests {
                     } else if ma.name.name == "value" {
                         assert_eq!(
                             field_type.unwrap().kind,
-                            TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                            TypeInfoKind::Number(NumberType::I32),
                             "Field value should have type i32"
                         );
                     }
@@ -738,7 +738,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         field_type.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Field count should have type i32"
                 );
@@ -779,14 +779,14 @@ mod type_inference_tests {
                     );
 
                     let expected_kind = match ma.name.name.as_str() {
-                        "a" => TypeInfoKind::Number(NumberTypeKindNumberType::I8),
-                        "b" => TypeInfoKind::Number(NumberTypeKindNumberType::I16),
-                        "c" => TypeInfoKind::Number(NumberTypeKindNumberType::I32),
-                        "d" => TypeInfoKind::Number(NumberTypeKindNumberType::I64),
-                        "e" => TypeInfoKind::Number(NumberTypeKindNumberType::U8),
-                        "f" => TypeInfoKind::Number(NumberTypeKindNumberType::U16),
-                        "g" => TypeInfoKind::Number(NumberTypeKindNumberType::U32),
-                        "h" => TypeInfoKind::Number(NumberTypeKindNumberType::U64),
+                        "a" => TypeInfoKind::Number(NumberType::I8),
+                        "b" => TypeInfoKind::Number(NumberType::I16),
+                        "c" => TypeInfoKind::Number(NumberType::I32),
+                        "d" => TypeInfoKind::Number(NumberType::I64),
+                        "e" => TypeInfoKind::Number(NumberType::U8),
+                        "f" => TypeInfoKind::Number(NumberType::U16),
+                        "g" => TypeInfoKind::Number(NumberType::U32),
+                        "h" => TypeInfoKind::Number(NumberType::U64),
                         _ => panic!("Unexpected field name: {}", ma.name.name),
                     };
 
@@ -860,7 +860,7 @@ mod type_inference_tests {
                         "value" => {
                             assert_eq!(
                                 field_type.unwrap().kind,
-                                TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                                TypeInfoKind::Number(NumberType::I32),
                                 "Field value should have type i32"
                             );
                             found_value = true;
@@ -903,7 +903,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         field_type.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Field value should have type i32"
                 );
@@ -941,7 +941,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         return_type.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Method get() should return i32"
                 );
@@ -974,7 +974,7 @@ mod type_inference_tests {
                 assert!(
                     matches!(
                         return_type.unwrap().kind,
-                        TypeInfoKind::Number(NumberTypeKindNumberType::I32)
+                        TypeInfoKind::Number(NumberType::I32)
                     ),
                     "Method add() should return i32"
                 );

@@ -351,7 +351,7 @@ impl TypeCheckError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_info::{NumberTypeKindNumberType, TypeInfoKind};
+    use crate::type_info::{NumberType, TypeInfoKind};
 
     fn test_location() -> Location {
         Location {
@@ -450,7 +450,11 @@ mod tests {
     fn display_registration_kind() {
         assert_eq!(RegistrationKind::Type.to_string(), "type");
         assert_eq!(RegistrationKind::Struct.to_string(), "struct");
+        assert_eq!(RegistrationKind::Enum.to_string(), "enum");
+        assert_eq!(RegistrationKind::Spec.to_string(), "spec");
+        assert_eq!(RegistrationKind::Function.to_string(), "function");
         assert_eq!(RegistrationKind::Method.to_string(), "method");
+        assert_eq!(RegistrationKind::Variable.to_string(), "variable");
     }
 
     #[test]
@@ -591,11 +595,11 @@ mod tests {
         let err = TypeCheckError::BinaryOperandTypeMismatch {
             operator: OperatorKind::Add,
             left: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
             right: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+                kind: TypeInfoKind::Number(NumberType::I64),
                 type_params: vec![],
             },
             location: test_location(),
@@ -665,7 +669,7 @@ mod tests {
     fn display_expected_array_type() {
         let err = TypeCheckError::ExpectedArrayType {
             found: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
             location: test_location(),
@@ -677,7 +681,7 @@ mod tests {
     fn display_expected_struct_type() {
         let err = TypeCheckError::ExpectedStructType {
             found: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
             location: test_location(),
@@ -722,11 +726,11 @@ mod tests {
     fn display_array_element_type_mismatch() {
         let err = TypeCheckError::ArrayElementTypeMismatch {
             expected: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
             found: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I64),
+                kind: TypeInfoKind::Number(NumberType::I64),
                 type_params: vec![],
             },
             location: test_location(),
@@ -774,7 +778,7 @@ mod tests {
     fn display_expected_enum_type() {
         let err = TypeCheckError::ExpectedEnumType {
             found: TypeInfo {
-                kind: TypeInfoKind::Number(NumberTypeKindNumberType::I32),
+                kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             },
             location: test_location(),
