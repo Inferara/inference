@@ -576,8 +576,8 @@ mod tests {
     #[test]
     fn display_invalid_unary_operand() {
         let err = TypeCheckError::InvalidUnaryOperand {
-            operator: UnaryOperatorKind::Neg,
-            expected_type: "numeric",
+            operator: UnaryOperatorKind::Not,
+            expected_type: "booleans",
             found_type: TypeInfo {
                 kind: TypeInfoKind::Bool,
                 type_params: vec![],
@@ -586,7 +586,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: unary operator `Neg` can only be applied to numeric, found `Bool`"
+            "1:5: unary operator `Not` can only be applied to booleans, found `Bool`"
         );
     }
 

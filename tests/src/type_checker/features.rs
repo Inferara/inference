@@ -2708,27 +2708,26 @@ mod coverage_tests {
         }
 
         #[test]
-        fn test_unary_neg_on_bool() {
+        fn test_unary_not_on_bool() {
             let source = r#"fn test() -> bool { return !true; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
-                "Unary negation on bool should work, got: {:?}",
+                "Unary NOT on bool should work, got: {:?}",
                 result.err()
             );
         }
 
-        // FIXME: Test disabled due to parser or type checker limitation
-        // #[test]
-        fn test_unary_neg_on_non_bool() {
+        #[test]
+        fn test_unary_not_on_non_bool() {
             let source = r#"fn test() -> i32 { return !42; }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Unary negation on non-bool should fail");
+            assert!(result.is_err(), "Unary NOT on non-bool should fail");
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("invalid unary operand"),
-                    "Error should mention invalid unary operand: {}",
+                    error_msg.contains("unary operator") || error_msg.contains("booleans"),
+                    "Error should mention unary operator or booleans: {}",
                     error_msg
                 );
             }

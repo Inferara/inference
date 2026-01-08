@@ -1161,7 +1161,7 @@ impl TypeChecker {
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
-                    UnaryOperatorKind::Neg => {
+                    UnaryOperatorKind::Not => {
                         let expression_type_op = self.infer_expression(
                             &mut prefix_unary_expression.expression.borrow_mut(),
                             ctx,
@@ -1175,7 +1175,7 @@ impl TypeChecker {
                                 return Some(expression_type);
                             }
                             self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::Neg,
+                                operator: UnaryOperatorKind::Not,
                                 expected_type: "booleans",
                                 found_type: expression_type,
                                 location: prefix_unary_expression.location.clone(),

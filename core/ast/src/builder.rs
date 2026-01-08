@@ -1034,7 +1034,7 @@ impl<'a> Builder<'a, InitState> {
 
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator = match operator_node.kind() {
-            "unary_not" => UnaryOperatorKind::Neg,
+            "unary_not" => UnaryOperatorKind::Not,
             _ => panic!("Unexpected operator node"),
         };
 
