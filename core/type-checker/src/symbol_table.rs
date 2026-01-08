@@ -59,15 +59,12 @@ pub(crate) struct StructInfo {
 
 /// Information about an enum type including its variants.
 /// Simple unit variants only - associated data support is out of scope.
-/// Visibility and definition_scope_id are used for visibility checking.
+/// Visibility and definition_scope_id are used for visibility checking during variant access.
 #[derive(Debug, Clone)]
 pub(crate) struct EnumInfo {
     pub(crate) name: String,
     pub(crate) variants: FxHashSet<String>,
     pub(crate) visibility: Visibility,
-    /// Scope where this enum is defined (for visibility checking during type member access).
-    /// Currently unused - will be utilized when enum visibility is fully implemented.
-    #[allow(dead_code)]
     pub(crate) definition_scope_id: u32,
 }
 
@@ -1056,7 +1053,7 @@ mod tests {
             let sibling2 = table.get_scope(sibling2_id).unwrap();
             let sibling3 = table.get_scope(sibling3_id).unwrap();
 
-            let names = vec![
+            let names = [
                 sibling1.borrow().name.clone(),
                 sibling2.borrow().name.clone(),
                 sibling3.borrow().name.clone(),

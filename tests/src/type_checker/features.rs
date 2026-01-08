@@ -907,6 +907,28 @@ mod enum_tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_enum_visibility_check_from_descendant_scope() {
+        let source = r#"enum Status { Active, Inactive } fn check_status(s: Status) -> i32 { return 1; } fn test() -> i32 { return check_status(Status::Active); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Private enum should be accessible from descendant function scope, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_enum_visibility_in_nested_block() {
+        let source = r#"enum Mode { Read, Write } fn process(m: Mode) -> i32 { if true { return 1; } return 0; } fn test() -> i32 { return process(Mode::Read); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Private enum should be accessible within nested blocks, got: {:?}",
+            result.err()
+        );
+    }
 }
 
 /// Tests for generic type instantiation (Phase 7.4)

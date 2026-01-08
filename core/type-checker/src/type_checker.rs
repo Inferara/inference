@@ -923,6 +923,16 @@ impl TypeChecker {
                 // Look up the enum and validate variant
                 if let Some(enum_info) = self.symbol_table.lookup_enum(&enum_name) {
                     if enum_info.variants.contains(variant_name) {
+                        // Check enum visibility (variants inherit the enum's visibility,
+                        // unlike struct fields which have per-field visibility)
+                        self.check_and_report_visibility(
+                            &enum_info.visibility,
+                            enum_info.definition_scope_id,
+                            &type_member_access_expression.location,
+                            VisibilityContext::Enum {
+                                name: enum_name.clone(),
+                            },
+                        );
                         let enum_type = TypeInfo {
                             kind: TypeInfoKind::Enum(enum_name),
                             type_params: vec![],
