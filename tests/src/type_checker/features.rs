@@ -28,7 +28,7 @@ mod import_tests {
     /// Tests for visibility checking
     ///
     /// Tests verify that visibility checks are properly integrated into:
-    /// - Function calls (using FuncSignature.definition_scope_id)
+    /// - Function calls (using FuncInfo.definition_scope_id)
     /// - Method calls (using MethodInfo.scope_id)
     /// - Struct field access (using StructInfo.definition_scope_id and StructFieldInfo.visibility)
     /// - Import resolution (checking symbol visibility during resolution)

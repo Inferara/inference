@@ -25,7 +25,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
-    symbol_table::{FuncSignature, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
+    symbol_table::{FuncInfo, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -187,7 +187,7 @@ impl TypeChecker {
 
                             let definition_scope_id =
                                 self.symbol_table.current_scope_id().unwrap_or(0);
-                            let signature = FuncSignature {
+                            let signature = FuncInfo {
                                 name: method.name(),
                                 type_params,
                                 param_types,
@@ -1820,7 +1820,7 @@ impl TypeChecker {
     #[allow(clippy::type_complexity)]
     fn infer_type_params_from_args(
         &mut self,
-        signature: &FuncSignature,
+        signature: &FuncInfo,
         arguments: Option<&Vec<(Option<Rc<Identifier>>, std::cell::RefCell<Expression>)>>,
         call_location: &Location,
         ctx: &mut TypedContext,

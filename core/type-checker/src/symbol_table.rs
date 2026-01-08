@@ -28,7 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub(crate) type ScopeRef = Rc<RefCell<Scope>>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct FuncSignature {
+pub(crate) struct FuncInfo {
     pub(crate) name: String,
     pub(crate) type_params: Vec<String>,
     pub(crate) param_types: Vec<TypeInfo>,
@@ -78,7 +78,7 @@ pub(crate) struct EnumInfo {
 /// - has_self: to distinguish instance methods from associated functions
 #[derive(Debug, Clone)]
 pub(crate) struct MethodInfo {
-    pub(crate) signature: FuncSignature,
+    pub(crate) signature: FuncInfo,
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
     #[allow(dead_code)]
@@ -140,7 +140,7 @@ pub(crate) enum Symbol {
     Struct(StructInfo),
     Enum(EnumInfo),
     Spec(String),
-    Function(FuncSignature),
+    Function(FuncInfo),
 }
 
 impl Symbol {
@@ -157,7 +157,7 @@ impl Symbol {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn as_function(&self) -> Option<&FuncSignature> {
+    pub(crate) fn as_function(&self) -> Option<&FuncInfo> {
         if let Symbol::Function(sig) = self {
             Some(sig)
         } else {
@@ -578,7 +578,7 @@ impl SymbolTable {
             let scope_id = scope.borrow().id;
             // Use type_params when constructing TypeInfo so that
             // type parameters like T, U are recognized as Generic types
-            let sig = FuncSignature {
+            let sig = FuncInfo {
                 name: name.to_string(),
                 type_params: type_params.clone(),
                 param_types: param_types
@@ -631,7 +631,7 @@ impl SymbolTable {
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn lookup_function(&self, name: &str) -> Option<FuncSignature> {
+    pub(crate) fn lookup_function(&self, name: &str) -> Option<FuncInfo> {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
@@ -657,7 +657,7 @@ impl SymbolTable {
     pub(crate) fn register_method(
         &mut self,
         type_name: &str,
-        signature: FuncSignature,
+        signature: FuncInfo,
         visibility: Visibility,
         has_self: bool,
     ) -> anyhow::Result<()> {
