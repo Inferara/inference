@@ -306,6 +306,28 @@ pub enum TypeCheckError {
         context: VisibilityContext,
         location: Location,
     },
+
+    /// Instance method called as associated function.
+    ///
+    /// This occurs when `Type::method()` syntax is used for a method that requires `self`.
+    /// Use `instance.method()` instead.
+    #[error("{location}: instance method `{type_name}::{method_name}` requires a receiver, use `instance.{method_name}()` instead")]
+    InstanceMethodCalledAsAssociated {
+        type_name: String,
+        method_name: String,
+        location: Location,
+    },
+
+    /// Associated function called as instance method.
+    ///
+    /// This occurs when `instance.function()` syntax is used for an associated function
+    /// that doesn't take `self`. Use `Type::function()` instead.
+    #[error("{location}: associated function `{type_name}::{method_name}` cannot be called on an instance, use `{type_name}::{method_name}()` instead")]
+    AssociatedFunctionCalledAsMethod {
+        type_name: String,
+        method_name: String,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -343,7 +365,9 @@ impl TypeCheckError {
             | TypeCheckError::CannotInferUzumakiType { location }
             | TypeCheckError::CannotInferTypeParameter { location, .. }
             | TypeCheckError::ConflictingTypeInference { location, .. }
-            | TypeCheckError::PrivateAccessViolation { location, .. } => location,
+            | TypeCheckError::PrivateAccessViolation { location, .. }
+            | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
+            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
         }
     }
 }
@@ -881,5 +905,31 @@ mod tests {
             err.to_string(),
             "1:5: cannot access private method `reset` on type `Counter`"
         );
+    }
+
+    #[test]
+    fn display_instance_method_called_as_associated() {
+        let err = TypeCheckError::InstanceMethodCalledAsAssociated {
+            type_name: "Point".to_string(),
+            method_name: "distance".to_string(),
+            location: test_location(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Point"));
+        assert!(msg.contains("distance"));
+        assert!(msg.contains("requires a receiver"));
+    }
+
+    #[test]
+    fn display_associated_function_called_as_method() {
+        let err = TypeCheckError::AssociatedFunctionCalledAsMethod {
+            type_name: "Point".to_string(),
+            method_name: "new".to_string(),
+            location: test_location(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Point"));
+        assert!(msg.contains("new"));
+        assert!(msg.contains("cannot be called on an instance"));
     }
 }

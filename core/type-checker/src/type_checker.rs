@@ -956,6 +956,94 @@ impl TypeChecker {
                 }
             }
             Expression::FunctionCall(function_call_expression) => {
+                // Handle Type::function() syntax - associated function calls
+                if let Expression::TypeMemberAccess(type_member_access) =
+                    &function_call_expression.function
+                {
+                    let inner_expr = type_member_access.expression.borrow();
+
+                    // Extract type name from the expression
+                    let type_name = match &*inner_expr {
+                        Expression::Type(ty) => match ty {
+                            Type::Simple(simple_type) => Some(simple_type.name.clone()),
+                            Type::Custom(ident) => Some(ident.name.clone()),
+                            _ => None,
+                        },
+                        Expression::Identifier(id) => Some(id.name.clone()),
+                        _ => None,
+                    };
+
+                    drop(inner_expr); // Release borrow before continuing
+
+                    if let Some(type_name) = type_name {
+                        let method_name = &type_member_access.name.name;
+
+                        // First check if this is an enum variant - can't call variants like functions
+                        if self.symbol_table.lookup_enum(&type_name).is_some() {
+                            // This is an enum type - TypeMemberAccess on enums is for variants,
+                            // not function calls. The enum variant access should be handled by
+                            // the TypeMemberAccess expression handler, not here.
+                            // Fall through to standard function handling which will report
+                            // "undefined function" error.
+                        } else if let Some(method_info) =
+                            self.symbol_table.lookup_method(&type_name, method_name)
+                        {
+                            // Found a method - check if it's an instance method or associated function
+                            if method_info.is_instance_method() {
+                                // Error: calling instance method without receiver
+                                self.errors
+                                    .push(TypeCheckError::InstanceMethodCalledAsAssociated {
+                                        type_name: type_name.clone(),
+                                        method_name: method_name.clone(),
+                                        location: type_member_access.location.clone(),
+                                    });
+                                // Continue with type checking for better error recovery
+                            }
+
+                            // Check visibility of the method
+                            self.check_and_report_visibility(
+                                &method_info.visibility,
+                                method_info.scope_id,
+                                &type_member_access.location,
+                                VisibilityContext::Method {
+                                    type_name: type_name.clone(),
+                                    method_name: method_name.clone(),
+                                },
+                            );
+
+                            let signature = &method_info.signature;
+                            let arg_count = function_call_expression
+                                .arguments
+                                .as_ref()
+                                .map_or(0, Vec::len);
+
+                            if arg_count != signature.param_types.len() {
+                                self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                                    kind: "method",
+                                    name: format!("{}::{}", type_name, method_name),
+                                    expected: signature.param_types.len(),
+                                    found: arg_count,
+                                    location: function_call_expression.location.clone(),
+                                });
+                            }
+
+                            if let Some(arguments) = &function_call_expression.arguments {
+                                for arg in arguments {
+                                    self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                                }
+                            }
+
+                            ctx.set_node_typeinfo(
+                                function_call_expression.id,
+                                signature.return_type.clone(),
+                            );
+                            return Some(signature.return_type.clone());
+                        }
+                        // Not an enum and not a method - fall through to standard function handling
+                    }
+                    // Fall through to standard function handling for invalid type expressions
+                }
+
                 if let Expression::MemberAccess(member_access) = &function_call_expression.function
                 {
                     let receiver_type =
@@ -979,6 +1067,18 @@ impl TypeChecker {
                             if let Some(method_info) =
                                 self.symbol_table.lookup_method(&type_name, method_name)
                             {
+                                // Check if this is an associated function being called as instance method
+                                if !method_info.is_instance_method() {
+                                    // Error: calling associated function with receiver
+                                    self.errors
+                                        .push(TypeCheckError::AssociatedFunctionCalledAsMethod {
+                                            type_name: type_name.clone(),
+                                            method_name: method_name.clone(),
+                                            location: member_access.location.clone(),
+                                        });
+                                    // Continue with type checking for better error recovery
+                                }
+
                                 // Check visibility of the method
                                 self.check_and_report_visibility(
                                     &method_info.visibility,

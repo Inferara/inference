@@ -921,7 +921,7 @@ mod type_inference_tests {
             struct Counter {
                 value: i32;
 
-                fn get() -> i32 { return 42; }
+                fn get(self) -> i32 { return 42; }
             }
             fn test(c: Counter) -> i32 { return c.get(); }
             "#;
@@ -954,7 +954,7 @@ mod type_inference_tests {
             struct Calculator {
                 value: i32;
 
-                fn add(x: i32) -> i32 { return x; }
+                fn add(self, x: i32) -> i32 { return x; }
             }
             fn test(c: Calculator) -> i32 { return c.add(10); }
             "#;
@@ -987,7 +987,7 @@ mod type_inference_tests {
             struct Checker {
                 valid: bool;
 
-                fn is_valid() -> bool { return true; }
+                fn is_valid(self) -> bool { return true; }
             }
             fn test(c: Checker) -> bool { return c.is_valid(); }
             "#;
@@ -1018,8 +1018,8 @@ mod type_inference_tests {
                 x: i32;
                 y: i32;
 
-                fn get_x() -> i32 { return 1; }
-                fn get_y() -> i32 { return 2; }
+                fn get_x(self) -> i32 { return 1; }
+                fn get_y(self) -> i32 { return 2; }
             }
             fn test_x(d: Data) -> i32 { return d.get_x(); }
             fn test_y(d: Data) -> i32 { return d.get_y(); }
@@ -1052,7 +1052,7 @@ mod type_inference_tests {
             struct Math {
                 base: i32;
 
-                fn compute(a: i32, b: i32) -> i32 { return a; }
+                fn compute(self, a: i32, b: i32) -> i32 { return a; }
             }
             fn test(m: Math) -> i32 { return m.compute(1, 2); }
             "#;

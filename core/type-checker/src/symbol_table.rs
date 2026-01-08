@@ -69,19 +69,40 @@ pub(crate) struct EnumInfo {
 }
 
 /// Information about a method defined on a type.
-/// Fields visibility, scope_id, and has_self are populated for future phases:
-/// - visibility: for visibility checking during method resolution
-/// - scope_id: to track which scope defines this method for qualified lookup
-/// - has_self: to distinguish instance methods from associated functions
+///
+/// # Instance Methods vs Associated Functions
+///
+/// Methods are distinguished by whether they take `self` as the first argument:
+///
+/// - **Instance methods** (`has_self = true`): Take `self`, `&self`, or `&mut self`
+///   as the first parameter. Called via `instance.method(args)`.
+///
+/// - **Associated functions** (`has_self = false`): Do not take `self`.
+///   Typically constructors like `new()`. Called via `Type::function(args)`.
+///
+/// # Fields
+///
+/// - `signature`: Function information including name, parameters, and return type
+/// - `visibility`: Access control for the method
+/// - `scope_id`: The scope where this method is defined (for visibility checking)
+/// - `has_self`: Whether this method takes `self` as first argument
 #[derive(Debug, Clone)]
 pub(crate) struct MethodInfo {
     pub(crate) signature: FuncInfo,
-    #[allow(dead_code)]
     pub(crate) visibility: Visibility,
-    #[allow(dead_code)]
     pub(crate) scope_id: u32,
-    #[allow(dead_code)]
     pub(crate) has_self: bool,
+}
+
+impl MethodInfo {
+    /// Returns true if this method takes `self` as first argument.
+    ///
+    /// Instance methods (`has_self = true`) are called via `instance.method()`.
+    /// Associated functions (`has_self = false`) are called via `Type::function()`.
+    #[must_use = "this is a pure check with no side effects"]
+    pub(crate) fn is_instance_method(&self) -> bool {
+        self.has_self
+    }
 }
 
 /// A single item in an import statement
@@ -936,7 +957,10 @@ mod tests {
 
             assert!(result.is_some());
             let result_type = result.unwrap();
-            assert!(matches!(result_type.kind, TypeInfoKind::Number(NumberType::U64)));
+            assert!(matches!(
+                result_type.kind,
+                TypeInfoKind::Number(NumberType::U64)
+            ));
         }
 
         #[test]
@@ -1162,8 +1186,8 @@ mod tests {
                 scope_ids.push(table.push_scope());
             }
 
-            for i in 0..depth {
-                let scope = table.get_scope(scope_ids[i]).unwrap();
+            for (i, scope_id) in scope_ids.iter().enumerate() {
+                let scope = table.get_scope(*scope_id).unwrap();
                 let scope_borrow = scope.borrow();
 
                 let expected_depth = i + 1;
@@ -1322,6 +1346,134 @@ mod tests {
                 full_path.starts_with("anonymous_"),
                 "Root-level anonymous scope full_path should be just the name"
             );
+        }
+    }
+
+    mod method_info_tests {
+        use super::*;
+
+        #[test]
+        fn is_instance_method_returns_true_when_has_self() {
+            let method_info = MethodInfo {
+                signature: FuncInfo {
+                    name: "get_value".to_string(),
+                    type_params: vec![],
+                    param_types: vec![],
+                    return_type: TypeInfo::default(),
+                    visibility: Visibility::Private,
+                    definition_scope_id: 0,
+                },
+                visibility: Visibility::Private,
+                scope_id: 0,
+                has_self: true,
+            };
+
+            assert!(method_info.is_instance_method());
+        }
+
+        #[test]
+        fn is_instance_method_returns_false_for_associated_function() {
+            let method_info = MethodInfo {
+                signature: FuncInfo {
+                    name: "new".to_string(),
+                    type_params: vec![],
+                    param_types: vec![],
+                    return_type: TypeInfo::default(),
+                    visibility: Visibility::Public,
+                    definition_scope_id: 0,
+                },
+                visibility: Visibility::Public,
+                scope_id: 0,
+                has_self: false,
+            };
+
+            assert!(!method_info.is_instance_method());
+        }
+
+        #[test]
+        fn register_method_stores_has_self_true_correctly() {
+            let mut table = SymbolTable::default();
+            table.push_scope_with_name("TestType", Visibility::Public);
+
+            let sig = FuncInfo {
+                name: "instance_method".to_string(),
+                type_params: vec![],
+                param_types: vec![],
+                return_type: TypeInfo::default(),
+                visibility: Visibility::Public,
+                definition_scope_id: 0,
+            };
+
+            let result = table.register_method("TestType", sig, Visibility::Public, true);
+            assert!(result.is_ok());
+
+            let method_info = table.lookup_method("TestType", "instance_method");
+            assert!(method_info.is_some());
+            let method_info = method_info.unwrap();
+            assert!(method_info.has_self);
+            assert!(method_info.is_instance_method());
+        }
+
+        #[test]
+        fn register_method_stores_has_self_false_correctly() {
+            let mut table = SymbolTable::default();
+            table.push_scope_with_name("TestType", Visibility::Public);
+
+            let sig = FuncInfo {
+                name: "constructor".to_string(),
+                type_params: vec![],
+                param_types: vec![],
+                return_type: TypeInfo::default(),
+                visibility: Visibility::Public,
+                definition_scope_id: 0,
+            };
+
+            let result = table.register_method("TestType", sig, Visibility::Public, false);
+            assert!(result.is_ok());
+
+            let method_info = table.lookup_method("TestType", "constructor");
+            assert!(method_info.is_some());
+            let method_info = method_info.unwrap();
+            assert!(!method_info.has_self);
+            assert!(!method_info.is_instance_method());
+        }
+
+        #[test]
+        fn method_info_accessor_consistent_with_field() {
+            let instance_method = MethodInfo {
+                signature: FuncInfo {
+                    name: "test".to_string(),
+                    type_params: vec![],
+                    param_types: vec![],
+                    return_type: TypeInfo::default(),
+                    visibility: Visibility::Private,
+                    definition_scope_id: 0,
+                },
+                visibility: Visibility::Private,
+                scope_id: 0,
+                has_self: true,
+            };
+
+            let associated_fn = MethodInfo {
+                signature: FuncInfo {
+                    name: "test".to_string(),
+                    type_params: vec![],
+                    param_types: vec![],
+                    return_type: TypeInfo::default(),
+                    visibility: Visibility::Private,
+                    definition_scope_id: 0,
+                },
+                visibility: Visibility::Private,
+                scope_id: 0,
+                has_self: false,
+            };
+
+            // Verify accessor returns same value as field
+            assert_eq!(
+                instance_method.is_instance_method(),
+                instance_method.has_self
+            );
+            assert_eq!(associated_fn.is_instance_method(), associated_fn.has_self);
         }
     }
 }

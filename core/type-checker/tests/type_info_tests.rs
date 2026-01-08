@@ -54,7 +54,7 @@ mod type_info_predicates {
 
         for kind in numeric_kinds {
             let ti = TypeInfo {
-                kind: TypeInfoKind::Number(kind.clone()),
+                kind: TypeInfoKind::Number(kind),
                 type_params: vec![],
             };
             assert!(ti.is_number(), "Expected {:?} to be a number", kind);
@@ -689,18 +689,42 @@ mod type_info_kind_builtin_methods {
 
     #[test]
     fn test_from_builtin_str_non_numeric() {
-        assert_eq!(TypeInfoKind::from_builtin_str("unit"), Some(TypeInfoKind::Unit));
-        assert_eq!(TypeInfoKind::from_builtin_str("bool"), Some(TypeInfoKind::Bool));
-        assert_eq!(TypeInfoKind::from_builtin_str("string"), Some(TypeInfoKind::String));
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("unit"),
+            Some(TypeInfoKind::Unit)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("bool"),
+            Some(TypeInfoKind::Bool)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("string"),
+            Some(TypeInfoKind::String)
+        );
     }
 
     #[test]
     fn test_from_builtin_str_case_insensitive() {
-        assert_eq!(TypeInfoKind::from_builtin_str("BOOL"), Some(TypeInfoKind::Bool));
-        assert_eq!(TypeInfoKind::from_builtin_str("Bool"), Some(TypeInfoKind::Bool));
-        assert_eq!(TypeInfoKind::from_builtin_str("STRING"), Some(TypeInfoKind::String));
-        assert_eq!(TypeInfoKind::from_builtin_str("Unit"), Some(TypeInfoKind::Unit));
-        assert_eq!(TypeInfoKind::from_builtin_str("I32"), Some(TypeInfoKind::Number(NumberType::I32)));
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("BOOL"),
+            Some(TypeInfoKind::Bool)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("Bool"),
+            Some(TypeInfoKind::Bool)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("STRING"),
+            Some(TypeInfoKind::String)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("Unit"),
+            Some(TypeInfoKind::Unit)
+        );
+        assert_eq!(
+            TypeInfoKind::from_builtin_str("I32"),
+            Some(TypeInfoKind::Number(NumberType::I32))
+        );
     }
 
     #[test]
