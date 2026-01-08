@@ -41,11 +41,13 @@ pub enum TypeMismatchContext {
     Condition,
     FunctionArgument {
         function_name: String,
+        arg_name: String,
         arg_index: usize,
     },
     MethodArgument {
         type_name: String,
         method_name: String,
+        arg_name: String,
         arg_index: usize,
     },
     ArrayElement,
@@ -61,15 +63,20 @@ impl Display for TypeMismatchContext {
             TypeMismatchContext::Condition => write!(f, "in condition"),
             TypeMismatchContext::FunctionArgument {
                 function_name,
-                arg_index,
-            } => write!(f, "in argument {arg_index} of function `{function_name}`"),
-            TypeMismatchContext::MethodArgument {
-                type_name,
-                method_name,
+                arg_name,
                 arg_index,
             } => write!(
                 f,
-                "in argument {arg_index} of method `{type_name}::{method_name}`"
+                "in argument {arg_index} `{arg_name}` of function `{function_name}`"
+            ),
+            TypeMismatchContext::MethodArgument {
+                type_name,
+                method_name,
+                arg_name,
+                arg_index,
+            } => write!(
+                f,
+                "in argument {arg_index} `{arg_name}` of method `{type_name}::{method_name}`"
             ),
             TypeMismatchContext::ArrayElement => write!(f, "in array element"),
         }
@@ -463,10 +470,21 @@ mod tests {
         assert_eq!(
             TypeMismatchContext::FunctionArgument {
                 function_name: "foo".to_string(),
+                arg_name: "x".to_string(),
                 arg_index: 0
             }
             .to_string(),
-            "in argument 0 of function `foo`"
+            "in argument 0 `x` of function `foo`"
+        );
+        assert_eq!(
+            TypeMismatchContext::MethodArgument {
+                type_name: "Point".to_string(),
+                method_name: "move_by".to_string(),
+                arg_name: "dx".to_string(),
+                arg_index: 0
+            }
+            .to_string(),
+            "in argument 0 `dx` of method `Point::move_by`"
         );
     }
 
