@@ -559,3 +559,171 @@ mod type_info_kind {
         assert_eq!(hash1, hash2);
     }
 }
+
+mod number_type_methods {
+    use super::*;
+
+    #[test]
+    fn test_all_contains_all_variants() {
+        assert_eq!(NumberType::ALL.len(), 8);
+        assert!(NumberType::ALL.contains(&NumberType::I8));
+        assert!(NumberType::ALL.contains(&NumberType::I16));
+        assert!(NumberType::ALL.contains(&NumberType::I32));
+        assert!(NumberType::ALL.contains(&NumberType::I64));
+        assert!(NumberType::ALL.contains(&NumberType::U8));
+        assert!(NumberType::ALL.contains(&NumberType::U16));
+        assert!(NumberType::ALL.contains(&NumberType::U32));
+        assert!(NumberType::ALL.contains(&NumberType::U64));
+    }
+
+    #[test]
+    fn test_as_str_returns_correct_names() {
+        assert_eq!(NumberType::I8.as_str(), "i8");
+        assert_eq!(NumberType::I16.as_str(), "i16");
+        assert_eq!(NumberType::I32.as_str(), "i32");
+        assert_eq!(NumberType::I64.as_str(), "i64");
+        assert_eq!(NumberType::U8.as_str(), "u8");
+        assert_eq!(NumberType::U16.as_str(), "u16");
+        assert_eq!(NumberType::U32.as_str(), "u32");
+        assert_eq!(NumberType::U64.as_str(), "u64");
+    }
+
+    #[test]
+    fn test_as_str_roundtrip_through_all() {
+        for nt in NumberType::ALL {
+            let s = nt.as_str();
+            let parsed: NumberType = s.parse().expect("should parse back");
+            assert_eq!(*nt, parsed);
+        }
+    }
+
+    #[test]
+    fn test_from_str_lowercase() {
+        assert_eq!("i32".parse::<NumberType>(), Ok(NumberType::I32));
+        assert_eq!("u64".parse::<NumberType>(), Ok(NumberType::U64));
+    }
+
+    #[test]
+    fn test_from_str_case_insensitive() {
+        assert_eq!("I32".parse::<NumberType>(), Ok(NumberType::I32));
+        assert_eq!("U64".parse::<NumberType>(), Ok(NumberType::U64));
+        assert_eq!("i32".parse::<NumberType>(), Ok(NumberType::I32));
+        assert_eq!("I8".parse::<NumberType>(), Ok(NumberType::I8));
+    }
+
+    #[test]
+    fn test_from_str_invalid() {
+        assert!("invalid".parse::<NumberType>().is_err());
+        assert!("f32".parse::<NumberType>().is_err());
+        assert!("i128".parse::<NumberType>().is_err());
+        assert!("".parse::<NumberType>().is_err());
+    }
+}
+
+mod type_info_kind_builtin_methods {
+    use super::*;
+
+    #[test]
+    fn test_non_numeric_builtins_contains_all() {
+        assert_eq!(TypeInfoKind::NON_NUMERIC_BUILTINS.len(), 3);
+
+        let names: Vec<&str> = TypeInfoKind::NON_NUMERIC_BUILTINS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(names.contains(&"unit"));
+        assert!(names.contains(&"bool"));
+        assert!(names.contains(&"string"));
+    }
+
+    #[test]
+    fn test_as_builtin_str_for_unit() {
+        assert_eq!(TypeInfoKind::Unit.as_builtin_str(), Some("unit"));
+    }
+
+    #[test]
+    fn test_as_builtin_str_for_bool() {
+        assert_eq!(TypeInfoKind::Bool.as_builtin_str(), Some("bool"));
+    }
+
+    #[test]
+    fn test_as_builtin_str_for_string() {
+        assert_eq!(TypeInfoKind::String.as_builtin_str(), Some("string"));
+    }
+
+    #[test]
+    fn test_as_builtin_str_for_numbers() {
+        for nt in NumberType::ALL {
+            let kind = TypeInfoKind::Number(*nt);
+            assert_eq!(kind.as_builtin_str(), Some(nt.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_as_builtin_str_returns_none_for_non_builtins() {
+        assert_eq!(
+            TypeInfoKind::Custom("Foo".to_string()).as_builtin_str(),
+            None
+        );
+        assert_eq!(
+            TypeInfoKind::Struct("Bar".to_string()).as_builtin_str(),
+            None
+        );
+        assert_eq!(
+            TypeInfoKind::Array(Box::new(TypeInfo::boolean()), None).as_builtin_str(),
+            None
+        );
+        assert_eq!(
+            TypeInfoKind::Generic("T".to_string()).as_builtin_str(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_from_builtin_str_numbers() {
+        for nt in NumberType::ALL {
+            let result = TypeInfoKind::from_builtin_str(nt.as_str());
+            assert_eq!(result, Some(TypeInfoKind::Number(*nt)));
+        }
+    }
+
+    #[test]
+    fn test_from_builtin_str_non_numeric() {
+        assert_eq!(TypeInfoKind::from_builtin_str("unit"), Some(TypeInfoKind::Unit));
+        assert_eq!(TypeInfoKind::from_builtin_str("bool"), Some(TypeInfoKind::Bool));
+        assert_eq!(TypeInfoKind::from_builtin_str("string"), Some(TypeInfoKind::String));
+    }
+
+    #[test]
+    fn test_from_builtin_str_case_insensitive() {
+        assert_eq!(TypeInfoKind::from_builtin_str("BOOL"), Some(TypeInfoKind::Bool));
+        assert_eq!(TypeInfoKind::from_builtin_str("Bool"), Some(TypeInfoKind::Bool));
+        assert_eq!(TypeInfoKind::from_builtin_str("STRING"), Some(TypeInfoKind::String));
+        assert_eq!(TypeInfoKind::from_builtin_str("Unit"), Some(TypeInfoKind::Unit));
+        assert_eq!(TypeInfoKind::from_builtin_str("I32"), Some(TypeInfoKind::Number(NumberType::I32)));
+    }
+
+    #[test]
+    fn test_from_builtin_str_invalid() {
+        assert_eq!(TypeInfoKind::from_builtin_str("invalid"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("CustomType"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str(""), None);
+    }
+
+    #[test]
+    fn test_as_builtin_str_roundtrip() {
+        let builtins = [
+            TypeInfoKind::Unit,
+            TypeInfoKind::Bool,
+            TypeInfoKind::String,
+            TypeInfoKind::Number(NumberType::I32),
+            TypeInfoKind::Number(NumberType::U64),
+        ];
+
+        for kind in builtins {
+            let name = kind.as_builtin_str().expect("should have builtin name");
+            let parsed = TypeInfoKind::from_builtin_str(name).expect("should parse back");
+            assert_eq!(kind, parsed);
+        }
+    }
+}

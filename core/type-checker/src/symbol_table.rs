@@ -404,24 +404,20 @@ impl SymbolTable {
     fn init_builtin_types(&mut self) {
         use crate::type_info::{NumberType, TypeInfoKind};
 
-        let builtins = [
-            ("i8", TypeInfoKind::Number(NumberType::I8)),
-            ("i16", TypeInfoKind::Number(NumberType::I16)),
-            ("i32", TypeInfoKind::Number(NumberType::I32)),
-            ("i64", TypeInfoKind::Number(NumberType::I64)),
-            ("u8", TypeInfoKind::Number(NumberType::U8)),
-            ("u16", TypeInfoKind::Number(NumberType::U16)),
-            ("u32", TypeInfoKind::Number(NumberType::U32)),
-            ("u64", TypeInfoKind::Number(NumberType::U64)),
-            ("bool", TypeInfoKind::Bool),
-            ("string", TypeInfoKind::String),
-        ];
-
         if let Some(scope) = &self.current_scope {
             let mut scope_mut = scope.borrow_mut();
-            for (name, kind) in builtins {
+
+            for number_type in NumberType::ALL {
                 let type_info = TypeInfo {
-                    kind,
+                    kind: TypeInfoKind::Number(*number_type),
+                    type_params: vec![],
+                };
+                let _ = scope_mut.insert_symbol(number_type.as_str(), Symbol::Type(type_info));
+            }
+
+            for (name, kind) in TypeInfoKind::NON_NUMERIC_BUILTINS {
+                let type_info = TypeInfo {
+                    kind: kind.clone(),
                     type_params: vec![],
                 };
                 let _ = scope_mut.insert_symbol(name, Symbol::Type(type_info));

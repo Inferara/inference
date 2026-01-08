@@ -16,7 +16,7 @@ use std::fmt::{Display, Formatter};
 use inference_ast::nodes::Type;
 use rustc_hash::FxHashMap;
 
-#[derive(Debug, Eq, PartialEq, Clone, Hash)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
 pub enum NumberType {
     I8,
     I16,
@@ -26,6 +26,56 @@ pub enum NumberType {
     U16,
     U32,
     U64,
+}
+
+impl NumberType {
+    /// All numeric type variants for iteration.
+    ///
+    /// Use this constant to enumerate all supported numeric types without
+    /// hardcoding the list in multiple places.
+    pub const ALL: &'static [NumberType] = &[
+        NumberType::I8,
+        NumberType::I16,
+        NumberType::I32,
+        NumberType::I64,
+        NumberType::U8,
+        NumberType::U16,
+        NumberType::U32,
+        NumberType::U64,
+    ];
+
+    /// Returns the canonical lowercase string representation of this numeric type.
+    ///
+    /// This is the source-code representation (e.g., "i32", "u64").
+    #[must_use = "returns the string representation without modifying self"]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            NumberType::I8 => "i8",
+            NumberType::I16 => "i16",
+            NumberType::I32 => "i32",
+            NumberType::I64 => "i64",
+            NumberType::U8 => "u8",
+            NumberType::U16 => "u16",
+            NumberType::U32 => "u32",
+            NumberType::U64 => "u64",
+        }
+    }
+}
+
+impl std::str::FromStr for NumberType {
+    type Err = ();
+
+    /// Parses a string into a `NumberType` (case-insensitive).
+    ///
+    /// Returns `Ok(NumberType)` if the string matches a known numeric type,
+    /// or `Err(())` if no match is found.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .find(|nt| nt.as_str().eq_ignore_ascii_case(s))
+            .copied()
+            .ok_or(())
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
@@ -51,16 +101,7 @@ impl Display for TypeInfoKind {
             TypeInfoKind::Unit => write!(f, "Unit"),
             TypeInfoKind::Bool => write!(f, "Bool"),
             TypeInfoKind::String => write!(f, "String"),
-            TypeInfoKind::Number(number_type) => match number_type {
-                NumberType::I8 => write!(f, "i8"),
-                NumberType::I16 => write!(f, "i16"),
-                NumberType::I32 => write!(f, "i32"),
-                NumberType::I64 => write!(f, "i64"),
-                NumberType::U8 => write!(f, "u8"),
-                NumberType::U16 => write!(f, "u16"),
-                NumberType::U32 => write!(f, "u32"),
-                NumberType::U64 => write!(f, "u64"),
-            },
+            TypeInfoKind::Number(number_type) => write!(f, "{}", number_type.as_str()),
             TypeInfoKind::Array(ty, length) => {
                 if let Some(length) = length {
                     return write!(f, "[{ty}; {length}]");
@@ -80,9 +121,53 @@ impl Display for TypeInfoKind {
 }
 
 impl TypeInfoKind {
-    #[must_use]
+    /// Non-numeric primitive builtin type names (case-insensitive lookup).
+    ///
+    /// This constant provides the canonical mapping from source-code type names
+    /// to their corresponding `TypeInfoKind` variants for unit, bool, and string.
+    /// Use this to enumerate non-numeric builtins without hardcoding the list.
+    pub const NON_NUMERIC_BUILTINS: &'static [(&'static str, TypeInfoKind)] = &[
+        ("unit", TypeInfoKind::Unit),
+        ("bool", TypeInfoKind::Bool),
+        ("string", TypeInfoKind::String),
+    ];
+
+    #[must_use = "this is a pure check with no side effects"]
     pub fn is_number(&self) -> bool {
         matches!(self, TypeInfoKind::Number(_))
+    }
+
+    /// Returns the canonical lowercase source-code name if this is a primitive builtin type.
+    ///
+    /// Returns `Some("i32")` for `Number(I32)`, `Some("bool")` for `Bool`, etc.
+    /// Returns `None` for compound types like `Array`, `Custom`, `Struct`, etc.
+    ///
+    /// Note: The `Display` impl outputs capitalized names ("Bool", "String") for
+    /// non-numeric builtins, while this method returns lowercase source-code names.
+    #[must_use = "returns the builtin name without modifying self"]
+    pub fn as_builtin_str(&self) -> Option<&'static str> {
+        match self {
+            TypeInfoKind::Unit => Some("unit"),
+            TypeInfoKind::Bool => Some("bool"),
+            TypeInfoKind::String => Some("string"),
+            TypeInfoKind::Number(nt) => Some(nt.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Parses a string into a primitive builtin `TypeInfoKind` (case-insensitive).
+    ///
+    /// Accepts type names like "i32", "I32", "bool", "BOOL", "string", "unit", etc.
+    /// Returns `None` if the string does not match any builtin type.
+    #[must_use = "parsing result should be checked; returns None if not a builtin"]
+    pub fn from_builtin_str(s: &str) -> Option<Self> {
+        if let Ok(number_type) = s.parse::<NumberType>() {
+            return Some(TypeInfoKind::Number(number_type));
+        }
+        Self::NON_NUMERIC_BUILTINS
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(s))
+            .map(|(_, kind)| kind.clone())
     }
 }
 
@@ -310,19 +395,7 @@ impl TypeInfo {
     }
 
     fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
-        match simple_type_name.to_lowercase().as_str() {
-            "bool" => TypeInfoKind::Bool,
-            "string" => TypeInfoKind::String,
-            "unit" => TypeInfoKind::Unit,
-            "i8" => TypeInfoKind::Number(NumberType::I8),
-            "i16" => TypeInfoKind::Number(NumberType::I16),
-            "i32" => TypeInfoKind::Number(NumberType::I32),
-            "i64" => TypeInfoKind::Number(NumberType::I64),
-            "u8" => TypeInfoKind::Number(NumberType::U8),
-            "u16" => TypeInfoKind::Number(NumberType::U16),
-            "u32" => TypeInfoKind::Number(NumberType::U32),
-            "u64" => TypeInfoKind::Number(NumberType::U64),
-            _ => TypeInfoKind::Custom(simple_type_name.to_string()),
-        }
+        TypeInfoKind::from_builtin_str(simple_type_name)
+            .unwrap_or_else(|| TypeInfoKind::Custom(simple_type_name.to_string()))
     }
 }
