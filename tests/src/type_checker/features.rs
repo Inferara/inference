@@ -581,20 +581,24 @@ mod import_tests {
         }
 
         #[test]
-        fn test_find_module_root_fallback() {
+        fn test_find_module_root_no_fallback_to_root() {
             use std::fs;
 
             let temp_dir =
                 std::env::temp_dir().join(format!("test_fallback_{}", std::process::id()));
             fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
 
+            // Create lib.inf at root level (not in src/)
             let lib_file = temp_dir.join("lib.inf");
             fs::write(&lib_file, "pub struct TestStruct { x: i32; }")
                 .expect("Failed to write lib.inf");
 
+            // Following root-level lib.inf should NOT be found
             let root = inference_ast::extern_prelude::find_module_root(&temp_dir);
-            assert!(root.is_some(), "Should find lib.inf as fallback");
-            assert_eq!(root.unwrap(), lib_file);
+            assert!(
+                root.is_none(),
+                "Should NOT find lib.inf at root - must be inside src directory"
+            );
 
             let _ = fs::remove_dir_all(&temp_dir);
         }

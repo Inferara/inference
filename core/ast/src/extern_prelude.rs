@@ -10,6 +10,7 @@ use rustc_hash::FxHashMap;
 
 use crate::arena::Arena;
 use crate::builder::Builder;
+use crate::errors::AstError;
 
 /// Represents a parsed external module
 #[derive(Clone)]
@@ -31,7 +32,6 @@ pub type ExternPrelude = FxHashMap<String, ParsedModule>;
 /// Searches for the main entry point of a module in standard locations:
 /// 1. `{module_dir}/src/lib.inf`
 /// 2. `{module_dir}/src/main.inf`
-/// 3. `{module_dir}/lib.inf`
 ///
 /// Returns the first path that exists, or `None` if no root file is found.
 #[must_use = "discarding the result loses the found path"]
@@ -39,7 +39,6 @@ pub fn find_module_root(module_dir: &Path) -> Option<PathBuf> {
     let candidates = [
         module_dir.join("src").join("lib.inf"),
         module_dir.join("src").join("main.inf"),
-        module_dir.join("lib.inf"),
     ];
 
     candidates.into_iter().find(|p| p.exists())
@@ -60,7 +59,7 @@ pub fn create_empty_prelude() -> ExternPrelude {
 /// and adds the resulting AST to the prelude registry.
 ///
 /// Module names are normalized: hyphens are replaced with underscores to match
-/// Rust's convention for crate names.
+/// Inference's convention for crate names.
 ///
 /// # Arguments
 /// * `module_dir` - Path to the module's root directory
@@ -95,15 +94,19 @@ pub fn parse_external_module(
         return Ok(());
     }
 
-    let root_path = find_module_root(module_dir).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No module root found in {}. Expected src/lib.inf, src/main.inf, or lib.inf",
-            module_dir.display()
-        )
+    let root_path = find_module_root(module_dir).ok_or_else(|| AstError::ModuleRootNotFound {
+        path: module_dir.to_path_buf(),
+        expected: format!(
+            "src{}lib.inf or src{}main.inf",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        ),
     })?;
 
-    let source = std::fs::read_to_string(&root_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", root_path.display(), e))?;
+    let source = std::fs::read_to_string(&root_path).map_err(|e| AstError::FileReadError {
+        path: root_path.clone(),
+        source: e,
+    })?;
 
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
@@ -113,13 +116,16 @@ pub fn parse_external_module(
 
     let tree = parser
         .parse(&source, None)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse {}", root_path.display()))?;
+        .ok_or_else(|| AstError::ParseError {
+            path: root_path.clone(),
+        })?;
 
     let mut builder = Builder::new();
     builder.add_source_code(tree.root_node(), source.as_bytes());
-    let completed = builder
-        .build_ast()
-        .map_err(|e| anyhow::anyhow!("Failed to build AST for {}: {}", root_path.display(), e))?;
+    let completed = builder.build_ast().map_err(|e| AstError::AstBuildError {
+        path: root_path.clone(),
+        reason: e.to_string(),
+    })?;
 
     let arena = completed.arena();
 
