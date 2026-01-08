@@ -4,7 +4,7 @@
 //! during type checking. It supports:
 //!
 //! - Hierarchical scopes with parent-child relationships
-//! - Type, struct, enum, spec, and function symbol registration
+//! - Type alias, struct, enum, spec, and function symbol registration
 //! - Variable tracking within scopes
 //! - Method resolution on types
 //! - Import registration and resolution
@@ -133,7 +133,9 @@ pub(crate) struct ResolvedImport {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Symbol {
-    Type(TypeInfo),
+    /// A type alias mapping a name to another type (`type X = Y;`).
+    /// Also used for builtin type bindings (i32, bool, etc.).
+    TypeAlias(TypeInfo),
     Struct(StructInfo),
     Enum(EnumInfo),
     Spec(String),
@@ -145,7 +147,7 @@ impl Symbol {
     #[must_use = "discarding the name has no effect"]
     pub(crate) fn name(&self) -> String {
         match self {
-            Symbol::Type(ti) => ti.to_string(),
+            Symbol::TypeAlias(ti) => ti.to_string(),
             Symbol::Struct(info) => info.name.clone(),
             Symbol::Enum(info) => info.name.clone(),
             Symbol::Spec(name) => name.clone(),
@@ -183,7 +185,7 @@ impl Symbol {
     #[must_use = "this is a pure conversion with no side effects"]
     pub(crate) fn as_type_info(&self) -> Option<TypeInfo> {
         match self {
-            Symbol::Type(ti) => Some(ti.clone()),
+            Symbol::TypeAlias(ti) => Some(ti.clone()),
             Symbol::Struct(info) => Some(TypeInfo {
                 kind: crate::type_info::TypeInfoKind::Struct(info.name.clone()),
                 type_params: info.type_params.clone(),
@@ -203,11 +205,11 @@ impl Symbol {
     /// Check if this symbol has public visibility.
     ///
     /// Structs, Enums, and Functions respect their visibility field.
-    /// Types and Specs are currently treated as public.
+    /// Type aliases and Specs are currently treated as public.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_public(&self) -> bool {
         match self {
-            Symbol::Type(_) => true,
+            Symbol::TypeAlias(_) => true,
             Symbol::Struct(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Enum(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Spec(_) => true,
@@ -409,7 +411,7 @@ impl SymbolTable {
                     kind: TypeInfoKind::Number(*number_type),
                     type_params: vec![],
                 };
-                let _ = scope_mut.insert_symbol(number_type.as_str(), Symbol::Type(type_info));
+                let _ = scope_mut.insert_symbol(number_type.as_str(), Symbol::TypeAlias(type_info));
             }
 
             for (name, kind) in TypeInfoKind::NON_NUMERIC_BUILTINS {
@@ -417,7 +419,7 @@ impl SymbolTable {
                     kind: kind.clone(),
                     type_params: vec![],
                 };
-                let _ = scope_mut.insert_symbol(name, Symbol::Type(type_info));
+                let _ = scope_mut.insert_symbol(name, Symbol::TypeAlias(type_info));
             }
         }
     }
@@ -474,7 +476,7 @@ impl SymbolTable {
             };
             scope
                 .borrow_mut()
-                .insert_symbol(name, Symbol::Type(type_info))
+                .insert_symbol(name, Symbol::TypeAlias(type_info))
         } else {
             bail!("No active scope to register type")
         }
@@ -904,6 +906,150 @@ impl SymbolTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_info::{NumberType, TypeInfoKind};
+
+    mod symbol_type_alias {
+        use super::*;
+
+        #[test]
+        fn name_returns_type_info_string_representation() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            let name = symbol.name();
+
+            assert_eq!(name, "i32");
+        }
+
+        #[test]
+        fn as_type_info_returns_clone_of_wrapped_type() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::U64),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info.clone());
+
+            let result = symbol.as_type_info();
+
+            assert!(result.is_some());
+            let result_type = result.unwrap();
+            assert!(matches!(result_type.kind, TypeInfoKind::Number(NumberType::U64)));
+        }
+
+        #[test]
+        fn as_type_info_with_custom_type() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Custom("MyType".to_string()),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            let result = symbol.as_type_info();
+
+            assert!(result.is_some());
+            let result_type = result.unwrap();
+            assert!(matches!(result_type.kind, TypeInfoKind::Custom(ref s) if s == "MyType"));
+        }
+
+        #[test]
+        fn is_public_always_returns_true() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            assert!(symbol.is_public());
+        }
+
+        #[test]
+        fn register_type_creates_type_alias_with_provided_type() {
+            use inference_ast::nodes::{Location, SimpleType};
+            use std::rc::Rc;
+
+            let mut table = SymbolTable::default();
+            let simple_type = Type::Simple(Rc::new(SimpleType::new(
+                0,
+                Location::default(),
+                "i32".into(),
+            )));
+
+            let result = table.register_type("MyInt", Some(&simple_type));
+
+            assert!(result.is_ok());
+            let lookup = table.lookup_type("MyInt");
+            assert!(lookup.is_some());
+        }
+
+        #[test]
+        fn register_type_creates_custom_type_when_none_provided() {
+            let mut table = SymbolTable::default();
+
+            let result = table.register_type("MyCustomType", None);
+
+            assert!(result.is_ok());
+            let lookup = table.lookup_type("MyCustomType");
+            assert!(lookup.is_some());
+            let type_info = lookup.unwrap();
+            assert!(matches!(type_info.kind, TypeInfoKind::Custom(ref s) if s == "MyCustomType"));
+        }
+
+        #[test]
+        fn builtin_types_are_registered_as_type_aliases() {
+            let table = SymbolTable::default();
+
+            assert!(table.lookup_type("i32").is_some());
+            assert!(table.lookup_type("u64").is_some());
+            assert!(table.lookup_type("bool").is_some());
+            assert!(table.lookup_type("unit").is_some());
+        }
+
+        #[test]
+        fn lookup_type_returns_type_alias_info() {
+            let mut table = SymbolTable::default();
+            table.register_type("TestType", None).unwrap();
+
+            let result = table.lookup_type("TestType");
+
+            assert!(result.is_some());
+        }
+
+        #[test]
+        fn as_function_returns_none_for_type_alias() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            assert!(symbol.as_function().is_none());
+        }
+
+        #[test]
+        fn as_struct_returns_none_for_type_alias() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            assert!(symbol.as_struct().is_none());
+        }
+
+        #[test]
+        fn as_enum_returns_none_for_type_alias() {
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let symbol = Symbol::TypeAlias(type_info);
+
+            assert!(symbol.as_enum().is_none());
+        }
+    }
 
     mod anonymous_scope_naming {
         use super::*;
