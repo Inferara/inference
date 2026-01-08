@@ -98,6 +98,24 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
                 return Err(e);
             }
         }
+
+        debug_assert!(
+            {
+                let untyped = ctx.find_untyped_expressions();
+                if !untyped.is_empty() {
+                    eprintln!(
+                        "Type checker bug: {} expression(s) without TypeInfo:",
+                        untyped.len()
+                    );
+                    for m in &untyped {
+                        eprintln!("  - {} at {} (id: {})", m.kind, m.location, m.id);
+                    }
+                }
+                untyped.is_empty()
+            },
+            "All expressions should have TypeInfo after type checking"
+        );
+
         Ok(TypeCheckerBuilder {
             typed_context: ctx,
             _state: PhantomData,

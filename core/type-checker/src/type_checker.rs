@@ -262,9 +262,10 @@ impl TypeChecker {
             for definition in &sf.definitions {
                 match definition {
                     Definition::Constant(constant_definition) => {
+                        let const_type = TypeInfo::new(&constant_definition.ty);
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
-                            TypeInfo::new(&constant_definition.ty),
+                            const_type.clone(),
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
@@ -273,6 +274,7 @@ impl TypeChecker {
                                 location: constant_definition.location.clone(),
                             });
                         }
+                        ctx.set_node_typeinfo(constant_definition.value.id(), const_type);
                     }
                     Definition::Function(function_definition) => {
                         for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
@@ -294,6 +296,7 @@ impl TypeChecker {
                                         &arg.ty,
                                         function_definition.type_parameters.as_ref(),
                                     );
+                                    ctx.set_node_typeinfo(arg.name.id, TypeInfo::new(&arg.ty));
                                 }
                                 ArgumentType::Type(ty) => {
                                     self.validate_type(
@@ -303,6 +306,16 @@ impl TypeChecker {
                                 }
                             }
                         }
+                        ctx.set_node_typeinfo(
+                            function_definition.name.id,
+                            TypeInfo {
+                                kind: TypeInfoKind::Function(function_definition.name()),
+                                type_params: function_definition
+                                    .type_parameters
+                                    .as_ref()
+                                    .map_or(vec![], |p| p.iter().map(|i| i.name.clone()).collect()),
+                            },
+                        );
                         if let Some(return_type) = &function_definition.returns {
                             self.validate_type(
                                 return_type,
@@ -713,6 +726,10 @@ impl TypeChecker {
                         location: variable_definition_statement.location.clone(),
                     });
                 }
+                ctx.set_node_typeinfo(
+                    variable_definition_statement.name.id,
+                    target_type.clone(),
+                );
                 ctx.set_node_typeinfo(variable_definition_statement.id, target_type);
             }
             Statement::TypeDefinition(type_definition_statement) => {
@@ -756,6 +773,7 @@ impl TypeChecker {
                         location: constant_definition.location.clone(),
                     });
                 }
+                ctx.set_node_typeinfo(constant_definition.value.id(), constant_type.clone());
                 ctx.set_node_typeinfo(constant_definition.id, constant_type);
             }
         }
@@ -1034,6 +1052,16 @@ impl TypeChecker {
                             }
 
                             ctx.set_node_typeinfo(
+                                type_member_access.id,
+                                TypeInfo {
+                                    kind: TypeInfoKind::Function(format!(
+                                        "{}::{}",
+                                        type_name, method_name
+                                    )),
+                                    type_params: vec![],
+                                },
+                            );
+                            ctx.set_node_typeinfo(
                                 function_call_expression.id,
                                 signature.return_type.clone(),
                             );
@@ -1112,6 +1140,16 @@ impl TypeChecker {
                                     }
                                 }
 
+                                ctx.set_node_typeinfo(
+                                    member_access.id,
+                                    TypeInfo {
+                                        kind: TypeInfoKind::Function(format!(
+                                            "{}::{}",
+                                            type_name, method_name
+                                        )),
+                                        type_params: vec![],
+                                    },
+                                );
                                 ctx.set_node_typeinfo(
                                     function_call_expression.id,
                                     signature.return_type.clone(),
@@ -1296,7 +1334,12 @@ impl TypeChecker {
                 }
             }
             Expression::Parenthesized(parenthesized_expression) => {
-                self.infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx)
+                let inner_type =
+                    self.infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx);
+                if let Some(ref type_info) = inner_type {
+                    ctx.set_node_typeinfo(parenthesized_expression.id, type_info.clone());
+                }
+                inner_type
             }
             Expression::Binary(binary_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(binary_expression.id) {
@@ -1382,8 +1425,8 @@ impl TypeChecker {
             }
             Expression::Literal(literal) => match literal {
                 Literal::Array(array_literal) => {
-                    if ctx.get_node_typeinfo(array_literal.id).is_some() {
-                        return ctx.get_node_typeinfo(array_literal.id);
+                    if let Some(type_info) = ctx.get_node_typeinfo(array_literal.id) {
+                        return Some(type_info);
                     }
                     if let Some(elements) = &array_literal.elements
                         && let Some(element_type_info) =
@@ -1402,8 +1445,16 @@ impl TypeChecker {
                                 });
                             }
                         }
+                        let array_type = TypeInfo {
+                            kind: TypeInfoKind::Array(
+                                Box::new(element_type_info),
+                                Some(elements.len() as u32),
+                            ),
+                            type_params: vec![],
+                        };
+                        ctx.set_node_typeinfo(array_literal.id, array_type.clone());
+                        return Some(array_type);
                     }
-
                     None
                 }
                 Literal::Bool(_) => {
@@ -1442,7 +1493,16 @@ impl TypeChecker {
                     None
                 }
             }
-            Expression::Type(type_expr) => Some(TypeInfo::new(type_expr)),
+            Expression::Type(type_expr) => {
+                let type_info = TypeInfo::new(type_expr);
+                ctx.set_node_typeinfo(type_expr.id(), type_info.clone());
+                if let Type::Array(array_type) = type_expr
+                    && let Some(ref size_expr) = array_type.size
+                {
+                    self.infer_expression(&mut size_expr.clone(), ctx);
+                }
+                Some(type_info)
+            }
             Expression::Uzumaki(uzumaki) => ctx.get_node_typeinfo(uzumaki.id),
         }
     }

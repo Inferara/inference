@@ -13,7 +13,7 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use inference_ast::nodes::Type;
+use inference_ast::nodes::{Expression, Literal, Type};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
@@ -260,16 +260,19 @@ impl TypeInfo {
                 kind: TypeInfoKind::Qualified(qualified.name.name.clone()),
                 type_params: vec![],
             },
-            Type::Array(array) => Self {
-                kind: TypeInfoKind::Array(
-                    Box::new(Self::new_with_type_params(
-                        &array.element_type,
-                        type_param_names,
-                    )),
-                    None,
-                ),
-                type_params: vec![],
-            },
+            Type::Array(array) => {
+                let size = extract_array_size(&array.size);
+                Self {
+                    kind: TypeInfoKind::Array(
+                        Box::new(Self::new_with_type_params(
+                            &array.element_type,
+                            type_param_names,
+                        )),
+                        size,
+                    ),
+                    type_params: vec![],
+                }
+            }
             Type::Function(func) => {
                 let param_types = func
                     .parameters
@@ -398,4 +401,13 @@ impl TypeInfo {
         TypeInfoKind::from_builtin_str(simple_type_name)
             .unwrap_or_else(|| TypeInfoKind::Custom(simple_type_name.to_string()))
     }
+}
+
+//TODO: Should probably return `u32`
+fn extract_array_size(size_expr: &Option<Expression>) -> Option<u32> {
+    let expr = size_expr.as_ref()?;
+    if let Expression::Literal(Literal::Number(num_lit)) = expr {
+        return num_lit.value.parse::<u32>().ok();
+    }
+    None
 }
