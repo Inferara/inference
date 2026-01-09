@@ -29,7 +29,7 @@
 
 mod parser;
 use clap::Parser;
-use inference::{analyze, codegen, parse, wasm_to_v};
+use inference::{analyze, codegen, parse, type_check, wasm_to_v};
 use parser::Cli;
 use std::{
     fs,
@@ -78,20 +78,30 @@ fn main() {
         }
     }
 
-    let Some(t_ast) = t_ast else {
+    let Some(arena) = t_ast else {
         unreachable!("Phase validation guarantees parse ran when required");
     };
 
-    if need_codegen || need_analyze {
-        if let Err(e) = analyze(&t_ast) {
-            eprintln!("Analysis failed: {e}");
-            process::exit(1);
-        }
-        println!("Analyzed: {}", args.path.display());
-    }
+    let mut typed_context = None;
 
+    if need_codegen || need_analyze {
+        match type_check(arena) {
+            Err(e) => {
+                eprintln!("Type checking failed: {e}");
+                process::exit(1);
+            }
+            Ok(tctx) => {
+                typed_context = Some(tctx);
+                if let Err(e) = analyze(typed_context.as_ref().unwrap()) {
+                    eprintln!("Analysis failed: {e}");
+                    process::exit(1);
+                }
+                println!("Analyzed: {}", args.path.display());
+            }
+        }
+    }
     if need_codegen {
-        let wasm = match codegen(&t_ast) {
+        let wasm = match codegen(&typed_context.unwrap()) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!("Codegen failed: {e}");

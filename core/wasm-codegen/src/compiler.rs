@@ -1,9 +1,10 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
 use crate::utils;
-use inference_ast::{
-    nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type},
-    type_info::{NumberTypeKindNumberType, TypeInfoKind},
+use inference_ast::nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type};
+use inference_type_checker::{
+    type_info::{NumberType, TypeInfoKind},
+    typed_context::TypedContext,
 };
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
@@ -57,7 +58,11 @@ impl<'ctx> Compiler<'ctx> {
         function.add_attribute(AttributeLoc::Function, noinline);
     }
 
-    pub(crate) fn visit_function_definition(&self, function_definition: &Rc<FunctionDefinition>) {
+    pub(crate) fn visit_function_definition(
+        &self,
+        function_definition: &Rc<FunctionDefinition>,
+        ctx: &TypedContext,
+    ) {
         let fn_name = function_definition.name();
         let fn_type = match &function_definition.returns {
             Some(ret_type) => match ret_type {
@@ -91,6 +96,7 @@ impl<'ctx> Compiler<'ctx> {
         self.lower_statement(
             std::iter::once(Statement::Block(function_definition.body.clone())).peekable(),
             &mut vec![function_definition.body.clone()],
+            ctx,
         );
         if function_definition.is_void() {
             self.builder.build_return(None).unwrap();
@@ -102,6 +108,7 @@ impl<'ctx> Compiler<'ctx> {
         &self,
         mut statements_iterator: Peekable<I>,
         parent_blocks_stack: &mut Vec<BlockType>,
+        ctx: &TypedContext,
     ) {
         let statement = statements_iterator.next().unwrap();
         match statement {
@@ -109,7 +116,11 @@ impl<'ctx> Compiler<'ctx> {
                 BlockType::Block(block) => {
                     parent_blocks_stack.push(BlockType::Block(block.clone()));
                     for stmt in block.statements.clone() {
-                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(
+                            std::iter::once(stmt).peekable(),
+                            parent_blocks_stack,
+                            ctx,
+                        );
                     }
                     parent_blocks_stack.pop();
                 }
@@ -120,7 +131,11 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build forall intrinsic call");
                     parent_blocks_stack.push(BlockType::Forall(forall_block.clone()));
                     for stmt in forall_block.statements.clone() {
-                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(
+                            std::iter::once(stmt).peekable(),
+                            parent_blocks_stack,
+                            ctx,
+                        );
                     }
                     let forall_end = self.forall_end_intrinsic();
                     self.builder
@@ -135,7 +150,11 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build assume intrinsic call");
                     parent_blocks_stack.push(BlockType::Assume(assume_block.clone()));
                     for stmt in assume_block.statements.clone() {
-                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(
+                            std::iter::once(stmt).peekable(),
+                            parent_blocks_stack,
+                            ctx,
+                        );
                     }
                     let assume_end = self.assume_end_intrinsic();
                     self.builder
@@ -150,7 +169,11 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build exists intrinsic call");
                     parent_blocks_stack.push(BlockType::Exists(exists_block.clone()));
                     for stmt in exists_block.statements.clone() {
-                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(
+                            std::iter::once(stmt).peekable(),
+                            parent_blocks_stack,
+                            ctx,
+                        );
                     }
                     let exists_end = self.exists_end_intrinsic();
                     self.builder
@@ -165,7 +188,11 @@ impl<'ctx> Compiler<'ctx> {
                         .expect("Failed to build unique intrinsic call");
                     parent_blocks_stack.push(BlockType::Unique(unique_block.clone()));
                     for stmt in unique_block.statements.clone() {
-                        self.lower_statement(std::iter::once(stmt).peekable(), parent_blocks_stack);
+                        self.lower_statement(
+                            std::iter::once(stmt).peekable(),
+                            parent_blocks_stack,
+                            ctx,
+                        );
                     }
                     let unique_end = self.unique_end_intrinsic();
                     self.builder
@@ -175,7 +202,7 @@ impl<'ctx> Compiler<'ctx> {
                 }
             },
             Statement::Expression(expression) => {
-                let expr = self.lower_expression(&expression);
+                let expr = self.lower_expression(&expression, ctx);
                 //FIXME: revisit this logic #45
                 if statements_iterator.peek().is_none()
                     && parent_blocks_stack.first().unwrap().is_non_det()
@@ -187,7 +214,7 @@ impl<'ctx> Compiler<'ctx> {
             }
             Statement::Assign(_assign_statement) => todo!(),
             Statement::Return(return_statement) => {
-                let ret = self.lower_expression(&return_statement.expression.borrow());
+                let ret = self.lower_expression(&return_statement.expression.borrow(), ctx);
                 self.builder.build_return(Some(&ret)).unwrap();
             }
             Statement::Loop(_loop_statement) => todo!(),
@@ -206,75 +233,69 @@ impl<'ctx> Compiler<'ctx> {
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
-            Statement::ConstantDefinition(constant_definition) => match &constant_definition.ty {
-                Type::Array(_type_array) => todo!(),
-                Type::Simple(simple_type) => {
-                    match &simple_type
-                        .type_info
-                        .borrow()
-                        .as_ref()
-                        .expect("SimpleType should have type_info set")
-                        .kind
-                    {
-                        TypeInfoKind::Unit => todo!(),
-                        TypeInfoKind::Bool => todo!(),
-                        TypeInfoKind::String => todo!(),
-                        TypeInfoKind::Number(number_type_kind_number_type) => {
-                            match number_type_kind_number_type {
-                                NumberTypeKindNumberType::I8 => todo!(),
-                                NumberTypeKindNumberType::I16 => todo!(),
-                                NumberTypeKindNumberType::I32 => {
-                                    let ctx_type = self.context.i32_type();
-                                    match &constant_definition.value {
-                                        Literal::Number(number_literal) => {
-                                            let val = ctx_type.const_int(
-                                                number_literal.value.parse::<u64>().unwrap_or(0),
-                                                false,
-                                            );
-                                            let local = self
-                                                .builder
-                                                .build_alloca(ctx_type, &constant_definition.name())
-                                                .unwrap();
-                                            self.builder.build_store(local, val).unwrap();
-                                            self.variables.borrow_mut().insert(
-                                                constant_definition.name(),
-                                                (local, ctx_type.into()),
-                                            );
-                                        }
-                                        _ => panic!(
-                                            "Constant value for i32 should be a number literal. Found: {:?}",
-                                            constant_definition.value
-                                        ),
+            Statement::ConstantDefinition(constant_definition) => {
+                match ctx
+                    .get_node_typeinfo(constant_definition.id)
+                    .expect("Constant definition must have a type info")
+                    .kind
+                {
+                    TypeInfoKind::Unit => todo!(),
+                    TypeInfoKind::Bool => todo!(),
+                    TypeInfoKind::String => todo!(),
+                    TypeInfoKind::Number(number_type_kind_number_type) => {
+                        match number_type_kind_number_type {
+                            NumberType::I8 => todo!(),
+                            NumberType::I16 => todo!(),
+                            NumberType::I32 => {
+                                let ctx_type = self.context.i32_type();
+                                match &constant_definition.value {
+                                    Literal::Number(number_literal) => {
+                                        let val = ctx_type.const_int(
+                                            number_literal.value.parse::<u64>().unwrap_or(0),
+                                            false,
+                                        );
+                                        let local = self
+                                            .builder
+                                            .build_alloca(ctx_type, &constant_definition.name())
+                                            .unwrap();
+                                        self.builder.build_store(local, val).unwrap();
+                                        self.variables.borrow_mut().insert(
+                                            constant_definition.name(),
+                                            (local, ctx_type.into()),
+                                        );
                                     }
+                                    _ => panic!(
+                                        "Constant value for i32 should be a number literal. Found: {:?}",
+                                        constant_definition.value
+                                    ),
                                 }
-                                NumberTypeKindNumberType::I64 => todo!(),
-                                NumberTypeKindNumberType::U8 => todo!(),
-                                NumberTypeKindNumberType::U16 => todo!(),
-                                NumberTypeKindNumberType::U32 => todo!(),
-                                NumberTypeKindNumberType::U64 => todo!(),
                             }
+                            NumberType::I64 => todo!(),
+                            NumberType::U8 => todo!(),
+                            NumberType::U16 => todo!(),
+                            NumberType::U32 => todo!(),
+                            NumberType::U64 => todo!(),
                         }
-                        TypeInfoKind::Custom(_) => todo!(),
-                        TypeInfoKind::Array(_type_info, _) => todo!(),
-                        TypeInfoKind::Generic(_) => todo!(),
-                        TypeInfoKind::QualifiedName(_) => todo!(),
-                        TypeInfoKind::Qualified(_) => todo!(),
-                        TypeInfoKind::Function(_) => todo!(),
-                        TypeInfoKind::Struct(_) => todo!(),
-                        TypeInfoKind::Enum(_) => todo!(),
-                        TypeInfoKind::Spec(_) => todo!(),
                     }
+                    TypeInfoKind::Custom(_) => todo!(),
+                    TypeInfoKind::Array(_type_info, _) => todo!(),
+                    TypeInfoKind::Generic(_) => todo!(),
+                    TypeInfoKind::QualifiedName(_) => todo!(),
+                    TypeInfoKind::Qualified(_) => todo!(),
+                    TypeInfoKind::Function(_) => todo!(),
+                    TypeInfoKind::Struct(_) => todo!(),
+                    TypeInfoKind::Enum(_) => todo!(),
+                    TypeInfoKind::Spec(_) => todo!(),
                 }
-                Type::Generic(_generic_type) => todo!(),
-                Type::Function(_function_type) => todo!(),
-                Type::QualifiedName(_qualified_name) => todo!(),
-                Type::Qualified(_type_qualified_name) => todo!(),
-                Type::Custom(_identifier) => todo!(),
-            },
+            }
         }
     }
 
-    fn lower_expression(&self, expression: &Expression) -> inkwell::values::IntValue<'ctx> {
+    fn lower_expression(
+        &self,
+        expression: &Expression,
+        ctx: &TypedContext,
+    ) -> inkwell::values::IntValue<'ctx> {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
             Expression::Binary(_binary_expression) => todo!(),
@@ -299,10 +320,10 @@ impl<'ctx> Compiler<'ctx> {
             }
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(uzumaki_expression) => {
-                if uzumaki_expression.is_i32() {
+                if ctx.is_node_i32(uzumaki_expression.id) {
                     return self.lower_uzumaki_i32_expression();
                 }
-                if uzumaki_expression.is_i64() {
+                if ctx.is_node_i64(uzumaki_expression.id) {
                     return self.lower_uzumaki_i64_expression();
                 }
                 panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");

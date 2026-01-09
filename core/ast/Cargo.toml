@@ -8,6 +8,9 @@ repository = { workspace = true }
 
 [dependencies]
 uuid = { version = "1.1", features = ["v4"] }
+rustc-hash.workspace = true
 serde.workspace = true
 tree-sitter.workspace = true
+tree-sitter-inference.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true

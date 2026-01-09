@@ -16,13 +16,7 @@ fn test_location_new() {
 fn test_location_display() {
     let loc = Location::new(5, 15, 2, 3, 2, 13, "test source".to_string());
     let display = format!("{loc}");
-    assert!(display.contains("offset_start: 5"));
-    assert!(display.contains("offset_end: 15"));
-    assert!(display.contains("start_line: 2"));
-    assert!(display.contains("start_column: 3"));
-    assert!(display.contains("end_line: 2"));
-    assert!(display.contains("end_column: 13"));
-    assert!(display.contains("source: test source"));
+    assert_eq!(display, "2:3");
 }
 
 #[test]

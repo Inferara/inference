@@ -1,11 +1,9 @@
 use std::{marker::PhantomData, rc::Rc};
 
 use crate::nodes::{
-    ArgumentType, Directive, IgnoreArgument, Misc, SelfReference, StructExpression,
-    TypeMemberAccessExpression,
+    ArgumentType, Ast, Directive, IgnoreArgument, Misc, ModuleDefinition, SelfReference,
+    StructExpression, TypeMemberAccessExpression, Visibility,
 };
-use crate::type_infer::TypeChecker;
-use crate::type_info::TypeInfo;
 use crate::{
     arena::Arena,
     nodes::{
@@ -20,7 +18,6 @@ use crate::{
         TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
         VariableDefinitionStatement,
     },
-    t_ast::TypedAst,
 };
 use tree_sitter::Node;
 
@@ -40,7 +37,6 @@ pub type CompletedBuilder<'a> = Builder<'a, CompleteState>;
 pub struct Builder<'a, S> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    t_ast: Option<TypedAst>,
     _state: PhantomData<S>,
 }
 
@@ -56,7 +52,6 @@ impl<'a> Builder<'a, InitState> {
         Self {
             arena: Arena::default(),
             source_code: Vec::new(),
-            t_ast: None,
             _state: PhantomData,
         }
     }
@@ -85,7 +80,6 @@ impl<'a> Builder<'a, InitState> {
     /// This function will return an error if the `source_file` is malformed and a valid AST cannot be constructed.
     #[allow(clippy::single_match_else)]
     pub fn build_ast(&'_ mut self) -> anyhow::Result<Builder<'_, CompleteState>> {
-        let mut res = Vec::new();
         for (root, code) in &self.source_code.clone() {
             let id = Self::get_node_id();
             let location = Self::get_location(root, code);
@@ -107,22 +101,12 @@ impl<'a> Builder<'a, InitState> {
                     }
                 }
             }
-            res.push(ast);
+            self.arena
+                .add_node(AstNode::Ast(Ast::SourceFile(Rc::new(ast))), u32::MAX);
         }
-        let mut type_checker = TypeChecker::new();
-        let _ = type_checker.infer_types(&mut res);
-
-        // let mut type_checker = TypeChecker::new();
-        let t_ast = TypedAst::new(res, self.arena.clone());
-        t_ast.infer_expression_types();
-        // run type inference over all expressions
-        // type_checker
-        //     .infer_types(&t_ast.source_files)
-        //     .map_err(|e| anyhow::Error::msg(format!("Type error: {e:?}")))?;
         Ok(Builder {
-            arena: Arena::default(),
+            arena: self.arena.clone(),
             source_code: Vec::new(),
-            t_ast: Some(t_ast),
             _state: PhantomData,
         })
     }
@@ -195,7 +179,13 @@ impl<'a> Builder<'a, InitState> {
             definitions.push(definition);
         }
 
-        let node = Rc::new(SpecDefinition::new(id, name, definitions, location));
+        let node = Rc::new(SpecDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            definitions,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Spec(node.clone())),
             parent_id,
@@ -223,7 +213,13 @@ impl<'a> Builder<'a, InitState> {
             variants = founded_variants;
         }
 
-        let node = Rc::new(EnumDefinition::new(id, name, variants, location));
+        let node = Rc::new(EnumDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            variants,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Enum(node.clone())),
             parent_id,
@@ -284,11 +280,19 @@ impl<'a> Builder<'a, InitState> {
         }
         cursor = node.walk();
         let founded_methods = node
-            .children_by_field_name("method", &mut cursor)
+            .children_by_field_name("value", &mut cursor) //FIXME: change to "method" after bumping tree-sitter grammar version to v0.0.38
+            .filter(|n| n.kind() == "function_definition")
             .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
 
-        let node = Rc::new(StructDefinition::new(id, name, fields, methods, location));
+        let node = Rc::new(StructDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            fields,
+            methods,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Struct(node.clone())),
             parent_id,
@@ -320,7 +324,14 @@ impl<'a> Builder<'a, InitState> {
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let value = self.build_literal(id, &node.child_by_field_name("value").unwrap(), code);
 
-        let node = Rc::new(ConstantDefinition::new(id, name, ty, value, location));
+        let node = Rc::new(ConstantDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            ty,
+            value,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Constant(node.clone())),
             parent_id,
@@ -370,6 +381,7 @@ impl<'a> Builder<'a, InitState> {
         let body = self.build_block(id, &body_node, code);
         let node = Rc::new(FunctionDefinition::new(
             id,
+            Visibility::default(),
             name,
             type_parameters,
             arguments,
@@ -411,7 +423,12 @@ impl<'a> Builder<'a, InitState> {
         }
 
         let node = Rc::new(ExternalFunctionDefinition::new(
-            id, name, arguments, returns, location,
+            id,
+            Visibility::default(),
+            name,
+            arguments,
+            returns,
+            location,
         ));
         self.arena.add_node(
             AstNode::Definition(Definition::ExternalFunction(node.clone())),
@@ -430,12 +447,31 @@ impl<'a> Builder<'a, InitState> {
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let node = Rc::new(TypeDefinition::new(id, name, ty, location));
+        let node = Rc::new(TypeDefinition::new(
+            id,
+            Visibility::default(),
+            name,
+            ty,
+            location,
+        ));
         self.arena.add_node(
             AstNode::Definition(Definition::Type(node.clone())),
             parent_id,
         );
         node
+    }
+
+    /// Build a module definition node
+    /// TODO: Implement module parsing when tree-sitter grammar supports it
+    #[allow(dead_code)]
+    fn build_module_definition(
+        &mut self,
+        _parent_id: u32,
+        _node: &Node,
+        _code: &[u8],
+    ) -> Rc<ModuleDefinition> {
+        // TODO: Implement me - currently tree-sitter grammar doesn't support modules
+        unimplemented!("Module definitions are not yet supported in the grammar")
     }
 
     fn build_argument_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> ArgumentType {
@@ -998,7 +1034,7 @@ impl<'a> Builder<'a, InitState> {
 
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator = match operator_node.kind() {
-            "unary_not" => UnaryOperatorKind::Neg,
+            "unary_not" => UnaryOperatorKind::Not,
             _ => panic!("Unexpected operator node"),
         };
 
@@ -1239,9 +1275,8 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
-        let size = node
-            .child_by_field_name("length")
-            .map(|n| self.build_expression(id, &n, code));
+        let length_node = node.child_by_field_name("length").unwrap();
+        let size = self.build_expression(id, &length_node, code);
 
         let node = Rc::new(TypeArray::new(id, location, element_type, size));
         self.arena.add_node(
@@ -1260,9 +1295,6 @@ impl<'a> Builder<'a, InitState> {
             node.utf8_text(code).unwrap().to_string()
         };
         let node = Rc::new(SimpleType::new(id, location, name));
-        node.type_info
-            .borrow_mut()
-            .replace(TypeInfo::new(&Type::Simple(node.clone())));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),
             parent_id,
@@ -1419,13 +1451,13 @@ impl<'a> Builder<'a, InitState> {
 }
 
 impl Builder<'_, CompleteState> {
-    /// Returns typed AST
+    /// Returns AST arena
     ///
     /// # Panics
     ///
-    /// This function will panic if resulted `TypedAst` is `None` which means an error occured during the parsing process.
+    /// This function will panic if resulted `Arena` is `None` which means an error occured during the parsing process.
     #[must_use]
-    pub fn t_ast(self) -> TypedAst {
-        self.t_ast.unwrap()
+    pub fn arena(self) -> Arena {
+        self.arena.clone()
     }
 }

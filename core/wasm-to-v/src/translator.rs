@@ -1213,7 +1213,7 @@ fn translate_basic_operator(
         | Operator::I64AtomicRmw32CmpxchgU { memarg: _ } => {
             return Err(anyhow::anyhow!(
                 "Atomic instruction {operator:?} are not supported",
-            ))
+            ));
         }
         Operator::V128Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
@@ -1730,7 +1730,7 @@ fn translate_basic_operator(
         } => {
             return Err(anyhow::anyhow!(
                 "Atomic instruction {operator:?} are not supported",
-            ))
+            ));
         }
         Operator::RefI31Shared => todo!(),
         Operator::CallRef { .. } => todo!(),

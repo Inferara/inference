@@ -51,7 +51,7 @@ fn procuring_sorted(func: sf) -> () forall {
 fn func() -> () {
   return ();
 }
-fn concatInts(xss : [[i64]]) -> [i64] {}
+fn concatInts(xss : [[i64; 1]; 1]) -> [i64; 2] {}
 fn func() -> () {
   unique {
       let a: i32 = 0;
@@ -190,10 +190,10 @@ fn proof() -> () {
 }
 //Variable Definition
 fn test() {
-  let mem : [i32];
+  let mem : [i32; 900];
 }
 fn test() {
-  let array_3d : [[[u32]]];
+  let array_3d : [[[u32; 1]; 1]; 1];
 }
 fn test() {
   let x : [Optional someNamespace::String'; 4];
