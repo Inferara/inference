@@ -373,7 +373,6 @@ impl Scope {
             .insert(resolved.local_name.clone(), resolved);
     }
 
-    /// Look up a name in resolved imports (used in resolve_name for Phase 4+ name lookup)
     #[allow(dead_code)]
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_resolved_import(&self, name: &str) -> Option<&ResolvedImport> {

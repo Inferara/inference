@@ -431,19 +431,6 @@ mod import_tests {
                 );
             }
         }
-
-        // FIXME: Glob import syntax not yet supported by parser
-        // When implemented, this should test that glob imports produce appropriate error
-        #[test]
-        fn test_glob_import_not_supported_error() {
-            let source = r#"fn test() -> i32 { return 42; }"#;
-            let arena = build_ast(source.to_string());
-            let result = TypeCheckerBuilder::build_typed_context(arena);
-            assert!(
-                result.is_ok(),
-                "Simple function should compile without imports"
-            );
-        }
     }
 
     mod import_infrastructure {
@@ -503,29 +490,11 @@ mod import_tests {
         }
     }
 
-    /// Tests for glob imports and external prelude (Phase 5)
+    /// Tests for glob imports and external prelude
     mod extern_prelude_tests {
         use super::*;
-
-        /// Phase 5A: Glob imports tests
-
-        // FIXME: Glob import syntax (use path::*) is not yet supported by the parser.
         // FIXME: Standalone pub keyword is not yet supported by the parser (needs module context).
         // These tests document expected behavior when both are implemented.
-        #[test]
-        fn test_glob_import_infrastructure_ready() {
-            let source = r#"struct Item1 { x: i32; } struct Item2 { y: i32; } fn test() -> i32 { return 42; }"#;
-            let result = try_type_check(source);
-            assert!(result.is_ok(), "Basic struct definitions work");
-        }
-
-        // FIXME: pub keyword support and glob imports not yet implemented in parser.
-        // When implemented:
-        // - test_glob_import_from_module: use path::* imports all public symbols
-        // - test_glob_import_public_only: Only public symbols imported, private excluded
-        // - test_glob_import_cycle_detection: Circular glob imports produce error
-        // - test_glob_import_empty_module: Glob from empty module succeeds
-        // - test_glob_import_nonexistent_module: Error for missing module
         #[test]
         fn test_visibility_tracking_in_symbol_table() {
             let source =
@@ -533,8 +502,6 @@ mod import_tests {
             let result = try_type_check(source);
             assert!(result.is_ok(), "Symbol table tracks struct definitions");
         }
-
-        /// Phase 5B: External prelude tests
 
         #[test]
         fn test_find_module_root_lib_inf() {
@@ -741,7 +708,7 @@ mod type_error_tests {
     // }
 }
 
-/// Tests for enum variant type checking (Phase 7.2)
+/// Tests for enum variant type checking
 ///
 /// FIXME: TypeInfo comparison issue - When parsing `Color` type annotation, TypeInfo::new()
 /// creates TypeInfoKind::Custom("Color") because it doesn't have symbol table access.
@@ -931,7 +898,7 @@ mod enum_tests {
     }
 }
 
-/// Tests for generic type instantiation (Phase 7.4)
+/// Tests for generic type instantiation
 #[cfg(test)]
 mod generics_tests {
     use super::*;
@@ -946,7 +913,7 @@ mod generics_tests {
     }
 
     // ============================================
-    // Phase 7.4.1: Type Substitution Tests
+    // Type Substitution Tests
     // ============================================
 
     // Note: Inference language uses T' syntax for type parameters, not <T>
@@ -1120,7 +1087,7 @@ mod generics_tests {
     }
 
     // ============================================
-    // Phase 7.4.3: Generic Inference Tests
+    // Generic Inference Tests
     // ============================================
 
     #[test]
@@ -2249,17 +2216,6 @@ mod coverage_tests {
 
     mod import_resolution_coverage {
         use super::*;
-
-        #[test]
-        fn test_glob_import_empty_path() {
-            let source = r#"fn test() -> i32 { return 42; }"#;
-            let result = try_type_check(source);
-            assert!(
-                result.is_ok(),
-                "No glob import should work, got: {:?}",
-                result.err()
-            );
-        }
 
         #[test]
         fn test_import_with_self_keyword() {

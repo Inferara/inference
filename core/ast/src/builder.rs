@@ -280,7 +280,7 @@ impl<'a> Builder<'a, InitState> {
         }
         cursor = node.walk();
         let founded_methods = node
-            .children_by_field_name("value", &mut cursor) //FIXME: change to "method" after bumping tree-sitter grammar version
+            .children_by_field_name("value", &mut cursor) //FIXME: change to "method" after bumping tree-sitter grammar version to v0.0.38
             .filter(|n| n.kind() == "function_definition")
             .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
@@ -1275,9 +1275,8 @@ impl<'a> Builder<'a, InitState> {
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
-        let size = node
-            .child_by_field_name("length")
-            .map(|n| self.build_expression(id, &n, code));
+        let length_node = node.child_by_field_name("length").unwrap();
+        let size = self.build_expression(id, &length_node, code);
 
         let node = Rc::new(TypeArray::new(id, location, element_type, size));
         self.arena.add_node(

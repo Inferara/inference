@@ -263,10 +263,10 @@ impl TypeChecker {
                 match definition {
                     Definition::Constant(constant_definition) => {
                         let const_type = TypeInfo::new(&constant_definition.ty);
-                        if let Err(err) = self.symbol_table.push_variable_to_scope(
-                            &constant_definition.name(),
-                            const_type.clone(),
-                        ) {
+                        if let Err(err) = self
+                            .symbol_table
+                            .push_variable_to_scope(&constant_definition.name(), const_type.clone())
+                        {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: constant_definition.name(),
@@ -726,10 +726,7 @@ impl TypeChecker {
                         location: variable_definition_statement.location.clone(),
                     });
                 }
-                ctx.set_node_typeinfo(
-                    variable_definition_statement.name.id,
-                    target_type.clone(),
-                );
+                ctx.set_node_typeinfo(variable_definition_statement.name.id, target_type.clone());
                 ctx.set_node_typeinfo(variable_definition_statement.id, target_type);
             }
             Statement::TypeDefinition(type_definition_statement) => {
@@ -1009,12 +1006,13 @@ impl TypeChecker {
                             // Found a method - check if it's an instance method or associated function
                             if method_info.is_instance_method() {
                                 // Error: calling instance method without receiver
-                                self.errors
-                                    .push(TypeCheckError::InstanceMethodCalledAsAssociated {
+                                self.errors.push(
+                                    TypeCheckError::InstanceMethodCalledAsAssociated {
                                         type_name: type_name.clone(),
                                         method_name: method_name.clone(),
                                         location: type_member_access.location.clone(),
-                                    });
+                                    },
+                                );
                                 // Continue with type checking for better error recovery
                             }
 
@@ -1098,12 +1096,13 @@ impl TypeChecker {
                                 // Check if this is an associated function being called as instance method
                                 if !method_info.is_instance_method() {
                                     // Error: calling associated function with receiver
-                                    self.errors
-                                        .push(TypeCheckError::AssociatedFunctionCalledAsMethod {
+                                    self.errors.push(
+                                        TypeCheckError::AssociatedFunctionCalledAsMethod {
                                             type_name: type_name.clone(),
                                             method_name: method_name.clone(),
                                             location: member_access.location.clone(),
-                                        });
+                                        },
+                                    );
                                     // Continue with type checking for better error recovery
                                 }
 
@@ -1334,8 +1333,8 @@ impl TypeChecker {
                 }
             }
             Expression::Parenthesized(parenthesized_expression) => {
-                let inner_type =
-                    self.infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx);
+                let inner_type = self
+                    .infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx);
                 if let Some(ref type_info) = inner_type {
                     ctx.set_node_typeinfo(parenthesized_expression.id, type_info.clone());
                 }
@@ -1448,7 +1447,7 @@ impl TypeChecker {
                         let array_type = TypeInfo {
                             kind: TypeInfoKind::Array(
                                 Box::new(element_type_info),
-                                Some(elements.len() as u32),
+                                elements.len() as u32,
                             ),
                             type_params: vec![],
                         };
@@ -1496,10 +1495,8 @@ impl TypeChecker {
             Expression::Type(type_expr) => {
                 let type_info = TypeInfo::new(type_expr);
                 ctx.set_node_typeinfo(type_expr.id(), type_info.clone());
-                if let Type::Array(array_type) = type_expr
-                    && let Some(ref size_expr) = array_type.size
-                {
-                    self.infer_expression(&mut size_expr.clone(), ctx);
+                if let Type::Array(array_type) = type_expr {
+                    self.infer_expression(&mut array_type.size.clone(), ctx);
                 }
                 Some(type_info)
             }

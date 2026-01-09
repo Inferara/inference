@@ -533,7 +533,7 @@ ast_nodes! {
 
     pub struct TypeArray {
         pub element_type: Type,
-        pub size: Option<Expression>,
+        pub size: Expression,
     }
 
 }

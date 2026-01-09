@@ -11,7 +11,10 @@
 //! The [`TypeInfo::substitute`] method replaces type parameters with concrete types.
 
 use core::fmt;
-use std::fmt::{Display, Formatter};
+use std::{
+    fmt::{Display, Formatter},
+    panic,
+};
 
 use inference_ast::nodes::{Expression, Literal, Type};
 use rustc_hash::FxHashMap;
@@ -85,7 +88,7 @@ pub enum TypeInfoKind {
     String,
     Number(NumberType),
     Custom(String),
-    Array(Box<TypeInfo>, Option<u32>),
+    Array(Box<TypeInfo>, u32),
     Generic(String),
     QualifiedName(String),
     Qualified(String),
@@ -102,12 +105,7 @@ impl Display for TypeInfoKind {
             TypeInfoKind::Bool => write!(f, "Bool"),
             TypeInfoKind::String => write!(f, "String"),
             TypeInfoKind::Number(number_type) => write!(f, "{}", number_type.as_str()),
-            TypeInfoKind::Array(ty, length) => {
-                if let Some(length) = length {
-                    return write!(f, "[{ty}; {length}]");
-                }
-                write!(f, "[{ty}]")
-            }
+            TypeInfoKind::Array(ty, length) => write!(f, "[{ty}; {length}]"),
             TypeInfoKind::Custom(ty)
             | TypeInfoKind::Spec(ty)
             | TypeInfoKind::Struct(ty)
@@ -115,7 +113,7 @@ impl Display for TypeInfoKind {
             | TypeInfoKind::QualifiedName(ty)
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
-            TypeInfoKind::Generic(ty) => write!(f, "<{ty}>"),
+            TypeInfoKind::Generic(ty) => write!(f, "{ty}'"),
         }
     }
 }
@@ -195,10 +193,10 @@ impl Display for TypeInfo {
         let type_params = self
             .type_params
             .iter()
-            .map(std::string::ToString::to_string)
+            .map(|tp| format!("{tp}'"))
             .collect::<Vec<_>>()
-            .join(", ");
-        write!(f, "{}<{}>", self.kind, type_params)
+            .join(" ");
+        write!(f, "{} {}", self.kind, type_params)
     }
 }
 
@@ -261,7 +259,7 @@ impl TypeInfo {
                 type_params: vec![],
             },
             Type::Array(array) => {
-                let size = extract_array_size(&array.size);
+                let size = extract_array_size(array.size.clone());
                 Self {
                     kind: TypeInfoKind::Array(
                         Box::new(Self::new_with_type_params(
@@ -403,11 +401,18 @@ impl TypeInfo {
     }
 }
 
-//TODO: Should probably return `u32`
-fn extract_array_size(size_expr: &Option<Expression>) -> Option<u32> {
-    let expr = size_expr.as_ref()?;
-    if let Expression::Literal(Literal::Number(num_lit)) = expr {
-        return num_lit.value.parse::<u32>().ok();
+/// Extracts the array size from an expression.
+///
+/// Panics if the size expression is not a numeric literal.
+fn extract_array_size(size_expr: Expression) -> u32 {
+    if let Expression::Literal(Literal::Number(num_lit)) = size_expr {
+        return num_lit.value.parse::<u32>().unwrap();
     }
-    None
+    if let Expression::Identifier(identifier) = size_expr {
+        todo!(
+            "Constant identifiers for array sizes not yet implemented: {}",
+            identifier.name
+        );
+    }
+    panic!("Array size must be a numeric literal");
 }

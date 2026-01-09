@@ -4,6 +4,12 @@
 //! They complement the integration tests in tests/src/type_checker/ which test
 //! end-to-end type checking with source code parsing.
 
+use std::rc::Rc;
+
+use inference_ast::nodes::{
+    Expression, FunctionType, GenericType, Identifier, Literal, NumberLiteral, QualifiedName,
+    SimpleType, Type, TypeArray, TypeQualifiedName,
+};
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use rustc_hash::FxHashMap;
 
@@ -33,6 +39,16 @@ mod type_info_construction {
         let ti = TypeInfo::default();
         assert!(matches!(ti.kind, TypeInfoKind::Unit));
         assert!(ti.type_params.is_empty());
+    }
+
+    #[test]
+    fn test_clone() {
+        let ti = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec!["T".to_string()],
+        };
+        let cloned = ti.clone();
+        assert_eq!(ti, cloned);
     }
 }
 
@@ -65,21 +81,11 @@ mod type_info_predicates {
     fn test_is_array() {
         let element = TypeInfo::boolean();
         let array_type = TypeInfo {
-            kind: TypeInfoKind::Array(Box::new(element), Some(10)),
+            kind: TypeInfoKind::Array(Box::new(element), 10),
             type_params: vec![],
         };
         assert!(array_type.is_array());
         assert!(!array_type.is_number());
-    }
-
-    #[test]
-    fn test_is_array_without_length() {
-        let element = TypeInfo::boolean();
-        let array_type = TypeInfo {
-            kind: TypeInfoKind::Array(Box::new(element), None),
-            type_params: vec![],
-        };
-        assert!(array_type.is_array());
     }
 
     #[test]
@@ -166,7 +172,7 @@ mod type_substitution {
                     kind: TypeInfoKind::Generic("T".to_string()),
                     type_params: vec![],
                 }),
-                None,
+                10,
             ),
             type_params: vec![],
         };
@@ -195,7 +201,7 @@ mod type_substitution {
                     kind: TypeInfoKind::Generic("T".to_string()),
                     type_params: vec![],
                 }),
-                Some(5),
+                5,
             ),
             type_params: vec![],
         };
@@ -205,7 +211,7 @@ mod type_substitution {
         let result = array.substitute(&subs);
         if let TypeInfoKind::Array(elem, length) = &result.kind {
             assert!(elem.is_bool());
-            assert_eq!(*length, Some(5));
+            assert_eq!(*length, 5);
         } else {
             panic!("Expected array type");
         }
@@ -243,11 +249,11 @@ mod type_substitution {
                             kind: TypeInfoKind::Generic("T".to_string()),
                             type_params: vec![],
                         }),
-                        None,
+                        10,
                     ),
                     type_params: vec![],
                 }),
-                Some(10),
+                10,
             ),
             type_params: vec![],
         };
@@ -256,7 +262,7 @@ mod type_substitution {
 
         let result = nested_array.substitute(&subs);
         if let TypeInfoKind::Array(outer_elem, outer_len) = &result.kind {
-            assert_eq!(*outer_len, Some(10));
+            assert_eq!(*outer_len, 10);
             if let TypeInfoKind::Array(inner_elem, _) = &outer_elem.kind {
                 assert!(inner_elem.is_bool());
             } else {
@@ -304,7 +310,7 @@ mod has_unresolved_params {
                     kind: TypeInfoKind::Generic("T".to_string()),
                     type_params: vec![],
                 }),
-                None,
+                10,
             ),
             type_params: vec![],
         };
@@ -314,7 +320,7 @@ mod has_unresolved_params {
     #[test]
     fn test_array_with_concrete_element() {
         let array = TypeInfo {
-            kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), Some(5)),
+            kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 5),
             type_params: vec![],
         };
         assert!(!array.has_unresolved_params());
@@ -330,11 +336,11 @@ mod has_unresolved_params {
                             kind: TypeInfoKind::Generic("T".to_string()),
                             type_params: vec![],
                         }),
-                        None,
+                        10,
                     ),
                     type_params: vec![],
                 }),
-                None,
+                10,
             ),
             type_params: vec![],
         };
@@ -413,21 +419,12 @@ mod display {
     }
 
     #[test]
-    fn test_display_array_with_length() {
+    fn test_display_array() {
         let array = TypeInfo {
-            kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), Some(10)),
+            kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 10),
             type_params: vec![],
         };
         assert_eq!(array.to_string(), "[Bool; 10]");
-    }
-
-    #[test]
-    fn test_display_array_without_length() {
-        let array = TypeInfo {
-            kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), None),
-            type_params: vec![],
-        };
-        assert_eq!(array.to_string(), "[Bool]");
     }
 
     #[test]
@@ -436,7 +433,7 @@ mod display {
             kind: TypeInfoKind::Generic("T".to_string()),
             type_params: vec![],
         };
-        assert_eq!(generic.to_string(), "<T>");
+        assert_eq!(generic.to_string(), "T'");
     }
 
     #[test]
@@ -463,7 +460,7 @@ mod display {
             kind: TypeInfoKind::Struct("Vec".to_string()),
             type_params: vec!["T".to_string()],
         };
-        assert_eq!(ti.to_string(), "Vec<T>");
+        assert_eq!(ti.to_string(), "Vec T'");
     }
 
     #[test]
@@ -472,7 +469,7 @@ mod display {
             kind: TypeInfoKind::Struct("Map".to_string()),
             type_params: vec!["K".to_string(), "V".to_string()],
         };
-        assert_eq!(ti.to_string(), "Map<K, V>");
+        assert_eq!(ti.to_string(), "Map K' V'");
     }
 
     #[test]
@@ -507,14 +504,32 @@ mod display {
         let nested = TypeInfo {
             kind: TypeInfoKind::Array(
                 Box::new(TypeInfo {
-                    kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), Some(5)),
+                    kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 5),
                     type_params: vec![],
                 }),
-                Some(10),
+                10,
             ),
             type_params: vec![],
         };
         assert_eq!(nested.to_string(), "[[Bool; 5]; 10]");
+    }
+
+    #[test]
+    fn test_display_qualified_name() {
+        let qualified_name = TypeInfo {
+            kind: TypeInfoKind::QualifiedName("std::vec::Vec".to_string()),
+            type_params: vec![],
+        };
+        assert_eq!(qualified_name.to_string(), "std::vec::Vec");
+    }
+
+    #[test]
+    fn test_display_qualified() {
+        let qualified = TypeInfo {
+            kind: TypeInfoKind::Qualified("MyModule::MyType".to_string()),
+            type_params: vec![],
+        };
+        assert_eq!(qualified.to_string(), "MyModule::MyType");
     }
 }
 
@@ -599,16 +614,26 @@ mod number_type_methods {
 
     #[test]
     fn test_from_str_lowercase() {
+        assert_eq!("i8".parse::<NumberType>(), Ok(NumberType::I8));
+        assert_eq!("i16".parse::<NumberType>(), Ok(NumberType::I16));
         assert_eq!("i32".parse::<NumberType>(), Ok(NumberType::I32));
+        assert_eq!("i64".parse::<NumberType>(), Ok(NumberType::I64));
+        assert_eq!("u8".parse::<NumberType>(), Ok(NumberType::U8));
+        assert_eq!("u16".parse::<NumberType>(), Ok(NumberType::U16));
+        assert_eq!("u32".parse::<NumberType>(), Ok(NumberType::U32));
         assert_eq!("u64".parse::<NumberType>(), Ok(NumberType::U64));
     }
 
     #[test]
     fn test_from_str_case_insensitive() {
-        assert_eq!("I32".parse::<NumberType>(), Ok(NumberType::I32));
-        assert_eq!("U64".parse::<NumberType>(), Ok(NumberType::U64));
-        assert_eq!("i32".parse::<NumberType>(), Ok(NumberType::I32));
         assert_eq!("I8".parse::<NumberType>(), Ok(NumberType::I8));
+        assert_eq!("I16".parse::<NumberType>(), Ok(NumberType::I16));
+        assert_eq!("I32".parse::<NumberType>(), Ok(NumberType::I32));
+        assert_eq!("I64".parse::<NumberType>(), Ok(NumberType::I64));
+        assert_eq!("U8".parse::<NumberType>(), Ok(NumberType::U8));
+        assert_eq!("U16".parse::<NumberType>(), Ok(NumberType::U16));
+        assert_eq!("U32".parse::<NumberType>(), Ok(NumberType::U32));
+        assert_eq!("U64".parse::<NumberType>(), Ok(NumberType::U64));
     }
 
     #[test]
@@ -670,7 +695,7 @@ mod type_info_kind_builtin_methods {
             None
         );
         assert_eq!(
-            TypeInfoKind::Array(Box::new(TypeInfo::boolean()), None).as_builtin_str(),
+            TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 10).as_builtin_str(),
             None
         );
         assert_eq!(
@@ -749,5 +774,372 @@ mod type_info_kind_builtin_methods {
             let parsed = TypeInfoKind::from_builtin_str(name).expect("should parse back");
             assert_eq!(kind, parsed);
         }
+    }
+}
+
+mod type_info_from_ast {
+    use super::*;
+    use inference_ast::nodes::Location;
+
+    fn dummy_location() -> Location {
+        Location::new(0, 0, 0, 0, 0, 0, String::new())
+    }
+
+    fn make_identifier(name: &str) -> Rc<Identifier> {
+        Rc::new(Identifier {
+            id: 0,
+            location: dummy_location(),
+            name: name.to_string(),
+        })
+    }
+
+    fn make_simple_type(name: &str) -> Type {
+        Type::Simple(Rc::new(SimpleType {
+            id: 0,
+            location: dummy_location(),
+            name: name.to_string(),
+        }))
+    }
+
+    fn make_number_literal(value: &str) -> Expression {
+        Expression::Literal(Literal::Number(Rc::new(NumberLiteral {
+            id: 0,
+            location: dummy_location(),
+            value: value.to_string(),
+        })))
+    }
+
+    #[test]
+    fn test_new_from_simple_builtin_i32() {
+        let ty = make_simple_type("i32");
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
+        assert!(ti.type_params.is_empty());
+    }
+
+    #[test]
+    fn test_new_from_simple_builtin_bool() {
+        let ty = make_simple_type("bool");
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Bool);
+    }
+
+    #[test]
+    fn test_new_from_simple_builtin_string() {
+        let ty = make_simple_type("string");
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::String);
+    }
+
+    #[test]
+    fn test_new_from_simple_builtin_unit() {
+        let ty = make_simple_type("unit");
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Unit);
+    }
+
+    #[test]
+    fn test_new_from_simple_all_numeric_types() {
+        let cases = [
+            ("i8", NumberType::I8),
+            ("i16", NumberType::I16),
+            ("i32", NumberType::I32),
+            ("i64", NumberType::I64),
+            ("u8", NumberType::U8),
+            ("u16", NumberType::U16),
+            ("u32", NumberType::U32),
+            ("u64", NumberType::U64),
+        ];
+
+        for (name, expected) in cases {
+            let ty = make_simple_type(name);
+            let ti = TypeInfo::new(&ty);
+            assert_eq!(ti.kind, TypeInfoKind::Number(expected), "Failed for {name}");
+        }
+    }
+
+    #[test]
+    fn test_new_from_simple_custom_type() {
+        let ty = make_simple_type("MyCustomType");
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Custom("MyCustomType".to_string()));
+    }
+
+    #[test]
+    fn test_new_from_generic_type() {
+        let ty = Type::Generic(Rc::new(GenericType {
+            id: 0,
+            location: dummy_location(),
+            base: make_identifier("Container"),
+            parameters: vec![make_identifier("T"), make_identifier("U")],
+        }));
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Generic("Container".to_string()));
+        assert_eq!(ti.type_params, vec!["T".to_string(), "U".to_string()]);
+    }
+
+    #[test]
+    fn test_new_from_qualified_name() {
+        let ty = Type::QualifiedName(Rc::new(QualifiedName {
+            id: 0,
+            location: dummy_location(),
+            qualifier: make_identifier("std"),
+            name: make_identifier("Vec"),
+        }));
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::QualifiedName("std::Vec".to_string()));
+    }
+
+    #[test]
+    fn test_new_from_qualified() {
+        let ty = Type::Qualified(Rc::new(TypeQualifiedName {
+            id: 0,
+            location: dummy_location(),
+            alias: make_identifier("Module"),
+            name: make_identifier("Type"),
+        }));
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Qualified("Type".to_string()));
+    }
+
+    #[test]
+    fn test_new_from_array_type() {
+        let elem_type = make_simple_type("i32");
+        let ty = Type::Array(Rc::new(TypeArray {
+            id: 0,
+            location: dummy_location(),
+            element_type: elem_type,
+            size: make_number_literal("10"),
+        }));
+        let ti = TypeInfo::new(&ty);
+
+        if let TypeInfoKind::Array(elem, size) = &ti.kind {
+            assert_eq!(elem.kind, TypeInfoKind::Number(NumberType::I32));
+            assert_eq!(*size, 10);
+        } else {
+            panic!("Expected array type");
+        }
+    }
+
+    #[test]
+    fn test_new_from_nested_array_type() {
+        let inner_elem = make_simple_type("bool");
+        let inner_array = Type::Array(Rc::new(TypeArray {
+            id: 0,
+            location: dummy_location(),
+            element_type: inner_elem,
+            size: make_number_literal("5"),
+        }));
+        let ty = Type::Array(Rc::new(TypeArray {
+            id: 0,
+            location: dummy_location(),
+            element_type: inner_array,
+            size: make_number_literal("3"),
+        }));
+        let ti = TypeInfo::new(&ty);
+
+        if let TypeInfoKind::Array(outer_elem, outer_size) = &ti.kind {
+            assert_eq!(*outer_size, 3);
+            if let TypeInfoKind::Array(inner_elem, inner_size) = &outer_elem.kind {
+                assert_eq!(*inner_size, 5);
+                assert_eq!(inner_elem.kind, TypeInfoKind::Bool);
+            } else {
+                panic!("Expected inner array type");
+            }
+        } else {
+            panic!("Expected outer array type");
+        }
+    }
+
+    #[test]
+    fn test_new_from_function_type_no_params_no_return() {
+        let ty = Type::Function(Rc::new(FunctionType {
+            id: 0,
+            location: dummy_location(),
+            parameters: None,
+            returns: None,
+        }));
+        let ti = TypeInfo::new(&ty);
+
+        if let TypeInfoKind::Function(sig) = &ti.kind {
+            assert!(sig.contains("Function<0"));
+            assert!(sig.contains("Unit"));
+        } else {
+            panic!("Expected function type");
+        }
+    }
+
+    #[test]
+    fn test_new_from_function_type_with_params() {
+        let ty = Type::Function(Rc::new(FunctionType {
+            id: 0,
+            location: dummy_location(),
+            parameters: Some(vec![make_simple_type("i32"), make_simple_type("bool")]),
+            returns: Some(make_simple_type("string")),
+        }));
+        let ti = TypeInfo::new(&ty);
+
+        if let TypeInfoKind::Function(sig) = &ti.kind {
+            assert!(sig.contains("Function<2"));
+            assert!(sig.contains("String"));
+        } else {
+            panic!("Expected function type");
+        }
+    }
+
+    #[test]
+    fn test_new_from_custom_identifier() {
+        let ty = Type::Custom(make_identifier("Point"));
+        let ti = TypeInfo::new(&ty);
+        assert_eq!(ti.kind, TypeInfoKind::Custom("Point".to_string()));
+    }
+}
+
+mod type_info_with_type_params {
+    use super::*;
+    use inference_ast::nodes::Location;
+
+    fn dummy_location() -> Location {
+        Location::new(0, 0, 0, 0, 0, 0, String::new())
+    }
+
+    fn make_identifier(name: &str) -> Rc<Identifier> {
+        Rc::new(Identifier {
+            id: 0,
+            location: dummy_location(),
+            name: name.to_string(),
+        })
+    }
+
+    fn make_simple_type(name: &str) -> Type {
+        Type::Simple(Rc::new(SimpleType {
+            id: 0,
+            location: dummy_location(),
+            name: name.to_string(),
+        }))
+    }
+
+    fn make_number_literal(value: &str) -> Expression {
+        Expression::Literal(Literal::Number(Rc::new(NumberLiteral {
+            id: 0,
+            location: dummy_location(),
+            value: value.to_string(),
+        })))
+    }
+
+    #[test]
+    fn test_simple_type_becomes_generic_when_in_params() {
+        let ty = make_simple_type("T");
+        let type_params = vec!["T".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert_eq!(ti.kind, TypeInfoKind::Generic("T".to_string()));
+    }
+
+    #[test]
+    fn test_simple_type_stays_custom_when_not_in_params() {
+        let ty = make_simple_type("T");
+        let type_params = vec!["U".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert_eq!(ti.kind, TypeInfoKind::Custom("T".to_string()));
+    }
+
+    #[test]
+    fn test_custom_type_becomes_generic_when_in_params() {
+        let ty = Type::Custom(make_identifier("T"));
+        let type_params = vec!["T".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert_eq!(ti.kind, TypeInfoKind::Generic("T".to_string()));
+    }
+
+    #[test]
+    fn test_custom_type_stays_custom_when_not_in_params() {
+        let ty = Type::Custom(make_identifier("MyStruct"));
+        let type_params = vec!["T".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert_eq!(ti.kind, TypeInfoKind::Custom("MyStruct".to_string()));
+    }
+
+    #[test]
+    fn test_array_element_becomes_generic() {
+        let elem_type = make_simple_type("T");
+        let ty = Type::Array(Rc::new(TypeArray {
+            id: 0,
+            location: dummy_location(),
+            element_type: elem_type,
+            size: make_number_literal("5"),
+        }));
+        let type_params = vec!["T".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        if let TypeInfoKind::Array(elem, size) = &ti.kind {
+            assert_eq!(elem.kind, TypeInfoKind::Generic("T".to_string()));
+            assert_eq!(*size, 5);
+        } else {
+            panic!("Expected array type");
+        }
+    }
+
+    #[test]
+    fn test_function_params_become_generic() {
+        let ty = Type::Function(Rc::new(FunctionType {
+            id: 0,
+            location: dummy_location(),
+            parameters: Some(vec![make_simple_type("T")]),
+            returns: Some(make_simple_type("U")),
+        }));
+        let type_params = vec!["T".to_string(), "U".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert!(matches!(ti.kind, TypeInfoKind::Function(_)));
+    }
+
+    #[test]
+    fn test_multiple_type_params_all_resolved() {
+        let elem_type = make_simple_type("K");
+        let ty = Type::Array(Rc::new(TypeArray {
+            id: 0,
+            location: dummy_location(),
+            element_type: elem_type,
+            size: make_number_literal("10"),
+        }));
+        let type_params = vec!["K".to_string(), "V".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        if let TypeInfoKind::Array(elem, _) = &ti.kind {
+            assert_eq!(elem.kind, TypeInfoKind::Generic("K".to_string()));
+        } else {
+            panic!("Expected array type");
+        }
+    }
+
+    #[test]
+    fn test_empty_type_params_no_generics() {
+        let ty = make_simple_type("T");
+        let ti = TypeInfo::new_with_type_params(&ty, &[]);
+
+        assert_eq!(ti.kind, TypeInfoKind::Custom("T".to_string()));
+    }
+
+    #[test]
+    fn test_type_param_can_shadow_builtin() {
+        let ty = make_simple_type("i32");
+        let type_params = vec!["i32".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        // Type parameter check happens before builtin lookup, so "i32" becomes generic
+        assert_eq!(ti.kind, TypeInfoKind::Generic("i32".to_string()));
+    }
+
+    #[test]
+    fn test_builtin_without_matching_type_param_stays_builtin() {
+        let ty = make_simple_type("i32");
+        let type_params = vec!["T".to_string()];
+        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+
+        assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
     }
 }

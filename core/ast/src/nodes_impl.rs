@@ -930,7 +930,7 @@ impl TypeQualifiedName {
 
 impl TypeArray {
     #[must_use]
-    pub fn new(id: u32, location: Location, element_type: Type, size: Option<Expression>) -> Self {
+    pub fn new(id: u32, location: Location, element_type: Type, size: Expression) -> Self {
         TypeArray {
             id,
             location,

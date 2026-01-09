@@ -18,3 +18,4 @@ inference.workspace = true
 inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
+rustc-hash.workspace = true

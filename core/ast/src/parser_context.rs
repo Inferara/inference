@@ -48,14 +48,12 @@ impl ParserContext {
     }
 
     /// Push a new file onto the parse queue (for submodule resolution)
-    /// TODO: Implement in Phase 1 when scope tree is ready
     #[allow(clippy::unused_self)]
     pub fn push_file(&mut self, _scope_id: u32, _file_path: PathBuf) {
         // TODO: Implement me - add file to queue with parent scope
     }
 
     /// Parse all queued files and build the unified AST
-    /// TODO: Implement in Phase 1 when scope tree is ready
     #[must_use]
     pub fn parse_all(&mut self) -> Arena {
         // TODO: Implement me - process queue until empty
@@ -74,7 +72,6 @@ impl ParserContext {
     }
 
     /// Resolve and process a module definition
-    /// TODO: Implement in Phase 1 when scope tree is ready
     #[allow(dead_code, clippy::unused_self)]
     fn process_module(
         &mut self,
@@ -107,7 +104,6 @@ impl ParserContext {
 }
 
 /// Find the path to a submodule file
-/// TODO: Implement in Phase 1
 #[must_use]
 pub fn find_submodule_path(_current_file: &PathBuf, _module_name: &str) -> Option<PathBuf> {
     // TODO: Implement me - search for:
