@@ -1448,10 +1448,9 @@ mod coverage_tests {
             );
         }
 
-        // FIXME: Uzumaki uses @ symbol, not ?
-        // #[test]
+        #[test]
         fn test_return_uzumaki() {
-            let source = r#"fn test() -> i32 { return ?; }"#;
+            let source = r#"fn test() -> i32 { return @; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),

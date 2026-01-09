@@ -68,6 +68,13 @@ impl TypedContext {
         self.node_types.get(&node_id).cloned()
     }
 
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn get_parent_node(&self, id: u32) -> Option<AstNode> {
+        self.arena
+            .find_parent_node(id)
+            .and_then(|parent_id| self.arena.find_node(parent_id))
+    }
+
     pub(crate) fn set_node_typeinfo(&mut self, node_id: u32, type_info: TypeInfo) {
         self.node_types.insert(node_id, type_info);
     }

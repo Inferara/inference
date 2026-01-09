@@ -120,44 +120,101 @@ mod type_inference_tests {
 
         #[test]
         fn test_variable_type_inference() {
-            let source = r#"
-            fn test() {
-                let x: i32 = 10;
-                let y: bool = true;
-            }"#;
+            let source = r#"fn test() {let x: i32 = 10;let y: bool = true;}"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
+            assert_eq!(typed_context.source_files().len(), 1);
             let var_defs = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
             });
             assert_eq!(var_defs.len(), 2, "Expected 2 variable definitions");
-
-            // Verify type checking completed successfully
-            assert_eq!(typed_context.source_files().len(), 1);
+            for var_node in &var_defs {
+                if let AstNode::Statement(Statement::VariableDefinition(var_def)) = var_node {
+                    let type_info = typed_context.get_node_typeinfo(var_def.id);
+                    assert!(
+                        type_info.is_some(),
+                        "Variable '{}' should have type info",
+                        var_def.name.name
+                    );
+                    match var_def.name.name.as_str() {
+                        "x" => assert!(
+                            matches!(
+                                type_info.unwrap().kind,
+                                TypeInfoKind::Number(NumberType::I32)
+                            ),
+                            "Variable x should have i32 type"
+                        ),
+                        "y" => assert!(
+                            matches!(type_info.unwrap().kind, TypeInfoKind::Bool),
+                            "Variable y should have bool type"
+                        ),
+                        _ => panic!("Unexpected variable name: {}", var_def.name.name),
+                    }
+                }
+            }
         }
 
         #[test]
         fn test_all_numeric_types_type_check() {
-            let sources = [
-                ("i8", r#"fn test(x: i8) -> i8 { return x; }"#),
-                ("i16", r#"fn test(x: i16) -> i16 { return x; }"#),
-                ("i32", r#"fn test(x: i32) -> i32 { return x; }"#),
-                ("i64", r#"fn test(x: i64) -> i64 { return x; }"#),
-                ("u8", r#"fn test(x: u8) -> u8 { return x; }"#),
-                ("u16", r#"fn test(x: u16) -> u16 { return x; }"#),
-                ("u32", r#"fn test(x: u32) -> u32 { return x; }"#),
-                ("u64", r#"fn test(x: u64) -> u64 { return x; }"#),
-            ];
-
-            for (type_name, source) in sources {
-                let typed_context =
-                    try_type_check(source).expect("Type checking should succeed for numeric types");
+            use inference_ast::nodes::ArgumentType;
+            for expected_type in NumberType::ALL {
+                let type_name = expected_type.as_str();
+                let source = format!("fn test(x: {type_name}) -> {type_name} {{ return x; }}");
+                let typed_context = try_type_check(&source)
+                    .expect("Type checking should succeed for numeric types");
                 assert_eq!(
                     typed_context.source_files().len(),
                     1,
                     "Type checking should succeed for {} type",
                     type_name
                 );
+                let functions = typed_context.functions();
+                assert_eq!(functions.len(), 1, "Expected 1 function for {}", type_name);
+                let func = &functions[0];
+                assert!(
+                    func.returns.is_some(),
+                    "Function should have return type for {}",
+                    type_name
+                );
+                let return_type =
+                    typed_context.get_node_typeinfo(func.returns.as_ref().unwrap().id());
+                assert!(
+                    return_type.is_some(),
+                    "Return type should have type info for {}",
+                    type_name
+                );
+                assert!(
+                    matches!(
+                        return_type.unwrap().kind,
+                        TypeInfoKind::Number(n) if n == *expected_type
+                    ),
+                    "Return type should be {} for {}",
+                    type_name,
+                    type_name
+                );
+                if let Some(arguments) = &func.arguments {
+                    assert_eq!(arguments.len(), 1, "Expected 1 argument for {}", type_name);
+                    if let ArgumentType::Argument(arg) = &arguments[0] {
+                        let arg_type = typed_context.get_node_typeinfo(arg.id);
+                        assert!(
+                            arg_type.is_some(),
+                            "Argument should have type info for {}",
+                            type_name
+                        );
+                        assert!(
+                            matches!(
+                                arg_type.unwrap().kind,
+                                TypeInfoKind::Number(n) if n == *expected_type
+                            ),
+                            "Argument should have {} type for {}",
+                            type_name,
+                            type_name
+                        );
+                    } else {
+                        panic!("Expected Argument for {}", type_name);
+                    }
+                } else {
+                    panic!("Function should have arguments for {}", type_name);
+                }
             }
         }
     }
@@ -166,7 +223,6 @@ mod type_inference_tests {
     mod function_parameters {
         use super::*;
         use inference_ast::nodes::{ArgumentType, Definition};
-
         #[test]
         fn test_single_parameter_type_info() {
             let source = r#"fn test(x: i32) -> i32 { return x; }"#;
@@ -467,11 +523,9 @@ mod type_inference_tests {
         fn test_binary_add_expression_type() {
             let source = r#"fn test() -> i32 { return 10 + 20; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let binary_exprs = typed_context
                 .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
             assert_eq!(binary_exprs.len(), 1, "Expected 1 binary expression");
-
             if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
                 let type_info = typed_context.get_node_typeinfo(bin_expr.id);
                 assert!(
@@ -492,11 +546,9 @@ mod type_inference_tests {
         fn test_comparison_expression_returns_bool() {
             let source = r#"fn test(x: i32, y: i32) -> bool { return x > y; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let binary_exprs = typed_context
                 .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
             assert_eq!(binary_exprs.len(), 1, "Expected 1 binary expression");
-
             if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
                 let type_info = typed_context.get_node_typeinfo(bin_expr.id);
                 assert!(type_info.is_some(), "Comparison should have type info");
@@ -511,11 +563,9 @@ mod type_inference_tests {
         fn test_logical_and_expression_type() {
             let source = r#"fn test(a: bool, b: bool) -> bool { return a && b; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let binary_exprs = typed_context
                 .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
             assert_eq!(binary_exprs.len(), 1, "Expected 1 binary expression");
-
             if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
                 let type_info = typed_context.get_node_typeinfo(bin_expr.id);
                 assert!(
@@ -533,12 +583,10 @@ mod type_inference_tests {
         fn test_nested_binary_expression_type() {
             let source = r#"fn test() -> i32 { return (10 + 20) * 30; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let binary_exprs = typed_context
                 .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
             // Should have 2 binary expressions: (10 + 20) and (...) * 30
             assert_eq!(binary_exprs.len(), 2, "Expected 2 binary expressions");
-
             for expr in &binary_exprs {
                 if let AstNode::Expression(Expression::Binary(bin_expr)) = expr {
                     let type_info = typed_context.get_node_typeinfo(bin_expr.id);
@@ -587,6 +635,10 @@ mod type_inference_tests {
             assert_eq!(fn_calls.len(), 1, "Expected 1 function call");
 
             if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                assert!(
+                    call.name() == "helper",
+                    "Function call should be to 'helper'"
+                );
                 let type_info = typed_context.get_node_typeinfo(call.id);
                 assert!(
                     type_info.is_some(),
@@ -616,6 +668,7 @@ mod type_inference_tests {
             assert_eq!(fn_calls.len(), 1, "Expected 1 function call");
 
             if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                assert!(call.name() == "add", "Function call should be to 'add'");
                 let type_info = typed_context.get_node_typeinfo(call.id);
                 assert!(
                     type_info.is_some(),
@@ -673,14 +726,78 @@ mod type_inference_tests {
             let source = r#"fn test(x: i32) -> i32 { if x > 0 { return 1; } else { return 0; } }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+
+            let if_statements = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::If(_))));
+            assert_eq!(if_statements.len(), 1, "Expected 1 if statement");
+
+            if let AstNode::Statement(Statement::If(if_stmt)) = &if_statements[0] {
+                let condition = if_stmt.condition.borrow();
+                if let Expression::Binary(bin_expr) = &*condition {
+                    let cond_type = typed_context.get_node_typeinfo(bin_expr.id);
+                    assert!(
+                        cond_type.is_some(),
+                        "If condition (comparison) should have type info"
+                    );
+                    assert!(
+                        matches!(cond_type.unwrap().kind, TypeInfoKind::Bool),
+                        "Comparison expression should have bool type"
+                    );
+                } else {
+                    panic!("Expected Binary expression as condition");
+                }
+            } else {
+                panic!("Expected IfStatement");
+            }
         }
 
         #[test]
         fn test_if_statement_with_bool_condition() {
+            use inference_ast::nodes::ArgumentType;
+
             let source =
                 r#"fn test(flag: bool) -> i32 { if flag { return 1; } else { return 0; } }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+
+            let if_statements = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::If(_))));
+            assert_eq!(if_statements.len(), 1, "Expected 1 if statement");
+
+            if let AstNode::Statement(Statement::If(if_stmt)) = &if_statements[0] {
+                let condition = if_stmt.condition.borrow();
+                if let Expression::Identifier(id) = &*condition {
+                    assert_eq!(id.name, "flag", "Condition should be the 'flag' identifier");
+                    let cond_type = typed_context.get_node_typeinfo(id.id);
+                    assert!(
+                        cond_type.is_some(),
+                        "If condition (identifier) should have type info"
+                    );
+                    assert!(
+                        matches!(cond_type.unwrap().kind, TypeInfoKind::Bool),
+                        "Identifier 'flag' should have bool type"
+                    );
+                } else {
+                    panic!("Expected Identifier expression as condition");
+                }
+            } else {
+                panic!("Expected IfStatement");
+            }
+
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::Argument(arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(arg_type.is_some(), "Parameter 'flag' should have type info");
+                    assert!(
+                        matches!(arg_type.unwrap().kind, TypeInfoKind::Bool),
+                        "Parameter 'flag' should have bool type"
+                    );
+                }
+            }
         }
 
         #[test]
@@ -688,6 +805,21 @@ mod type_inference_tests {
             let source = r#"fn test() { loop { break; } }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+
+            let loop_statements = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Loop(_))));
+            assert_eq!(loop_statements.len(), 1, "Expected 1 loop statement");
+
+            let break_statements = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Break(_))));
+            assert_eq!(break_statements.len(), 1, "Expected 1 break statement");
+
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            assert!(
+                functions[0].returns.is_none(),
+                "Function with loop should have no explicit return type"
+            );
         }
 
         #[test]
@@ -699,11 +831,74 @@ mod type_inference_tests {
             }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+            let assign_statements = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Assign(_))));
+            assert_eq!(
+                assign_statements.len(),
+                1,
+                "Expected 1 assignment statement"
+            );
+            if let AstNode::Statement(Statement::Assign(assign_stmt)) = &assign_statements[0] {
+                let right = assign_stmt.right.borrow();
+                if let Expression::Literal(Literal::Number(num_lit)) = &*right {
+                    let rhs_type = typed_context.get_node_typeinfo(num_lit.id);
+                    assert!(
+                        rhs_type.is_some(),
+                        "RHS of assignment should have type info"
+                    );
+                    assert!(
+                        matches!(
+                            rhs_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "RHS should be i32 to match variable type"
+                    );
+                } else {
+                    panic!("Expected number literal as RHS");
+                }
+                let left = assign_stmt.left.borrow();
+                if let Expression::Identifier(id) = &*left {
+                    let lhs_type = typed_context.get_node_typeinfo(id.id);
+                    assert!(
+                        lhs_type.is_some(),
+                        "LHS of assignment should have type info"
+                    );
+                    assert!(
+                        matches!(
+                            lhs_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "LHS should be i32 to match variable type"
+                    );
+                } else {
+                    panic!("Expected identifier as LHS");
+                }
+            } else {
+                panic!("Expected AssignStatement");
+            }
+
+            let var_defs = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
+            });
+            assert_eq!(var_defs.len(), 1, "Expected 1 variable definition");
+            if let AstNode::Statement(Statement::VariableDefinition(var_def)) = &var_defs[0] {
+                let type_info = typed_context.get_node_typeinfo(var_def.id);
+                assert!(type_info.is_some(), "Variable 'x' should have type info");
+                assert!(
+                    matches!(
+                        type_info.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Variable 'x' should have i32 type"
+                );
+            }
         }
     }
 
     /// Tests for array type inference
     mod arrays {
+        use inference_ast::nodes::Definition;
+
         use super::*;
 
         // FIXME: Array indexing (arr[0]) type inference is not fully implemented.
@@ -714,15 +909,51 @@ mod type_inference_tests {
         fn test_array_type() {
             let source = r#"fn get_first(arr: [i32; 1]) -> i32 { return arr[0]; }"#;
             let arena = build_ast(source.to_string());
-            // Parsing succeeds
             assert_eq!(arena.source_files().len(), 1);
         }
 
         #[test]
         fn test_nested_arrays() {
+            use inference_ast::nodes::ArgumentType;
+
             let source = r#"fn test(matrix: [[bool; 2]; 1]) { assert(true); }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::Argument(arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(
+                        arg_type.is_some(),
+                        "Nested array parameter should have type info"
+                    );
+
+                    if let TypeInfoKind::Array(outer_elem, outer_size) = &arg_type.unwrap().kind {
+                        assert_eq!(*outer_size, 1, "Outer array size should be 1");
+
+                        if let TypeInfoKind::Array(inner_elem, inner_size) = &outer_elem.kind {
+                            assert_eq!(*inner_size, 2, "Inner array size should be 2");
+                            assert!(
+                                matches!(inner_elem.kind, TypeInfoKind::Bool),
+                                "Inner array element should be bool"
+                            );
+                        } else {
+                            panic!("Expected inner array type");
+                        }
+                    } else {
+                        panic!("Expected outer array type");
+                    }
+                } else {
+                    panic!("Expected Argument");
+                }
+            } else {
+                panic!("Function should have arguments");
+            }
         }
     }
 
@@ -733,7 +964,7 @@ mod type_inference_tests {
         #[test]
         fn test_uzumaki_numeric_type_inference() {
             let source_code = r#"
-            fn a() {
+            fn foo() {
                 let a: i8 = @;
                 let b: i16 = @;
                 let c: i32 = @;
@@ -780,6 +1011,38 @@ mod type_inference_tests {
                     );
                 }
             }
+
+            for c in "abcdefgh".to_string().chars() {
+                for identifier in typed_context.filter_nodes(|node| {
+                    matches!(node, AstNode::Expression(Expression::Identifier(id)) if id.name == c.to_string())
+                }) {
+                    if let AstNode::Expression(Expression::Identifier(id)) = identifier {
+                        let type_info = typed_context.get_node_typeinfo(id.id);
+                        assert!(
+                            type_info.is_some(),
+                            "Identifier '{}' should have type info",
+                            c
+                        );
+                        let expected_type = match c {
+                            'a' => TypeInfoKind::Number(NumberType::I8),
+                            'b' => TypeInfoKind::Number(NumberType::I16),
+                            'c' => TypeInfoKind::Number(NumberType::I32),
+                            'd' => TypeInfoKind::Number(NumberType::I64),
+                            'e' => TypeInfoKind::Number(NumberType::U8),
+                            'f' => TypeInfoKind::Number(NumberType::U16),
+                            'g' => TypeInfoKind::Number(NumberType::U32),
+                            'h' => TypeInfoKind::Number(NumberType::U64),
+                            _ => panic!("Unexpected identifier"),
+                        };
+                        assert!(
+                            type_info.unwrap().kind == expected_type,
+                            "Identifier '{}' should have type {:?}",
+                            c,
+                            expected_type
+                        );
+                    }
+                }
+            }
         }
 
         #[test]
@@ -817,7 +1080,8 @@ mod type_inference_tests {
 
         #[test]
         fn test_parameter_identifier_type() {
-            // Test that parameter identifiers are found in the AST
+            use inference_ast::nodes::ArgumentType;
+
             let source = r#"fn test(x: i32, y: i32) -> bool { return x > y; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
 
@@ -841,11 +1105,48 @@ mod type_inference_tests {
                 }
             }
             assert!(found_identifier, "Should have found identifiers x or y");
+
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 2, "Expected 2 arguments");
+                for (i, arg_type) in arguments.iter().enumerate() {
+                    if let ArgumentType::Argument(arg) = arg_type {
+                        let arg_type_info = typed_context.get_node_typeinfo(arg.id);
+                        assert!(
+                            arg_type_info.is_some(),
+                            "Argument {} should have type info",
+                            i
+                        );
+                        assert!(
+                            matches!(
+                                arg_type_info.unwrap().kind,
+                                TypeInfoKind::Number(NumberType::I32)
+                            ),
+                            "Argument {} should have i32 type",
+                            i
+                        );
+                    }
+                }
+            }
+
+            let binary_exprs = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
+            assert_eq!(binary_exprs.len(), 1, "Expected 1 binary comparison");
+
+            if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
+                let type_info = typed_context.get_node_typeinfo(bin_expr.id);
+                assert!(type_info.is_some(), "Comparison should have type info");
+                assert!(
+                    matches!(type_info.unwrap().kind, TypeInfoKind::Bool),
+                    "Comparison should return bool"
+                );
+            }
         }
 
         #[test]
         fn test_local_variable_identifier_type() {
-            // Test that local variable identifiers are found in the AST
             let source = r#"
             fn test() -> bool {
                 let flag: bool = true;
@@ -870,6 +1171,39 @@ mod type_inference_tests {
                 }
             }
             assert!(found_flag, "Should have found identifier 'flag'");
+
+            let var_defs = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
+            });
+            assert_eq!(var_defs.len(), 1, "Expected 1 variable definition");
+
+            if let AstNode::Statement(Statement::VariableDefinition(var_def)) = &var_defs[0] {
+                let type_info = typed_context.get_node_typeinfo(var_def.id);
+                assert!(type_info.is_some(), "Variable 'flag' should have type info");
+                assert!(
+                    matches!(type_info.unwrap().kind, TypeInfoKind::Bool),
+                    "Variable 'flag' should have bool type"
+                );
+                assert_eq!(var_def.name.name, "flag", "Variable name should be 'flag'");
+            }
+
+            let bool_literals = typed_context.filter_nodes(|node| {
+                matches!(
+                    node,
+                    AstNode::Expression(Expression::Literal(Literal::Bool(_)))
+                )
+            });
+            assert_eq!(bool_literals.len(), 1, "Expected 1 bool literal");
+
+            if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0]
+            {
+                let type_info = typed_context.get_node_typeinfo(lit.id);
+                assert!(type_info.is_some(), "Bool literal should have type info");
+                assert!(
+                    matches!(type_info.unwrap().kind, TypeInfoKind::Bool),
+                    "Bool literal should have Bool type"
+                );
+            }
         }
     }
 
@@ -1255,7 +1589,6 @@ mod type_inference_tests {
             let source = r#"
             struct Counter {
                 value: i32;
-
                 fn get(self) -> i32 { return 42; }
             }
             fn test(c: Counter) -> i32 { return c.get(); }
@@ -1288,7 +1621,6 @@ mod type_inference_tests {
             let source = r#"
             struct Calculator {
                 value: i32;
-
                 fn add(self, x: i32) -> i32 { return x; }
             }
             fn test(c: Calculator) -> i32 { return c.add(10); }
@@ -1321,7 +1653,6 @@ mod type_inference_tests {
             let source = r#"
             struct Checker {
                 valid: bool;
-
                 fn is_valid(self) -> bool { return true; }
             }
             fn test(c: Checker) -> bool { return c.is_valid(); }
@@ -1365,6 +1696,23 @@ mod type_inference_tests {
                 matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
             });
             assert_eq!(fn_calls.len(), 2, "Expected 2 function call expressions");
+
+            for call_node in &fn_calls {
+                if let AstNode::Expression(Expression::FunctionCall(call)) = call_node {
+                    let return_type = typed_context.get_node_typeinfo(call.id);
+                    assert!(
+                        return_type.is_some(),
+                        "Method call should have return type info"
+                    );
+                    assert!(
+                        matches!(
+                            return_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "Method should return i32"
+                    );
+                }
+            }
         }
 
         #[test]
@@ -1420,11 +1768,24 @@ mod type_inference_tests {
             fn test(c: Container) -> i32 { return c.process(); }
             "#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let fn_calls = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
             });
             assert_eq!(fn_calls.len(), 1, "Expected 1 function call expression");
+            if let AstNode::Expression(Expression::FunctionCall(call)) = &fn_calls[0] {
+                let return_type = typed_context.get_node_typeinfo(call.id);
+                assert!(
+                    return_type.is_some(),
+                    "Method call with self should have return type info"
+                );
+                assert!(
+                    matches!(
+                        return_type.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Method process() should return i32"
+                );
+            }
         }
 
         #[test]
@@ -1432,7 +1793,6 @@ mod type_inference_tests {
             let source = r#"
             struct Test {
                 value: i32;
-
                 fn needs_one(x: i32) -> i32 { return x; }
             }
             fn test(t: Test) -> i32 { return t.needs_one(); }
@@ -1463,7 +1823,6 @@ mod type_inference_tests {
             let source = r#"
             struct Container {
                 data: i32;
-
                 fn process(self) -> i32 {
                     let x: i32 = self.data;
                     return x;
@@ -1480,6 +1839,25 @@ mod type_inference_tests {
                 !member_accesses.is_empty(),
                 "Expected at least 1 member access expression for self.data"
             );
+
+            let mut found_data_field = false;
+            for ma_node in &member_accesses {
+                if let AstNode::Expression(Expression::MemberAccess(ma)) = ma_node
+                    && ma.name.name == "data"
+                {
+                    let field_type = typed_context.get_node_typeinfo(ma.id);
+                    assert!(field_type.is_some(), "Field access should have type info");
+                    assert!(
+                        matches!(
+                            field_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "Field data should have type i32"
+                    );
+                    found_data_field = true;
+                }
+            }
+            assert!(found_data_field, "Should have found self.data access");
         }
 
         #[test]
@@ -1495,7 +1873,74 @@ mod type_inference_tests {
             }
             fn test(p: Point) -> i32 { return p.sum(); }
             "#;
-            try_type_check(source).expect("Type checking should succeed");
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let member_accesses = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::MemberAccess(_)))
+            });
+            assert!(
+                member_accesses.len() >= 2,
+                "Expected at least 2 member access expressions for self.x and self.y"
+            );
+
+            let mut found_x = false;
+            let mut found_y = false;
+            for ma_node in &member_accesses {
+                if let AstNode::Expression(Expression::MemberAccess(ma)) = ma_node {
+                    match ma.name.name.as_str() {
+                        "x" => {
+                            let field_type = typed_context.get_node_typeinfo(ma.id);
+                            assert!(field_type.is_some(), "Field x should have type info");
+                            assert!(
+                                matches!(
+                                    field_type.unwrap().kind,
+                                    TypeInfoKind::Number(NumberType::I32)
+                                ),
+                                "Field x should have type i32"
+                            );
+                            found_x = true;
+                        }
+                        "y" => {
+                            let field_type = typed_context.get_node_typeinfo(ma.id);
+                            assert!(field_type.is_some(), "Field y should have type info");
+                            assert!(
+                                matches!(
+                                    field_type.unwrap().kind,
+                                    TypeInfoKind::Number(NumberType::I32)
+                                ),
+                                "Field y should have type i32"
+                            );
+                            found_y = true;
+                        }
+                        _ => {} // Allow other member accesses (like method calls)
+                    }
+                }
+            }
+            assert!(found_x, "Should have found self.x access");
+            assert!(found_y, "Should have found self.y access");
+
+            let binary_exprs = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
+            assert_eq!(
+                binary_exprs.len(),
+                1,
+                "Expected 1 binary expression (x + y)"
+            );
+
+            if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
+                let type_info = typed_context.get_node_typeinfo(bin_expr.id);
+                assert!(
+                    type_info.is_some(),
+                    "Binary expression should have type info"
+                );
+                assert!(
+                    matches!(
+                        type_info.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Binary expression should have type i32"
+                );
+            }
         }
 
         #[test]
@@ -1514,7 +1959,53 @@ mod type_inference_tests {
             }
             fn test(c: Counter) -> i32 { return c.doubled(); }
             "#;
-            try_type_check(source).expect("Type checking should succeed");
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+
+            let fn_calls = typed_context.filter_nodes(|node| {
+                matches!(node, AstNode::Expression(Expression::FunctionCall(_)))
+            });
+            // 3 function calls: c.doubled() and two self.get_value() inside doubled
+            assert_eq!(fn_calls.len(), 3, "Expected 3 function call expressions");
+
+            for call_node in &fn_calls {
+                if let AstNode::Expression(Expression::FunctionCall(call)) = call_node {
+                    let return_type = typed_context.get_node_typeinfo(call.id);
+                    assert!(
+                        return_type.is_some(),
+                        "Method call should have return type info"
+                    );
+                    assert!(
+                        matches!(
+                            return_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "All methods should return i32"
+                    );
+                }
+            }
+
+            let binary_exprs = typed_context
+                .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
+            assert_eq!(
+                binary_exprs.len(),
+                1,
+                "Expected 1 binary expression (get_value() + get_value())"
+            );
+
+            if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
+                let type_info = typed_context.get_node_typeinfo(bin_expr.id);
+                assert!(
+                    type_info.is_some(),
+                    "Binary expression should have type info"
+                );
+                assert!(
+                    matches!(
+                        type_info.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Binary expression should have type i32"
+                );
+            }
         }
 
         #[test]
