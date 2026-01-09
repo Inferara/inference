@@ -938,9 +938,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             let name = symbol.name();
-
             assert_eq!(name, "i32");
         }
 
@@ -951,9 +949,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info.clone());
-
             let result = symbol.as_type_info();
-
             assert!(result.is_some());
             let result_type = result.unwrap();
             assert!(matches!(
@@ -969,9 +965,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             let result = symbol.as_type_info();
-
             assert!(result.is_some());
             let result_type = result.unwrap();
             assert!(matches!(result_type.kind, TypeInfoKind::Custom(ref s) if s == "MyType"));
@@ -984,7 +978,6 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             assert!(symbol.is_public());
         }
 
@@ -992,16 +985,13 @@ mod tests {
         fn register_type_creates_type_alias_with_provided_type() {
             use inference_ast::nodes::{Location, SimpleType};
             use std::rc::Rc;
-
             let mut table = SymbolTable::default();
             let simple_type = Type::Simple(Rc::new(SimpleType::new(
                 0,
                 Location::default(),
                 "i32".into(),
             )));
-
             let result = table.register_type("MyInt", Some(&simple_type));
-
             assert!(result.is_ok());
             let lookup = table.lookup_type("MyInt");
             assert!(lookup.is_some());
@@ -1010,9 +1000,7 @@ mod tests {
         #[test]
         fn register_type_creates_custom_type_when_none_provided() {
             let mut table = SymbolTable::default();
-
             let result = table.register_type("MyCustomType", None);
-
             assert!(result.is_ok());
             let lookup = table.lookup_type("MyCustomType");
             assert!(lookup.is_some());
@@ -1023,20 +1011,24 @@ mod tests {
         #[test]
         fn builtin_types_are_registered_as_type_aliases() {
             let table = SymbolTable::default();
-
+            assert!(table.lookup_type("i8").is_some());
+            assert!(table.lookup_type("i16").is_some());
             assert!(table.lookup_type("i32").is_some());
+            assert!(table.lookup_type("i64").is_some());
+            assert!(table.lookup_type("u8").is_some());
+            assert!(table.lookup_type("u16").is_some());
+            assert!(table.lookup_type("u32").is_some());
             assert!(table.lookup_type("u64").is_some());
             assert!(table.lookup_type("bool").is_some());
             assert!(table.lookup_type("unit").is_some());
+            assert!(table.lookup_type("string").is_some());
         }
 
         #[test]
         fn lookup_type_returns_type_alias_info() {
             let mut table = SymbolTable::default();
             table.register_type("TestType", None).unwrap();
-
             let result = table.lookup_type("TestType");
-
             assert!(result.is_some());
         }
 
@@ -1047,7 +1039,6 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             assert!(symbol.as_function().is_none());
         }
 
@@ -1058,7 +1049,6 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             assert!(symbol.as_struct().is_none());
         }
 
@@ -1069,7 +1059,6 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-
             assert!(symbol.as_enum().is_none());
         }
     }
@@ -1080,13 +1069,10 @@ mod tests {
         #[test]
         fn unique_names_for_consecutive_scopes() {
             let mut table = SymbolTable::default();
-
             let scope1_id = table.push_scope();
             let scope2_id = table.push_scope();
-
             let scope1 = table.get_scope(scope1_id).unwrap();
             let scope2 = table.get_scope(scope2_id).unwrap();
-
             assert_ne!(
                 scope1.borrow().name,
                 scope2.borrow().name,
@@ -1097,15 +1083,12 @@ mod tests {
         #[test]
         fn name_includes_scope_id() {
             let mut table = SymbolTable::default();
-
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-
             assert!(
                 scope.borrow().name.starts_with("anonymous_"),
                 "Anonymous scope name should start with 'anonymous_'"
             );
-
             let expected_name = format!("anonymous_{scope_id}");
             assert_eq!(
                 scope.borrow().name,
@@ -1117,21 +1100,16 @@ mod tests {
         #[test]
         fn nested_scopes_have_distinguishable_paths() {
             let mut table = SymbolTable::default();
-
             table.push_scope_with_name("test_func", Visibility::Private);
-
             let inner1_id = table.push_scope();
             let inner2_id = table.push_scope();
-
             let inner1 = table.get_scope(inner1_id).unwrap();
             let inner2 = table.get_scope(inner2_id).unwrap();
-
             assert_ne!(
                 inner1.borrow().full_path,
                 inner2.borrow().full_path,
                 "Nested anonymous scopes should have different full_paths"
             );
-
             assert!(
                 inner1.borrow().full_path.contains("test_func"),
                 "Full path should include parent function name"
@@ -1141,11 +1119,9 @@ mod tests {
         #[test]
         fn anonymous_scopes_not_in_mod_scopes() {
             let mut table = SymbolTable::default();
-
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
             let full_path = scope.borrow().full_path.clone();
-
             let path_segments: Vec<String> = full_path.split("::").map(String::from).collect();
             assert!(
                 table.find_module_scope(&path_segments).is_none(),
@@ -1156,17 +1132,13 @@ mod tests {
         #[test]
         fn pop_push_maintains_correct_ids() {
             let mut table = SymbolTable::default();
-
             let scope1_id = table.push_scope();
             table.pop_scope();
-
             let scope2_id = table.push_scope();
-
             assert_ne!(
                 scope1_id, scope2_id,
                 "Popping and pushing should create new scope with different ID"
             );
-
             assert_eq!(
                 scope2_id,
                 scope1_id + 1,
@@ -1177,18 +1149,14 @@ mod tests {
         #[test]
         fn deeply_nested_anonymous_scopes() {
             let mut table = SymbolTable::default();
-
             let depth = 10;
             let mut scope_ids = Vec::new();
-
             for _ in 0..depth {
                 scope_ids.push(table.push_scope());
             }
-
             for (i, scope_id) in scope_ids.iter().enumerate() {
                 let scope = table.get_scope(*scope_id).unwrap();
                 let scope_borrow = scope.borrow();
-
                 let expected_depth = i + 1;
                 let path_parts: Vec<&str> = scope_borrow.full_path.split("::").collect();
                 assert_eq!(
@@ -1196,7 +1164,6 @@ mod tests {
                     expected_depth,
                     "Deeply nested scope at level {i} should have correct path depth"
                 );
-
                 assert!(
                     scope_borrow.name.starts_with("anonymous_"),
                     "All nested scopes should have anonymous_ prefix"
@@ -1207,27 +1174,20 @@ mod tests {
         #[test]
         fn sibling_anonymous_scopes_have_unique_names() {
             let mut table = SymbolTable::default();
-
             table.push_scope_with_name("parent", Visibility::Private);
-
             let sibling1_id = table.push_scope();
             table.pop_scope();
-
             let sibling2_id = table.push_scope();
             table.pop_scope();
-
             let sibling3_id = table.push_scope();
-
             let sibling1 = table.get_scope(sibling1_id).unwrap();
             let sibling2 = table.get_scope(sibling2_id).unwrap();
             let sibling3 = table.get_scope(sibling3_id).unwrap();
-
             let names = [
                 sibling1.borrow().name.clone(),
                 sibling2.borrow().name.clone(),
                 sibling3.borrow().name.clone(),
             ];
-
             assert_eq!(
                 names.len(),
                 names.iter().collect::<FxHashSet<_>>().len(),
@@ -1238,32 +1198,26 @@ mod tests {
         #[test]
         fn anonymous_scope_parent_relationship() {
             let mut table = SymbolTable::default();
-
             let parent_id = table.push_scope_with_name("parent_func", Visibility::Private);
             let child_id = table.push_scope();
-
             let child_scope = table.get_scope(child_id).unwrap();
             let parent_scope = table.get_scope(parent_id).unwrap();
-
             let child_parent = child_scope.borrow().parent.clone();
             assert!(
                 child_parent.is_some(),
                 "Anonymous child scope should have parent"
             );
-
             let child_parent_id = child_parent.unwrap().borrow().id;
             assert_eq!(
                 child_parent_id, parent_id,
                 "Anonymous scope's parent should be the enclosing scope"
             );
-
             let parent_children = &parent_scope.borrow().children;
             assert_eq!(
                 parent_children.len(),
                 1,
                 "Parent should have the anonymous child in its children list"
             );
-
             assert_eq!(
                 parent_children[0].borrow().id,
                 child_id,
@@ -1274,10 +1228,8 @@ mod tests {
         #[test]
         fn anonymous_scope_visibility_is_private() {
             let mut table = SymbolTable::default();
-
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-
             assert!(
                 matches!(scope.borrow().visibility, Visibility::Private),
                 "Anonymous scopes should have private visibility"
@@ -1287,14 +1239,11 @@ mod tests {
         #[test]
         fn multiple_anonymous_scopes_increment_id_correctly() {
             let mut table = SymbolTable::default();
-
             let count = 20;
             let mut scope_ids = Vec::new();
-
             for _ in 0..count {
                 scope_ids.push(table.push_scope());
             }
-
             for i in 1..count {
                 assert_eq!(
                     scope_ids[i],
@@ -1307,21 +1256,17 @@ mod tests {
         #[test]
         fn anonymous_scope_full_path_construction() {
             let mut table = SymbolTable::default();
-
             table.push_scope_with_name("mod1", Visibility::Private);
             table.push_scope_with_name("mod2", Visibility::Private);
-
             let anon_id = table.push_scope();
             let anon_scope = table.get_scope(anon_id).unwrap();
             let full_path = anon_scope.borrow().full_path.clone();
             let name = anon_scope.borrow().name.clone();
-
             let expected_path = format!("mod1::mod2::{name}");
             assert_eq!(
                 full_path, expected_path,
                 "Anonymous scope full_path should include all parent module names"
             );
-
             assert!(
                 full_path.contains("::anonymous_"),
                 "Full path should contain the anonymous scope name with separator"
@@ -1331,16 +1276,13 @@ mod tests {
         #[test]
         fn root_level_anonymous_scope_no_separator_in_path() {
             let mut table = SymbolTable::default();
-
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
             let full_path = scope.borrow().full_path.clone();
-
             assert!(
                 !full_path.starts_with("::"),
                 "Root-level anonymous scope should not start with ::"
             );
-
             assert!(
                 full_path.starts_with("anonymous_"),
                 "Root-level anonymous scope full_path should be just the name"
@@ -1350,7 +1292,6 @@ mod tests {
 
     mod method_info_tests {
         use super::*;
-
         #[test]
         fn is_instance_method_returns_true_when_has_self() {
             let method_info = MethodInfo {
@@ -1366,7 +1307,6 @@ mod tests {
                 scope_id: 0,
                 has_self: true,
             };
-
             assert!(method_info.is_instance_method());
         }
 
@@ -1385,7 +1325,6 @@ mod tests {
                 scope_id: 0,
                 has_self: false,
             };
-
             assert!(!method_info.is_instance_method());
         }
 
@@ -1393,7 +1332,6 @@ mod tests {
         fn register_method_stores_has_self_true_correctly() {
             let mut table = SymbolTable::default();
             table.push_scope_with_name("TestType", Visibility::Public);
-
             let sig = FuncInfo {
                 name: "instance_method".to_string(),
                 type_params: vec![],
@@ -1402,10 +1340,8 @@ mod tests {
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
             };
-
             let result = table.register_method("TestType", sig, Visibility::Public, true);
             assert!(result.is_ok());
-
             let method_info = table.lookup_method("TestType", "instance_method");
             assert!(method_info.is_some());
             let method_info = method_info.unwrap();
@@ -1417,7 +1353,6 @@ mod tests {
         fn register_method_stores_has_self_false_correctly() {
             let mut table = SymbolTable::default();
             table.push_scope_with_name("TestType", Visibility::Public);
-
             let sig = FuncInfo {
                 name: "constructor".to_string(),
                 type_params: vec![],
@@ -1426,10 +1361,8 @@ mod tests {
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
             };
-
             let result = table.register_method("TestType", sig, Visibility::Public, false);
             assert!(result.is_ok());
-
             let method_info = table.lookup_method("TestType", "constructor");
             assert!(method_info.is_some());
             let method_info = method_info.unwrap();
@@ -1452,7 +1385,6 @@ mod tests {
                 scope_id: 0,
                 has_self: true,
             };
-
             let associated_fn = MethodInfo {
                 signature: FuncInfo {
                     name: "test".to_string(),
@@ -1466,7 +1398,6 @@ mod tests {
                 scope_id: 0,
                 has_self: false,
             };
-
             // Verify accessor returns same value as field
             assert_eq!(
                 instance_method.is_instance_method(),

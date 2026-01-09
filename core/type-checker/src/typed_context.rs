@@ -14,7 +14,7 @@ use crate::{
 };
 use inference_ast::{
     arena::Arena,
-    nodes::{AstNode, Expression, Location, SourceFile},
+    nodes::{AstNode, Expression, FunctionDefinition, Location, SourceFile},
 };
 use rustc_hash::FxHashMap;
 
@@ -37,6 +37,11 @@ impl TypedContext {
     #[must_use = "returns source files without side effects"]
     pub fn source_files(&self) -> Vec<Rc<SourceFile>> {
         self.arena.source_files()
+    }
+
+    #[must_use = "returns function definitions without side effects"]
+    pub fn functions(&self) -> Vec<Rc<FunctionDefinition>> {
+        self.arena.functions()
     }
 
     #[must_use = "returns filtered nodes without side effects"]
@@ -90,9 +95,9 @@ impl TypedContext {
     #[track_caller]
     pub fn find_untyped_expressions(&self) -> Vec<MissingExpressionType> {
         self.arena
-            .filter_nodes(|node| {
-                matches!(node, AstNode::Expression(expr) if Self::is_value_expression(expr))
-            })
+            .filter_nodes(
+                |node| matches!(node, AstNode::Expression(expr) if Self::is_value_expression(expr)),
+            )
             .into_iter()
             .filter_map(|node| {
                 if let AstNode::Expression(expr) = &node {

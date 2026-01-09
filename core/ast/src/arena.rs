@@ -1,4 +1,4 @@
-use crate::nodes::{Ast, AstNode, Definition, SourceFile, TypeDefinition};
+use crate::nodes::{Ast, AstNode, Definition, FunctionDefinition, SourceFile, TypeDefinition};
 use rustc_hash::FxHashMap;
 use std::rc::Rc;
 
@@ -14,6 +14,17 @@ impl Arena {
         self.list_nodes_cmp(|node| {
             if let AstNode::Ast(Ast::SourceFile(source_file)) = node {
                 Some(source_file.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+    }
+    #[must_use]
+    pub fn functions(&self) -> Vec<Rc<FunctionDefinition>> {
+        self.list_nodes_cmp(|node| {
+            if let AstNode::Definition(Definition::Function(func_def)) = node {
+                Some(func_def.clone())
             } else {
                 None
             }

@@ -33,26 +33,36 @@ mod type_inference_tests {
         fn test_numeric_literal_type_inference() {
             let source = r#"fn test() -> i32 { return 42; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
-            // Find the number literal and verify its type
-            let arena = build_ast(source.to_string());
-            let literals = arena.filter_nodes(|node| {
+            let literals = typed_context.filter_nodes(|node| {
                 matches!(
                     node,
                     AstNode::Expression(Expression::Literal(Literal::Number(_)))
                 )
             });
             assert_eq!(literals.len(), 1, "Expected 1 number literal");
-
-            // Type checker successfully processed the source
             assert_eq!(typed_context.source_files().len(), 1);
+            if let AstNode::Expression(Expression::Literal(Literal::Number(lit))) = &literals[0] {
+                let literal_type = typed_context.get_node_typeinfo(lit.id);
+                assert!(
+                    literal_type.is_some(),
+                    "Number literal should have type info"
+                );
+                assert!(
+                    matches!(
+                        literal_type.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Number literal should have type i32"
+                );
+            } else {
+                panic!("Expected number literal");
+            }
         }
 
         #[test]
         fn test_bool_literal_type_inference() {
             let source = r#"fn test() -> bool { return true; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
-
             let bool_literals = typed_context.filter_nodes(|node| {
                 matches!(
                     node,
@@ -60,7 +70,6 @@ mod type_inference_tests {
                 )
             });
             assert_eq!(bool_literals.len(), 1, "Expected 1 bool literal");
-
             if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0]
             {
                 let type_info = typed_context.get_node_typeinfo(lit.id);
@@ -69,6 +78,8 @@ mod type_inference_tests {
                     matches!(type_info.unwrap().kind, TypeInfoKind::Bool),
                     "Bool literal should have Bool type"
                 );
+            } else {
+                panic!("Expected bool literal");
             }
         }
 
@@ -77,6 +88,28 @@ mod type_inference_tests {
             let source = r#"fn test(x: String) -> String { return x; }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
             assert_eq!(typed_context.source_files().len(), 1);
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function definition");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert!(!arguments.is_empty(), "Function should have arguments");
+                let param_type = typed_context.get_node_typeinfo(arguments[0].id());
+                assert!(
+                    param_type.is_some(),
+                    "Function parameter should have type info"
+                );
+                let param_type = param_type.unwrap();
+                assert!(
+                    matches!(param_type.kind, TypeInfoKind::Struct(_)),
+                    "Function parameter should have String type"
+                );
+                assert!(
+                    param_type.is_struct(),
+                    "Function parameter should be identified as String type"
+                )
+            } else {
+                panic!("Function should have arguments");
+            }
         }
 
         #[test]
@@ -88,8 +121,7 @@ mod type_inference_tests {
             }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
 
-            let arena = build_ast(source.to_string());
-            let var_defs = arena.filter_nodes(|node| {
+            let var_defs = typed_context.filter_nodes(|node| {
                 matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
             });
             assert_eq!(var_defs.len(), 2, "Expected 2 variable definitions");
