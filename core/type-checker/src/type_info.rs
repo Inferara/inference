@@ -305,7 +305,7 @@ impl TypeInfo {
                     };
                 }
                 Self {
-                    kind: TypeInfoKind::Custom(custom.name.clone()),
+                    kind: Self::type_kind_from_simple_type(&custom.name),
                     type_params: vec![],
                 }
             }

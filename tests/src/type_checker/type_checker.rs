@@ -91,6 +91,16 @@ mod type_inference_tests {
             let functions = typed_context.functions();
             assert_eq!(functions.len(), 1, "Expected 1 function definition");
             let func = &functions[0];
+            assert!(func.returns.is_some(), "Function should have return type");
+            let return_type = typed_context.get_node_typeinfo(func.returns.as_ref().unwrap().id());
+            assert!(
+                return_type.is_some(),
+                "Function return type should have type info"
+            );
+            assert!(
+                matches!(return_type.unwrap().kind, TypeInfoKind::String),
+                "Function return type should be String"
+            );
             if let Some(arguments) = &func.arguments {
                 assert!(!arguments.is_empty(), "Function should have arguments");
                 let param_type = typed_context.get_node_typeinfo(arguments[0].id());
@@ -100,13 +110,9 @@ mod type_inference_tests {
                 );
                 let param_type = param_type.unwrap();
                 assert!(
-                    matches!(param_type.kind, TypeInfoKind::Struct(_)),
+                    matches!(param_type.kind, TypeInfoKind::String),
                     "Function parameter should have String type"
                 );
-                assert!(
-                    param_type.is_struct(),
-                    "Function parameter should be identified as String type"
-                )
             } else {
                 panic!("Function should have arguments");
             }
@@ -152,6 +158,303 @@ mod type_inference_tests {
                     "Type checking should succeed for {} type",
                     type_name
                 );
+            }
+        }
+    }
+
+    /// Tests for function parameter type info storage
+    mod function_parameters {
+        use super::*;
+        use inference_ast::nodes::{ArgumentType, Definition};
+
+        #[test]
+        fn test_single_parameter_type_info() {
+            let source = r#"fn test(x: i32) -> i32 { return x; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::Argument(arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(arg_type.is_some(), "Argument node should have type info");
+                    assert!(
+                        matches!(
+                            arg_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "Argument should have i32 type"
+                    );
+                    let name_type = typed_context.get_node_typeinfo(arg.name.id);
+                    assert!(name_type.is_some(), "Argument name should have type info");
+                    assert!(
+                        matches!(
+                            name_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "Argument name should have i32 type"
+                    );
+                } else {
+                    panic!("Expected Argument");
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_multiple_parameters_type_info() {
+            let source = r#"fn test(a: i32, b: bool, c: String) -> i32 { return a; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 3, "Expected 3 arguments");
+                let expected_types = [
+                    TypeInfoKind::Number(NumberType::I32),
+                    TypeInfoKind::Bool,
+                    TypeInfoKind::String,
+                ];
+                for (i, arg_type) in arguments.iter().enumerate() {
+                    if let ArgumentType::Argument(arg) = arg_type {
+                        let arg_type_info = typed_context.get_node_typeinfo(arg.id);
+                        assert!(
+                            arg_type_info.is_some(),
+                            "Argument {} should have type info",
+                            i
+                        );
+                        assert_eq!(
+                            arg_type_info.unwrap().kind,
+                            expected_types[i],
+                            "Argument {} should have correct type",
+                            i
+                        );
+                        let name_type_info = typed_context.get_node_typeinfo(arg.name.id);
+                        assert!(
+                            name_type_info.is_some(),
+                            "Argument name {} should have type info",
+                            i
+                        );
+                        assert_eq!(
+                            name_type_info.unwrap().kind,
+                            expected_types[i],
+                            "Argument name {} should have correct type",
+                            i
+                        );
+                    } else {
+                        panic!("Expected Argument at position {}", i);
+                    }
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_ignore_argument_type_info() {
+            let source = r#"fn test(_: i32) -> i32 { return 42; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::IgnoreArgument(ignore_arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(ignore_arg.id);
+                    assert!(
+                        arg_type.is_some(),
+                        "IgnoreArgument node should have type info"
+                    );
+                    assert!(
+                        matches!(
+                            arg_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "IgnoreArgument should have i32 type"
+                    );
+                } else {
+                    panic!("Expected IgnoreArgument");
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_ignore_argument_with_different_types() {
+            let sources = [
+                (NumberType::I8, r#"fn test(_: i8) -> i32 { return 1; }"#),
+                (NumberType::I16, r#"fn test(_: i16) -> i32 { return 1; }"#),
+                (NumberType::I32, r#"fn test(_: i32) -> i32 { return 1; }"#),
+                (NumberType::I64, r#"fn test(_: i64) -> i32 { return 1; }"#),
+                (NumberType::U8, r#"fn test(_: u8) -> i32 { return 1; }"#),
+                (NumberType::U16, r#"fn test(_: u16) -> i32 { return 1; }"#),
+                (NumberType::U32, r#"fn test(_: u32) -> i32 { return 1; }"#),
+                (NumberType::U64, r#"fn test(_: u64) -> i32 { return 1; }"#),
+            ];
+            for (expected_type, source) in sources {
+                let typed_context = try_type_check(source).expect("Type checking should succeed");
+                let functions = typed_context.functions();
+                assert_eq!(functions.len(), 1, "Expected 1 function");
+                let func = &functions[0];
+                if let Some(arguments) = &func.arguments {
+                    assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                    if let ArgumentType::IgnoreArgument(ignore_arg) = &arguments[0] {
+                        let arg_type = typed_context.get_node_typeinfo(ignore_arg.id);
+                        assert!(
+                            arg_type.is_some(),
+                            "IgnoreArgument should have type info for {:?}",
+                            expected_type
+                        );
+                        assert!(
+                            matches!(
+                                arg_type.unwrap().kind,
+                                TypeInfoKind::Number(t) if t == expected_type
+                            ),
+                            "IgnoreArgument should have {:?} type",
+                            expected_type
+                        );
+                    } else {
+                        panic!("Expected IgnoreArgument for {:?}", expected_type);
+                    }
+                } else {
+                    panic!("Expected arguments for {:?}", expected_type);
+                }
+            }
+        }
+
+        #[test]
+        fn test_mixed_ignore_and_named_arguments() {
+            let source = r#"fn test(a: i32, _: bool, b: String) -> i32 { return a; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 3, "Expected 3 arguments");
+                if let ArgumentType::Argument(arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(arg_type.is_some(), "First argument should have type info");
+                    assert!(
+                        matches!(
+                            arg_type.unwrap().kind,
+                            TypeInfoKind::Number(NumberType::I32)
+                        ),
+                        "First argument should be i32"
+                    );
+                } else {
+                    panic!("Expected Argument at position 0");
+                }
+                if let ArgumentType::IgnoreArgument(ignore_arg) = &arguments[1] {
+                    let arg_type = typed_context.get_node_typeinfo(ignore_arg.id);
+                    assert!(
+                        arg_type.is_some(),
+                        "Second argument (ignore) should have type info"
+                    );
+                    assert!(
+                        matches!(arg_type.unwrap().kind, TypeInfoKind::Bool),
+                        "Second argument should be bool"
+                    );
+                } else {
+                    panic!("Expected IgnoreArgument at position 1");
+                }
+                if let ArgumentType::Argument(arg) = &arguments[2] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(arg_type.is_some(), "Third argument should have type info");
+                    assert!(
+                        matches!(arg_type.unwrap().kind, TypeInfoKind::String),
+                        "Third argument should be String"
+                    );
+                } else {
+                    panic!("Expected Argument at position 2");
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_ignore_argument_with_string_type() {
+            let source = r#"fn test(_: String) -> i32 { return 1; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::IgnoreArgument(ignore_arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(ignore_arg.id);
+                    assert!(
+                        arg_type.is_some(),
+                        "IgnoreArgument with String should have type info"
+                    );
+                    assert!(
+                        matches!(arg_type.unwrap().kind, TypeInfoKind::String),
+                        "IgnoreArgument should have String type"
+                    );
+                } else {
+                    panic!("Expected IgnoreArgument");
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_ignore_argument_with_bool_type() {
+            let source = r#"fn test(_: bool) -> i32 { return 1; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::IgnoreArgument(ignore_arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(ignore_arg.id);
+                    assert!(
+                        arg_type.is_some(),
+                        "IgnoreArgument with bool should have type info"
+                    );
+                    assert!(
+                        matches!(arg_type.unwrap().kind, TypeInfoKind::Bool),
+                        "IgnoreArgument should have bool type"
+                    );
+                } else {
+                    panic!("Expected IgnoreArgument");
+                }
+            } else {
+                panic!("Expected arguments");
+            }
+        }
+
+        #[test]
+        fn test_array_parameter_type_info() {
+            let source = r#"fn test(arr: [i32; 5]) -> i32 { return arr[0]; }"#;
+            let typed_context = try_type_check(source).expect("Type checking should succeed");
+            let functions = typed_context.functions();
+            assert_eq!(functions.len(), 1, "Expected 1 function");
+            let func = &functions[0];
+            if let Some(arguments) = &func.arguments {
+                assert_eq!(arguments.len(), 1, "Expected 1 argument");
+                if let ArgumentType::Argument(arg) = &arguments[0] {
+                    let arg_type = typed_context.get_node_typeinfo(arg.id);
+                    assert!(arg_type.is_some(), "Array parameter should have type info");
+                    if let TypeInfoKind::Array(element_type, size) = &arg_type.unwrap().kind {
+                        assert!(
+                            matches!(element_type.kind, TypeInfoKind::Number(NumberType::I32)),
+                            "Array element should be i32"
+                        );
+                        assert_eq!(*size, 5, "Array size should be 5");
+                    } else {
+                        panic!("Expected Array type");
+                    }
+                } else {
+                    panic!("Expected Argument");
+                }
+            } else {
+                panic!("Expected arguments");
             }
         }
     }

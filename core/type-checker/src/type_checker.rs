@@ -290,13 +290,19 @@ impl TypeChecker {
                                         &ignore_argument.ty,
                                         function_definition.type_parameters.as_ref(),
                                     );
+                                    ctx.set_node_typeinfo(
+                                        ignore_argument.id,
+                                        TypeInfo::new(&ignore_argument.ty),
+                                    );
                                 }
                                 ArgumentType::Argument(arg) => {
                                     self.validate_type(
                                         &arg.ty,
                                         function_definition.type_parameters.as_ref(),
                                     );
-                                    ctx.set_node_typeinfo(arg.name.id, TypeInfo::new(&arg.ty));
+                                    let type_info = TypeInfo::new(&arg.ty);
+                                    ctx.set_node_typeinfo(arg.id, type_info.clone());
+                                    ctx.set_node_typeinfo(arg.name.id, type_info);
                                 }
                                 ArgumentType::Type(ty) => {
                                     self.validate_type(
@@ -321,6 +327,7 @@ impl TypeChecker {
                                 return_type,
                                 function_definition.type_parameters.as_ref(),
                             );
+                            ctx.set_node_typeinfo(return_type.id(), TypeInfo::new(return_type));
                         }
                         // Register function even if parameter validation had errors
                         // to allow error recovery and prevent spurious UndefinedFunction errors
