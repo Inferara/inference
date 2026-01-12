@@ -28,7 +28,7 @@ coverage/
 cobertura.xml
 
 .*
-!.github/
+!.github/workflows/
 !.cargo/
 !.gitattributes
 
