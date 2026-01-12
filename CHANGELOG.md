@@ -2,25 +2,6 @@
 
 All notable changes to the Inference compiler project.
 
-## Location Struct Optimization - Phase 1 (#69)
-
-- Remove `source: String` field from `Location` struct
-  - Eliminates ~250KB memory overhead per 2.5KB source file with 100 nodes
-  - Source text now stored once in `SourceFile` (coming in Phase 2)
-- Add `#[derive(Copy)]` to `Location` struct
-  - Enables efficient stack copies instead of heap allocations
-  - 60+ `.clone()` calls in type-checker now become trivial copies
-  - Aligns with rustc `Span` and rust-analyzer `TextRange` patterns
-- Update `Location::new()` constructor (6 parameters instead of 7)
-- Add comprehensive doc comment explaining the design pattern
-- Add 6 new tests for Copy trait verification:
-  - `test_location_copy()` - Basic copy test
-  - `test_location_copy_allows_multiple_uses()` - Multiple assignment
-  - `test_location_copy_in_function_arguments()` - Pass-by-value
-  - `test_location_edge_case_zero_values()` - Boundary testing (0)
-  - `test_location_edge_case_max_values()` - Boundary testing (u32::MAX)
-  - `test_location_display_zero_values()` - Edge case formatting
-
 ## Type Checker Implementation (#54)
 
 - `c13371b` Add `type-checker` crate (#54)
