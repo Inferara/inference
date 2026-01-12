@@ -392,7 +392,6 @@ mod tests {
             start_column: 5,
             end_line: 1,
             end_column: 10,
-            source: "test.inf".to_string(),
         }
     }
 

@@ -782,7 +782,7 @@ mod type_info_from_ast {
     use inference_ast::nodes::Location;
 
     fn dummy_location() -> Location {
-        Location::new(0, 0, 0, 0, 0, 0, String::new())
+        Location::new(0, 0, 0, 0, 0, 0)
     }
 
     fn make_identifier(name: &str) -> Rc<Identifier> {
@@ -1000,7 +1000,7 @@ mod type_info_with_type_params {
     use inference_ast::nodes::Location;
 
     fn dummy_location() -> Location {
-        Location::new(0, 0, 0, 0, 0, 0, String::new())
+        Location::new(0, 0, 0, 0, 0, 0)
     }
 
     fn make_identifier(name: &str) -> Rc<Identifier> {

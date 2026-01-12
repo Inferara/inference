@@ -5,7 +5,11 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// Source location information for AST nodes.
+///
+/// Stores byte offsets and line/column positions.
+/// Source text should be retrieved from the `SourceFile` using the offset range.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Location {
     pub offset_start: u32,
     pub offset_end: u32,
@@ -13,7 +17,6 @@ pub struct Location {
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
-    pub source: String,
 }
 
 impl Location {
@@ -25,7 +28,6 @@ impl Location {
         start_column: u32,
         end_line: u32,
         end_column: u32,
-        source: String,
     ) -> Self {
         Self {
             offset_start,
@@ -34,7 +36,6 @@ impl Location {
             start_column,
             end_line,
             end_column,
-            source,
         }
     }
 }
