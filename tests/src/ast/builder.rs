@@ -638,3 +638,331 @@ fn test_multiple_params() {
     let arena = build_ast(source.to_string());
     assert_eq!(arena.source_files().len(), 1);
 }
+
+#[test]
+fn test_source_file_stores_source_correctly() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].source, source);
+}
+
+#[test]
+fn test_source_file_source_with_multiple_definitions() {
+    let source = r#"const X: i32 = 42;
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+struct Point { x: i32; y: i32; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].source, source);
+}
+
+#[test]
+fn test_source_file_source_empty_function() {
+    let source = r#"fn empty() {}"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files[0].source, source);
+}
+
+#[test]
+fn test_location_offset_extracts_function_definition() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    assert_eq!(source_file.definitions.len(), 1);
+    if let Definition::Function(func) = &source_file.definitions[0] {
+        let loc = func.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_identifier() {
+    let source = r#"fn my_function() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Function(func) = &source_file.definitions[0] {
+        let name_loc = func.name.location;
+        let extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(extracted, "my_function");
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_struct_definition() {
+    let source = r#"struct Point { x: i32; y: i32; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Struct(struct_def) = &source_file.definitions[0] {
+        let loc = struct_def.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+
+        let name_loc = struct_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "Point");
+    } else {
+        panic!("Expected struct definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_struct_fields() {
+    let source = r#"struct Point { x: i32; y: i32; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Struct(struct_def) = &source_file.definitions[0] {
+        assert_eq!(struct_def.fields.len(), 2);
+
+        let field_x = &struct_def.fields[0];
+        let field_x_name_loc = field_x.name.location;
+        let field_x_name = &source_file.source
+            [field_x_name_loc.offset_start as usize..field_x_name_loc.offset_end as usize];
+        assert_eq!(field_x_name, "x");
+
+        let field_y = &struct_def.fields[1];
+        let field_y_name_loc = field_y.name.location;
+        let field_y_name = &source_file.source
+            [field_y_name_loc.offset_start as usize..field_y_name_loc.offset_end as usize];
+        assert_eq!(field_y_name, "y");
+    } else {
+        panic!("Expected struct definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_constant_definition() {
+    let source = r#"const MAX_VALUE: i32 = 100;"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Constant(const_def) = &source_file.definitions[0] {
+        let loc = const_def.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+
+        let name_loc = const_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "MAX_VALUE");
+    } else {
+        panic!("Expected constant definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_enum_definition() {
+    let source = r#"enum Color { Red, Green, Blue }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Enum(enum_def) = &source_file.definitions[0] {
+        let loc = enum_def.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+
+        let name_loc = enum_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "Color");
+
+        assert_eq!(enum_def.variants.len(), 3);
+        let variant_names: Vec<&str> = enum_def
+            .variants
+            .iter()
+            .map(|v| {
+                let loc = v.location;
+                &source_file.source[loc.offset_start as usize..loc.offset_end as usize]
+            })
+            .collect();
+        assert_eq!(variant_names, vec!["Red", "Green", "Blue"]);
+    } else {
+        panic!("Expected enum definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_multiple_definitions() {
+    let source = r#"const X: i32 = 10;
+fn compute(n: i32) -> i32 { return n * 2; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    assert_eq!(source_file.definitions.len(), 2);
+
+    if let Definition::Constant(const_def) = &source_file.definitions[0] {
+        let name_loc = const_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "X");
+    } else {
+        panic!("Expected constant definition");
+    }
+
+    if let Definition::Function(func_def) = &source_file.definitions[1] {
+        let name_loc = func_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "compute");
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_function_arguments() {
+    let source = r#"fn add(first_arg: i32, second_arg: i32) -> i32 { return first_arg + second_arg; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Function(func) = &source_file.definitions[0] {
+        let args = func.arguments.as_ref().expect("Expected arguments");
+        assert_eq!(args.len(), 2);
+
+        if let inference_ast::nodes::ArgumentType::Argument(arg1) = &args[0] {
+            let arg1_name_loc = arg1.name.location;
+            let arg1_name = &source_file.source
+                [arg1_name_loc.offset_start as usize..arg1_name_loc.offset_end as usize];
+            assert_eq!(arg1_name, "first_arg");
+        } else {
+            panic!("Expected Argument type");
+        }
+
+        if let inference_ast::nodes::ArgumentType::Argument(arg2) = &args[1] {
+            let arg2_name_loc = arg2.name.location;
+            let arg2_name = &source_file.source
+                [arg2_name_loc.offset_start as usize..arg2_name_loc.offset_end as usize];
+            assert_eq!(arg2_name, "second_arg");
+        } else {
+            panic!("Expected Argument type");
+        }
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_use_directive() {
+    let source = r#"use inference::std::collections;"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    assert_eq!(source_file.directives.len(), 1);
+    let inference_ast::nodes::Directive::Use(use_dir) = &source_file.directives[0];
+    let loc = use_dir.location;
+    let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+    assert_eq!(extracted, source);
+}
+
+#[test]
+fn test_location_offset_with_whitespace_and_comments() {
+    let source = r#"// This is a comment
+fn   spaced_function  ( ) -> i32 {
+    return 42;
+}"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    assert_eq!(source_file.source, source);
+
+    if let Definition::Function(func) = &source_file.definitions[0] {
+        let name_loc = func.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "spaced_function");
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_external_function() {
+    let source = r#"external fn print_value(i32);"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::ExternalFunction(ext_func) = &source_file.definitions[0] {
+        let loc = ext_func.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+
+        let name_loc = ext_func.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "print_value");
+    } else {
+        panic!("Expected external function definition");
+    }
+}
+
+#[test]
+fn test_location_offset_extracts_type_alias() {
+    let source = r#"type MyInt = i32;"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    if let Definition::Type(type_def) = &source_file.definitions[0] {
+        let loc = type_def.location;
+        let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+        assert_eq!(extracted, source);
+
+        let name_loc = type_def.name.location;
+        let name_extracted =
+            &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
+        assert_eq!(name_extracted, "MyInt");
+    } else {
+        panic!("Expected type definition");
+    }
+}
+
+#[test]
+fn test_source_file_location_covers_entire_source() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    let loc = source_file.location;
+    assert_eq!(loc.offset_start, 0);
+    assert_eq!(loc.offset_end as usize, source.len());
+
+    let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
+    assert_eq!(extracted, source);
+}
+
+#[test]
+fn test_location_offset_extracts_nested_expressions() {
+    let source = r#"fn calc() -> i32 { return (1 + 2) * 3; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    let source_file = &source_files[0];
+
+    assert_eq!(source_file.source, source);
+    assert_eq!(source_file.definitions.len(), 1);
+}

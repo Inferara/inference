@@ -75,10 +75,11 @@ macro_rules! ast_nodes_impl {
 
 impl SourceFile {
     #[must_use]
-    pub fn new(id: u32, location: Location) -> Self {
+    pub fn new(id: u32, location: Location, source: String) -> Self {
         SourceFile {
             id,
             location,
+            source,
             directives: Vec::new(),
             definitions: Vec::new(),
         }

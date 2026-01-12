@@ -312,7 +312,12 @@ pub enum OperatorKind {
 
 ast_nodes! {
 
+    /// Root AST node representing a parsed source file.
+    ///
+    /// Stores the complete source text, enabling any node to retrieve its source
+    /// via `Location::offset_start..Location::offset_end` slicing on this field.
     pub struct SourceFile {
+        pub source: String,
         pub directives: Vec<Directive>,
         pub definitions: Vec<Definition>,
     }

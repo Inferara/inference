@@ -83,7 +83,13 @@ impl<'a> Builder<'a, InitState> {
         for (root, code) in &self.source_code.clone() {
             let id = Self::get_node_id();
             let location = Self::get_location(root, code);
-            let mut ast = SourceFile::new(id, location);
+            let source = String::from_utf8_lossy(code);
+            debug_assert!(
+                !source.contains('\u{FFFD}'),
+                "Source code contains invalid UTF-8"
+            );
+            let source = source.into_owned();
+            let mut ast = SourceFile::new(id, location, source);
 
             for i in 0..root.child_count() {
                 if let Some(child) = root.child(u32::try_from(i).unwrap()) {
