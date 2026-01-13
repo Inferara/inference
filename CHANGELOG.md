@@ -2,6 +2,20 @@
 
 All notable changes to the Inference compiler project.
 
+## Location and Arena Optimization (#69)
+
+- `d7d38b4` Refactor location handling: remove unnecessary clones in TypeChecker
+- `8c7b5bb` Add convenience methods for source text retrieval in Arena
+- `1cd45d8` Refactor Arena: optimize parent-child relationships with FxHashMap
+- `bbf895b` Enhance SourceFile struct to store complete source text
+- `0f08896` Optimize Location struct: remove source field, add Copy derive
+  - Remove unused `source: String` field from `Location` struct (98% memory reduction)
+  - Add `#[derive(Copy)]` to `Location` for efficient stack copies
+  - Store source text once in `SourceFile.source` instead of per-node duplication
+  - Replace `Vec<NodeRoute>` with `FxHashMap` for O(1) parent/children lookup
+  - Add `arena.get_node_source()` and `arena.find_source_file_for_node()` convenience API
+  - Add 562 lines of Arena tests, 328 lines of Builder tests
+
 ## Type Checker Implementation (#54)
 
 - `c13371b` Add `type-checker` crate (#54)
