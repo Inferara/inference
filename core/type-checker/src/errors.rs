@@ -392,7 +392,6 @@ mod tests {
             start_column: 5,
             end_line: 1,
             end_column: 10,
-            source: "test.inf".to_string(),
         }
     }
 
@@ -504,7 +503,7 @@ mod tests {
         let loc = test_location();
         let err = TypeCheckError::UnknownType {
             name: "Foo".to_string(),
-            location: loc.clone(),
+            location: loc,
         };
         assert_eq!(err.location(), &loc);
     }
