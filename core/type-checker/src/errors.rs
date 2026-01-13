@@ -503,7 +503,7 @@ mod tests {
         let loc = test_location();
         let err = TypeCheckError::UnknownType {
             name: "Foo".to_string(),
-            location: loc.clone(),
+            location: loc,
         };
         assert_eq!(err.location(), &loc);
     }

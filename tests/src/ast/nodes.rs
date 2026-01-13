@@ -30,7 +30,9 @@ fn test_location_default() {
 }
 
 #[test]
+#[allow(clippy::clone_on_copy)]
 fn test_location_clone() {
+    // Explicitly test Clone trait works (Copy provides Clone automatically)
     let loc = Location::new(0, 5, 1, 0, 1, 5);
     let cloned = loc.clone();
     assert_eq!(loc, cloned);
