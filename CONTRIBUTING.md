@@ -59,7 +59,7 @@ Every PR (except for documentation-only changes and renaming) must include tests
 
 ### Unit Tests
 
-When writing unit tests, you probably need to have Inference source code as input. In this case, locate the code on top of the test with in a compact format. For example:
+When writing unit tests, you probably need to have Inference source code as input. In this case, locate the code on top of the test in a compact format. For example:
 
 ```rust
 #[test]
@@ -80,7 +80,7 @@ As you can see, the source code is compact and fits within one line. When it mak
 
 Code generation (codegen) tests validate that the actual lowering matches the expected one. With the help of some utilities, you can write such tests easily. Directories `tests/src/codegen` and `tests/test_data/codegen` are paired and help to organize codegen tests.
 
-Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial.inf` and an expected binary next to it. And if it is, then you can a test as easy as:
+Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial.inf` and an expected binary next to it. And if it is, then you can write a test as easy as:
 
 ```rust
     #[test]
@@ -167,7 +167,7 @@ fn foo() {
 
 ## Idiomatic Condition Checks
 
-Use `if let` and `let match` constructs for condition checks instead of manual `is_some`, `is_none`, etc. This makes the code more idiomatic and easier to read.
+Use `if let` and `match` constructs for condition checks instead of manual `is_some`, `is_none`, etc. This makes the code more idiomatic and easier to read.
 
 ## Type Invariants
 
@@ -175,7 +175,7 @@ If a type has invariants, then invariant fields must be private, set during cons
 
 ## Useless Types
 
-Always prefer types on the left
+Always prefer types on the left:
 
 ```rust
 // GOOD      BAD
@@ -242,6 +242,4 @@ fn process_item(item: &Item) -> Result<Output> {
 - **Enum values hold context**: Include relevant data (field names, values, positions) in enum variants
 - **General fallback**: Use the `General(String)` variant only when no specific category applies
 - **Avoid bare strings**: Never use `anyhow!("some error")` without wrapping in an error enum variant
-
-## CLI crate as a user-faced interface should raise anyhow errors directly
-
+- **CLI exception**: The `cli` crate is a user-facing interface and should raise `anyhow` errors directly without a custom error enum

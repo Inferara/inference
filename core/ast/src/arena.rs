@@ -49,12 +49,13 @@ impl Arena {
     ///
     /// # Panics
     ///
-    /// Panics if `node.id()` is zero or if a node with the same ID already exists in the arena.
+    /// Panics if the node ID is zero or if a node with the same ID already exists.
+    /// These conditions indicate bugs in the builder, not recoverable runtime errors.
     pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
-        assert!(node.id() != 0, "Node ID must be non-zero");
+        assert!(node.id() != 0, "node ID must be non-zero");
         assert!(
             !self.nodes.contains_key(&node.id()),
-            "Node with ID {} already exists in the arena",
+            "node with ID {} already exists in the arena",
             node.id()
         );
         let id = node.id();

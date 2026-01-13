@@ -1,5 +1,6 @@
 use crate::utils::build_ast;
-use inference_ast::nodes::{AstNode, Definition};
+use inference_ast::builder::Builder;
+use inference_ast::nodes::{AstNode, Definition, Expression, Statement};
 
 #[test]
 fn test_parse_simple_function() {
@@ -965,4 +966,373 @@ fn test_location_offset_extracts_nested_expressions() {
 
     assert_eq!(source_file.source, source);
     assert_eq!(source_file.definitions.len(), 1);
+}
+
+/// Tests for Builder::default() - improving coverage
+
+#[test]
+fn test_builder_default_creates_empty_builder() {
+    let builder: Builder<'_, _> = Builder::default();
+    let inference_language = tree_sitter_inference::language();
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&inference_language)
+        .expect("Error loading Inference grammar");
+
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let tree = parser.parse(source, None).unwrap();
+    let code = source.as_bytes();
+    let root_node = tree.root_node();
+
+    let mut builder = builder;
+    builder.add_source_code(root_node, code);
+    let builder = builder.build_ast().unwrap();
+    let arena = builder.arena();
+
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+/// Tests for struct expressions with fields - improving coverage
+
+#[test]
+fn test_parse_struct_expression_finds_correct_node_type() {
+    let source = r#"struct Point { x: i32; y: i32; }
+fn test() -> Point { return Point { x: 10, y: 20 }; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let struct_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::Struct(_)))
+    });
+    assert_eq!(struct_exprs.len(), 1, "Should find 1 struct expression");
+
+    if let AstNode::Expression(Expression::Struct(struct_expr)) = &struct_exprs[0] {
+        assert_eq!(struct_expr.name.name, "Point");
+    } else {
+        panic!("Expected struct expression");
+    }
+}
+
+#[test]
+fn test_parse_struct_expression_empty_struct() {
+    let source = r#"struct Empty {}
+fn test() -> Empty { return Empty {}; }"#;
+    let arena = build_ast(source.to_string());
+
+    let struct_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::Struct(_)))
+    });
+    assert_eq!(struct_exprs.len(), 1, "Should find 1 struct expression");
+
+    if let AstNode::Expression(Expression::Struct(struct_expr)) = &struct_exprs[0] {
+        assert_eq!(struct_expr.name.name, "Empty");
+    } else {
+        panic!("Expected struct expression");
+    }
+}
+
+/// Tests for function definitions - improving coverage
+
+#[test]
+fn test_parse_function_definition_basic() {
+    let source = r#"fn simple() -> i32 { return 1; }"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1);
+    assert_eq!(functions[0].name.name, "simple");
+}
+
+#[test]
+fn test_parse_function_definition_with_arguments() {
+    let source = r#"fn with_args(x: i32, y: bool) -> i32 { return x; }"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1);
+
+    let args = functions[0].arguments.as_ref();
+    assert!(args.is_some(), "Should have arguments");
+    assert_eq!(args.unwrap().len(), 2);
+}
+
+/// Tests for type definition statement - improving coverage
+
+#[test]
+fn test_parse_type_definition_in_function_body() {
+    let source = r#"fn test() { type LocalInt = i32; }"#;
+    let arena = build_ast(source.to_string());
+
+    let type_def_stmts = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Statement(Statement::TypeDefinition(_)))
+    });
+    assert_eq!(type_def_stmts.len(), 1, "Should find 1 type definition statement");
+
+    if let AstNode::Statement(Statement::TypeDefinition(type_def)) = &type_def_stmts[0] {
+        assert_eq!(type_def.name.name, "LocalInt");
+    } else {
+        panic!("Expected type definition statement");
+    }
+}
+
+#[test]
+fn test_parse_multiple_type_definitions_in_function() {
+    let source = r#"fn test() { type A = i32; type B = bool; type C = i64; }"#;
+    let arena = build_ast(source.to_string());
+
+    let type_def_stmts = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Statement(Statement::TypeDefinition(_)))
+    });
+    assert_eq!(type_def_stmts.len(), 3, "Should find 3 type definition statements");
+}
+
+/// Tests for variable definitions
+
+#[test]
+fn test_parse_variable_definition_basic() {
+    let source = r#"fn test() { let x: i32 = 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let var_defs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
+    });
+    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
+
+    if let AstNode::Statement(Statement::VariableDefinition(var_def)) = &var_defs[0] {
+        assert_eq!(var_def.name.name, "x");
+    } else {
+        panic!("Expected variable definition statement");
+    }
+}
+
+/// Tests for forall, exists, unique, and assume blocks
+
+#[test]
+fn test_parse_forall_block() {
+    let source = r#"fn test() { forall { assert true; } }"#;
+    let arena = build_ast(source.to_string());
+
+    let forall_blocks = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Forall(_)))
+        )
+    });
+    assert_eq!(forall_blocks.len(), 1, "Should find 1 forall block");
+}
+
+#[test]
+fn test_parse_exists_block() {
+    let source = r#"fn test() { exists { assert true; } }"#;
+    let arena = build_ast(source.to_string());
+
+    let exists_blocks = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Exists(_)))
+        )
+    });
+    assert_eq!(exists_blocks.len(), 1, "Should find 1 exists block");
+}
+
+#[test]
+fn test_parse_unique_block() {
+    let source = r#"fn test() { unique { assert true; } }"#;
+    let arena = build_ast(source.to_string());
+
+    let unique_blocks = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Unique(_)))
+        )
+    });
+    assert_eq!(unique_blocks.len(), 1, "Should find 1 unique block");
+}
+
+#[test]
+fn test_parse_assume_block() {
+    let source = r#"fn test() { assume { assert true; } }"#;
+    let arena = build_ast(source.to_string());
+
+    let assume_blocks = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Assume(_)))
+        )
+    });
+    assert_eq!(assume_blocks.len(), 1, "Should find 1 assume block");
+}
+
+/// Tests for various binary operators - improving coverage
+
+#[test]
+fn test_parse_bitwise_and() {
+    let source = r#"fn test() -> i32 { return a & b; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_parse_bitwise_or() {
+    let source = r#"fn test() -> i32 { return a | b; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_parse_bitwise_xor() {
+    let source = r#"fn test() -> i32 { return a ^ b; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_parse_shift_left() {
+    let source = r#"fn test() -> i32 { return a << 2; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_parse_shift_right() {
+    let source = r#"fn test() -> i32 { return a >> 2; }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+/// Tests for function arguments - improving coverage
+
+#[test]
+fn test_parse_self_reference_in_method() {
+    let source = r#"struct Counter {
+        value: i32;
+        fn get(self) -> i32 { return 42; }
+    }"#;
+    let arena = build_ast(source.to_string());
+
+    let self_refs = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::ArgumentType(inference_ast::nodes::ArgumentType::SelfReference(_))
+        )
+    });
+    assert_eq!(self_refs.len(), 1, "Should find 1 self reference");
+}
+
+#[test]
+fn test_parse_ignore_argument() {
+    let source = r#"fn test(_: i32) -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let ignore_args = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::ArgumentType(inference_ast::nodes::ArgumentType::IgnoreArgument(_))
+        )
+    });
+    assert_eq!(ignore_args.len(), 1, "Should find 1 ignore argument");
+}
+
+/// Tests for type member access expression
+
+#[test]
+fn test_parse_type_member_access() {
+    let source = r#"fn test() -> i32 { return Color::Red; }"#;
+    let arena = build_ast(source.to_string());
+
+    let type_member_accesses = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::TypeMemberAccess(_)))
+    });
+    assert_eq!(type_member_accesses.len(), 1, "Should find 1 type member access");
+}
+
+/// Tests for use directives
+
+#[test]
+fn test_parse_use_directive_basic() {
+    let source = r#"use foo::bar;"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let directives = &source_files[0].directives;
+    assert_eq!(directives.len(), 1);
+}
+
+/// Tests for qualified names and type qualified names
+
+#[test]
+fn test_parse_qualified_name_type() {
+    let source = r#"fn test(x: std::i32) {}"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+#[test]
+fn test_parse_function_type_parameter() {
+    let source = r#"fn apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x); }"#;
+    let arena = build_ast(source.to_string());
+    assert_eq!(arena.source_files().len(), 1);
+}
+
+/// Test for constant definitions
+
+#[test]
+fn test_parse_constant_definition_at_module_level() {
+    let source = r#"const GLOBAL: i32 = 42;"#;
+    let arena = build_ast(source.to_string());
+
+    let const_defs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Constant(_)))
+    });
+    assert_eq!(const_defs.len(), 1, "Should find 1 constant definition");
+}
+
+/// Test for arguments
+
+#[test]
+fn test_parse_argument_with_type() {
+    let source = r#"fn test(x: i32) { }"#;
+    let arena = build_ast(source.to_string());
+
+    let args = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::ArgumentType(inference_ast::nodes::ArgumentType::Argument(_))
+        )
+    });
+    assert_eq!(args.len(), 1, "Should find 1 argument");
+}
+
+/// Test for external function definitions
+
+#[test]
+fn test_parse_external_function_with_return() {
+    let source = r#"external fn get_value() -> i32;"#;
+    let arena = build_ast(source.to_string());
+
+    let ext_funcs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::ExternalFunction(_)))
+    });
+    assert_eq!(ext_funcs.len(), 1);
+
+    if let AstNode::Definition(Definition::ExternalFunction(ext_func)) = &ext_funcs[0] {
+        assert!(ext_func.returns.is_some(), "Should have return type");
+    }
+}
+
+#[test]
+fn test_parse_external_function_basic() {
+    let source = r#"external fn do_something();"#;
+    let arena = build_ast(source.to_string());
+
+    let ext_funcs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::ExternalFunction(_)))
+    });
+    assert_eq!(ext_funcs.len(), 1);
+
+    if let AstNode::Definition(Definition::ExternalFunction(ext_func)) = &ext_funcs[0] {
+        assert_eq!(ext_func.name.name, "do_something");
+    }
 }
