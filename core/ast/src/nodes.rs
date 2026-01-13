@@ -140,7 +140,7 @@ macro_rules! ast_enum {
     };
 
     (@location_arm $inner:ident, ) => {
-        $inner.location.clone()
+        $inner.location
     };
 }
 
@@ -171,6 +171,15 @@ macro_rules! ast_enums {
                 match self {
                     $(
                         AstNode::$name(node) => node.id(),
+                    )+
+                }
+            }
+
+            #[must_use]
+            pub fn location(&self) -> Location {
+                match self {
+                    $(
+                        AstNode::$name(node) => node.location(),
                     )+
                 }
             }

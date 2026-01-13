@@ -280,3 +280,283 @@ fn test_children_lookup_consistency() {
         );
     }
 }
+
+/// Tests for Arena's Phase 4 convenience API methods: `find_source_file_for_node` and `get_node_source`.
+/// These methods provide efficient source text retrieval for any AST node.
+
+#[test]
+fn test_get_node_source_returns_function_source() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1);
+    let function = &functions[0];
+
+    let function_source = arena.get_node_source(function.id);
+    assert!(function_source.is_some(), "Function source should be retrievable");
+    assert_eq!(
+        function_source.unwrap(),
+        "fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        "Function source should match the original source text"
+    );
+}
+
+#[test]
+fn test_get_node_source_for_nested_identifier() {
+    let source = r#"fn test() -> i32 { let value: i32 = 42; return value; }"#;
+    let arena = build_ast(source.to_string());
+
+    let identifiers = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Expression(inference_ast::nodes::Expression::Identifier(_))
+        )
+    });
+
+    let value_identifier = identifiers
+        .iter()
+        .find(|node| {
+            if let AstNode::Expression(inference_ast::nodes::Expression::Identifier(ident)) = node {
+                ident.name == "value"
+            } else {
+                false
+            }
+        });
+
+    assert!(value_identifier.is_some(), "Should find 'value' identifier");
+    let ident_source = arena.get_node_source(value_identifier.unwrap().id());
+    assert!(ident_source.is_some(), "Identifier source should be retrievable");
+    assert_eq!(ident_source.unwrap(), "value", "Identifier source should match");
+}
+
+#[test]
+fn test_get_node_source_for_source_file() {
+    let source = r#"fn main() -> i32 { return 0; }"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    let source_file = &source_files[0];
+
+    let file_source = arena.get_node_source(source_file.id);
+    assert!(file_source.is_some(), "SourceFile source should be retrievable");
+    assert_eq!(
+        file_source.unwrap(),
+        source,
+        "SourceFile source should return the entire source text"
+    );
+}
+
+#[test]
+fn test_get_node_source_nonexistent_returns_none() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let nonexistent_id = u32::MAX - 1;
+    let result = arena.get_node_source(nonexistent_id);
+    assert!(result.is_none(), "Non-existent node ID should return None");
+}
+
+#[test]
+fn test_get_node_source_for_binary_expression() {
+    let source = r#"fn calc() -> i32 { return 10 + 20; }"#;
+    let arena = build_ast(source.to_string());
+
+    let binary_expressions = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Expression(inference_ast::nodes::Expression::Binary(_))
+        )
+    });
+
+    assert!(!binary_expressions.is_empty(), "Should find binary expression");
+    let binary_expr = &binary_expressions[0];
+
+    let expr_source = arena.get_node_source(binary_expr.id());
+    assert!(expr_source.is_some(), "Binary expression source should be retrievable");
+    assert_eq!(expr_source.unwrap(), "10 + 20", "Binary expression source should match");
+}
+
+#[test]
+fn test_get_node_source_for_return_statement() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let return_statements = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Statement(Statement::Return(_)))
+    });
+
+    assert_eq!(return_statements.len(), 1, "Should find 1 return statement");
+    let return_stmt = &return_statements[0];
+
+    let stmt_source = arena.get_node_source(return_stmt.id());
+    assert!(stmt_source.is_some(), "Return statement source should be retrievable");
+    assert_eq!(stmt_source.unwrap(), "return 42;", "Return statement source should match");
+}
+
+#[test]
+fn test_find_source_file_for_function_returns_correct_id() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1);
+    let function = &functions[0];
+
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    let expected_source_file_id = source_files[0].id;
+
+    let found_source_file_id = arena.find_source_file_for_node(function.id);
+    assert!(found_source_file_id.is_some(), "Should find SourceFile for function");
+    assert_eq!(
+        found_source_file_id.unwrap(),
+        expected_source_file_id,
+        "Should return the correct SourceFile ID"
+    );
+}
+
+#[test]
+fn test_find_source_file_for_source_file_returns_self() {
+    let source = r#"fn test() {}"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    let source_file = &source_files[0];
+
+    let found_id = arena.find_source_file_for_node(source_file.id);
+    assert!(found_id.is_some(), "SourceFile should find itself");
+    assert_eq!(
+        found_id.unwrap(),
+        source_file.id,
+        "SourceFile should return its own ID when queried"
+    );
+}
+
+#[test]
+fn test_find_source_file_for_nonexistent_returns_none() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let nonexistent_id = u32::MAX - 1;
+    let result = arena.find_source_file_for_node(nonexistent_id);
+    assert!(result.is_none(), "Non-existent node ID should return None");
+}
+
+#[test]
+fn test_get_node_source_zero_length_span() {
+    let source = r#"fn test() {}"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1);
+    let function = &functions[0];
+
+    let func_source = arena.get_node_source(function.id);
+    assert!(
+        func_source.is_some(),
+        "Function with empty body should still have retrievable source"
+    );
+    assert_eq!(func_source.unwrap(), "fn test() {}", "Function source should match");
+}
+
+#[test]
+fn test_find_source_file_for_deeply_nested_node() {
+    let source = r#"fn outer() -> i32 { if (true) { let x: i32 = 1 + 2 + 3; return x; } return 0; }"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    let expected_source_file_id = source_files[0].id;
+
+    let binary_expressions = arena.filter_nodes(|node| {
+        matches!(
+            node,
+            AstNode::Expression(inference_ast::nodes::Expression::Binary(_))
+        )
+    });
+
+    assert!(!binary_expressions.is_empty(), "Should find binary expressions");
+
+    for expr in &binary_expressions {
+        let found_id = arena.find_source_file_for_node(expr.id());
+        assert!(
+            found_id.is_some(),
+            "Deeply nested expression should have SourceFile ancestor"
+        );
+        assert_eq!(
+            found_id.unwrap(),
+            expected_source_file_id,
+            "All nodes should have the same SourceFile ancestor"
+        );
+    }
+}
+
+#[test]
+fn test_get_node_source_for_variable_definition() {
+    let source = r#"fn test() { let counter: i32 = 100; }"#;
+    let arena = build_ast(source.to_string());
+
+    let var_definitions = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
+    });
+
+    assert_eq!(var_definitions.len(), 1, "Should find 1 variable definition");
+    let var_def = &var_definitions[0];
+
+    let def_source = arena.get_node_source(var_def.id());
+    assert!(def_source.is_some(), "Variable definition source should be retrievable");
+    assert_eq!(
+        def_source.unwrap(),
+        "let counter: i32 = 100;",
+        "Variable definition source should match"
+    );
+}
+
+#[test]
+fn test_get_node_source_for_struct_definition() {
+    let source = r#"struct Point { x: i32; y: i32; }"#;
+    let arena = build_ast(source.to_string());
+
+    let struct_defs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Struct(_)))
+    });
+
+    assert_eq!(struct_defs.len(), 1, "Should find 1 struct definition");
+    let struct_def = &struct_defs[0];
+
+    let struct_source = arena.get_node_source(struct_def.id());
+    assert!(struct_source.is_some(), "Struct definition source should be retrievable");
+    assert_eq!(
+        struct_source.unwrap(),
+        "struct Point { x: i32; y: i32; }",
+        "Struct definition source should match"
+    );
+}
+
+#[test]
+fn test_get_node_source_multiple_functions() {
+    let source = r#"fn first() -> i32 { return 1; } fn second() -> i32 { return 2; }"#;
+    let arena = build_ast(source.to_string());
+
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 2, "Should find 2 functions");
+
+    let first_source = arena.get_node_source(functions[0].id);
+    let second_source = arena.get_node_source(functions[1].id);
+
+    assert!(first_source.is_some(), "First function source should be retrievable");
+    assert!(second_source.is_some(), "Second function source should be retrievable");
+
+    let sources: Vec<&str> = vec![first_source.unwrap(), second_source.unwrap()];
+    assert!(
+        sources.contains(&"fn first() -> i32 { return 1; }"),
+        "Should find first function source"
+    );
+    assert!(
+        sources.contains(&"fn second() -> i32 { return 2; }"),
+        "Should find second function source"
+    );
+}

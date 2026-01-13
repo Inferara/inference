@@ -2,12 +2,13 @@ use crate::nodes::{Ast, AstNode, Definition, FunctionDefinition, SourceFile, Typ
 use rustc_hash::FxHashMap;
 use std::rc::Rc;
 
-/// Arena-based AST storage with O(1) node, parent, and children lookups.
+/// Arena-based AST storage with O(1) node and parent lookups.
 ///
 /// The Arena stores all AST nodes in a hash map keyed by node ID. Parent-child
 /// relationships are tracked in separate maps for efficient traversal:
 /// - `parent_map`: Maps `node_id` -> `parent_id` for O(1) parent lookup
-/// - `children_map`: Maps `node_id` -> `[child_ids]` for O(1) children lookup
+/// - `children_map`: Maps `node_id` -> `[child_ids]` for O(1) lookup of the children list,
+///   plus O(c) to access child nodes where c is the number of children
 ///
 /// Root nodes (`SourceFile`) are not stored in `parent_map` - their parent lookup
 /// returns `None`.
@@ -77,6 +78,78 @@ impl Arena {
     #[must_use]
     pub fn find_parent_node(&self, id: u32) -> Option<u32> {
         self.parent_map.get(&id).copied()
+    }
+
+    /// Finds the root `SourceFile` ancestor for the given node.
+    ///
+    /// Traverses the parent chain from `node_id` to find the root ancestor.
+    /// Returns `Some(source_file_id)` if found, `None` if the node doesn't exist
+    /// or has no `SourceFile` ancestor.
+    ///
+    /// # Complexity
+    ///
+    /// `O(tree_depth)`, typically < 20 levels for well-formed ASTs.
+    /// Each parent lookup is `O(1)` using `parent_map`.
+    #[must_use]
+    pub fn find_source_file_for_node(&self, node_id: u32) -> Option<u32> {
+        let node = self.nodes.get(&node_id)?;
+
+        if matches!(node, AstNode::Ast(Ast::SourceFile(_))) {
+            return Some(node_id);
+        }
+
+        let mut current_id = node_id;
+        while let Some(parent_id) = self.parent_map.get(&current_id).copied() {
+            current_id = parent_id;
+        }
+
+        let root_node = self.nodes.get(&current_id)?;
+        if matches!(root_node, AstNode::Ast(Ast::SourceFile(_))) {
+            Some(current_id)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the source text for a node using its byte offset range.
+    ///
+    /// Retrieves the source text by slicing `SourceFile.source[offset_start..offset_end]`.
+    /// Returns `None` if:
+    /// - The node ID doesn't exist
+    /// - No `SourceFile` ancestor exists
+    /// - The byte offsets are out of bounds
+    ///
+    /// # Complexity
+    ///
+    /// `O(tree_depth)` for finding the source file, plus `O(1)` for the string slice.
+    /// Tree depth is typically < 20 levels for well-formed ASTs.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let source = arena.get_node_source(function_id);
+    /// assert_eq!(source, Some("fn add(a: i32) -> i32 { return a; }"));
+    /// ```
+    #[must_use]
+    pub fn get_node_source(&self, node_id: u32) -> Option<&str> {
+        let source_file_id = self.find_source_file_for_node(node_id)?;
+        let node = self.nodes.get(&node_id)?;
+        let location = node.location();
+
+        let source_file_node = self.nodes.get(&source_file_id)?;
+        let source = match source_file_node {
+            AstNode::Ast(Ast::SourceFile(sf)) => &sf.source,
+            _ => return None,
+        };
+
+        let start = location.offset_start as usize;
+        let end = location.offset_end as usize;
+
+        if start <= end && end <= source.len() {
+            source.get(start..end)
+        } else {
+            None
+        }
     }
 
     pub fn get_children_cmp<F>(&self, id: u32, comparator: F) -> Vec<AstNode>
