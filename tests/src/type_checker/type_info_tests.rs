@@ -995,6 +995,105 @@ mod type_info_from_ast {
     }
 }
 
+mod is_signed_methods {
+    use super::*;
+
+    #[test]
+    fn test_number_type_is_signed_signed_types() {
+        assert!(NumberType::I8.is_signed(), "i8 should be signed");
+        assert!(NumberType::I16.is_signed(), "i16 should be signed");
+        assert!(NumberType::I32.is_signed(), "i32 should be signed");
+        assert!(NumberType::I64.is_signed(), "i64 should be signed");
+    }
+
+    #[test]
+    fn test_number_type_is_signed_unsigned_types() {
+        assert!(!NumberType::U8.is_signed(), "u8 should not be signed");
+        assert!(!NumberType::U16.is_signed(), "u16 should not be signed");
+        assert!(!NumberType::U32.is_signed(), "u32 should not be signed");
+        assert!(!NumberType::U64.is_signed(), "u64 should not be signed");
+    }
+
+    #[test]
+    fn test_number_type_is_signed_all_variants() {
+        let signed_types = [NumberType::I8, NumberType::I16, NumberType::I32, NumberType::I64];
+        let unsigned_types = [NumberType::U8, NumberType::U16, NumberType::U32, NumberType::U64];
+
+        for nt in signed_types {
+            assert!(nt.is_signed(), "{:?} should be signed", nt);
+        }
+
+        for nt in unsigned_types {
+            assert!(!nt.is_signed(), "{:?} should not be signed", nt);
+        }
+    }
+
+    #[test]
+    fn test_type_info_is_signed_integer_signed_types() {
+        let signed_types = [
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::I8), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::I16), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::I64), type_params: vec![] },
+        ];
+
+        for ti in signed_types {
+            assert!(ti.is_signed_integer(), "{:?} should be a signed integer", ti.kind);
+        }
+    }
+
+    #[test]
+    fn test_type_info_is_signed_integer_unsigned_types() {
+        let unsigned_types = [
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::U8), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::U16), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::U32), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Number(NumberType::U64), type_params: vec![] },
+        ];
+
+        for ti in unsigned_types {
+            assert!(!ti.is_signed_integer(), "{:?} should not be a signed integer", ti.kind);
+        }
+    }
+
+    #[test]
+    fn test_type_info_is_signed_integer_non_numeric_types() {
+        let non_numeric = [
+            TypeInfo::boolean(),
+            TypeInfo::string(),
+            TypeInfo::default(),
+            TypeInfo { kind: TypeInfoKind::Struct("Point".to_string()), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Enum("Color".to_string()), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Generic("T".to_string()), type_params: vec![] },
+            TypeInfo { kind: TypeInfoKind::Custom("MyType".to_string()), type_params: vec![] },
+            TypeInfo {
+                kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 10),
+                type_params: vec![],
+            },
+        ];
+
+        for ti in non_numeric {
+            assert!(
+                !ti.is_signed_integer(),
+                "{:?} should not be a signed integer",
+                ti.kind
+            );
+        }
+    }
+
+    #[test]
+    fn test_type_info_is_signed_integer_with_type_params() {
+        let ti = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec!["T".to_string()],
+        };
+        assert!(
+            ti.is_signed_integer(),
+            "i32 with type params should still be a signed integer"
+        );
+    }
+}
+
 mod type_info_with_type_params {
     use super::*;
     use inference_ast::nodes::Location;

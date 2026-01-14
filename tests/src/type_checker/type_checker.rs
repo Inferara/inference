@@ -2025,3 +2025,421 @@ mod type_inference_tests {
         }
     }
 }
+
+/// Tests for unary operator type checking
+#[cfg(test)]
+mod unary_operator_tests {
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+
+    fn try_type_check(
+        source: &str,
+    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+        let arena = build_ast(source.to_string());
+        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
+    }
+
+    mod negation_operator {
+        use super::*;
+
+        #[test]
+        fn test_negate_i8_succeeds() {
+            let source = r#"fn test(x: i8) -> i8 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Negation of i8 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_negate_i16_succeeds() {
+            let source = r#"fn test(x: i16) -> i16 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Negation of i16 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_negate_i32_succeeds() {
+            let source = r#"fn test(x: i32) -> i32 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Negation of i32 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_negate_i64_succeeds() {
+            let source = r#"fn test(x: i64) -> i64 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Negation of i64 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_negate_u8_produces_error() {
+            let source = r#"fn test(x: u8) -> u8 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Negation of u8 should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Neg") && err_msg.contains("signed integers"),
+                "Error should mention Neg operator and signed integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_negate_u16_produces_error() {
+            let source = r#"fn test(x: u16) -> u16 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Negation of u16 should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Neg") && err_msg.contains("signed integers"),
+                "Error should mention Neg operator and signed integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_negate_u32_produces_error() {
+            let source = r#"fn test(x: u32) -> u32 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Negation of u32 should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Neg") && err_msg.contains("signed integers"),
+                "Error should mention Neg operator and signed integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_negate_u64_produces_error() {
+            let source = r#"fn test(x: u64) -> u64 { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Negation of u64 should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Neg") && err_msg.contains("signed integers"),
+                "Error should mention Neg operator and signed integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_negate_bool_produces_error() {
+            let source = r#"fn test(x: bool) -> bool { return -(x); }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Negation of bool should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Neg") && err_msg.contains("signed integers"),
+                "Error should mention Neg operator and signed integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_negate_parenthesized_expression() {
+            let source = r#"fn test(a: i32, b: i32) -> i32 { return -(a + b); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Negation of parenthesized expression should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_double_negate() {
+            let source = r#"fn test(x: i32) -> i32 { return --(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Double negation should succeed, got: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    mod bitnot_operator {
+        use super::*;
+
+        #[test]
+        fn test_bitnot_i8_succeeds() {
+            let source = r#"fn test(x: i8) -> i8 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of i8 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_i16_succeeds() {
+            let source = r#"fn test(x: i16) -> i16 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of i16 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_i32_succeeds() {
+            let source = r#"fn test(x: i32) -> i32 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of i32 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_i64_succeeds() {
+            let source = r#"fn test(x: i64) -> i64 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of i64 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_u8_succeeds() {
+            let source = r#"fn test(x: u8) -> u8 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of u8 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_u16_succeeds() {
+            let source = r#"fn test(x: u16) -> u16 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of u16 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_u32_succeeds() {
+            let source = r#"fn test(x: u32) -> u32 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of u32 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_u64_succeeds() {
+            let source = r#"fn test(x: u64) -> u64 { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Bitwise NOT of u64 should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_bitnot_bool_produces_error() {
+            let source = r#"fn test(x: bool) -> bool { return ~x; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Bitwise NOT of bool should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("BitNot") && err_msg.contains("integers"),
+                "Error should mention BitNot operator and integers, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_bitnot_combined_with_negate() {
+            let source = r#"fn test(x: i32) -> i32 { return ~-(x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Combining BitNot and Neg should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_negate_combined_with_bitnot() {
+            let source = r#"fn test(x: i32) -> i32 { return -(~x); }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Combining Neg and BitNot should succeed, got: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    mod logical_not_operator {
+        use super::*;
+
+        #[test]
+        fn test_logical_not_bool_succeeds() {
+            let source = r#"fn test(x: bool) -> bool { return !x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Logical NOT of bool should succeed, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_logical_not_i32_produces_error() {
+            let source = r#"fn test(x: i32) -> bool { return !x; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Logical NOT of i32 should produce error");
+            let err_msg = result.err().unwrap().to_string();
+            assert!(
+                err_msg.contains("Not") && err_msg.contains("booleans"),
+                "Error should mention Not operator and booleans, got: {}",
+                err_msg
+            );
+        }
+
+        #[test]
+        fn test_double_logical_not() {
+            let source = r#"fn test(x: bool) -> bool { return !!x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Double logical NOT should succeed, got: {:?}",
+                result.err()
+            );
+        }
+    }
+}
+
+/// Tests for binary division operator type checking
+#[cfg(test)]
+mod division_operator_tests {
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+
+    fn try_type_check(
+        source: &str,
+    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+        let arena = build_ast(source.to_string());
+        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
+    }
+
+    #[test]
+    fn test_divide_i32_succeeds() {
+        let source = r#"fn test(a: i32, b: i32) -> i32 { return a / b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division of i32 should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_divide_i64_succeeds() {
+        let source = r#"fn test(a: i64, b: i64) -> i64 { return a / b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division of i64 should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_divide_u32_succeeds() {
+        let source = r#"fn test(a: u32, b: u32) -> u32 { return a / b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division of u32 should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_divide_mixed_types_produces_error() {
+        let source = r#"fn test(a: i32, b: i64) -> i32 { return a / b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Division of mixed types should produce error"
+        );
+    }
+
+    #[test]
+    fn test_divide_bool_produces_error() {
+        let source = r#"fn test(a: bool, b: bool) -> bool { return a / b; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Division of bool should produce error");
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("arithmetic") || err_msg.contains("Div"),
+            "Error should mention arithmetic operator or division, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_divide_chained() {
+        let source = r#"fn test(a: i32, b: i32, c: i32) -> i32 { return a / b / c; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Chained division should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_divide_with_multiply() {
+        let source = r#"fn test(a: i32, b: i32, c: i32) -> i32 { return a * b / c; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division combined with multiplication should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_divide_with_addition_precedence() {
+        let source = r#"fn test(a: i32, b: i32, c: i32) -> i32 { return a + b / c; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division with addition (precedence) should succeed, got: {:?}",
+            result.err()
+        );
+    }
+}
