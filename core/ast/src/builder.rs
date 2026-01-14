@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, rc::Rc};
+use std::{
+    marker::PhantomData,
+    rc::Rc,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use crate::nodes::{
     ArgumentType, Ast, Directive, IgnoreArgument, Misc, ModuleDefinition, SelfReference,
@@ -1430,9 +1434,13 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
-    #[allow(clippy::cast_possible_truncation)]
+    /// Generate a unique node ID using an atomic counter.
+    ///
+    /// Uses a global atomic counter to ensure unique IDs across all AST nodes.
+    /// Starting from 1 (0 is reserved as invalid/uninitialized).
     fn get_node_id() -> u32 {
-        uuid::Uuid::new_v4().as_u128() as u32
+        static COUNTER: AtomicU32 = AtomicU32::new(1);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
     }
 
     #[allow(clippy::cast_possible_truncation)]
