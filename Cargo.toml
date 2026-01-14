@@ -34,7 +34,6 @@ inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 inference-tests = { path = "./tests", version = "0.0.1" }
 
 # Various supplementary tools
-inference-playground-server = { path = "./tools/playground-server", version = "0.0.1" }
 wasm-fmt = { path = "./tools/wasm-fmt", version = "0.0.1" }
 wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
