@@ -173,7 +173,7 @@ fn get_download_url(platform: &str, binary: &str) -> String {
                 .to_string()
         }
         ("linux", "libLLVM") => {
-            "https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.zip".to_string()
+            "https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.0-nightly.zip".to_string()
         }
         ("windows", "inf-llc") => {
             "https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip"

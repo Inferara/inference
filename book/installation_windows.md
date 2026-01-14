@@ -97,7 +97,7 @@ rustflags = [
 ]
 
 [env]
-LLVM_SYS_210_PREFIX = "C:\\msys64\\ucrt64"
+LLVM_SYS_211_PREFIX = "C:\\msys64\\ucrt64"
 ```
 
 This configuration:
