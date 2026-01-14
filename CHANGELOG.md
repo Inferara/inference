@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Language
 
 - Add struct definition and parsing support ([#14])
+- Add division operator (`/`) support ([#86])
+- Add unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
+- Parse visibility modifiers (`pub`) for functions, structs, enums, constants, and type aliases ([#86])
 
 ### Compiler
 
+- type-checker: Add type checking for unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
 - type-checker: Add bidirectional type inference with scope-aware symbol table ([#54])
 - type-checker: Implement import system with registration and resolution phases ([#54])
 - type-checker: Add visibility handling for modules, structs, and enums ([#54])
@@ -128,3 +132,4 @@ Initial tagged release.
 [#58]: https://github.com/Inferara/inference/pull/58
 [#60]: https://github.com/Inferara/inference/pull/60
 [#69]: https://github.com/Inferara/inference/pull/69
+[#86]: https://github.com/Inferara/inference/pull/86

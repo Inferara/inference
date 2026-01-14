@@ -221,7 +221,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(EnumDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             variants,
             location,
@@ -286,14 +286,14 @@ impl<'a> Builder<'a, InitState> {
         }
         cursor = node.walk();
         let founded_methods = node
-            .children_by_field_name("value", &mut cursor) //FIXME: change to "method" after bumping tree-sitter grammar version to v0.0.38
+            .children_by_field_name("method", &mut cursor)
             .filter(|n| n.kind() == "function_definition")
             .map(|segment| self.build_function_definition(id, &segment, code));
         let methods: Vec<Rc<FunctionDefinition>> = founded_methods.collect();
 
         let node = Rc::new(StructDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             fields,
             methods,
@@ -332,7 +332,7 @@ impl<'a> Builder<'a, InitState> {
 
         let node = Rc::new(ConstantDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             ty,
             value,
@@ -387,7 +387,7 @@ impl<'a> Builder<'a, InitState> {
         let body = self.build_block(id, &body_node, code);
         let node = Rc::new(FunctionDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             type_parameters,
             arguments,
@@ -455,7 +455,7 @@ impl<'a> Builder<'a, InitState> {
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let node = Rc::new(TypeDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             ty,
             location,
@@ -1041,7 +1041,9 @@ impl<'a> Builder<'a, InitState> {
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator = match operator_node.kind() {
             "unary_not" => UnaryOperatorKind::Not,
-            _ => panic!("Unexpected operator node"),
+            "unary_minus" => UnaryOperatorKind::Neg,
+            "unary_bitnot" => UnaryOperatorKind::BitNot,
+            other => unreachable!("Unexpected unary operator node: {other}"),
         };
 
         let node = Rc::new(PrefixUnaryExpression::new(
@@ -1123,6 +1125,7 @@ impl<'a> Builder<'a, InitState> {
             "+" => OperatorKind::Add,
             "-" => OperatorKind::Sub,
             "*" => OperatorKind::Mul,
+            "/" => OperatorKind::Div,
             "%" => OperatorKind::Mod,
             "<" => OperatorKind::Lt,
             "<=" => OperatorKind::Le,
@@ -1451,6 +1454,15 @@ impl<'a> Builder<'a, InitState> {
             end_line,
             end_column,
         }
+    }
+
+    /// Extracts visibility modifier from a definition CST node.
+    /// Returns `Visibility::Public` if a "visibility" child field is present,
+    /// otherwise returns `Visibility::Private` (the default).
+    fn get_visibility(node: &Node) -> Visibility {
+        node.child_by_field_name("visibility")
+            .map(|_| Visibility::Public)
+            .unwrap_or_default()
     }
 }
 

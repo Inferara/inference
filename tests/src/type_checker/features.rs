@@ -1860,6 +1860,106 @@ mod coverage_tests {
             }
         }
 
+        #[test]
+        fn test_unary_neg_on_signed_integer() {
+            let source = r#"fn test() -> i32 { return -42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Unary neg on signed integer should work, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_unary_neg_on_signed_i64() {
+            let source = r#"fn test(x: i64) -> i64 { return -x; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Unary neg on i64 should work, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_unary_neg_on_unsigned_integer() {
+            let source = r#"fn test(u: u32) -> u32 { return -u; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Unary neg on unsigned integer should fail");
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("unary operator") || error_msg.contains("signed"),
+                    "Error should mention unary operator or signed: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn test_unary_neg_on_bool() {
+            let source = r#"fn test() -> bool { return -true; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Unary neg on bool should fail");
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("unary operator") || error_msg.contains("signed"),
+                    "Error should mention unary operator or signed: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn test_unary_bitnot_on_signed_integer() {
+            let source = r#"fn test() -> i32 { return ~42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Unary bitnot on signed integer should work, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_unary_bitnot_on_unsigned_integer() {
+            let source = r#"fn test(u: u32) -> u32 { return ~u; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Unary bitnot on unsigned integer should work, got: {:?}",
+                result.err()
+            );
+        }
+
+        #[test]
+        fn test_unary_bitnot_on_bool() {
+            let source = r#"fn test() -> bool { return ~true; }"#;
+            let result = try_type_check(source);
+            assert!(result.is_err(), "Unary bitnot on bool should fail");
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("unary operator") || error_msg.contains("integers"),
+                    "Error should mention unary operator or integers: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn test_unary_neg_nested() {
+            let source = r#"fn test() -> i32 { return --42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "Double unary neg should work, got: {:?}",
+                result.err()
+            );
+        }
+
         // FIXME: Test disabled due to parser or type checker limitation
         // #[test]
         fn test_struct_expression() {

@@ -63,6 +63,14 @@ impl NumberType {
             NumberType::U64 => "u64",
         }
     }
+
+    #[must_use = "this is a pure check with no side effects"]
+    pub const fn is_signed(&self) -> bool {
+        matches!(
+            self,
+            NumberType::I8 | NumberType::I16 | NumberType::I32 | NumberType::I64
+        )
+    }
 }
 
 impl std::str::FromStr for NumberType {
@@ -335,6 +343,16 @@ impl TypeInfo {
     #[must_use]
     pub fn is_generic(&self) -> bool {
         matches!(self.kind, TypeInfoKind::Generic(_))
+    }
+
+    /// Returns true if this is a signed integer type (i8, i16, i32, i64).
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn is_signed_integer(&self) -> bool {
+        if let TypeInfoKind::Number(nt) = &self.kind {
+            nt.is_signed()
+        } else {
+            false
+        }
     }
 
     /// Substitute type parameters using the given mapping.

@@ -594,15 +594,14 @@ impl TypeChecker {
     #[allow(clippy::too_many_lines)]
     fn infer_statement(
         &mut self,
-        statement: &mut Statement,
+        statement: &Statement,
         return_type: &TypeInfo,
         ctx: &mut TypedContext,
     ) {
         match statement {
             Statement::Assign(assign_statement) => {
-                let target_type =
-                    self.infer_expression(&mut assign_statement.left.borrow_mut(), ctx);
-                let mut right_expr = assign_statement.right.borrow_mut();
+                let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
+                let right_expr = assign_statement.right.borrow();
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
                     if let Some(target) = &target_type {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
@@ -612,7 +611,7 @@ impl TypeChecker {
                         });
                     }
                 } else {
-                    let value_type = self.infer_expression(&mut right_expr, ctx);
+                    let value_type = self.infer_expression(&right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
                     {
@@ -646,7 +645,7 @@ impl TypeChecker {
                     );
                 } else {
                     let value_type =
-                        self.infer_expression(&mut return_statement.expression.borrow_mut(), ctx);
+                        self.infer_expression(&return_statement.expression.borrow(), ctx);
                     if *return_type != value_type.clone().unwrap_or_default() {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
@@ -658,7 +657,7 @@ impl TypeChecker {
                 }
             }
             Statement::Loop(loop_statement) => {
-                if let Some(condition) = &mut *loop_statement.condition.borrow_mut() {
+                if let Some(condition) = &*loop_statement.condition.borrow() {
                     let condition_type = self.infer_expression(condition, ctx);
                     if condition_type.is_none()
                         || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
@@ -679,8 +678,7 @@ impl TypeChecker {
             }
             Statement::Break(_) => {}
             Statement::If(if_statement) => {
-                let condition_type =
-                    self.infer_expression(&mut if_statement.condition.borrow_mut(), ctx);
+                let condition_type = self.infer_expression(&if_statement.condition.borrow(), ctx);
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
@@ -711,7 +709,7 @@ impl TypeChecker {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(&mut expr_ref, ctx)
+                    } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
                         && init_type != TypeInfo::new(&variable_definition_statement.ty)
                     {
                         self.errors.push(TypeCheckError::TypeMismatch {
@@ -752,7 +750,7 @@ impl TypeChecker {
             }
             Statement::Assert(assert_statement) => {
                 let condition_type =
-                    self.infer_expression(&mut assert_statement.expression.borrow_mut(), ctx);
+                    self.infer_expression(&assert_statement.expression.borrow(), ctx);
                 if condition_type.is_none()
                     || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
                 {
@@ -786,20 +784,19 @@ impl TypeChecker {
     #[allow(clippy::too_many_lines)]
     fn infer_expression(
         &mut self,
-        expression: &mut Expression,
+        expression: &Expression,
         ctx: &mut TypedContext,
     ) -> Option<TypeInfo> {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
                     Some(type_info.clone())
-                } else if let Some(array_type) = self
-                    .infer_expression(&mut array_index_access_expression.array.borrow_mut(), ctx)
+                } else if let Some(array_type) =
+                    self.infer_expression(&array_index_access_expression.array.borrow(), ctx)
                 {
-                    if let Some(index_type) = self.infer_expression(
-                        &mut array_index_access_expression.index.borrow_mut(),
-                        ctx,
-                    ) && !index_type.is_number()
+                    if let Some(index_type) =
+                        self.infer_expression(&array_index_access_expression.index.borrow(), ctx)
+                        && !index_type.is_number()
                     {
                         self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
                             found: index_type,
@@ -829,8 +826,8 @@ impl TypeChecker {
             Expression::MemberAccess(member_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(member_access_expression.id) {
                     Some(type_info.clone())
-                } else if let Some(object_type) = self
-                    .infer_expression(&mut member_access_expression.expression.borrow_mut(), ctx)
+                } else if let Some(object_type) =
+                    self.infer_expression(&member_access_expression.expression.borrow(), ctx)
                 {
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
@@ -921,7 +918,7 @@ impl TypeChecker {
                         // For other expressions, try to infer the type
                         drop(inner_expr); // Release borrow before mutable borrow
                         if let Some(expr_type) = self.infer_expression(
-                            &mut type_member_access_expression.expression.borrow_mut(),
+                            &type_member_access_expression.expression.borrow(),
                             ctx,
                         ) {
                             match &expr_type.kind {
@@ -1052,7 +1049,7 @@ impl TypeChecker {
 
                             if let Some(arguments) = &function_call_expression.arguments {
                                 for arg in arguments {
-                                    self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                                    self.infer_expression(&arg.1.borrow(), ctx);
                                 }
                             }
 
@@ -1080,7 +1077,7 @@ impl TypeChecker {
                 if let Expression::MemberAccess(member_access) = &function_call_expression.function
                 {
                     let receiver_type =
-                        self.infer_expression(&mut member_access.expression.borrow_mut(), ctx);
+                        self.infer_expression(&member_access.expression.borrow(), ctx);
 
                     if let Some(receiver_type) = receiver_type {
                         let type_name = match &receiver_type.kind {
@@ -1142,7 +1139,7 @@ impl TypeChecker {
 
                                 if let Some(arguments) = &function_call_expression.arguments {
                                     for arg in arguments {
-                                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                                        self.infer_expression(&arg.1.borrow(), ctx);
                                     }
                                 }
 
@@ -1176,7 +1173,7 @@ impl TypeChecker {
                         // Infer arguments even for non-struct receiver for better error recovery
                         if let Some(arguments) = &function_call_expression.arguments {
                             for arg in arguments {
-                                self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                                self.infer_expression(&arg.1.borrow(), ctx);
                             }
                         }
                         return None;
@@ -1184,7 +1181,7 @@ impl TypeChecker {
                     // Receiver type inference failed; infer arguments for better error recovery
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
-                            self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                            self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
                     return None;
@@ -1211,7 +1208,7 @@ impl TypeChecker {
                     });
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
-                            self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                            self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
                     return None;
@@ -1227,7 +1224,7 @@ impl TypeChecker {
                         location: function_call_expression.location,
                     });
                     for arg in arguments {
-                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                        self.infer_expression(&arg.1.borrow(), ctx);
                     }
                     return None;
                 }
@@ -1291,7 +1288,7 @@ impl TypeChecker {
                 // Infer argument types
                 if let Some(arguments) = &function_call_expression.arguments {
                     for arg in arguments {
-                        self.infer_expression(&mut arg.1.borrow_mut(), ctx);
+                        self.infer_expression(&arg.1.borrow(), ctx);
                     }
                 }
 
@@ -1316,10 +1313,8 @@ impl TypeChecker {
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Not => {
-                        let expression_type_op = self.infer_expression(
-                            &mut prefix_unary_expression.expression.borrow_mut(),
-                            ctx,
-                        );
+                        let expression_type_op = self
+                            .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
                         if let Some(expression_type) = expression_type_op {
                             if expression_type.is_bool() {
                                 ctx.set_node_typeinfo(
@@ -1337,11 +1332,51 @@ impl TypeChecker {
                         }
                         None
                     }
+                    UnaryOperatorKind::Neg => {
+                        let expression_type_op = self
+                            .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
+                        if let Some(expression_type) = expression_type_op {
+                            if expression_type.is_signed_integer() {
+                                ctx.set_node_typeinfo(
+                                    prefix_unary_expression.id,
+                                    expression_type.clone(),
+                                );
+                                return Some(expression_type);
+                            }
+                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                                operator: UnaryOperatorKind::Neg,
+                                expected_type: "signed integers (i8, i16, i32, i64)",
+                                found_type: expression_type,
+                                location: prefix_unary_expression.location,
+                            });
+                        }
+                        None
+                    }
+                    UnaryOperatorKind::BitNot => {
+                        let expression_type_op = self
+                            .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
+                        if let Some(expression_type) = expression_type_op {
+                            if expression_type.is_number() {
+                                ctx.set_node_typeinfo(
+                                    prefix_unary_expression.id,
+                                    expression_type.clone(),
+                                );
+                                return Some(expression_type);
+                            }
+                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                                operator: UnaryOperatorKind::BitNot,
+                                expected_type: "integers (i8, i16, i32, i64, u8, u16, u32, u64)",
+                                found_type: expression_type,
+                                location: prefix_unary_expression.location,
+                            });
+                        }
+                        None
+                    }
                 }
             }
             Expression::Parenthesized(parenthesized_expression) => {
-                let inner_type = self
-                    .infer_expression(&mut parenthesized_expression.expression.borrow_mut(), ctx);
+                let inner_type =
+                    self.infer_expression(&parenthesized_expression.expression.borrow(), ctx);
                 if let Some(ref type_info) = inner_type {
                     ctx.set_node_typeinfo(parenthesized_expression.id, type_info.clone());
                 }
@@ -1351,10 +1386,8 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(binary_expression.id) {
                     return Some(type_info.clone());
                 }
-                let left_type =
-                    self.infer_expression(&mut binary_expression.left.borrow_mut(), ctx);
-                let right_type =
-                    self.infer_expression(&mut binary_expression.right.borrow_mut(), ctx);
+                let left_type = self.infer_expression(&binary_expression.left.borrow(), ctx);
+                let right_type = self.infer_expression(&binary_expression.right.borrow(), ctx);
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
                     if left_type != right_type {
                         self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
@@ -1436,11 +1469,10 @@ impl TypeChecker {
                     }
                     if let Some(elements) = &array_literal.elements
                         && let Some(element_type_info) =
-                            self.infer_expression(&mut elements[0].borrow_mut(), ctx)
+                            self.infer_expression(&elements[0].borrow(), ctx)
                     {
                         for element in &elements[1..] {
-                            let element_type =
-                                self.infer_expression(&mut element.borrow_mut(), ctx);
+                            let element_type = self.infer_expression(&element.borrow(), ctx);
                             if let Some(element_type) = element_type
                                 && element_type != element_type_info
                             {
@@ -1503,7 +1535,7 @@ impl TypeChecker {
                 let type_info = TypeInfo::new(type_expr);
                 ctx.set_node_typeinfo(type_expr.id(), type_info.clone());
                 if let Type::Array(array_type) = type_expr {
-                    self.infer_expression(&mut array_type.size.clone(), ctx);
+                    self.infer_expression(&array_type.size.clone(), ctx);
                 }
                 Some(type_info)
             }
@@ -2015,7 +2047,7 @@ impl TypeChecker {
             // If the parameter type is a type variable, infer from argument
             if let TypeInfoKind::Generic(type_param_name) = &param_type.kind {
                 // Infer the argument type
-                let arg_type = self.infer_expression(&mut args[i].1.borrow_mut(), ctx);
+                let arg_type = self.infer_expression(&args[i].1.borrow(), ctx);
 
                 if let Some(arg_type) = arg_type {
                     // Check for conflicting inference

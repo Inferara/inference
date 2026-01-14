@@ -293,6 +293,8 @@ pub enum Visibility {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UnaryOperatorKind {
     Not,
+    Neg,
+    BitNot,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

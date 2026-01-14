@@ -1,6 +1,6 @@
 use crate::utils::build_ast;
 use inference_ast::builder::Builder;
-use inference_ast::nodes::{AstNode, Definition, Expression, Statement};
+use inference_ast::nodes::{AstNode, Definition, Expression, OperatorKind, Statement, UnaryOperatorKind, Visibility};
 
 #[test]
 fn test_parse_simple_function() {
@@ -202,6 +202,41 @@ fn test_parse_binary_expression_divide() {
     let arena = build_ast(source.to_string());
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
+
+    let binary_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::Binary(_)))
+    });
+    assert_eq!(binary_exprs.len(), 1, "Should find 1 binary expression");
+
+    if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
+        assert_eq!(bin_expr.operator, OperatorKind::Div);
+    } else {
+        panic!("Expected binary expression");
+    }
+}
+
+#[test]
+fn test_parse_binary_expression_divide_chained() {
+    let source = r#"fn test() -> i32 { return 10 / 2 / 1; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+}
+
+#[test]
+fn test_parse_binary_expression_divide_with_multiply() {
+    let source = r#"fn test() -> i32 { return a * b / c; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+}
+
+#[test]
+fn test_parse_binary_expression_divide_precedence() {
+    let source = r#"fn test() -> i32 { return a + b / c; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
 }
 
 #[test]
@@ -290,6 +325,99 @@ fn test_parse_unary_negate() {
     let arena = build_ast(source.to_string());
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
+}
+
+#[test]
+fn test_parse_negative_literal() {
+    // Note: tree-sitter-inference parses `-42` as a negative literal, not as unary minus
+    // applied to `42`. This is grammar-level behavior - the minus is part of the literal.
+    let source = r#"fn test() -> i32 { return -42; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    // Grammar parses -42 as a negative literal, not a prefix unary expression
+    assert_eq!(prefix_exprs.len(), 0, "Negative literal is not a prefix unary expression");
+}
+
+#[test]
+fn test_parse_unary_negate_parenthesized() {
+    let source = r#"fn test() -> i32 { return -(42); }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    assert_eq!(prefix_exprs.len(), 1, "Should find 1 prefix unary expression");
+
+    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
+        assert_eq!(unary_expr.operator, UnaryOperatorKind::Neg);
+    } else {
+        panic!("Expected prefix unary expression");
+    }
+}
+
+#[test]
+fn test_parse_unary_bitnot() {
+    let source = r#"fn test() -> i32 { return ~flags; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    assert_eq!(prefix_exprs.len(), 1, "Should find 1 prefix unary expression");
+
+    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
+        assert_eq!(unary_expr.operator, UnaryOperatorKind::BitNot);
+    } else {
+        panic!("Expected prefix unary expression");
+    }
+}
+
+#[test]
+fn test_parse_unary_double_negate() {
+    let source = r#"fn test() -> i32 { return --x; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    assert_eq!(prefix_exprs.len(), 2, "Should find 2 prefix unary expressions");
+}
+
+#[test]
+fn test_parse_unary_negate_bitnot() {
+    let source = r#"fn test() -> i32 { return -~x; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    assert_eq!(prefix_exprs.len(), 2, "Should find 2 prefix unary expressions");
+}
+
+#[test]
+fn test_parse_unary_bitnot_negate() {
+    let source = r#"fn test() -> i32 { return ~-x; }"#;
+    let arena = build_ast(source.to_string());
+    let source_files = &arena.source_files();
+    assert_eq!(source_files.len(), 1);
+
+    let prefix_exprs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
+    });
+    assert_eq!(prefix_exprs.len(), 2, "Should find 2 prefix unary expressions");
 }
 
 #[test]
@@ -1334,5 +1462,283 @@ fn test_parse_external_function_basic() {
 
     if let AstNode::Definition(Definition::ExternalFunction(ext_func)) = &ext_funcs[0] {
         assert_eq!(ext_func.name.name, "do_something");
+    }
+}
+
+/// Tests for visibility parsing from CST
+
+#[test]
+fn test_parse_public_function_visibility() {
+    let source = r#"pub fn public_function() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1, "Should find 1 function");
+    assert_eq!(
+        functions[0].visibility,
+        Visibility::Public,
+        "Function should have Public visibility"
+    );
+}
+
+#[test]
+fn test_parse_private_function_visibility() {
+    let source = r#"fn private_function() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+    let functions = arena.functions();
+    assert_eq!(functions.len(), 1, "Should find 1 function");
+    assert_eq!(
+        functions[0].visibility,
+        Visibility::Private,
+        "Function without pub should have Private visibility"
+    );
+}
+
+#[test]
+fn test_parse_public_struct_visibility() {
+    let source = r#"pub struct PublicStruct { x: i32; }"#;
+    let arena = build_ast(source.to_string());
+    let structs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Struct(_)))
+    });
+    assert_eq!(structs.len(), 1, "Should find 1 struct");
+    if let AstNode::Definition(Definition::Struct(struct_def)) = &structs[0] {
+        assert_eq!(
+            struct_def.visibility,
+            Visibility::Public,
+            "Struct should have Public visibility"
+        );
+    } else {
+        panic!("Expected struct definition");
+    }
+}
+
+#[test]
+fn test_parse_private_struct_visibility() {
+    let source = r#"struct PrivateStruct { x: i32; }"#;
+    let arena = build_ast(source.to_string());
+    let structs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Struct(_)))
+    });
+    assert_eq!(structs.len(), 1, "Should find 1 struct");
+    if let AstNode::Definition(Definition::Struct(struct_def)) = &structs[0] {
+        assert_eq!(
+            struct_def.visibility,
+            Visibility::Private,
+            "Struct without pub should have Private visibility"
+        );
+    } else {
+        panic!("Expected struct definition");
+    }
+}
+
+#[test]
+fn test_parse_public_enum_visibility() {
+    let source = r#"pub enum PublicEnum { A, B, C }"#;
+    let arena = build_ast(source.to_string());
+    let enums = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Enum(_)))
+    });
+    assert_eq!(enums.len(), 1, "Should find 1 enum");
+    if let AstNode::Definition(Definition::Enum(enum_def)) = &enums[0] {
+        assert_eq!(
+            enum_def.visibility,
+            Visibility::Public,
+            "Enum should have Public visibility"
+        );
+    } else {
+        panic!("Expected enum definition");
+    }
+}
+
+#[test]
+fn test_parse_private_enum_visibility() {
+    let source = r#"enum PrivateEnum { X, Y, Z }"#;
+    let arena = build_ast(source.to_string());
+    let enums = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Enum(_)))
+    });
+    assert_eq!(enums.len(), 1, "Should find 1 enum");
+    if let AstNode::Definition(Definition::Enum(enum_def)) = &enums[0] {
+        assert_eq!(
+            enum_def.visibility,
+            Visibility::Private,
+            "Enum without pub should have Private visibility"
+        );
+    } else {
+        panic!("Expected enum definition");
+    }
+}
+
+#[test]
+fn test_parse_public_constant_visibility() {
+    let source = r#"pub const MAX_VALUE: i32 = 100;"#;
+    let arena = build_ast(source.to_string());
+    let consts = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Constant(_)))
+    });
+    assert_eq!(consts.len(), 1, "Should find 1 constant");
+    if let AstNode::Definition(Definition::Constant(const_def)) = &consts[0] {
+        assert_eq!(
+            const_def.visibility,
+            Visibility::Public,
+            "Constant should have Public visibility"
+        );
+    } else {
+        panic!("Expected constant definition");
+    }
+}
+
+#[test]
+fn test_parse_private_constant_visibility() {
+    let source = r#"const MIN_VALUE: i32 = 0;"#;
+    let arena = build_ast(source.to_string());
+    let consts = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Constant(_)))
+    });
+    assert_eq!(consts.len(), 1, "Should find 1 constant");
+    if let AstNode::Definition(Definition::Constant(const_def)) = &consts[0] {
+        assert_eq!(
+            const_def.visibility,
+            Visibility::Private,
+            "Constant without pub should have Private visibility"
+        );
+    } else {
+        panic!("Expected constant definition");
+    }
+}
+
+#[test]
+fn test_parse_public_type_alias_visibility() {
+    let source = r#"pub type MyInt = i32;"#;
+    let arena = build_ast(source.to_string());
+    let types = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Type(_)))
+    });
+    assert_eq!(types.len(), 1, "Should find 1 type alias");
+    if let AstNode::Definition(Definition::Type(type_def)) = &types[0] {
+        assert_eq!(
+            type_def.visibility,
+            Visibility::Public,
+            "Type alias should have Public visibility"
+        );
+    } else {
+        panic!("Expected type definition");
+    }
+}
+
+#[test]
+fn test_parse_private_type_alias_visibility() {
+    let source = r#"type LocalInt = i32;"#;
+    let arena = build_ast(source.to_string());
+    let types = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Type(_)))
+    });
+    assert_eq!(types.len(), 1, "Should find 1 type alias");
+    if let AstNode::Definition(Definition::Type(type_def)) = &types[0] {
+        assert_eq!(
+            type_def.visibility,
+            Visibility::Private,
+            "Type alias without pub should have Private visibility"
+        );
+    } else {
+        panic!("Expected type definition");
+    }
+}
+
+#[test]
+fn test_parse_mixed_visibility_definitions() {
+    let source = r#"
+pub fn public_func() {}
+fn private_func() {}
+pub struct PublicStruct { x: i32; }
+struct PrivateStruct { y: i32; }
+pub const PUBLIC_CONST: i32 = 1;
+const PRIVATE_CONST: i32 = 2;
+"#;
+    let arena = build_ast(source.to_string());
+    let source_files = arena.source_files();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].definitions.len(), 6);
+
+    let definitions = &source_files[0].definitions;
+
+    if let Definition::Function(func) = &definitions[0] {
+        assert_eq!(func.name.name, "public_func");
+        assert_eq!(func.visibility, Visibility::Public);
+    } else {
+        panic!("Expected function definition");
+    }
+
+    if let Definition::Function(func) = &definitions[1] {
+        assert_eq!(func.name.name, "private_func");
+        assert_eq!(func.visibility, Visibility::Private);
+    } else {
+        panic!("Expected function definition");
+    }
+
+    if let Definition::Struct(struct_def) = &definitions[2] {
+        assert_eq!(struct_def.name.name, "PublicStruct");
+        assert_eq!(struct_def.visibility, Visibility::Public);
+    } else {
+        panic!("Expected struct definition");
+    }
+
+    if let Definition::Struct(struct_def) = &definitions[3] {
+        assert_eq!(struct_def.name.name, "PrivateStruct");
+        assert_eq!(struct_def.visibility, Visibility::Private);
+    } else {
+        panic!("Expected struct definition");
+    }
+
+    if let Definition::Constant(const_def) = &definitions[4] {
+        assert_eq!(const_def.name.name, "PUBLIC_CONST");
+        assert_eq!(const_def.visibility, Visibility::Public);
+    } else {
+        panic!("Expected constant definition");
+    }
+
+    if let Definition::Constant(const_def) = &definitions[5] {
+        assert_eq!(const_def.name.name, "PRIVATE_CONST");
+        assert_eq!(const_def.visibility, Visibility::Private);
+    } else {
+        panic!("Expected constant definition");
+    }
+}
+
+#[test]
+fn test_external_function_visibility_is_always_private() {
+    let source = r#"external fn extern_func() -> i32;"#;
+    let arena = build_ast(source.to_string());
+    let externs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::ExternalFunction(_)))
+    });
+    assert_eq!(externs.len(), 1, "Should find 1 external function");
+    if let AstNode::Definition(Definition::ExternalFunction(ext)) = &externs[0] {
+        assert_eq!(
+            ext.visibility,
+            Visibility::Private,
+            "External functions should always be private (no grammar support for pub)"
+        );
+    } else {
+        panic!("Expected external function definition");
+    }
+}
+
+#[test]
+fn test_spec_definition_visibility_is_always_private() {
+    let source = r#"spec MySpec { fn verify() -> bool { return true; } }"#;
+    let arena = build_ast(source.to_string());
+    let specs = arena.filter_nodes(|node| {
+        matches!(node, AstNode::Definition(Definition::Spec(_)))
+    });
+    assert_eq!(specs.len(), 1, "Should find 1 spec definition");
+    if let AstNode::Definition(Definition::Spec(spec)) = &specs[0] {
+        assert_eq!(
+            spec.visibility,
+            Visibility::Private,
+            "Spec definitions should always be private (no grammar support for pub)"
+        );
+    } else {
+        panic!("Expected spec definition");
     }
 }
