@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tooling
 
+- Remove `playground-server` tool (unused, superseded by external playground infrastructure) ([#56])
 - Reorganize project structure: move crates to `core/` and `tools/` directories ([#43])
 - Add `inf-wasmparser` crate (fork with non-det instruction support) ([#43])
 - Add `inf-wat` crate for WAT parsing ([#43])

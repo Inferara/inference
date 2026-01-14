@@ -79,6 +79,11 @@ Prebuilt `infc` binaries distributables are arranged in the following directory 
 
 To build Inference from source, you'll need the required binary dependencies for your platform.
 
+For detailed platform-specific setup instructions, see:
+- [Linux Development Setup](book/installation_linux.md)
+- [macOS Development Setup](book/installation_macos.md)
+- [Windows Development Setup](book/installation_windows.md)
+
 ### Required Binaries
 
 Download the following files for your platform and place them in the specified directories:
