@@ -33,7 +33,7 @@ cobertura.xml
 !.gitattributes
 
 external/
-*.md
+./*.md
 !README.md
 !CONTRIBUTING.md
 !CHANGELOG.md

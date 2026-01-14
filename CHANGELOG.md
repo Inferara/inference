@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Compiler
 
 - type-checker: Add type checking for unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
+- type-checker: Change expression inference to use immutable references ([#86])
+- ast: Use atomic counter for deterministic node ID generation ([#86])
 - type-checker: Add bidirectional type inference with scope-aware symbol table ([#54])
 - type-checker: Implement import system with registration and resolution phases ([#54])
 - type-checker: Add visibility handling for modules, structs, and enums ([#54])

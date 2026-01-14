@@ -60,19 +60,38 @@ This design provides:
 - O(1) children list lookup (plus O(c) to access child nodes where c is the number of children)
 - O(d) source file lookup where d is tree depth (typically < 20 levels)
 
-## Recent Optimizations (Issue #69)
+## Recent Changes
 
-### Location Struct Optimization
+### Issue #86 Enhancements
+
+**New Operator Support**:
+- **Division operator** (`/`) added to binary expressions
+- **Unary minus operator** (`-`) for numeric negation
+- **Bitwise NOT operator** (`~`) for bitwise complement
+
+**Visibility Parsing**:
+- Comprehensive visibility modifier support for all definitions
+- Functions, structs, enums, constants, and type aliases now correctly parse `pub` keyword
+- Default visibility remains `Private` when not specified
+
+**Node ID Generation**:
+- Replaced UUID-based ID generation with atomic counter for deterministic ordering
+- Sequential IDs starting from 1 provide better debugging experience
+- Thread-safe ID allocation using `AtomicU32`
+
+### Issue #69 Optimizations
+
+**Location Struct Optimization**:
 - **Removed** `source: String` field (98% memory reduction per node)
 - **Added** `#[derive(Copy)]` for efficient stack copies
 - Source text now stored once in `SourceFile.source`
 
-### Arena Performance Improvements
+**Arena Performance Improvements**:
 - **Replaced** `Vec<NodeRoute>` with `FxHashMap` for parent lookups
 - **Added** `parent_map` for O(1) parent queries (previously O(n) linear search)
 - **Added** `children_map` for O(1) children list access
 
-### Convenience API
+**Convenience API**:
 - `find_source_file_for_node(node_id)`: Find the root `SourceFile` for any node
 - `get_node_source(node_id)`: Retrieve source text using byte offsets
 
