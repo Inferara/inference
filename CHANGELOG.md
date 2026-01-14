@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove unused PATH configuration from `.cargo/config.toml` ([#56])
 - Bump CI cache keys to invalidate stale binary caches ([#56])
 - Fix LLVM environment variable reference in Windows installation guide ([#56])
+- Add Linux development setup guide (`book/installation_linux.md`) ([#56])
+- Add macOS development setup guide (`book/installation_macos.md`) ([#56])
+- Add cross-platform dependency check script (`book/check_deps.sh`) ([#56])
 
 ### Performance
 
