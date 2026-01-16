@@ -1,7 +1,9 @@
 //TODO: don't forget to remove
 #![allow(dead_code)]
 use crate::utils;
-use inference_ast::nodes::{BlockType, Expression, FunctionDefinition, Literal, Statement, Type};
+use inference_ast::nodes::{
+    BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type,
+};
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
     typed_context::TypedContext,
@@ -66,14 +68,21 @@ impl<'ctx> Compiler<'ctx> {
         let fn_name = function_definition.name();
         let fn_type = match &function_definition.returns {
             Some(ret_type) => match ret_type {
+                Type::Simple(SimpleTypeKind::Unit) => self.context.void_type().fn_type(&[], false),
+                Type::Simple(SimpleTypeKind::Bool) => self.context.bool_type().fn_type(&[], false),
+                Type::Simple(SimpleTypeKind::I8 | SimpleTypeKind::U8) => {
+                    self.context.i8_type().fn_type(&[], false)
+                }
+                Type::Simple(SimpleTypeKind::I16 | SimpleTypeKind::U16) => {
+                    self.context.i16_type().fn_type(&[], false)
+                }
+                Type::Simple(SimpleTypeKind::I32 | SimpleTypeKind::U32) => {
+                    self.context.i32_type().fn_type(&[], false)
+                }
+                Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => {
+                    self.context.i64_type().fn_type(&[], false)
+                }
                 Type::Array(_array_type) => todo!(),
-                Type::Simple(simple_type) => match simple_type.name.to_lowercase().as_str() {
-                    "i32" => self.context.i32_type().fn_type(&[], false),
-                    "i64" => self.context.i64_type().fn_type(&[], false),
-                    "u32" => todo!(),
-                    "u64" => todo!(),
-                    _ => panic!("Unsupported return type: {}", simple_type.name),
-                },
                 Type::Generic(_generic_type) => todo!(),
                 Type::Function(_function_type) => todo!(),
                 Type::QualifiedName(_qualified_name) => todo!(),

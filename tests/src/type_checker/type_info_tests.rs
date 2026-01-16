@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use inference_ast::nodes::{
     Expression, FunctionType, GenericType, Identifier, Literal, NumberLiteral, QualifiedName,
-    SimpleType, Type, TypeArray, TypeQualifiedName,
+    SimpleTypeKind, Type, TypeArray, TypeQualifiedName,
 };
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use rustc_hash::FxHashMap;
@@ -793,12 +793,24 @@ mod type_info_from_ast {
         })
     }
 
+    fn simple_type_kind_from_str(name: &str) -> SimpleTypeKind {
+        match name.to_lowercase().as_str() {
+            "unit" => SimpleTypeKind::Unit,
+            "bool" => SimpleTypeKind::Bool,
+            "i8" => SimpleTypeKind::I8,
+            "i16" => SimpleTypeKind::I16,
+            "i32" => SimpleTypeKind::I32,
+            "i64" => SimpleTypeKind::I64,
+            "u8" => SimpleTypeKind::U8,
+            "u16" => SimpleTypeKind::U16,
+            "u32" => SimpleTypeKind::U32,
+            "u64" => SimpleTypeKind::U64,
+            _ => panic!("Unknown simple type kind: {}", name),
+        }
+    }
+
     fn make_simple_type(name: &str) -> Type {
-        Type::Simple(Rc::new(SimpleType {
-            id: 0,
-            location: dummy_location(),
-            name: name.to_string(),
-        }))
+        Type::Simple(simple_type_kind_from_str(name))
     }
 
     fn make_number_literal(value: &str) -> Expression {
@@ -825,8 +837,9 @@ mod type_info_from_ast {
     }
 
     #[test]
-    fn test_new_from_simple_builtin_string() {
-        let ty = make_simple_type("string");
+    fn test_new_from_custom_builtin_string() {
+        // String is a builtin type but parsed as Custom (no dedicated tree-sitter node kind)
+        let ty = Type::Custom(make_identifier("string"));
         let ti = TypeInfo::new(&ty);
         assert_eq!(ti.kind, TypeInfoKind::String);
     }
@@ -859,8 +872,9 @@ mod type_info_from_ast {
     }
 
     #[test]
-    fn test_new_from_simple_custom_type() {
-        let ty = make_simple_type("MyCustomType");
+    fn test_new_from_custom_type() {
+        // Custom types use Type::Custom variant
+        let ty = Type::Custom(make_identifier("MyCustomType"));
         let ti = TypeInfo::new(&ty);
         assert_eq!(ti.kind, TypeInfoKind::Custom("MyCustomType".to_string()));
     }
@@ -971,11 +985,12 @@ mod type_info_from_ast {
 
     #[test]
     fn test_new_from_function_type_with_params() {
+        // String type is parsed as Custom (no dedicated tree-sitter node kind)
         let ty = Type::Function(Rc::new(FunctionType {
             id: 0,
             location: dummy_location(),
             parameters: Some(vec![make_simple_type("i32"), make_simple_type("bool")]),
-            returns: Some(make_simple_type("string")),
+            returns: Some(Type::Custom(make_identifier("string"))),
         }));
         let ti = TypeInfo::new(&ty);
 
@@ -1016,8 +1031,18 @@ mod is_signed_methods {
 
     #[test]
     fn test_number_type_is_signed_all_variants() {
-        let signed_types = [NumberType::I8, NumberType::I16, NumberType::I32, NumberType::I64];
-        let unsigned_types = [NumberType::U8, NumberType::U16, NumberType::U32, NumberType::U64];
+        let signed_types = [
+            NumberType::I8,
+            NumberType::I16,
+            NumberType::I32,
+            NumberType::I64,
+        ];
+        let unsigned_types = [
+            NumberType::U8,
+            NumberType::U16,
+            NumberType::U32,
+            NumberType::U64,
+        ];
 
         for nt in signed_types {
             assert!(nt.is_signed(), "{:?} should be signed", nt);
@@ -1031,28 +1056,60 @@ mod is_signed_methods {
     #[test]
     fn test_type_info_is_signed_integer_signed_types() {
         let signed_types = [
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::I8), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::I16), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::I64), type_params: vec![] },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I8),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I16),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            },
         ];
 
         for ti in signed_types {
-            assert!(ti.is_signed_integer(), "{:?} should be a signed integer", ti.kind);
+            assert!(
+                ti.is_signed_integer(),
+                "{:?} should be a signed integer",
+                ti.kind
+            );
         }
     }
 
     #[test]
     fn test_type_info_is_signed_integer_unsigned_types() {
         let unsigned_types = [
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::U8), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::U16), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::U32), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Number(NumberType::U64), type_params: vec![] },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::U8),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::U16),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::U32),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::U64),
+                type_params: vec![],
+            },
         ];
 
         for ti in unsigned_types {
-            assert!(!ti.is_signed_integer(), "{:?} should not be a signed integer", ti.kind);
+            assert!(
+                !ti.is_signed_integer(),
+                "{:?} should not be a signed integer",
+                ti.kind
+            );
         }
     }
 
@@ -1062,10 +1119,22 @@ mod is_signed_methods {
             TypeInfo::boolean(),
             TypeInfo::string(),
             TypeInfo::default(),
-            TypeInfo { kind: TypeInfoKind::Struct("Point".to_string()), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Enum("Color".to_string()), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Generic("T".to_string()), type_params: vec![] },
-            TypeInfo { kind: TypeInfoKind::Custom("MyType".to_string()), type_params: vec![] },
+            TypeInfo {
+                kind: TypeInfoKind::Struct("Point".to_string()),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Enum("Color".to_string()),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Generic("T".to_string()),
+                type_params: vec![],
+            },
+            TypeInfo {
+                kind: TypeInfoKind::Custom("MyType".to_string()),
+                type_params: vec![],
+            },
             TypeInfo {
                 kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 10),
                 type_params: vec![],
@@ -1110,12 +1179,24 @@ mod type_info_with_type_params {
         })
     }
 
+    fn simple_type_kind_from_str(name: &str) -> SimpleTypeKind {
+        match name.to_lowercase().as_str() {
+            "unit" => SimpleTypeKind::Unit,
+            "bool" => SimpleTypeKind::Bool,
+            "i8" => SimpleTypeKind::I8,
+            "i16" => SimpleTypeKind::I16,
+            "i32" => SimpleTypeKind::I32,
+            "i64" => SimpleTypeKind::I64,
+            "u8" => SimpleTypeKind::U8,
+            "u16" => SimpleTypeKind::U16,
+            "u32" => SimpleTypeKind::U32,
+            "u64" => SimpleTypeKind::U64,
+            _ => panic!("Unknown simple type kind: {}", name),
+        }
+    }
+
     fn make_simple_type(name: &str) -> Type {
-        Type::Simple(Rc::new(SimpleType {
-            id: 0,
-            location: dummy_location(),
-            name: name.to_string(),
-        }))
+        Type::Simple(simple_type_kind_from_str(name))
     }
 
     fn make_number_literal(value: &str) -> Expression {
@@ -1127,8 +1208,9 @@ mod type_info_with_type_params {
     }
 
     #[test]
-    fn test_simple_type_becomes_generic_when_in_params() {
-        let ty = make_simple_type("T");
+    fn test_custom_type_becomes_generic_when_in_type_params_list() {
+        // Type "T" parsed as Custom becomes Generic when T is in type_param_names
+        let ty = Type::Custom(make_identifier("T"));
         let type_params = vec!["T".to_string()];
         let ti = TypeInfo::new_with_type_params(&ty, &type_params);
 
@@ -1136,8 +1218,9 @@ mod type_info_with_type_params {
     }
 
     #[test]
-    fn test_simple_type_stays_custom_when_not_in_params() {
-        let ty = make_simple_type("T");
+    fn test_custom_type_stays_custom_when_not_in_type_params_list() {
+        // Type "T" parsed as Custom stays Custom when T is not in type_param_names
+        let ty = Type::Custom(make_identifier("T"));
         let type_params = vec!["U".to_string()];
         let ti = TypeInfo::new_with_type_params(&ty, &type_params);
 
@@ -1164,7 +1247,8 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_array_element_becomes_generic() {
-        let elem_type = make_simple_type("T");
+        // Element type "T" as Custom becomes Generic when T is in type_param_names
+        let elem_type = Type::Custom(make_identifier("T"));
         let ty = Type::Array(Rc::new(TypeArray {
             id: 0,
             location: dummy_location(),
@@ -1184,11 +1268,12 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_function_params_become_generic() {
+        // Function parameters with Custom types become Generic when in type_param_names
         let ty = Type::Function(Rc::new(FunctionType {
             id: 0,
             location: dummy_location(),
-            parameters: Some(vec![make_simple_type("T")]),
-            returns: Some(make_simple_type("U")),
+            parameters: Some(vec![Type::Custom(make_identifier("T"))]),
+            returns: Some(Type::Custom(make_identifier("U"))),
         }));
         let type_params = vec!["T".to_string(), "U".to_string()];
         let ti = TypeInfo::new_with_type_params(&ty, &type_params);
@@ -1198,7 +1283,8 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_multiple_type_params_all_resolved() {
-        let elem_type = make_simple_type("K");
+        // Array element with Custom type becomes Generic when in type_param_names
+        let elem_type = Type::Custom(make_identifier("K"));
         let ty = Type::Array(Rc::new(TypeArray {
             id: 0,
             location: dummy_location(),
@@ -1217,20 +1303,24 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_empty_type_params_no_generics() {
-        let ty = make_simple_type("T");
+        // Custom type "T" stays Custom when no type_param_names provided
+        let ty = Type::Custom(make_identifier("T"));
         let ti = TypeInfo::new_with_type_params(&ty, &[]);
 
         assert_eq!(ti.kind, TypeInfoKind::Custom("T".to_string()));
     }
 
     #[test]
-    fn test_type_param_can_shadow_builtin() {
+    fn test_simple_type_cannot_be_shadowed_by_type_param() {
+        // Type::Simple(i32) always becomes Number(I32), even if "i32" is in type_param_names
+        // This is expected behavior: primitive types have dedicated SimpleTypeKind variants
+        // and are not subject to type parameter shadowing
         let ty = make_simple_type("i32");
         let type_params = vec!["i32".to_string()];
         let ti = TypeInfo::new_with_type_params(&ty, &type_params);
 
-        // Type parameter check happens before builtin lookup, so "i32" becomes generic
-        assert_eq!(ti.kind, TypeInfoKind::Generic("i32".to_string()));
+        // Primitive types are not affected by type_param_names
+        assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
     }
 
     #[test]

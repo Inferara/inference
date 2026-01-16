@@ -11,10 +11,10 @@ use super::nodes::{
     Definition, EnumDefinition, Expression, ExpressionStatement, ExternalFunctionDefinition,
     FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier, IfStatement,
     Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral, OperatorKind,
-    ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SimpleType,
-    SourceFile, SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type,
-    TypeArray, TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind,
-    UnitLiteral, UseDirective, UzumakiExpression, VariableDefinitionStatement,
+    ParenthesizedExpression, PrefixUnaryExpression, QualifiedName, ReturnStatement, SourceFile,
+    SpecDefinition, Statement, StringLiteral, StructDefinition, StructField, Type, TypeArray,
+    TypeDefinition, TypeDefinitionStatement, TypeQualifiedName, UnaryOperatorKind, UnitLiteral,
+    UseDirective, UzumakiExpression, VariableDefinitionStatement,
 };
 
 #[macro_export]
@@ -836,13 +836,6 @@ impl UnitLiteral {
     #[must_use]
     pub fn new(id: u32, location: Location) -> Self {
         UnitLiteral { id, location }
-    }
-}
-
-impl SimpleType {
-    #[must_use]
-    pub fn new(id: u32, location: Location, name: String) -> Self {
-        SimpleType { id, location, name }
     }
 }
 

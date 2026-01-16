@@ -95,3 +95,23 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
         );
     }
 }
+
+pub(crate) fn simple_type_kind_from_str(
+    type_name: &str,
+) -> Option<inference_ast::nodes::SimpleTypeKind> {
+    use inference_ast::nodes::SimpleTypeKind;
+
+    match type_name {
+        "unit" => Some(SimpleTypeKind::Unit),
+        "bool" => Some(SimpleTypeKind::Bool),
+        "i8" => Some(SimpleTypeKind::I8),
+        "i16" => Some(SimpleTypeKind::I16),
+        "i32" => Some(SimpleTypeKind::I32),
+        "i64" => Some(SimpleTypeKind::I64),
+        "u8" => Some(SimpleTypeKind::U8),
+        "u16" => Some(SimpleTypeKind::U16),
+        "u32" => Some(SimpleTypeKind::U32),
+        "u64" => Some(SimpleTypeKind::U64),
+        _ => None,
+    }
+}

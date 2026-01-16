@@ -17,7 +17,7 @@ use crate::{
         FunctionCallExpression, FunctionDefinition, FunctionType, GenericType, Identifier,
         IfStatement, Literal, Location, LoopStatement, MemberAccessExpression, NumberLiteral,
         OperatorKind, ParenthesizedExpression, PrefixUnaryExpression, QualifiedName,
-        ReturnStatement, SimpleType, SourceFile, SpecDefinition, Statement, StringLiteral,
+        ReturnStatement, SimpleTypeKind, SourceFile, SpecDefinition, Statement, StringLiteral,
         StructDefinition, StructField, Type, TypeArray, TypeDefinition, TypeDefinitionStatement,
         TypeQualifiedName, UnaryOperatorKind, UnitLiteral, UseDirective, UzumakiExpression,
         VariableDefinitionStatement,
@@ -471,8 +471,20 @@ impl<'a> Builder<'a, InitState> {
         node
     }
 
-    /// Build a module definition node
-    /// TODO: Implement module parsing when tree-sitter grammar supports it
+    /// Builds a module definition node.
+    ///
+    /// # Not Yet Implemented
+    ///
+    /// Module parsing requires tree-sitter grammar support for module declarations.
+    /// The Inference grammar does not currently support `mod name;` or `mod name { ... }`
+    /// syntax. When grammar support is added, this function will:
+    ///
+    /// 1. Parse the module name from the CST node
+    /// 2. Determine if it's an external (`mod name;`) or inline (`mod name { ... }`) module
+    /// 3. Build the `ModuleDefinition` AST node
+    /// 4. Add it to the arena
+    ///
+    /// See `ParserContext::process_module()` for the planned integration point.
     #[allow(dead_code)]
     fn build_module_definition(
         &mut self,
@@ -480,7 +492,6 @@ impl<'a> Builder<'a, InitState> {
         _node: &Node,
         _code: &[u8],
     ) -> Rc<ModuleDefinition> {
-        // TODO: Implement me - currently tree-sitter grammar doesn't support modules
         unimplemented!("Module definitions are not yet supported in the grammar")
     }
 
@@ -1258,11 +1269,17 @@ impl<'a> Builder<'a, InitState> {
     fn build_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Type {
         let node_kind = node.kind();
         match node_kind {
+            "type_unit" => Type::Simple(SimpleTypeKind::Unit),
+            "type_bool" => Type::Simple(SimpleTypeKind::Bool),
+            "type_i8" => Type::Simple(SimpleTypeKind::I8),
+            "type_i16" => Type::Simple(SimpleTypeKind::I16),
+            "type_i32" => Type::Simple(SimpleTypeKind::I32),
+            "type_i64" => Type::Simple(SimpleTypeKind::I64),
+            "type_u8" => Type::Simple(SimpleTypeKind::U8),
+            "type_u16" => Type::Simple(SimpleTypeKind::U16),
+            "type_u32" => Type::Simple(SimpleTypeKind::U32),
+            "type_u64" => Type::Simple(SimpleTypeKind::U64),
             "type_array" => Type::Array(self.build_type_array(parent_id, node, code)),
-            "type_i8" | "type_i16" | "type_i32" | "type_i64" | "type_u8" | "type_u16"
-            | "type_u32" | "type_u64" | "type_bool" | "type_unit" => {
-                Type::Simple(self.build_simple_type(parent_id, node, code))
-            }
             "generic_type" | "generic_name" => {
                 Type::Generic(self.build_generic_type(parent_id, node, code))
             }
@@ -1294,22 +1311,6 @@ impl<'a> Builder<'a, InitState> {
         let node = Rc::new(TypeArray::new(id, location, element_type, size));
         self.arena.add_node(
             AstNode::Expression(Expression::Type(Type::Array(node.clone()))),
-            parent_id,
-        );
-        node
-    }
-
-    fn build_simple_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<SimpleType> {
-        let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
-        let name = if node.kind() == "type_unit" {
-            String::from("unit")
-        } else {
-            node.utf8_text(code).unwrap().to_string()
-        };
-        let node = Rc::new(SimpleType::new(id, location, name));
-        self.arena.add_node(
-            AstNode::Expression(Expression::Type(Type::Simple(node.clone()))),
             parent_id,
         );
         node

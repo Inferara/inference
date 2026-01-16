@@ -108,6 +108,7 @@ macro_rules! ast_enum {
         impl $name {
 
             #[must_use]
+            #[allow(unused_variables)]
             pub fn id(&self) -> u32 {
                 match self {
                     $(
@@ -117,6 +118,7 @@ macro_rules! ast_enum {
             }
 
             #[must_use]
+            #[allow(unused_variables)]
             pub fn location(&self) -> Location {
                 match self {
                     $(
@@ -127,12 +129,20 @@ macro_rules! ast_enum {
         }
     };
 
+    (@id_arm $inner:ident, skip) => {
+        u32::MAX
+    };
+
     (@id_arm $inner:ident, inner_enum) => {
         $inner.id()
     };
 
     (@id_arm $inner:ident, ) => {
         $inner.id
+    };
+
+    (@location_arm $inner:ident, skip) => {
+        Location::default()
     };
 
     (@location_arm $inner:ident, inner_enum) => {
@@ -263,7 +273,7 @@ ast_enums! {
     }
     pub enum Type {
         Array(Rc<TypeArray>),
-        Simple(Rc<SimpleType>),
+        @skip Simple(SimpleTypeKind),
         Generic(Rc<GenericType>),
         Function(Rc<FunctionType>),
         QualifiedName(Rc<QualifiedName>),
@@ -295,6 +305,43 @@ pub enum UnaryOperatorKind {
     Not,
     Neg,
     BitNot,
+}
+
+/// Simple type kinds for primitive built-in types.
+///
+/// Primitive types have dedicated variants for efficient pattern matching
+/// without string comparison. User-defined types use `Type::Custom` instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum SimpleTypeKind {
+    Unit,
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
+impl SimpleTypeKind {
+    /// Returns the canonical lowercase source-code representation.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            SimpleTypeKind::Unit => "unit",
+            SimpleTypeKind::Bool => "bool",
+            SimpleTypeKind::I8 => "i8",
+            SimpleTypeKind::I16 => "i16",
+            SimpleTypeKind::I32 => "i32",
+            SimpleTypeKind::I64 => "i64",
+            SimpleTypeKind::U8 => "u8",
+            SimpleTypeKind::U16 => "u16",
+            SimpleTypeKind::U32 => "u32",
+            SimpleTypeKind::U64 => "u64",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -522,10 +569,6 @@ ast_nodes! {
     }
 
     pub struct UnitLiteral {
-    }
-
-    pub struct SimpleType {
-        pub name: String,
     }
 
     pub struct GenericType {

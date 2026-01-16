@@ -954,7 +954,7 @@ mod generics_tests {
                         assert_eq!(ident.name(), "T", "Argument type should be T");
                     }
                     Type::Simple(simple) => {
-                        panic!("T was parsed as Simple({}) instead of Custom", simple.name);
+                        panic!("T was parsed as Simple({simple:?}) instead of Custom");
                     }
                     other => {
                         panic!("Unexpected type variant for T: {:?}", other);

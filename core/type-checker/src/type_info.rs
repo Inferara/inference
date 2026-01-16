@@ -16,7 +16,7 @@ use std::{
     panic,
 };
 
-use inference_ast::nodes::{Expression, Literal, Type};
+use inference_ast::nodes::{Expression, Literal, SimpleTypeKind, Type};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
@@ -237,19 +237,10 @@ impl TypeInfo {
     #[must_use]
     pub fn new_with_type_params(ty: &Type, type_param_names: &[String]) -> Self {
         match ty {
-            Type::Simple(simple) => {
-                // Check if this is a declared type parameter
-                if type_param_names.contains(&simple.name) {
-                    return Self {
-                        kind: TypeInfoKind::Generic(simple.name.clone()),
-                        type_params: vec![],
-                    };
-                }
-                Self {
-                    kind: Self::type_kind_from_simple_type(&simple.name),
-                    type_params: vec![],
-                }
-            }
+            Type::Simple(simple) => Self {
+                kind: Self::type_kind_from_simple_type_kind(simple),
+                type_params: vec![],
+            },
             Type::Generic(generic) => Self {
                 kind: TypeInfoKind::Generic(generic.base.name.clone()),
                 type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
@@ -416,6 +407,21 @@ impl TypeInfo {
     fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
         TypeInfoKind::from_builtin_str(simple_type_name)
             .unwrap_or_else(|| TypeInfoKind::Custom(simple_type_name.to_string()))
+    }
+
+    fn type_kind_from_simple_type_kind(kind: &SimpleTypeKind) -> TypeInfoKind {
+        match kind {
+            SimpleTypeKind::Unit => TypeInfoKind::Unit,
+            SimpleTypeKind::Bool => TypeInfoKind::Bool,
+            SimpleTypeKind::I8 => TypeInfoKind::Number(NumberType::I8),
+            SimpleTypeKind::I16 => TypeInfoKind::Number(NumberType::I16),
+            SimpleTypeKind::I32 => TypeInfoKind::Number(NumberType::I32),
+            SimpleTypeKind::I64 => TypeInfoKind::Number(NumberType::I64),
+            SimpleTypeKind::U8 => TypeInfoKind::Number(NumberType::U8),
+            SimpleTypeKind::U16 => TypeInfoKind::Number(NumberType::U16),
+            SimpleTypeKind::U32 => TypeInfoKind::Number(NumberType::U32),
+            SimpleTypeKind::U64 => TypeInfoKind::Number(NumberType::U64),
+        }
     }
 }
 
