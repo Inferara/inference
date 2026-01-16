@@ -822,8 +822,7 @@ fn test_add_node_with_parent_creates_relationship() {
     arena.add_node(parent_node, u32::MAX);
 
     let child_ident = Rc::new(Identifier::new(2, "child".to_string(), Location::default()));
-    let child_node =
-        AstNode::Expression(inference_ast::nodes::Expression::Identifier(child_ident));
+    let child_node = AstNode::Expression(inference_ast::nodes::Expression::Identifier(child_ident));
     arena.add_node(child_node, 1);
 
     assert_eq!(

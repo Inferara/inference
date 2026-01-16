@@ -1,4 +1,8 @@
-use inference_ast::{arena::Arena, builder::Builder};
+use inference_ast::{
+    arena::Arena,
+    builder::Builder,
+    nodes::{AstNode, Definition, Expression, OperatorKind, Statement, Type, UnaryOperatorKind},
+};
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
@@ -8,6 +12,11 @@ pub(crate) fn get_test_data_path() -> std::path::PathBuf {
 }
 
 pub(crate) fn build_ast(source_code: String) -> Arena {
+    try_build_ast(source_code)
+        .expect("Failed to build AST - check for syntax errors in the test source")
+}
+
+pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<Arena> {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -18,8 +27,8 @@ pub(crate) fn build_ast(source_code: String) -> Arena {
     let root_node = tree.root_node();
     let mut builder = Builder::new();
     builder.add_source_code(root_node, code);
-    let builder = builder.build_ast().unwrap();
-    builder.arena()
+    let builder = builder.build_ast()?;
+    Ok(builder.arena())
 }
 
 pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
@@ -113,5 +122,247 @@ pub(crate) fn simple_type_kind_from_str(
         "u32" => Some(SimpleTypeKind::U32),
         "u64" => Some(SimpleTypeKind::U64),
         _ => None,
+    }
+}
+
+/// Asserts that a single binary expression with the expected operator exists in the AST.
+///
+/// Filters all binary expressions from the arena and verifies:
+/// - Exactly one binary expression is found
+/// - The operator matches the expected kind
+///
+/// # Panics
+/// Panics if no binary expression is found or if the operator doesn't match.
+pub(crate) fn assert_single_binary_op(arena: &Arena, expected: OperatorKind) {
+    let binary_exprs =
+        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
+
+    assert_eq!(
+        binary_exprs.len(),
+        1,
+        "Expected 1 binary expression, found {}",
+        binary_exprs.len()
+    );
+
+    if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
+        assert_eq!(
+            bin_expr.operator, expected,
+            "Expected operator {:?}, found {:?}",
+            expected, bin_expr.operator
+        );
+    } else {
+        panic!("Expected binary expression");
+    }
+}
+
+/// Asserts that a single prefix unary expression with the expected operator exists in the AST.
+///
+/// # Panics
+/// Panics if no unary expression is found or if the operator doesn't match.
+pub(crate) fn assert_single_unary_op(arena: &Arena, expected: UnaryOperatorKind) {
+    let prefix_exprs =
+        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
+
+    assert_eq!(
+        prefix_exprs.len(),
+        1,
+        "Expected 1 prefix unary expression, found {}",
+        prefix_exprs.len()
+    );
+
+    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
+        assert_eq!(
+            unary_expr.operator, expected,
+            "Expected operator {:?}, found {:?}",
+            expected, unary_expr.operator
+        );
+    } else {
+        panic!("Expected prefix unary expression");
+    }
+}
+
+/// Asserts function signature properties.
+///
+/// Verifies:
+/// - Function name matches expected
+/// - Parameter count matches (if `param_count` is provided)
+/// - Return type presence matches `has_return`
+///
+/// # Panics
+/// Panics if no function is found or if the signature doesn't match expectations.
+pub(crate) fn assert_function_signature(
+    arena: &Arena,
+    name: &str,
+    param_count: Option<usize>,
+    has_return: bool,
+) {
+    let functions = arena.functions();
+    assert!(!functions.is_empty(), "Expected at least 1 function");
+
+    let func = functions.iter().find(|f| f.name.name == name);
+    let func = func.unwrap_or_else(|| panic!("Expected function named '{name}'"));
+
+    if let Some(expected_count) = param_count {
+        let actual_count = func.arguments.as_ref().map_or(0, Vec::len);
+        assert_eq!(
+            actual_count, expected_count,
+            "Function '{}' expected {} parameters, found {}",
+            name, expected_count, actual_count
+        );
+    }
+
+    assert_eq!(
+        func.returns.is_some(),
+        has_return,
+        "Function '{}' return type: expected {}, found {}",
+        name,
+        if has_return { "present" } else { "absent" },
+        if func.returns.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+}
+
+/// Asserts that a single constant definition with expected name exists.
+///
+/// # Panics
+/// Panics if no constant with the expected name is found.
+pub(crate) fn assert_constant_def(arena: &Arena, name: &str) {
+    let const_defs =
+        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Constant(_))));
+
+    assert!(
+        !const_defs.is_empty(),
+        "Expected at least 1 constant definition"
+    );
+
+    let found = const_defs.iter().any(|node| {
+        if let AstNode::Definition(Definition::Constant(c)) = node {
+            c.name.name == name
+        } else {
+            false
+        }
+    });
+
+    assert!(found, "Expected constant named '{name}'");
+}
+
+/// Asserts that a single variable definition with expected name exists.
+///
+/// # Panics
+/// Panics if no variable definition with the expected name is found.
+pub(crate) fn assert_variable_def(arena: &Arena, name: &str) {
+    let var_defs = arena
+        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
+
+    assert!(
+        !var_defs.is_empty(),
+        "Expected at least 1 variable definition"
+    );
+
+    let found = var_defs.iter().any(|node| {
+        if let AstNode::Statement(Statement::VariableDefinition(v)) = node {
+            v.name.name == name
+        } else {
+            false
+        }
+    });
+
+    assert!(found, "Expected variable named '{name}'");
+}
+
+/// Asserts that a struct definition with expected name and field count exists.
+///
+/// # Panics
+/// Panics if no struct with the expected name is found.
+pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<usize>) {
+    let structs =
+        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
+
+    assert!(!structs.is_empty(), "Expected at least 1 struct definition");
+
+    let struct_def = structs.iter().find_map(|node| {
+        if let AstNode::Definition(Definition::Struct(s)) = node
+            && s.name.name == name
+        {
+            return Some(s);
+        }
+        None
+    });
+
+    let struct_def = struct_def.unwrap_or_else(|| panic!("Expected struct named '{name}'"));
+
+    if let Some(expected_count) = field_count {
+        assert_eq!(
+            struct_def.fields.len(),
+            expected_count,
+            "Struct '{}' expected {} fields, found {}",
+            name,
+            expected_count,
+            struct_def.fields.len()
+        );
+    }
+}
+
+/// Asserts that an enum definition with expected name and variant count exists.
+///
+/// # Panics
+/// Panics if no enum with the expected name is found.
+pub(crate) fn assert_enum_def(arena: &Arena, name: &str, variant_count: Option<usize>) {
+    let enums = arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Enum(_))));
+
+    assert!(!enums.is_empty(), "Expected at least 1 enum definition");
+
+    let enum_def = enums.iter().find_map(|node| {
+        if let AstNode::Definition(Definition::Enum(e)) = node
+            && e.name.name == name
+        {
+            return Some(e);
+        }
+        None
+    });
+
+    let enum_def = enum_def.unwrap_or_else(|| panic!("Expected enum named '{name}'"));
+
+    if let Some(expected_count) = variant_count {
+        assert_eq!(
+            enum_def.variants.len(),
+            expected_count,
+            "Enum '{}' expected {} variants, found {}",
+            name,
+            expected_count,
+            enum_def.variants.len()
+        );
+    }
+}
+
+/// Asserts that a function return type is a specific simple type.
+///
+/// # Panics
+/// Panics if the function is not found or doesn't have the expected return type.
+pub(crate) fn assert_function_returns_simple_type(
+    arena: &Arena,
+    func_name: &str,
+    expected_type: inference_ast::nodes::SimpleTypeKind,
+) {
+    let functions = arena.functions();
+    let func = functions
+        .iter()
+        .find(|f| f.name.name == func_name)
+        .unwrap_or_else(|| panic!("Expected function named '{func_name}'"));
+
+    if let Some(Type::Simple(kind)) = &func.returns {
+        assert_eq!(
+            *kind, expected_type,
+            "Function '{}' expected return type {:?}, found {:?}",
+            func_name, expected_type, kind
+        );
+    } else {
+        panic!(
+            "Function '{}' expected simple return type {:?}, but found {:?}",
+            func_name, expected_type, func.returns
+        );
     }
 }

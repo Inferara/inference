@@ -648,8 +648,24 @@ impl<'a> Builder<'a, InitState> {
     ) -> Vec<Statement> {
         let mut statements = Vec::new();
         let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            statements.push(self.build_statement(parent_id, &child, code));
+
+        for child in node.children(&mut cursor) {
+            if child.is_error() {
+                let location = Self::get_location(&child, code);
+                let source_snippet = String::from_utf8_lossy(
+                    &code[location.offset_start as usize..location.offset_end as usize],
+                );
+                panic!(
+                    "Parse error: invalid syntax at line {}:{} near '{}'",
+                    location.start_line,
+                    location.start_column,
+                    source_snippet.chars().take(30).collect::<String>()
+                );
+            }
+
+            if child.is_named() {
+                statements.push(self.build_statement(parent_id, &child, code));
+            }
         }
         statements
     }
@@ -700,6 +716,8 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ReturnStatement> {
+        Self::check_for_error_children(node, code);
+
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expr_node = &node.child_by_field_name("expression");
@@ -1462,6 +1480,27 @@ impl<'a> Builder<'a, InitState> {
             start_column,
             end_line,
             end_column,
+        }
+    }
+
+    /// Checks all children of a node for ERROR nodes and panics if found.
+    /// This catches syntax errors that tree-sitter marks as ERROR nodes
+    /// but which would otherwise be silently ignored by `named_children()`.
+    fn check_for_error_children(node: &Node, code: &[u8]) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_error() {
+                let location = Self::get_location(&child, code);
+                let source_snippet = String::from_utf8_lossy(
+                    &code[location.offset_start as usize..location.offset_end as usize],
+                );
+                panic!(
+                    "Parse error: invalid syntax at line {}:{} near '{}'",
+                    location.start_line,
+                    location.start_column,
+                    source_snippet.chars().take(30).collect::<String>()
+                );
+            }
         }
     }
 

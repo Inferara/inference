@@ -210,8 +210,7 @@ mod statement_coverage {
 
     #[test]
     fn test_nested_blocks() {
-        let source =
-            r#"fn test() -> i32 { { { let x: i32 = 1; } let y: i32 = 2; } return 42; }"#;
+        let source = r#"fn test() -> i32 { { { let x: i32 = 1; } let y: i32 = 2; } return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -799,8 +798,7 @@ mod expression_coverage {
 
     #[test]
     fn test_member_access_on_struct() {
-        let source =
-            r#"struct Point { x: i32; y: i32; } fn test(p: Point) -> i32 { return p.x; }"#;
+        let source = r#"struct Point { x: i32; y: i32; } fn test(p: Point) -> i32 { return p.x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -827,8 +825,7 @@ mod expression_coverage {
 
     #[test]
     fn test_member_access_field_not_found() {
-        let source =
-            r#"struct Point { x: i32; y: i32; } fn test(p: Point) -> i32 { return p.z; }"#;
+        let source = r#"struct Point { x: i32; y: i32; } fn test(p: Point) -> i32 { return p.z; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -857,7 +854,8 @@ mod expression_coverage {
 
     #[test]
     fn test_method_call_not_found() {
-        let source = r#"struct Point { x: i32; } fn test(p: Point) -> i32 { return p.missing_method(); }"#;
+        let source =
+            r#"struct Point { x: i32; } fn test(p: Point) -> i32 { return p.missing_method(); }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -914,7 +912,8 @@ mod expression_coverage {
     // FIXME: Test disabled due to parser or type checker limitation
     // #[test]
     fn test_type_member_access_on_identifier() {
-        let source = r#"enum Status { Active, Inactive } fn test() -> Status { return Status::Active; }"#;
+        let source =
+            r#"enum Status { Active, Inactive } fn test() -> Status { return Status::Active; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -926,8 +925,7 @@ mod expression_coverage {
     // FIXME: Test disabled due to parser or type checker limitation
     // #[test]
     fn test_type_member_access_on_simple_type() {
-        let source =
-            r#"enum Color { Red, Green, Blue } fn test() -> Color { return Color::Red; }"#;
+        let source = r#"enum Color { Red, Green, Blue } fn test() -> Color { return Color::Red; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -1092,7 +1090,8 @@ mod generic_type_inference_coverage {
 
     #[test]
     fn test_type_parameter_count_mismatch_explicit() {
-        let source = r#"fn identity T'(x: T) -> T { return x; } fn test() -> i32 { return identity(42); }"#;
+        let source =
+            r#"fn identity T'(x: T) -> T { return x; } fn test() -> i32 { return identity(42); }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok() || result.is_err(),
@@ -1117,7 +1116,8 @@ mod generic_type_inference_coverage {
 
     #[test]
     fn test_cannot_infer_type_parameter() {
-        let source = r#"fn identity T'(x: T) -> T { return x; } fn test() -> i32 { return identity(42); }"#;
+        let source =
+            r#"fn identity T'(x: T) -> T { return x; } fn test() -> i32 { return identity(42); }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok() || result.is_err(),
@@ -1181,8 +1181,7 @@ mod symbol_table_coverage {
     // FIXME: Test disabled due to parser or type checker limitation
     // #[test]
     fn test_enum_variant_lookup() {
-        let source =
-            r#"enum Color { Red, Green, Blue } fn test() -> Color { return Color::Red; }"#;
+        let source = r#"enum Color { Red, Green, Blue } fn test() -> Color { return Color::Red; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -1258,7 +1257,8 @@ mod visibility_infrastructure_coverage {
 
     #[test]
     fn test_symbol_is_public_check() {
-        let source = r#"struct PublicStruct { x: i32; } fn test(s: PublicStruct) -> i32 { return s.x; }"#;
+        let source =
+            r#"struct PublicStruct { x: i32; } fn test(s: PublicStruct) -> i32 { return s.x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
