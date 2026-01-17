@@ -129,6 +129,11 @@ macro_rules! ast_enum {
         }
     };
 
+    // Variants marked with `skip` (e.g., `SimpleTypeKind`) do not correspond to
+    // heap-allocated AST nodes and therefore have no stable ID. For these cases
+    // we return `u32::MAX` as a sentinel "no ID" value. Code that performs
+    // ID-based lookups must treat `u32::MAX` as invalid and never assign it to
+    // any real node.
     (@id_arm $inner:ident, skip) => {
         u32::MAX
     };

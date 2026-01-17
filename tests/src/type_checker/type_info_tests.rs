@@ -837,8 +837,9 @@ mod type_info_from_ast {
     }
 
     #[test]
-    fn test_new_from_custom_builtin_string() {
-        // String is a builtin type but parsed as Custom (no dedicated tree-sitter node kind)
+    fn test_new_from_string_custom_type() {
+        // String type is parsed as Type::Custom (no dedicated SimpleTypeKind variant)
+        // but TypeInfo recognizes it as the builtin String type
         let ty = Type::Custom(make_identifier("string"));
         let ti = TypeInfo::new(&ty);
         assert_eq!(ti.kind, TypeInfoKind::String);

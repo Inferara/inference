@@ -127,7 +127,7 @@ fn test_parse_function_return_type_i32_is_simple() {
         .as_ref()
         .expect("Should have return type");
     if let Type::Simple(simple_node) = returns {
-        matches!(simple_node, SimpleTypeKind::I32);
+        assert!(matches!(simple_node, SimpleTypeKind::I32));
         assert_eq!(simple_node.as_str(), "i32");
     } else {
         panic!(
@@ -149,7 +149,7 @@ fn test_parse_function_return_type_bool_is_simple() {
         .as_ref()
         .expect("Should have return type");
     if let Type::Simple(simple_node) = returns {
-        matches!(simple_node, SimpleTypeKind::Bool);
+        assert!(matches!(simple_node, SimpleTypeKind::Bool));
     } else {
         panic!(
             "Expected Type::Simple for bool return type, got {:?}",
@@ -170,7 +170,7 @@ fn test_parse_function_return_type_i64_is_simple() {
         .as_ref()
         .expect("Should have return type");
     if let Type::Simple(simple_node) = returns {
-        matches!(simple_node, SimpleTypeKind::I64);
+        assert!(matches!(simple_node, SimpleTypeKind::I64));
     } else {
         panic!(
             "Expected Type::Simple for i64 return type, got {:?}",
@@ -194,7 +194,7 @@ fn test_parse_function_argument_type_i32_is_simple() {
 
     if let inference_ast::nodes::ArgumentType::Argument(arg) = &args[0] {
         if let Type::Simple(simple_node) = &arg.ty {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!("Expected Type::Simple for argument type");
         }
@@ -214,7 +214,7 @@ fn test_parse_variable_type_i32_is_simple() {
 
     if let AstNode::Statement(Statement::VariableDefinition(var_def)) = &var_defs[0] {
         if let Type::Simple(simple_node) = &var_def.ty {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!(
                 "Expected Type::Simple for variable type, got {:?}",
@@ -235,7 +235,7 @@ fn test_parse_variable_type_bool_is_simple() {
 
     if let AstNode::Statement(Statement::VariableDefinition(var_def)) = &var_defs[0] {
         if let Type::Simple(simple_node) = &var_def.ty {
-            matches!(simple_node, SimpleTypeKind::Bool);
+            assert!(matches!(simple_node, SimpleTypeKind::Bool));
         } else {
             panic!("Expected Type::Simple for variable type");
         }
@@ -253,7 +253,7 @@ fn test_parse_constant_type_i32_is_simple() {
 
     if let AstNode::Definition(Definition::Constant(const_def)) = &const_defs[0] {
         if let Type::Simple(simple_node) = &const_def.ty {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!(
                 "Expected Type::Simple for constant type, got {:?}",
@@ -274,7 +274,7 @@ fn test_parse_constant_type_bool_is_simple() {
 
     if let AstNode::Definition(Definition::Constant(const_def)) = &const_defs[0] {
         if let Type::Simple(simple_node) = &const_def.ty {
-            matches!(simple_node, SimpleTypeKind::Bool);
+            assert!(matches!(simple_node, SimpleTypeKind::Bool));
         } else {
             panic!("Expected Type::Simple for constant type");
         }
@@ -294,7 +294,7 @@ fn test_parse_struct_field_type_i32_is_simple() {
         assert_eq!(struct_def.fields.len(), 2);
         for field in &struct_def.fields {
             if let Type::Simple(simple_node) = &field.type_ {
-                matches!(simple_node, SimpleTypeKind::I32);
+                assert!(matches!(simple_node, SimpleTypeKind::I32));
             } else {
                 panic!("Expected Type::Simple for struct field type");
             }
@@ -315,7 +315,7 @@ fn test_parse_struct_field_type_bool_is_simple() {
         assert_eq!(struct_def.fields.len(), 2);
         for field in &struct_def.fields {
             if let Type::Simple(simple_node) = &field.type_ {
-                matches!(simple_node, SimpleTypeKind::Bool);
+                assert!(matches!(simple_node, SimpleTypeKind::Bool));
             } else {
                 panic!("Expected Type::Simple for struct field type");
             }
@@ -349,7 +349,7 @@ fn test_parse_all_signed_integer_types() {
     for (i, (arg, expected)) in args.iter().zip(expected_types.iter()).enumerate() {
         if let inference_ast::nodes::ArgumentType::Argument(arg) = arg {
             if let Type::Simple(simple_node) = &arg.ty {
-                matches!(simple_node, expected);
+                assert!(matches!(simple_node, expected));
             } else {
                 panic!("Expected Type::Simple for argument {}", i);
             }
@@ -381,7 +381,7 @@ fn test_parse_all_unsigned_integer_types() {
     for (i, (arg, expected)) in args.iter().zip(expected_types.iter()).enumerate() {
         if let inference_ast::nodes::ArgumentType::Argument(arg) = arg {
             if let Type::Simple(simple_node) = &arg.ty {
-                matches!(simple_node, expected);
+                assert!(matches!(simple_node, expected));
             } else {
                 panic!("Expected Type::Simple for argument {}", i);
             }
@@ -460,7 +460,7 @@ fn test_array_element_type_is_simple() {
         && let Type::Array(arr_type) = &arg.ty
     {
         if let Type::Simple(simple_node) = &arr_type.element_type {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!("Array element type should be Type::Simple");
         }
@@ -481,7 +481,7 @@ fn test_external_function_return_type_is_simple() {
     if let AstNode::Definition(Definition::ExternalFunction(ext_func)) = &ext_funcs[0] {
         let returns = ext_func.returns.as_ref().expect("Should have return type");
         if let Type::Simple(simple_node) = returns {
-            matches!(simple_node, SimpleTypeKind::I64);
+            assert!(matches!(simple_node, SimpleTypeKind::I64));
         } else {
             panic!("External function return type should be Type::Simple");
         }
@@ -501,7 +501,7 @@ fn test_type_alias_to_primitive_is_simple() {
 
     if let AstNode::Definition(Definition::Type(type_def)) = &type_defs[0] {
         if let Type::Simple(simple_node) = &type_def.ty {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!("Type alias should point to Type::Simple");
         }
@@ -525,7 +525,7 @@ fn test_function_type_with_primitive_return() {
         if let Type::Function(fn_type) = &arg.ty {
             let returns = fn_type.returns.as_ref().expect("Should have return type");
             if let Type::Simple(simple_node) = returns {
-                matches!(simple_node, SimpleTypeKind::I32);
+                assert!(matches!(simple_node, SimpleTypeKind::I32));
             } else {
                 panic!(
                     "Function type return should be Type::Simple, got {:?}",
@@ -557,7 +557,7 @@ fn test_ignore_argument_type_is_simple() {
         &ignore_args[0]
     {
         if let Type::Simple(simple_node) = &ignore_arg.ty {
-            matches!(simple_node, SimpleTypeKind::I32);
+            assert!(matches!(simple_node, SimpleTypeKind::I32));
         } else {
             panic!("Ignore argument type should be Type::Simple");
         }
