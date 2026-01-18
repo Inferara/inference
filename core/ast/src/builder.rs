@@ -650,18 +650,7 @@ impl<'a> Builder<'a, InitState> {
         let mut cursor = node.walk();
 
         for child in node.children(&mut cursor) {
-            if child.is_error() {
-                let location = Self::get_location(&child, code);
-                let source_snippet = String::from_utf8_lossy(
-                    &code[location.offset_start as usize..location.offset_end as usize],
-                );
-                panic!(
-                    "Parse error: invalid syntax at line {}:{} near '{}'",
-                    location.start_line,
-                    location.start_column,
-                    source_snippet.chars().take(30).collect::<String>()
-                );
-            }
+            Self::assert_not_error(&child, code);
 
             if child.is_named() {
                 statements.push(self.build_statement(parent_id, &child, code));
@@ -1483,24 +1472,34 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
+    /// Panics if the given node is an ERROR node from tree-sitter.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a detailed error message including line number, column,
+    /// and source snippet if the node is an ERROR node.
+    fn assert_not_error(node: &Node, code: &[u8]) {
+        if node.is_error() {
+            let location = Self::get_location(node, code);
+            let source_snippet = String::from_utf8_lossy(
+                &code[location.offset_start as usize..location.offset_end as usize],
+            );
+            panic!(
+                "Parse error: invalid syntax at line {}:{} near '{}'",
+                location.start_line,
+                location.start_column,
+                source_snippet.chars().take(30).collect::<String>()
+            );
+        }
+    }
+
     /// Checks all children of a node for ERROR nodes and panics if found.
     /// This catches syntax errors that tree-sitter marks as ERROR nodes
     /// but which would otherwise be silently ignored by `named_children()`.
     fn check_for_error_children(node: &Node, code: &[u8]) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.is_error() {
-                let location = Self::get_location(&child, code);
-                let source_snippet = String::from_utf8_lossy(
-                    &code[location.offset_start as usize..location.offset_end as usize],
-                );
-                panic!(
-                    "Parse error: invalid syntax at line {}:{} near '{}'",
-                    location.start_line,
-                    location.start_column,
-                    source_snippet.chars().take(30).collect::<String>()
-                );
-            }
+            Self::assert_not_error(&child, code);
         }
     }
 

@@ -105,9 +105,7 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
     }
 }
 
-pub(crate) fn simple_type_kind_from_str(
-    type_name: &str,
-) -> Option<inference_ast::nodes::SimpleTypeKind> {
+pub(crate) fn parse_simple_type(type_name: &str) -> Option<inference_ast::nodes::SimpleTypeKind> {
     use inference_ast::nodes::SimpleTypeKind;
 
     match type_name {

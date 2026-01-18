@@ -1,4 +1,4 @@
-use crate::utils::{build_ast, simple_type_kind_from_str};
+use crate::utils::{build_ast, parse_simple_type};
 use inference_ast::nodes::{AstNode, Definition, Expression, SimpleTypeKind, Statement, Type};
 
 /// Tests for `SimpleTypeKind::as_str()` - verifies canonical string representations.
@@ -578,7 +578,7 @@ fn test_mixed_simple_and_custom_types_in_struct() {
         assert_eq!(struct_def.fields.len(), 3);
 
         if let Type::Simple(simple) = &struct_def.fields[0].type_ {
-            matches!(simple, SimpleTypeKind::I32);
+            assert!(matches!(simple, SimpleTypeKind::I32));
         } else {
             panic!("First field should be simple");
         }
@@ -589,7 +589,7 @@ fn test_mixed_simple_and_custom_types_in_struct() {
         );
 
         if let Type::Simple(simple) = &struct_def.fields[2].type_ {
-            matches!(simple, SimpleTypeKind::Bool);
+            assert!(matches!(simple, SimpleTypeKind::Bool));
         } else {
             panic!("Third field should be simple");
         }
