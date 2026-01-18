@@ -1,5 +1,4 @@
 use std::{
-    marker::PhantomData,
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -25,38 +24,25 @@ use crate::{
 };
 use tree_sitter::Node;
 
-#[allow(dead_code)]
-trait BuilderInit {}
-#[allow(dead_code)]
-trait BuilderComplete {}
-
-pub struct InitState;
-impl BuilderInit for InitState {}
-pub struct CompleteState;
-impl BuilderComplete for CompleteState {}
-
-pub type CompletedBuilder<'a> = Builder<'a, CompleteState>;
-
-#[allow(dead_code)]
-pub struct Builder<'a, S> {
+pub struct Builder<'a> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
-    _state: PhantomData<S>,
+    errors: Vec<anyhow::Error>,
 }
 
-impl Default for Builder<'_, InitState> {
+impl Default for Builder<'_> {
     fn default() -> Self {
         Builder::new()
     }
 }
 
-impl<'a> Builder<'a, InitState> {
+impl<'a> Builder<'a> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             arena: Arena::default(),
             source_code: Vec::new(),
-            _state: PhantomData,
+            errors: Vec::new(),
         }
     }
 
@@ -83,7 +69,7 @@ impl<'a> Builder<'a, InitState> {
     ///
     /// This function will return an error if the `source_file` is malformed and a valid AST cannot be constructed.
     #[allow(clippy::single_match_else)]
-    pub fn build_ast(&'_ mut self) -> anyhow::Result<Builder<'_, CompleteState>> {
+    pub fn build_ast(&'_ mut self) -> anyhow::Result<Arena> {
         for (root, code) in &self.source_code.clone() {
             let id = Self::get_node_id();
             let location = Self::get_location(root, code);
@@ -113,12 +99,14 @@ impl<'a> Builder<'a, InitState> {
             }
             self.arena
                 .add_node(AstNode::Ast(Ast::SourceFile(Rc::new(ast))), u32::MAX);
+            if !self.errors.is_empty() {
+                for err in &self.errors {
+                    eprintln!("AST Builder Error: {err}");
+                }
+                return Err(anyhow::anyhow!("AST building failed due to errors"));
+            }
         }
-        Ok(Builder {
-            arena: self.arena.clone(),
-            source_code: Vec::new(),
-            _state: PhantomData,
-        })
+        Ok(self.arena.clone())
     }
 
     fn build_use_directive(
@@ -127,6 +115,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<UseDirective> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut segments = None;
@@ -177,6 +166,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<SpecDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -209,6 +199,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<EnumDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -276,6 +267,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<StructDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -311,6 +303,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_struct_field(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<StructField> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -328,6 +321,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ConstantDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -355,6 +349,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<FunctionDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut arguments = None;
@@ -412,6 +407,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ExternalFunctionDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -453,6 +449,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<TypeDefinition> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -496,6 +493,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_argument_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> ArgumentType {
+        self.collect_errors(node, code);
         match node.kind() {
             "argument_declaration" => {
                 let argument = self.build_argument(parent_id, node, code);
@@ -514,6 +512,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_argument(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Argument> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name_node = node.child_by_field_name("name").unwrap();
@@ -537,6 +536,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<SelfReference> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let is_mut = node
@@ -556,6 +556,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<IgnoreArgument> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -568,6 +569,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_block(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> BlockType {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         match node.kind() {
@@ -650,7 +652,7 @@ impl<'a> Builder<'a, InitState> {
         let mut cursor = node.walk();
 
         for child in node.children(&mut cursor) {
-            Self::assert_not_error(&child, code);
+            self.collect_errors(&child, code);
 
             if child.is_named() {
                 statements.push(self.build_statement(parent_id, &child, code));
@@ -705,8 +707,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ReturnStatement> {
-        Self::check_for_error_children(node, code);
-
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expr_node = &node.child_by_field_name("expression");
@@ -732,6 +733,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<LoopStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let condition = node
@@ -746,6 +748,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_if_statement(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<IfStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let condition_node = node.child_by_field_name("condition").unwrap();
@@ -767,6 +770,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<VariableDefinitionStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -792,6 +796,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<TypeDefinitionStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -854,6 +859,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<AssignStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
@@ -873,6 +879,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ArrayIndexAccessExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let array = self.build_expression(id, &node.named_child(0).unwrap(), code);
@@ -892,6 +899,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<MemberAccessExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression =
@@ -911,6 +919,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<TypeMemberAccessExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression =
@@ -932,6 +941,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<FunctionCallExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let function =
@@ -1003,6 +1013,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<StructExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -1056,6 +1067,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<PrefixUnaryExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
@@ -1084,6 +1096,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<AssertStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
@@ -1101,6 +1114,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<BreakStatement> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let node = Rc::new(BreakStatement::new(id, location));
@@ -1117,6 +1131,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ParenthesizedExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
@@ -1135,6 +1150,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<BinaryExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
@@ -1190,6 +1206,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<ArrayLiteral> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut elements = Vec::new();
@@ -1212,6 +1229,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_bool_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<BoolLiteral> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = match node.utf8_text(code).unwrap() {
@@ -1234,6 +1252,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<StringLiteral> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
@@ -1251,6 +1270,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<NumberLiteral> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
@@ -1263,6 +1283,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_unit_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<UnitLiteral> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let node = Rc::new(UnitLiteral::new(id, location));
@@ -1309,6 +1330,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_type_array(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<TypeArray> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
@@ -1324,6 +1346,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_generic_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<GenericType> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let base = self.build_identifier(id, &node.child_by_field_name("base_type").unwrap(), code);
@@ -1351,6 +1374,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<FunctionType> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let mut arguments = None;
@@ -1381,6 +1405,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<TypeQualifiedName> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let alias = self.build_identifier(id, &node.child_by_field_name("alias").unwrap(), code);
@@ -1400,6 +1425,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<QualifiedName> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let qualifier =
@@ -1420,6 +1446,7 @@ impl<'a> Builder<'a, InitState> {
         node: &Node,
         code: &[u8],
     ) -> Rc<UzumakiExpression> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let node = Rc::new(UzumakiExpression::new(id, location));
@@ -1431,6 +1458,7 @@ impl<'a> Builder<'a, InitState> {
     }
 
     fn build_identifier(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Identifier> {
+        self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
@@ -1472,34 +1500,21 @@ impl<'a> Builder<'a, InitState> {
         }
     }
 
-    /// Panics if the given node is an ERROR node from tree-sitter.
-    ///
-    /// # Panics
-    ///
-    /// Panics with a detailed error message including line number, column,
-    /// and source snippet if the node is an ERROR node.
-    fn assert_not_error(node: &Node, code: &[u8]) {
-        if node.is_error() {
-            let location = Self::get_location(node, code);
-            let source_snippet = String::from_utf8_lossy(
-                &code[location.offset_start as usize..location.offset_end as usize],
-            );
-            panic!(
-                "Parse error: invalid syntax at line {}:{} near '{}'",
-                location.start_line,
-                location.start_column,
-                source_snippet.chars().take(30).collect::<String>()
-            );
-        }
-    }
-
-    /// Checks all children of a node for ERROR nodes and panics if found.
-    /// This catches syntax errors that tree-sitter marks as ERROR nodes
-    /// but which would otherwise be silently ignored by `named_children()`.
-    fn check_for_error_children(node: &Node, code: &[u8]) {
+    fn collect_errors(&mut self, node: &Node, code: &[u8]) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            Self::assert_not_error(&child, code);
+            if child.is_error() {
+                let location = Self::get_location(&child, code);
+                let source_snippet = String::from_utf8_lossy(
+                    &code[location.offset_start as usize..location.offset_end as usize],
+                );
+                self.errors.push(anyhow::anyhow!(
+                    "Parse error: invalid syntax at line {}:{} near '{}'",
+                    location.start_line,
+                    location.start_column,
+                    source_snippet.chars().take(30).collect::<String>()
+                ));
+            }
         }
     }
 
@@ -1510,17 +1525,5 @@ impl<'a> Builder<'a, InitState> {
         node.child_by_field_name("visibility")
             .map(|_| Visibility::Public)
             .unwrap_or_default()
-    }
-}
-
-impl Builder<'_, CompleteState> {
-    /// Returns AST arena
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if resulted `Arena` is `None` which means an error occured during the parsing process.
-    #[must_use]
-    pub fn arena(self) -> Arena {
-        self.arena.clone()
     }
 }

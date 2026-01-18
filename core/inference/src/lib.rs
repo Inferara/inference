@@ -24,8 +24,8 @@ pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
     let root_node = tree.root_node();
     let mut builder = Builder::new();
     builder.add_source_code(root_node, code);
-    let builder = builder.build_ast()?;
-    Ok(builder.arena())
+    let arena = builder.build_ast()?;
+    Ok(arena)
 }
 
 /// Performs type checking on the given AST and returns a typed context.

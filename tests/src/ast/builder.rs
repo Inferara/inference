@@ -1,6 +1,6 @@
 use crate::utils::{
     assert_constant_def, assert_enum_def, assert_function_signature, assert_single_binary_op,
-    assert_single_unary_op, assert_struct_def, assert_variable_def, build_ast,
+    assert_single_unary_op, assert_struct_def, assert_variable_def, build_ast, try_build_ast,
 };
 use inference_ast::nodes::{
     AstNode, Definition, Expression, Literal, OperatorKind, Statement, UnaryOperatorKind,
@@ -822,7 +822,7 @@ fn test_parse_external_function() {
 
 #[test]
 fn test_parse_type_alias() {
-    let source = r#"type sf = typeof(sorting_function);"#;
+    let source = r#"type sf = sorting_function;"#;
     let arena = build_ast(source.to_string());
     assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
@@ -839,7 +839,7 @@ fn test_parse_type_alias() {
 
 #[test]
 fn test_parse_generic_type() {
-    let source = r#"fn test() -> Array<i32> {}"#;
+    let source = r#"fn test() -> Array i32' {}"#;
     let arena = build_ast(source.to_string());
     assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(0), true);

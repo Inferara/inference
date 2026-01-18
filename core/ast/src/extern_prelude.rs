@@ -122,12 +122,10 @@ pub fn parse_external_module(
 
     let mut builder = Builder::new();
     builder.add_source_code(tree.root_node(), source.as_bytes());
-    let completed = builder.build_ast().map_err(|e| AstError::AstBuildError {
+    let arena = builder.build_ast().map_err(|e| AstError::AstBuildError {
         path: root_path.clone(),
         reason: e.to_string(),
     })?;
-
-    let arena = completed.arena();
 
     prelude.insert(
         normalized_name.clone(),

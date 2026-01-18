@@ -27,8 +27,7 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<Arena> {
     let root_node = tree.root_node();
     let mut builder = Builder::new();
     builder.add_source_code(root_node, code);
-    let builder = builder.build_ast()?;
-    Ok(builder.arena())
+    builder.build_ast()
 }
 
 pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {

@@ -247,7 +247,7 @@ mod statement_coverage {
 
     #[test]
     fn test_assign_uzumaki_to_variable() {
-        let source = r#"fn test() -> i32 { let x: i32; x = ?; return x; }"#;
+        let source = r#"fn test() -> i32 { let x: i32; x = @; return x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -591,17 +591,6 @@ mod expression_coverage {
         assert!(
             result.is_ok(),
             "Bitwise XOR should work, got: {:?}",
-            result.err()
-        );
-    }
-
-    #[test]
-    fn test_binary_bitwise_not() {
-        let source = r#"fn test() -> i32 { return 5 ~^ 3; }"#;
-        let result = try_type_check(source);
-        assert!(
-            result.is_ok(),
-            "Bitwise NOT should work, got: {:?}",
             result.err()
         );
     }
@@ -1141,13 +1130,10 @@ mod import_resolution_coverage {
     }
 
     #[test]
-    fn test_partial_import_with_alias() {
-        let source = r#"use std::{Type as T}; fn test() -> i32 { return 42; }"#;
+    fn test_partial_import_nonexistent_path() {
+        let source = r#"use std::nonexistent::Type; fn test() -> i32 { return 42; }"#;
         let result = try_type_check(source);
-        assert!(
-            result.is_err(),
-            "Partial import with alias should fail when path doesn't exist"
-        );
+        assert!(result.is_err(), "Import from nonexistent path should fail");
     }
 }
 
@@ -1351,7 +1337,7 @@ mod edge_cases {
 
     #[test]
     fn test_uzumaki_expression_cached() {
-        let source = r#"fn test() -> i32 { let x: i32 = ?; return x; }"#;
+        let source = r#"fn test() -> i32 { let x: i32 = @; return x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
