@@ -148,7 +148,7 @@ impl<'ctx> Compiler<'ctx> {
     /// # Parameters
     ///
     /// - `context` - LLVM context for creating types and values
-    /// - `module_name` - Name for the generated LLVM module (typically "wasm_module")
+    /// - `module_name` - Name for the generated LLVM module (typically `wasm_module`)
     pub(crate) fn new(context: &'ctx Context, module_name: &str) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();

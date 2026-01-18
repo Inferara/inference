@@ -49,7 +49,7 @@
 //!
 //! The builder walks the tree-sitter CST depth-first, creating typed AST nodes:
 //!
-//! 1. For each CST node, determine its kind (e.g., "function_definition")
+//! 1. For each CST node, determine its kind (e.g., `function_definition`)
 //! 2. Extract relevant child nodes by field name (e.g., "name", "body")
 //! 3. Recursively build child AST nodes
 //! 4. Create the parent AST node with references to children
