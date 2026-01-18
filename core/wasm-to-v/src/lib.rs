@@ -1,3 +1,89 @@
+//! WebAssembly to Rocq (Coq) Translator
+//!
+//! This crate translates WebAssembly bytecode into Rocq formal verification language,
+//! enabling mathematical verification of compiled Inference programs.
+//!
+//! ## Overview
+//!
+//! The translator is a critical component of the Inference verification pipeline:
+//!
+//! ```text
+//! Inference source → Typed AST → LLVM IR → WASM → Rocq (.v)
+//!                                                   ↑
+//!                                            (this crate)
+//! ```
+//!
+//! ## Entry Point
+//!
+//! Use [`wasm_parser::translate_bytes`] to translate WASM bytecode:
+//!
+//! ```ignore
+//! use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+//!
+//! let wasm_bytes = std::fs::read("output.wasm")?;
+//! let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+//! std::fs::write("output.v", rocq_code)?;
+//! ```
+//!
+//! ## Architecture
+//!
+//! The translation process uses a two-phase approach:
+//!
+//! 1. **Parsing Phase** ([`wasm_parser`]): Streams through WASM sections and builds [`translator::WasmParseData`]
+//! 2. **Translation Phase** ([`translator`]): Converts structured data into Rocq code strings
+//!
+//! ### WASM Sections Supported
+//!
+//! - Type Section: Function signatures
+//! - Import Section: External dependencies
+//! - Function Section: Function type mappings
+//! - Table Section: Indirect call tables
+//! - Memory Section: Linear memory definitions
+//! - Global Section: Global variables
+//! - Export Section: Public interface
+//! - Start Section: Entry point
+//! - Element Section: Table initialization
+//! - Data Section: Memory initialization
+//! - Code Section: Function bodies with instructions
+//! - Custom Section: Debug information (function and local names)
+//!
+//! ## Type Translation
+//!
+//! WASM types are mapped to Rocq type constructors:
+//!
+//! | WASM Type | Rocq Type |
+//! |-----------|-----------|
+//! | `i32` | `T_num T_i32` |
+//! | `i64` | `T_num T_i64` |
+//! | `f32` | `T_num T_f32` |
+//! | `f64` | `T_num T_f64` |
+//! | `v128` | `T_vec T_v128` |
+//! | `funcref` | `T_ref T_funcref` |
+//! | `externref` | `T_ref T_externref` |
+//!
+//! ## Expression Translation
+//!
+//! WASM's stack-based instruction model is converted to structured Rocq expressions.
+//! The translator reconstructs control flow from linear instruction sequences.
+//!
+//! ## Non-Deterministic Instructions
+//!
+//! Inference extends WASM with custom instructions for formal verification:
+//!
+//! - `forall.start` (`0xfc 0x3a`): Universal quantification
+//! - `exists.start` (`0xfc 0x3b`): Existential quantification
+//! - `uzumaki.i32/i64` (`0xfc 0x3c/0x3d`): Non-deterministic values
+//! - `assume` (`0xfc 0x3e`): Constraint assumption
+//! - `unique` (`0xfc 0x3f`): Uniqueness constraint
+//!
+//! These instructions are parsed by the forked `inf-wasmparser` and translated
+//! to corresponding Rocq constructs.
+//!
+//! ## Modules
+//!
+//! - [`wasm_parser`] - Parses WASM bytecode sections into structured data
+//! - [`translator`] - Converts parsed data into Rocq code generation
+
 pub mod translator;
 pub mod wasm_parser;
 

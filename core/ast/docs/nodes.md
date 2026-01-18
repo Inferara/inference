@@ -85,7 +85,7 @@ AstNode
 │   └── Unit
 ├── Type
 │   ├── Array
-│   ├── Simple
+│   ├── Simple(SimpleTypeKind)  # Copy enum, no heap allocation
 │   ├── Generic
 │   ├── Function
 │   ├── QualifiedName
@@ -850,24 +850,89 @@ pub struct UnitLiteral {
 
 ## Types
 
-### SimpleType
+### SimpleTypeKind
 
-Built-in primitive type.
+Enum representing built-in primitive types (Issue #50).
 
 ```rust
-pub struct SimpleType {
-    pub id: u32,
-    pub location: Location,
-    pub name: String,
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum SimpleTypeKind {
+    Unit,   // ()
+    Bool,   // bool
+    I8,     // i8
+    I16,    // i16
+    I32,    // i32
+    I64,    // i64
+    U8,     // u8
+    U16,    // u16
+    U32,    // u32
+    U64,    // u64
 }
 ```
 
 **Example source:**
 ```inference
 i32
-f64
 bool
-str
+unit  // or ()
+u64
+```
+
+**Key Characteristics**:
+- **Copy type**: No heap allocation, can be copied on stack
+- **No `id` or `location` fields**: Not a heap-allocated AST node
+- **Used in `Type::Simple` variant**: `Type::Simple(SimpleTypeKind::I32)`
+- **Canonical string representation**: `kind.as_str()` returns lowercase name
+
+**Why Enum Instead of String** (Issue #50):
+
+Prior to Issue #50, primitive types used `SimpleType { name: String }`, which required:
+- String comparisons for type checking (`simple.name == "i32"`)
+- Heap allocations for each primitive type
+- No compile-time exhaustiveness checking
+
+The enum approach provides:
+- Fast pattern matching: `matches!(ty, Type::Simple(SimpleTypeKind::I32))`
+- Zero heap allocation (Copy type)
+- Compiler-enforced exhaustiveness
+- Consistency with type-checker layer (`TypeInfoKind`)
+
+**Usage in Type Enum**:
+
+```rust
+pub enum Type {
+    @skip Simple(SimpleTypeKind),  // @skip = no id/location, returns u32::MAX
+    Array(Rc<TypeArray>),
+    Generic(Rc<GenericType>),
+    // ...
+}
+
+// Pattern matching
+match ty {
+    Type::Simple(SimpleTypeKind::Unit) => { /* handle unit type */ }
+    Type::Simple(SimpleTypeKind::I32) => { /* handle i32 */ }
+    Type::Simple(kind) => { /* handle any primitive */ }
+    _ => { /* handle complex types */ }
+}
+```
+
+**Conversion to String**:
+
+```rust
+impl SimpleTypeKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            SimpleTypeKind::Unit => "unit",
+            SimpleTypeKind::Bool => "bool",
+            SimpleTypeKind::I32 => "i32",
+            // ... all variants
+        }
+    }
+}
+
+// Usage
+let kind = SimpleTypeKind::I32;
+println!("Type: {}", kind.as_str());  // "Type: i32"
 ```
 
 ### TypeArray

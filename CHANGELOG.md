@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compiler
 
+- ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])
+- ast: Simplify Builder API to return `Arena` directly instead of using state machine pattern ([#50])
+- ast: Add error collection in Builder with `collect_errors()` for better parse error reporting ([#50])
+- ast: Add `@skip` macro annotation for enum variants without stable node IDs ([#50])
+- type-checker: Add `type_kind_from_simple_type_kind()` for type-safe primitive type conversion ([#50])
 - type-checker: Add type checking for unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
 - type-checker: Change expression inference to use immutable references ([#86])
 - ast: Use atomic counter for deterministic node ID generation ([#86])
@@ -76,6 +81,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Linux development setup guide (`book/installation_linux.md`) ([#56])
 - Add macOS development setup guide (`book/installation_macos.md`) ([#56])
 - Add cross-platform dependency check script (`book/check_deps.sh`) ([#56])
+
+### Testing
+
+- tests: Consolidate builder tests by removing redundant `builder_extended.rs` module ([#50])
+- tests: Add `builder_features.rs` module with feature-specific AST tests ([#50])
+- tests: Add `primitive_type.rs` module with `SimpleTypeKind` tests ([#50])
+- tests: Add utility assertions: `assert_single_binary_op`, `assert_function_signature`, etc. ([#50])
 
 ### Performance
 
@@ -136,6 +148,7 @@ Initial tagged release.
 [#29]: https://github.com/Inferara/inference/pull/29
 [#43]: https://github.com/Inferara/inference/pull/43
 [#44]: https://github.com/Inferara/inference/pull/44
+[#50]: https://github.com/Inferara/inference/pull/50
 [#54]: https://github.com/Inferara/inference/pull/54
 [#55]: https://github.com/Inferara/inference/pull/55
 [#56]: https://github.com/Inferara/inference/pull/56

@@ -327,6 +327,21 @@ fn is_accessible(symbol_scope: u32, access_scope: u32, visibility: Visibility) -
 
 ## Type Information Representation
 
+### Two-Level Type System
+
+The type checker uses a two-level type representation strategy:
+
+**Level 1 - AST Types** (`Type` enum in `inference_ast`):
+- Source-level representation parsed from code
+- Uses `Type::Simple(SimpleTypeKind)` for primitive builtins
+- `SimpleTypeKind` is a lightweight enum without heap allocation
+- Efficient for the parser and AST construction
+
+**Level 2 - Type Information** (`TypeInfo` in `inference_type_checker`):
+- Semantic representation for type checking and inference
+- Uses `TypeInfoKind` with rich semantic information
+- Supports type parameter substitution and unification
+
 ### TypeInfo Structure
 
 ```rust
@@ -358,6 +373,24 @@ pub enum TypeInfoKind {
     Spec(String),               // Specification type
 }
 ```
+
+### SimpleTypeKind in the AST
+
+```rust
+// In inference_ast::nodes
+pub enum SimpleTypeKind {
+    Unit,
+    Bool,
+    I8, I16, I32, I64,
+    U8, U16, U32, U64,
+}
+```
+
+The `SimpleTypeKind` enum provides:
+- **Zero-cost representation**: Stack-allocated enum, no heap allocation
+- **Type safety**: Compile-time guarantee that only valid primitive types exist
+- **Efficient comparison**: Direct enum comparison without string matching
+- **Pattern matching**: Exhaustive compile-time checking of all cases
 
 ### Type Substitution for Generics
 
@@ -583,6 +616,16 @@ Scopes use `Rc<RefCell<Scope>>` for shared ownership:
 - Interior mutability for adding symbols during type checking
 - No cycles in scope tree, so `Rc` is safe
 
+### SimpleTypeKind for Primitives
+
+Primitive types use `SimpleTypeKind` enum instead of heap-allocated nodes:
+- **Memory efficiency**: No `Rc` allocation for common types (i32, bool, unit, etc.)
+- **Cache performance**: Enum values are stack-allocated and compact
+- **Type checking speed**: Direct pattern matching without indirection
+- **Default values**: Easy to construct default return type `Type::Simple(SimpleTypeKind::Unit)`
+
+This design recognizes that primitive types are the most frequently used types in typical programs, so optimizing their representation has significant impact on overall compiler performance.
+
 ## Design Trade-offs
 
 ### Multi-Phase vs Single-Pass
@@ -621,6 +664,22 @@ Scopes use `Rc<RefCell<Scope>>` for shared ownership:
 - **Con**: Need to handle invalid state carefully
 
 **Rationale**: Collecting multiple errors dramatically improves the edit-compile-test cycle, especially for large codebases.
+
+### SimpleTypeKind vs Heap-Allocated Types
+
+**Choice**: Value-based `SimpleTypeKind` enum for primitives
+
+**Trade-off**:
+- **Pro**: Zero heap allocations for most common types
+- **Pro**: Smaller AST memory footprint
+- **Pro**: Faster type equality checks (enum discriminant comparison)
+- **Pro**: Simpler default value construction (e.g., unit return type)
+- **Con**: Two representations to maintain (AST vs TypeInfo)
+- **Con**: Conversion overhead between representations
+
+**Rationale**: Profiling showed that primitive types dominate typical Inference programs. The previous design using `Rc<SimpleType>` created unnecessary allocations and indirections. The new design using `SimpleTypeKind` eliminates these costs while maintaining type safety. The conversion overhead to `TypeInfoKind` is negligible compared to the memory and cache benefits.
+
+**Impact on Type Checking**: The validate_type method no longer needs to look up primitive types in the symbol table. The pattern match on `Type::Simple(_)` immediately recognizes these as valid builtin types, simplifying the validation logic.
 
 ## Testing Strategy
 

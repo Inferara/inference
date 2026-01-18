@@ -1,3 +1,72 @@
+//! Rocq Code Generation from Parsed WASM Data
+//!
+//! This module converts structured WASM data (from [`crate::wasm_parser`]) into
+//! Rocq (Coq) formal verification code.
+//!
+//! ## Overview
+//!
+//! The translator takes [`WasmParseData`] and generates a complete Rocq module
+//! that represents the WASM module in a form suitable for formal verification.
+//!
+//! ## Translation Process
+//!
+//! The translation happens in [`WasmParseData::translate`]:
+//!
+//! 1. **Generate header**: Rocq imports and helper definitions
+//! 2. **Translate types**: WASM types → Rocq type constructors
+//! 3. **Translate imports**: External dependencies → Rocq import records
+//! 4. **Translate exports**: Public interface → Rocq export records
+//! 5. **Translate tables**: Indirect call tables → Rocq table definitions
+//! 6. **Translate memory**: Linear memory → Rocq memory definitions
+//! 7. **Translate globals**: Global variables → Rocq global definitions
+//! 8. **Translate data**: Memory initialization → Rocq data segments
+//! 9. **Translate elements**: Table initialization → Rocq element segments
+//! 10. **Translate functions**: Function bodies → Rocq function definitions
+//! 11. **Generate module record**: Assemble all parts into final Rocq module
+//!
+//! ## Code Generation Strategy
+//!
+//! The translator generates Rocq code as strings using helper functions for each
+//! WASM construct. This approach prioritizes:
+//!
+//! - **Correctness**: Direct mapping from WASM semantics to Rocq types
+//! - **Readability**: Well-formatted output with proper indentation
+//! - **Debuggability**: Preserve names from WASM custom sections
+//!
+//! ## Expression Translation
+//!
+//! WASM instructions are converted to structured Rocq expressions:
+//!
+//! ```text
+//! WASM (stack-based)          Rocq (structured)
+//! ──────────────────          ─────────────────
+//! local.get 0                 BI_get_local 0%N ::
+//! local.get 1                 BI_get_local 1%N ::
+//! i32.add                     BI_binop (Binop_i BOI_add) ::
+//!                             nil
+//! ```
+//!
+//! Control flow is reconstructed from linear instruction sequences using
+//! [`Expression`] and helper structs [`BlockExpr`] and [`ConditionExpr`].
+//!
+//! ## Helper Definitions
+//!
+//! The translator generates these Rocq helper definitions for convenience:
+//!
+//! - `Vi32`, `Vi64`: Integer literal constructors
+//! - `Mt`: Table type constructor
+//! - `Mm`: Memory type constructor
+//! - `Mg`: Global constructor
+//! - `Mi`: Import constructor
+//! - `Me`: Export constructor
+//! - `Ma`: Memory argument constructor
+//!
+//! ## Error Recovery
+//!
+//! Unlike the parser (which fails fast), the translator collects errors from
+//! all sections before returning. This provides better diagnostics for complex
+//! translation failures.
+
 use core::fmt;
 use std::{collections::HashMap, fmt::Display};
 
@@ -14,6 +83,41 @@ const RCB_DOT: &str = "|}.\n";
 const LIST_EXT: &str = " ::\n";
 const LIST_SEAL: &str = "nil";
 
+/// Structured representation of a parsed WASM module.
+///
+/// This structure holds all information extracted from WASM bytecode sections,
+/// ready for translation to Rocq code. It is populated by [`crate::wasm_parser::parse`]
+/// and consumed by [`WasmParseData::translate`].
+///
+/// # Lifetime
+///
+/// The lifetime `'a` represents borrowed data from the original WASM bytecode.
+/// Most WASM section data (imports, exports, function bodies) reference slices
+/// of the original bytecode to avoid allocations.
+///
+/// # Fields
+///
+/// ## Module Metadata
+/// - `mod_name`: Rocq module identifier (from parameter or custom name section)
+/// - `func_names_map`: Maps function index → name (from custom name section)
+/// - `func_locals_name_map`: Maps function index → (local index → name) (from custom name section)
+/// - `start_function`: Optional module entry point function index
+///
+/// ## WASM Sections
+/// - `imports`: External dependencies (functions, tables, memories, globals)
+/// - `exports`: Public interface (exported functions, tables, memories, globals)
+/// - `tables`: Indirect call table definitions
+/// - `memory_types`: Linear memory specifications
+/// - `globals`: Global variable definitions with initialization
+/// - `data`: Memory initialization segments
+/// - `elements`: Table initialization segments
+/// - `function_types`: Function type signatures (as recursion groups)
+/// - `function_type_indexes`: Maps function index → type index
+/// - `function_bodies`: Function code with locals and instructions
+///
+/// ## Translation State (private)
+/// - `translated_function_names`: Accumulates Rocq function names during translation
+/// - `translated_functions_string`: Accumulates Rocq function definitions during translation
 pub(crate) struct WasmParseData<'a> {
     pub(crate) mod_name: String,
     pub(crate) func_names_map: Option<HashMap<u32, String>>,
@@ -37,6 +141,14 @@ pub(crate) struct WasmParseData<'a> {
 }
 
 impl WasmParseData<'_> {
+    /// Creates a new empty [`WasmParseData`] with the given module name.
+    ///
+    /// All section vectors are initialized as empty. This is called by the parser
+    /// before streaming through WASM sections.
+    ///
+    /// # Parameters
+    ///
+    /// - `mod_name`: Default Rocq module name (may be overridden by custom name section)
     pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
@@ -59,6 +171,43 @@ impl WasmParseData<'_> {
         }
     }
 
+    /// Translates the parsed WASM data into complete Rocq code.
+    ///
+    /// This is the main translation entry point. It generates a complete Rocq file
+    /// including imports, helper definitions, and a module record containing all
+    /// translated WASM sections.
+    ///
+    /// # Translation Steps
+    ///
+    /// 1. Generate Rocq imports and helper definitions
+    /// 2. Translate each WASM section to Rocq definitions:
+    ///    - Imports → `Mi` records
+    ///    - Exports → `Me` records
+    ///    - Tables → `Mt` definitions
+    ///    - Memory → `Mm` definitions
+    ///    - Globals → `Mg` definitions
+    ///    - Data segments → data initialization
+    ///    - Element segments → table initialization
+    ///    - Function types → type signatures
+    ///    - Functions → `module_func` definitions
+    /// 3. Assemble module record with all translated components
+    ///
+    /// # Error Recovery
+    ///
+    /// Unlike the parser, this method uses error recovery: it collects translation
+    /// errors from all sections and returns the first error only if no sections
+    /// succeeded. This provides better diagnostics for complex failures.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `String` containing complete Rocq code ready to write to a `.v` file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if translation of any section fails due to:
+    /// - Unsupported WASM features (tags, unknown reference types)
+    /// - Invalid WASM data (malformed expressions, out-of-bounds indices)
+    /// - Unimplemented instruction opcodes
     #[allow(clippy::too_many_lines)]
     pub(crate) fn translate(&mut self) -> anyhow::Result<String /* WasmModuleParseError*/> {
         let mut res = String::new();

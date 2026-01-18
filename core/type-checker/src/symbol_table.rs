@@ -12,6 +12,12 @@
 //!
 //! Scopes form a tree structure where each scope can have multiple child scopes.
 //! Symbol lookup walks up the tree from current scope to root until a match is found.
+//!
+//! ## Default Return Types
+//!
+//! Functions without an explicit return type default to the unit type. This is
+//! represented using `Type::Simple(SimpleTypeKind::Unit)`, which provides a
+//! lightweight value-based representation without heap allocation.
 
 use std::cell::RefCell;
 use std::rc::Rc;

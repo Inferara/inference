@@ -38,6 +38,11 @@ Types
 
 ## Primitive Types
 
+Primitive types use an efficient representation in the AST through the `SimpleTypeKind` enum. This provides a value-based representation without heap allocation, which is then converted to `TypeInfoKind` by the type checker for semantic analysis.
+
+**AST Representation**: `Type::Simple(SimpleTypeKind)` - Lightweight enum value
+**Type Checker Representation**: `TypeInfoKind` - Semantic analysis format
+
 ### Unit Type
 
 The unit type represents the absence of a value, similar to `void` in other languages.
@@ -52,7 +57,8 @@ fn explicit_unit() -> unit {
 }
 ```
 
-**Representation**: `TypeInfoKind::Unit`
+**AST Representation**: `Type::Simple(SimpleTypeKind::Unit)`
+**Type Checker Representation**: `TypeInfoKind::Unit`
 
 ### Boolean Type
 
@@ -66,7 +72,8 @@ fn test() -> bool {
 }
 ```
 
-**Representation**: `TypeInfoKind::Bool`
+**AST Representation**: `Type::Simple(SimpleTypeKind::Bool)`
+**Type Checker Representation**: `TypeInfoKind::Bool`
 
 **Operations**:
 - Logical: `&&`, `||`, `!`
@@ -77,13 +84,15 @@ fn test() -> bool {
 
 UTF-8 encoded strings.
 
+**Note**: String is not currently part of `SimpleTypeKind` as it's not yet fully implemented as a primitive type in the compiler. String support is under development.
+
 ```rust
 fn greet(name: string) -> string {
     return name;
 }
 ```
 
-**Representation**: `TypeInfoKind::String`
+**Type Checker Representation**: `TypeInfoKind::String`
 
 **Operations**:
 - Comparison: `==`, `!=`
@@ -103,9 +112,18 @@ Eight numeric types with different sizes and signedness:
 | `u32` | 32 bits | 0 to 2^32-1 | No |
 | `u64` | 64 bits | 0 to 2^64-1 | No |
 
-**Representation**: `TypeInfoKind::Number(NumberType)`
+**AST Representation**: `Type::Simple(SimpleTypeKind::{I8, I16, I32, I64, U8, U16, U32, U64})`
+**Type Checker Representation**: `TypeInfoKind::Number(NumberType)`
 
 ```rust
+// In the AST (inference_ast crate)
+enum SimpleTypeKind {
+    Unit, Bool,
+    I8, I16, I32, I64,
+    U8, U16, U32, U64,
+}
+
+// In the type checker (inference_type_checker crate)
 enum NumberType {
     I8, I16, I32, I64,
     U8, U16, U32, U64,

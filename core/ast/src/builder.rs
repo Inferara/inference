@@ -1,3 +1,63 @@
+//! AST builder that converts tree-sitter concrete syntax trees (CST) into typed AST nodes.
+//!
+//! The `Builder` processes tree-sitter parse trees and constructs a typed Abstract Syntax Tree
+//! stored in an `Arena`. It handles:
+//!
+//! - Converting CST nodes to typed AST nodes
+//! - Assigning unique sequential IDs to each node
+//! - Recording parent-child relationships in the arena
+//! - Collecting parse errors from malformed syntax
+//! - Extracting source location information
+//!
+//! # Example
+//!
+//! ```no_run
+//! use inference_ast::builder::Builder;
+//! use tree_sitter::Parser;
+//!
+//! let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+//! let mut parser = Parser::new();
+//! parser.set_language(&tree_sitter_inference::language()).unwrap();
+//! let tree = parser.parse(source, None).unwrap();
+//!
+//! let mut builder = Builder::new();
+//! builder.add_source_code(tree.root_node(), source.as_bytes());
+//! let arena = builder.build_ast().unwrap();
+//! ```
+//!
+//! # Error Handling
+//!
+//! The builder collects errors during construction by checking for tree-sitter ERROR nodes.
+//! If any errors are found, `build_ast()` prints them to stderr and returns an error:
+//!
+//! ```text
+//! AST Builder Error: Syntax error at line 5
+//! AST Builder Error: Unexpected token at line 10
+//! Error: AST building failed due to errors
+//! ```
+//!
+//! # Node ID Assignment
+//!
+//! Node IDs are assigned sequentially starting from 1 using an atomic counter:
+//!
+//! - **Deterministic ordering**: IDs match parse order for easier debugging
+//! - **Thread-safe**: Uses `AtomicU32` with relaxed ordering
+//! - **Zero is reserved**: ID 0 represents invalid/uninitialized nodes
+//! - **Sentinel value**: `u32::MAX` represents "no ID" for non-node types
+//!
+//! # Implementation Details
+//!
+//! The builder walks the tree-sitter CST depth-first, creating typed AST nodes:
+//!
+//! 1. For each CST node, determine its kind (e.g., "function_definition")
+//! 2. Extract relevant child nodes by field name (e.g., "name", "body")
+//! 3. Recursively build child AST nodes
+//! 4. Create the parent AST node with references to children
+//! 5. Add to arena with parent-child relationship
+//!
+//! The builder also calls `collect_errors()` for each processed node to identify
+//! tree-sitter ERROR nodes from parse failures.
+
 use std::{
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},

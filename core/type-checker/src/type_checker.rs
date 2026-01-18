@@ -410,6 +410,16 @@ impl TypeChecker {
         }
     }
 
+    /// Validates that a type reference is well-formed.
+    ///
+    /// Checks that:
+    /// - Custom types exist in the symbol table
+    /// - Generic type parameters are declared or known types
+    /// - Array element types are valid
+    ///
+    /// Primitive builtin types represented by `Type::Simple(SimpleTypeKind)` are
+    /// always valid and require no symbol table lookup. This includes unit, bool,
+    /// and numeric types (i8, i16, i32, i64, u8, u16, u32, u64).
     fn validate_type(&mut self, ty: &Type, type_parameters: Option<&Vec<Rc<Identifier>>>) {
         // Collect type parameter names for checking
         let type_param_names: Vec<String> = type_parameters
@@ -421,7 +431,8 @@ impl TypeChecker {
                 self.validate_type(&type_array.element_type, type_parameters)
             }
             Type::Simple(_) => {
-                // SimpleType only contains primitive builtin types - always valid
+                // SimpleTypeKind only contains primitive builtin types - always valid.
+                // No symbol table lookup required for unit, bool, i8-i64, u8-u64.
             }
             Type::Generic(generic_type) => {
                 if self

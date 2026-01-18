@@ -79,6 +79,8 @@ TypeCheckerBuilder
 
 ### Primitive Types
 
+Primitive types are represented in the AST using `Type::Simple(SimpleTypeKind)`, a lightweight enum that avoids heap allocation for builtin types.
+
 ```rust
 // Numeric types
 i8, i16, i32, i64     // Signed integers
@@ -86,9 +88,10 @@ u8, u16, u32, u64     // Unsigned integers
 
 // Other primitives
 bool                   // Boolean
-string                 // UTF-8 strings
 unit                   // Unit type (like void)
 ```
+
+**Internal Representation**: The AST's `SimpleTypeKind` enum provides an efficient, value-based representation that the type checker converts to `TypeInfoKind` for semantic analysis. This design eliminates unnecessary allocations for the most common types in Inference programs.
 
 ### Compound Types
 

@@ -3,12 +3,24 @@
 //! This crate provides type checking and type inference for the Inference language.
 //! It implements bidirectional type checking with support for:
 //!
-//! - Primitive types (i8, i16, i32, i64, u8, u16, u32, u64, bool, string)
+//! - Primitive types (i8, i16, i32, i64, u8, u16, u32, u64, bool, unit)
 //! - Struct and enum types with visibility checking
 //! - Method resolution on struct types
 //! - Generic function type parameter inference and substitution
 //! - Import resolution with glob and partial imports
 //! - Error recovery for collecting multiple errors
+//!
+//! ## Type Representation
+//!
+//! The type checker uses two distinct representations for types:
+//!
+//! - **AST Types** (`Type` enum from `inference_ast`): The source-level representation
+//!   including `Type::Simple(SimpleTypeKind)` for primitive builtin types. The
+//!   `SimpleTypeKind` enum provides a lightweight, value-based representation of
+//!   primitive types without heap allocation.
+//!
+//! - **Type Information** (`TypeInfo` from this crate): The type checker's internal
+//!   representation using `TypeInfoKind` for semantic analysis and type inference.
 //!
 //! ## Entry Point
 //!

@@ -426,6 +426,191 @@ arena.list_nodes_cmp(|node| {
 
 ## AST Construction Details
 
+### Builder State Machine Simplification (Issue #50)
+
+Prior to Issue #50, the Builder used a typestate pattern with `InitState` and `CompleteState` to enforce correct API usage at compile time:
+
+```rust
+// Old API (before Issue #50)
+pub struct Builder<'a, S> {
+    arena: Arena,
+    source_code: Vec<(Node<'a>, &'a [u8])>,
+    _state: PhantomData<S>,
+}
+
+let mut builder = Builder::new();  // Builder<InitState>
+builder.add_source_code(...);
+let completed = builder.build_ast()?;  // Builder<CompleteState>
+let arena = completed.arena();
+```
+
+**Why It Was Removed**:
+- Added API complexity without significant safety benefits
+- Required two separate types (`Builder<InitState>` and `Builder<CompleteState>`)
+- Made error handling awkward (had to transform type on error)
+- The arena is immutable after construction anyway
+
+**New Simplified API** (Issue #50):
+
+```rust
+pub struct Builder<'a> {
+    arena: Arena,
+    source_code: Vec<(Node<'a>, &'a [u8])>,
+    errors: Vec<anyhow::Error>,
+}
+
+let mut builder = Builder::new();
+builder.add_source_code(...);
+let arena = builder.build_ast()?;  // Returns Arena directly
+```
+
+**Benefits**:
+- Single `Builder` type instead of two
+- Direct `Arena` return - no intermediate `CompletedBuilder` type
+- Error collection integrated into builder state
+- Simpler mental model and API surface
+
+### Error Collection During Building (Issue #50)
+
+The Builder now collects errors during AST construction:
+
+```rust
+impl Builder {
+    fn collect_errors(&mut self, node: &Node, code: &[u8]) {
+        // Collects tree-sitter ERROR nodes
+    }
+
+    pub fn build_ast(&mut self) -> anyhow::Result<Arena> {
+        // ... build nodes ...
+
+        if !self.errors.is_empty() {
+            for err in &self.errors {
+                eprintln!("AST Builder Error: {err}");
+            }
+            return Err(anyhow::anyhow!("AST building failed due to errors"));
+        }
+        Ok(self.arena.clone())
+    }
+}
+```
+
+Each builder method that processes CST nodes calls `collect_errors()` to identify malformed syntax. If any errors are collected, `build_ast()` prints them and returns an error.
+
+### Primitive Type Representation (Issue #50)
+
+Prior to Issue #50, primitive types were represented using a `SimpleType` struct with a string field:
+
+```rust
+// Old representation (before Issue #50)
+pub struct SimpleType {
+    pub id: u32,
+    pub location: Location,
+    pub name: String,  // "i32", "bool", "unit", etc.
+}
+
+// Type checking required string comparisons
+fn is_unit_type(ty: &Type) -> bool {
+    match ty {
+        Type::Simple(simple) => simple.name == "unit",  // FIXME: string comparison
+        _ => false,
+    }
+}
+```
+
+**Problems with String-Based Approach**:
+- String comparisons are slower than enum matching
+- Typos in string literals could cause bugs ("i32" vs "I32")
+- No compile-time exhaustiveness checking
+- Inconsistent with type-checker layer (`TypeInfoKind` uses enums)
+- Every primitive type check requires string allocation/comparison
+
+**New Enum-Based Approach** (Issue #50):
+
+```rust
+// Efficient enum representation
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum SimpleTypeKind {
+    Unit,
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
+// Type enum directly wraps the kind (no heap allocation)
+pub enum Type {
+    Simple(SimpleTypeKind),  // Copy type, no Rc needed
+    Array(Rc<TypeArray>),
+    Generic(Rc<GenericType>),
+    // ...
+}
+
+// Fast enum-based type checking
+fn is_unit_type(ty: &Type) -> bool {
+    matches!(ty, Type::Simple(SimpleTypeKind::Unit))
+}
+```
+
+**Special Macro Support for `@skip` Variants**:
+
+Since `SimpleTypeKind` is a Copy enum without `id` or `location` fields, the `ast_enum!` macro was extended with `@skip` support:
+
+```rust
+ast_enum! {
+    pub enum Type {
+        @skip Simple(SimpleTypeKind),  // No id/location - returns u32::MAX sentinel
+        Array(Rc<TypeArray>),
+        Generic(Rc<GenericType>),
+        // ...
+    }
+}
+
+// Macro generates:
+impl Type {
+    pub fn id(&self) -> u32 {
+        match self {
+            Type::Simple(_) => u32::MAX,  // Sentinel "no ID" value
+            Type::Array(n) => n.id,
+            // ...
+        }
+    }
+}
+```
+
+The `@skip` annotation tells the macro to return `u32::MAX` (sentinel value) for `id()` and `Location::default()` for `location()`. Code that performs ID-based lookups must treat `u32::MAX` as invalid.
+
+**Benefits**:
+- **Performance**: Enum matching is faster than string comparison
+- **Type safety**: Compiler catches typos and ensures exhaustiveness
+- **Memory efficiency**: `SimpleTypeKind` is Copy (no heap allocation)
+- **Consistency**: Aligns with type-checker's `TypeInfoKind` enum design
+- **Maintainability**: Adding new primitives requires updating enum, not strings throughout codebase
+
+**Conversion to Type Checker Layer**:
+
+```rust
+// core/type-checker/src/type_info.rs
+pub fn type_kind_from_simple_type_kind(kind: SimpleTypeKind) -> TypeInfoKind {
+    match kind {
+        SimpleTypeKind::Unit => TypeInfoKind::Unit,
+        SimpleTypeKind::Bool => TypeInfoKind::Bool,
+        SimpleTypeKind::I8 => TypeInfoKind::I8,
+        SimpleTypeKind::I16 => TypeInfoKind::I16,
+        SimpleTypeKind::I32 => TypeInfoKind::I32,
+        SimpleTypeKind::I64 => TypeInfoKind::I64,
+        SimpleTypeKind::U8 => TypeInfoKind::U8,
+        SimpleTypeKind::U16 => TypeInfoKind::U16,
+        SimpleTypeKind::U32 => TypeInfoKind::U32,
+        SimpleTypeKind::U64 => TypeInfoKind::U64,
+    }
+}
+```
+
 ### Visibility Parsing (Issue #86)
 
 The AST builder extracts visibility modifiers from the tree-sitter CST (Concrete Syntax Tree) during node construction:

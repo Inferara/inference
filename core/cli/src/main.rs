@@ -2,30 +2,110 @@
 
 //! # Inference Compiler CLI
 //!
-//! Command line interface for the Inference toolchain.
+//! Command line interface for the Inference programming language compiler.
 //!
-//! 1. Parse  (`--parse`)   – build the typed AST.
-//! 2. Analyze (`--analyze`) – perform type / semantic inference and validation.
-//! 3. Codegen (`--codegen`) – emit WebAssembly, and optionally translate to V (`-o`).
+//! ## Compilation Phases
 //!
-//! At least one of the phase flags must be supplied; the phases that are requested will be
-//! executed in the canonical order even if specified out of order on the command line.
+//! The Inference compiler operates in three distinct phases:
 //!
-//! Output artifacts are written to an `out/` directory relative to the current working directory.
-//! When `-o` is passed together with `--codegen` the produced WASM module is further translated
-//! into V source and saved as `out/out.v`.
+//! 1. **Parse** (`--parse`) – Builds the typed AST using tree-sitter
+//!    - Reads the source file
+//!    - Runs tree-sitter parser with Inference grammar
+//!    - Constructs arena-allocated AST nodes
+//!    - Validates syntax and basic structure
+//!    - Reports parsing errors if any
 //!
-//! ## Exit codes
-//! * 0 – success.
-//! * 1 – usage / IO / phase failure.
+//! 2. **Analyze** (`--analyze`) – Performs type checking and semantic validation
+//!    - Type inference and checking
+//!    - Symbol resolution
+//!    - Semantic validation
+//!    - Reports type errors and semantic issues
 //!
-//! ## Example
+//! 3. **Codegen** (`--codegen`) – Emits WebAssembly binary
+//!    - Generates LLVM IR from typed AST
+//!    - Compiles LLVM IR to WebAssembly
+//!    - Supports non-deterministic instructions (uzumaki, forall, exists)
+//!    - Optionally translates to Rocq (.v) format for formal verification
+//!
+//! ## Phase Execution
+//!
+//! Phases execute in canonical order (parse → analyze → codegen) regardless of
+//! the order flags appear on the command line. Each phase depends on the previous:
+//!
+//! - `--parse` runs standalone
+//! - `--analyze` automatically runs parse first
+//! - `--codegen` automatically runs parse and analyze first
+//!
+//! At least one phase flag must be specified.
+//!
+//! ## Output Artifacts
+//!
+//! All output files are written to an `out/` directory relative to the current
+//! working directory:
+//!
+//! - `out/<source_name>.wasm` – WebAssembly binary (when `-o` is specified)
+//! - `out/<source_name>.v` – Rocq translation (when `-v` is specified)
+//!
+//! The output directory is created automatically if it doesn't exist.
+//!
+//! ## Error Handling
+//!
+//! The compiler reports errors to stderr with descriptive messages:
+//!
+//! - **Parse errors**: Syntax errors, malformed AST nodes
+//! - **Type errors**: Type mismatches, undefined symbols
+//! - **Codegen errors**: LLVM compilation failures
+//! - **IO errors**: File not found, permission issues
+//!
+//! All errors cause the process to exit with code 1.
+//!
+//! ## Exit Codes
+//!
+//! | Code | Meaning                                    |
+//! |------|--------------------------------------------|
+//! | 0    | Success - all requested phases completed   |
+//! | 1    | Failure - usage, IO, or compilation error  |
+//!
+//! ## Examples
+//!
+//! Parse and validate syntax:
 //! ```bash
-//! infc examples/hello.inf --codegen -o
+//! infc example.inf --parse
 //! ```
 //!
+//! Type check without generating code:
+//! ```bash
+//! infc example.inf --analyze
+//! ```
+//!
+//! Full compilation to WebAssembly:
+//! ```bash
+//! infc example.inf --codegen -o
+//! ```
+//!
+//! Compile and generate Rocq translation:
+//! ```bash
+//! infc example.inf --codegen -o -v
+//! ```
+//!
+//! Only generate Rocq (no WASM file):
+//! ```bash
+//! infc example.inf --codegen -v
+//! ```
+//!
+//! ## Current Limitations
+//!
+//! - Single-file compilation only (multi-file projects not yet supported)
+//! - Output directory is relative to CWD, not source file location
+//! - Analysis phase is work-in-progress
+//!
 //! ## Tests
-//! Integration tests exercise flag validation and the happy path compilation pipeline.
+//!
+//! Integration tests in `tests/cli_integration.rs` verify:
+//! - Flag validation and error handling
+//! - Phase execution correctness
+//! - Output file generation
+//! - Error message formatting
 
 mod parser;
 use clap::Parser;
@@ -37,15 +117,54 @@ use std::{
     process::{self},
 };
 
-/// Entry point for the CLI executable.
+/// Entry point for the Inference compiler CLI.
 ///
-/// Responsibilities:
-/// * Parse flags.
-/// * Validate that the input path exists and at least one phase is selected.
-/// * Run requested phases (parse -> analyze -> codegen).
-/// * Optionally translate emitted WASM into V source when `-o` is set.
+/// ## Execution Flow
 ///
-/// On any failure a diagnostic is printed to stderr and the process exits with code `1`.
+/// 1. **Parse command line arguments** using clap
+/// 2. **Validate input**:
+///    - Verify source file exists
+///    - Ensure at least one phase flag is specified
+/// 3. **Execute compilation phases** in canonical order:
+///    - Parse: Build typed AST from source using tree-sitter
+///    - Analyze: Type check and semantic validation
+///    - Codegen: Generate LLVM IR and compile to WebAssembly
+/// 4. **Generate output files** (if requested):
+///    - Write WASM binary with `-o` flag
+///    - Write Rocq translation with `-v` flag
+///
+/// ## Error Handling
+///
+/// All errors are reported to stderr with descriptive messages and cause
+/// process exit with code 1. Error categories:
+///
+/// - **Usage errors**: Missing phase flags, invalid arguments
+/// - **IO errors**: File not found, permission denied, output write failures
+/// - **Compilation errors**: Parse errors, type errors, codegen failures
+///
+/// ## Phase Coordination
+///
+/// The function ensures correct phase dependencies:
+/// - Parse phase always runs first when any phase is requested
+/// - Analyze phase requires parse output (typed AST)
+/// - Codegen phase requires analyze output (typed context)
+///
+/// Phase outputs are stored in `Option` types and unwrapped only when
+/// guaranteed to be present by prior validation logic.
+///
+/// ## Output Management
+///
+/// Output files are written to `out/` directory relative to CWD:
+/// - Directory is created if it doesn't exist
+/// - File names are derived from source file stem
+/// - Both `-o` and `-v` flags can be used simultaneously
+///
+/// ## Implementation Notes
+///
+/// - Uses `anyhow::Result` for error propagation from library functions
+/// - Calls `process::exit(1)` explicitly on errors (no panics)
+/// - Reads entire source file into memory (limitation: no streaming)
+/// - Phase execution is sequential (no parallelization)
 fn main() {
     let args = Cli::parse();
     if !args.path.exists() {
@@ -151,9 +270,18 @@ fn main() {
     process::exit(0);
 }
 
+/// Unit test helpers for the CLI module.
+///
+/// Most CLI testing is done through integration tests in `tests/cli_integration.rs`
+/// which spawn the actual binary. This module contains helper functions and
+/// placeholder tests for future unit-level testing needs.
 #[cfg(test)]
 mod test {
 
+    // Commented out test for WASM to Rocq translation.
+    // This test is currently disabled as it depends on specific test data setup
+    // and may fail in CI environments.
+    //
     // #[test]
     // fn test_wasm_to_coq() {
     //     if std::env::var("GITHUB_ACTIONS").is_ok() {
@@ -162,7 +290,7 @@ mod test {
     //     }
     //     let path = get_test_data_path().join("wasm").join("comments.0.wasm");
     //     let absolute_path = path.canonicalize().unwrap();
-
+    //
     //     let bytes = std::fs::read(absolute_path).unwrap();
     //     let mod_name = String::from("index");
     //     let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
@@ -174,6 +302,12 @@ mod test {
     //     std::fs::write(coq_file_path, coq.unwrap()).unwrap();
     // }
 
+    /// Returns the path to the test data directory.
+    ///
+    /// Navigates from the current working directory to the workspace root
+    /// and locates the `test_data` directory.
+    ///
+    /// This helper is used for locating test input files in unit tests.
     #[allow(dead_code)]
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {
         let current_dir = std::env::current_dir().unwrap();
@@ -183,6 +317,10 @@ mod test {
             .join("test_data")
     }
 
+    /// Returns the path to the output directory for test artifacts.
+    ///
+    /// Located at `<workspace_root>/out/`, this directory is where test-generated
+    /// WASM and Rocq files are written during testing.
     #[allow(dead_code)]
     fn get_out_path() -> std::path::PathBuf {
         get_test_data_path().parent().unwrap().join("out")

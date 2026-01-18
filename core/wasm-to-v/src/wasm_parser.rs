@@ -1,3 +1,49 @@
+//! WASM Bytecode Parser
+//!
+//! This module provides the parsing phase of WASM to Rocq translation.
+//! It streams through WASM bytecode sections and builds a structured
+//! representation suitable for Rocq code generation.
+//!
+//! ## Overview
+//!
+//! The parser uses `inf-wasmparser` (a fork of `wasmparser` with non-deterministic
+//! instruction support) to incrementally parse WASM sections without loading the
+//! entire module into memory.
+//!
+//! ## Entry Point
+//!
+//! The main entry point is [`translate_bytes`], which:
+//! 1. Parses WASM bytecode using [`parse`]
+//! 2. Builds a [`WasmParseData`] structure
+//! 3. Calls [`WasmParseData::translate`] to generate Rocq code
+//!
+//! ## Parsing Strategy
+//!
+//! The parser makes a single forward pass through the WASM module,
+//! processing sections in order:
+//!
+//! ```text
+//! Version → Type → Import → Function → Table → Memory → Global →
+//! Export → Start → Element → DataCount → Data → Code → Custom
+//! ```
+//!
+//! Each section handler pushes data into the corresponding `WasmParseData` field.
+//!
+//! ## Custom Name Section
+//!
+//! The parser extracts debug information from the custom "name" section:
+//!
+//! - Module name: Overrides the default module name parameter
+//! - Function names: Maps function indices to human-readable names
+//! - Local names: Maps function indices to local variable name maps
+//!
+//! This information dramatically improves readability of generated Rocq code.
+//!
+//! ## Error Handling
+//!
+//! Parse errors are propagated using `anyhow::Result`. The parser fails fast
+//! on invalid bytecode, though the translation phase uses error recovery.
+
 use inf_wasmparser::{
     Parser,
     Payload::{
@@ -13,6 +59,45 @@ use std::{collections::HashMap, io::Read};
 
 use crate::translator::WasmParseData;
 
+/// Translates WebAssembly bytecode into Rocq (Coq) formal verification code.
+///
+/// This is the main entry point for WASM to Rocq translation. It performs a complete
+/// translation in two phases:
+///
+/// 1. **Parse Phase**: Streams through WASM sections to build [`WasmParseData`]
+/// 2. **Translate Phase**: Converts structured data into Rocq code strings
+///
+/// # Parameters
+///
+/// - `mod_name`: The Rocq module name for generated definitions (may be overridden by WASM custom name section)
+/// - `bytes`: Raw WASM bytecode to translate
+///
+/// # Returns
+///
+/// Returns a `String` containing complete Rocq code including:
+/// - Required Rocq imports
+/// - Helper definitions
+/// - Type translations
+/// - Function definitions
+/// - Module record with all WASM sections
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - WASM bytecode is malformed or invalid
+/// - Required WASM sections are missing
+/// - Unsupported WASM features are encountered (e.g., tag section, unknown reference types)
+/// - Translation of specific instructions fails
+///
+/// # Examples
+///
+/// ```ignore
+/// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+///
+/// let wasm_bytes = std::fs::read("output.wasm")?;
+/// let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+/// std::fs::write("output.v", rocq_code)?;
+/// ```
 pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut data = Vec::new();
     let mut reader = std::io::Cursor::new(bytes);
@@ -23,6 +108,43 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     }
 }
 
+/// Parses WebAssembly bytecode into structured [`WasmParseData`].
+///
+/// This function makes a single forward pass through the WASM module,
+/// processing each section and populating the corresponding fields in
+/// [`WasmParseData`].
+///
+/// # Section Processing
+///
+/// The parser handles these WASM sections:
+///
+/// - **Type Section**: Function type signatures stored as `RecGroup` entries
+/// - **Import Section**: External function, table, memory, and global imports
+/// - **Function Section**: Maps function indices to their type indices
+/// - **Table Section**: Indirect call table definitions
+/// - **Memory Section**: Linear memory definitions with size limits
+/// - **Global Section**: Global variable definitions with initialization expressions
+/// - **Export Section**: Exported functions, tables, memories, and globals
+/// - **Start Section**: Optional module entry point function
+/// - **Element Section**: Table element initialization
+/// - **Data Section**: Memory initialization data
+/// - **Code Section**: Function bodies with local variables and instructions
+/// - **Custom Section**: Name mappings for functions and local variables (debug info)
+///
+/// Unsupported sections (component model, tags, unknown sections) are silently ignored.
+///
+/// # Parameters
+///
+/// - `mod_name`: Default module name (may be overridden by custom name section)
+/// - `data`: Raw WASM bytecode slice
+///
+/// # Returns
+///
+/// Returns [`WasmParseData`] containing all parsed information ready for translation.
+///
+/// # Errors
+///
+/// Returns an error if WASM bytecode is malformed or contains invalid section data.
 #[allow(clippy::match_same_arms)]
 fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
