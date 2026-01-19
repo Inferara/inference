@@ -4,12 +4,16 @@ resolver = "2"
 
 members = [
     "core/*",
+    "ide/*",
+    "apps/*",
     "tools/*",
     "tests"
 ]
 
 default-members = [
     "core/*",
+    "ide/*",
+    "apps/*",
     "tests"
 ]
 
@@ -30,6 +34,16 @@ inference-cli = { path = "./core/cli", version = "0.0.1" }
 inference-wasm-to-v-translator = { path = "./core/wasm-to-v", version = "0.0.1" }
 inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 
+# IDE support crates
+inference-base-db = { path = "./ide/base-db", version = "0.0.1" }
+inference-ide = { path = "./ide/ide", version = "0.0.1" }
+inference-ide-db = { path = "./ide/ide-db", version = "0.0.1" }
+inference-vfs = { path = "./ide/vfs", version = "0.0.1" }
+
+# Applications
+infs = { path = "./apps/infs", version = "0.0.1" }
+inference-lsp = { path = "./apps/lsp", version = "0.0.1" }
+
 # Test suite
 inference-tests = { path = "./tests", version = "0.0.1" }
 
@@ -42,7 +56,7 @@ inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 tree-sitter = "0.26.2"
 tree-sitter-inference = "0.0.38"
 anyhow = "1.0.100"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 leb128 = "0.2.5"
 rustc-hash = "2.1.1"

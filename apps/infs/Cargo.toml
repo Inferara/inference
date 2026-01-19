@@ -1,0 +1,12 @@
+[package]
+name = "infs"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Inference unified CLI toolchain"
+
+[[bin]]
+name = "infs"
+path = "src/main.rs"

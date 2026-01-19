@@ -1,0 +1,8 @@
+[package]
+name = "inference-vfs"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Virtual File System for Inference IDE support"

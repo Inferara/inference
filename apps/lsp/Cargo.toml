@@ -1,0 +1,12 @@
+[package]
+name = "inference-lsp"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Inference Language Server Protocol implementation"
+
+[[bin]]
+name = "inference-lsp"
+path = "src/main.rs"

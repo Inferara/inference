@@ -1,0 +1,8 @@
+[package]
+name = "inference-base-db"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Base Database for Inference IDE support"
