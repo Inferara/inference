@@ -149,7 +149,7 @@ async fn download_with_progress(url: &str, dest: &Path, expected_size: u64) -> R
 fn calculate_retry_delay(attempt: u32) -> u64 {
     let base_delay = BASE_RETRY_DELAY_MS * 2u64.pow(attempt);
     let jitter_range = base_delay / 4;
-    let jitter = rand::thread_rng().gen_range(0..=jitter_range * 2);
+    let jitter = rand::rng().random_range(0..=jitter_range * 2);
     base_delay - jitter_range + jitter
 }
 

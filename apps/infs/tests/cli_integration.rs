@@ -302,6 +302,43 @@ fn headless_mode_without_command_shows_info() {
         .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
 }
 
+/// Verifies that the TUI is skipped when CI=true environment variable is set.
+///
+/// **Test setup**: Sets CI=true environment variable and runs infs without subcommand.
+/// This simulates running in a CI environment where interactive TUI should not launch.
+///
+/// **Expected behavior**: Exit with code 0 and display informational output (same as headless mode).
+/// The TUI should NOT be launched because the headless detection recognizes the CI environment.
+#[test]
+fn tui_detects_ci_environment() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("CI", "true");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("infs"))
+        .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
+}
+
+/// Verifies that the TUI is skipped when `NO_COLOR` environment variable is set.
+///
+/// **Test setup**: Sets `NO_COLOR=1` environment variable and runs infs without subcommand.
+/// The `NO_COLOR` convention (<https://no-color.org/>) indicates the user prefers no ANSI colors,
+/// which typically also indicates a headless or non-interactive environment.
+///
+/// **Expected behavior**: Exit with code 0 and display informational output (same as headless mode).
+/// The TUI should NOT be launched because the headless detection recognizes the `NO_COLOR` setting.
+#[test]
+fn tui_detects_no_color_environment() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("NO_COLOR", "1");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("infs"))
+        .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
+}
+
 // =============================================================================
 // Byte-Identical Output Tests
 // =============================================================================
@@ -378,10 +415,7 @@ fn build_produces_identical_wasm_as_infc() {
     let wasm_new = temp_new.child("out").child("trivial.wasm");
     let wasm_legacy = temp_legacy.child("out").child("trivial.wasm");
 
-    assert!(
-        wasm_new.path().exists(),
-        "infs did not produce WASM output"
-    );
+    assert!(wasm_new.path().exists(), "infs did not produce WASM output");
     assert!(
         wasm_legacy.path().exists(),
         "infc did not produce WASM output"
@@ -674,9 +708,7 @@ fn self_update_without_network_shows_error() {
     let temp = assert_fs::TempDir::new().unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFS_HOME", temp.path())
-        .arg("self")
-        .arg("update");
+    cmd.env("INFS_HOME", temp.path()).arg("self").arg("update");
 
     cmd.assert()
         .failure()
@@ -694,4 +726,325 @@ fn self_requires_subcommand() {
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("subcommand").or(predicate::str::contains("required")));
+}
+
+// =============================================================================
+// Phase 3: Project Scaffolding Command Tests
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// New Command Tests
+// -----------------------------------------------------------------------------
+
+/// Verifies that `infs new --help` displays the available options.
+///
+/// **Expected behavior**: Exit with code 0 and show NAME argument, --no-git flag, and path option.
+#[test]
+fn new_help_shows_options() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.arg("new").arg("--help");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("NAME"))
+        .stdout(predicate::str::contains("--no-git"))
+        .stdout(predicate::str::contains("PATH").or(predicate::str::contains("path")));
+}
+
+/// Verifies that `infs new` requires a name argument.
+///
+/// **Expected behavior**: Exit with non-zero code when no name is provided.
+#[test]
+fn new_requires_name_argument() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.arg("new");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("NAME").or(predicate::str::contains("required")));
+}
+
+/// Verifies that `infs new` creates the complete project structure.
+///
+/// **Test setup**: Uses a temporary directory and --no-git to avoid git dependency.
+///
+/// **Expected behavior**: Creates Inference.toml, src/main.inf, .gitignore, tests/, and proofs/.
+#[test]
+fn new_creates_project_structure() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("myproject")
+        .arg("--no-git");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Created project"));
+
+    let project_dir = temp.child("myproject");
+    assert!(
+        project_dir.path().exists(),
+        "Project directory should exist"
+    );
+    assert!(
+        project_dir.child("Inference.toml").path().exists(),
+        "Inference.toml should exist"
+    );
+    assert!(
+        project_dir.child("src").child("main.inf").path().exists(),
+        "src/main.inf should exist"
+    );
+    assert!(
+        project_dir.child(".gitignore").path().exists(),
+        ".gitignore should exist"
+    );
+    assert!(
+        project_dir.child("tests").path().exists(),
+        "tests/ directory should exist"
+    );
+    assert!(
+        project_dir.child("proofs").path().exists(),
+        "proofs/ directory should exist"
+    );
+}
+
+/// Verifies that `infs new` validates project names and rejects invalid ones.
+///
+/// **Test cases**:
+/// - Names starting with numbers (e.g., "123invalid")
+/// - Reserved keywords (e.g., "fn")
+///
+/// **Expected behavior**: Exit with non-zero code and display an error message.
+#[test]
+fn new_validates_project_name() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("123invalid")
+        .arg("--no-git");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("start with"));
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("fn")
+        .arg("--no-git");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("reserved"));
+}
+
+/// Verifies that `infs new` fails when the target directory already exists.
+///
+/// **Test setup**: Pre-creates a directory with the same name.
+///
+/// **Expected behavior**: Exit with non-zero code and indicate directory exists.
+#[test]
+fn new_fails_if_directory_exists() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let existing_dir = temp.child("existing_project");
+    std::fs::create_dir_all(existing_dir.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("existing_project")
+        .arg("--no-git");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+/// Verifies that `infs new` generates a valid Inference.toml manifest.
+///
+/// **Expected behavior**: The manifest contains the correct project name and version.
+#[test]
+fn new_generates_valid_manifest() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("test_manifest_project")
+        .arg("--no-git");
+
+    cmd.assert().success();
+
+    let manifest_path = temp.child("test_manifest_project").child("Inference.toml");
+    let manifest_content =
+        std::fs::read_to_string(manifest_path.path()).expect("Failed to read Inference.toml");
+
+    assert!(
+        manifest_content.contains("name = \"test_manifest_project\""),
+        "Manifest should contain project name"
+    );
+    assert!(
+        manifest_content.contains("version = \"0.1.0\""),
+        "Manifest should contain default version"
+    );
+}
+
+/// Verifies that `infs new --no-git` skips git initialization.
+///
+/// **Expected behavior**: Project is created successfully without .git directory.
+#[test]
+fn new_with_no_git_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("new")
+        .arg("nogit_project")
+        .arg("--no-git");
+
+    cmd.assert().success();
+
+    let project_dir = temp.child("nogit_project");
+    assert!(
+        project_dir.path().exists(),
+        "Project directory should exist"
+    );
+    assert!(
+        !project_dir.child(".git").path().exists(),
+        ".git directory should not exist when --no-git is used"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Init Command Tests
+// -----------------------------------------------------------------------------
+
+/// Verifies that `infs init --help` displays the available options.
+///
+/// **Expected behavior**: Exit with code 0 and show the name option.
+#[test]
+fn init_help_shows_options() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.arg("init").arg("--help");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("NAME").or(predicate::str::contains("name")));
+}
+
+/// Verifies that `infs init` creates the manifest and source files.
+///
+/// **Test setup**: Uses a temporary directory.
+///
+/// **Expected behavior**: Creates Inference.toml and src/main.inf.
+#[test]
+fn init_creates_manifest() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("init")
+        .arg("init_test_project");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Initialized"));
+
+    assert!(
+        temp.child("Inference.toml").path().exists(),
+        "Inference.toml should exist"
+    );
+    assert!(
+        temp.child("src").child("main.inf").path().exists(),
+        "src/main.inf should exist"
+    );
+}
+
+/// Verifies that `infs init` uses a custom name when provided.
+///
+/// **Expected behavior**: The manifest contains the specified project name.
+#[test]
+fn init_uses_custom_name() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("init")
+        .arg("custom_name_project");
+
+    cmd.assert().success();
+
+    let manifest_content = std::fs::read_to_string(temp.child("Inference.toml").path())
+        .expect("Failed to read Inference.toml");
+
+    assert!(
+        manifest_content.contains("name = \"custom_name_project\""),
+        "Manifest should contain the custom project name"
+    );
+}
+
+/// Verifies that `infs init` fails when Inference.toml already exists.
+///
+/// **Test setup**: Pre-creates an Inference.toml file.
+///
+/// **Expected behavior**: Exit with non-zero code and indicate manifest exists.
+#[test]
+fn init_fails_if_manifest_exists() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    std::fs::write(
+        temp.child("Inference.toml").path(),
+        "[package]\nname = \"existing\"",
+    )
+    .expect("Failed to create existing manifest");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("init").arg("newproject");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+/// Verifies that `infs init` validates custom project names.
+///
+/// **Expected behavior**: Exit with non-zero code for reserved keywords.
+#[test]
+fn init_validates_custom_name() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("init").arg("fn");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("reserved"));
+}
+
+/// Verifies that `infs init` uses the directory name as default project name.
+///
+/// **Test setup**: Creates a directory with a specific name and runs init without arguments.
+///
+/// **Expected behavior**: The manifest contains the directory name as project name.
+#[test]
+fn init_uses_directory_name_as_default() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let project_dir = temp.child("my_default_name_project");
+    std::fs::create_dir_all(project_dir.path()).expect("Failed to create project directory");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(project_dir.path()).arg("init");
+
+    cmd.assert().success();
+
+    let manifest_content = std::fs::read_to_string(project_dir.child("Inference.toml").path())
+        .expect("Failed to read Inference.toml");
+
+    assert!(
+        manifest_content.contains("name = \"my_default_name_project\""),
+        "Manifest should contain the directory name as project name"
+    );
 }

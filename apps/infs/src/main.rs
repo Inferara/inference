@@ -8,6 +8,8 @@
 //!
 //! ## Subcommands
 //!
+//! - `new` - Create a new Inference project
+//! - `init` - Initialize an existing directory as an Inference project
 //! - `build` - Compile Inference source files
 //! - `version` - Display version information
 //! - `install` - Install toolchain versions
@@ -31,6 +33,11 @@
 //!
 //! ## Examples
 //!
+//! Create a new project:
+//! ```bash
+//! infs new myproject
+//! ```
+//!
 //! Build a source file:
 //! ```bash
 //! infs build example.inf --codegen -o
@@ -47,11 +54,13 @@
 //! ```
 
 mod commands;
+mod project;
 mod toolchain;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use commands::{build, default, doctor, install, list, self_cmd, uninstall, version};
+use commands::{build, default, doctor, init, install, list, new, self_cmd, uninstall, version};
 
 /// Inference unified CLI toolchain.
 ///
@@ -82,6 +91,19 @@ pub struct Cli {
 /// Available subcommands for the infs CLI.
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create a new Inference project.
+    ///
+    /// Creates a new directory with a standard Inference project structure
+    /// including Inference.toml manifest, src/main.inf entry point, and
+    /// directories for tests and proofs.
+    New(new::NewArgs),
+
+    /// Initialize an existing directory as an Inference project.
+    ///
+    /// Creates an Inference.toml manifest and src/main.inf in the current
+    /// directory without creating a new parent directory.
+    Init(init::InitArgs),
+
     /// Compile Inference source files.
     ///
     /// The build command runs one or more compilation phases over a single
@@ -139,6 +161,8 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::New(args)) => new::execute(&args),
+        Some(Commands::Init(args)) => init::execute(&args),
         Some(Commands::Build(args)) => build::execute(&args),
         Some(Commands::Version) => version::execute(),
         Some(Commands::Install(args)) => install::execute(&args).await,
@@ -148,16 +172,15 @@ async fn run() -> Result<()> {
         Some(Commands::Doctor) => doctor::execute().await,
         Some(Commands::SelfCmd(args)) => self_cmd::execute(&args).await,
         None => {
-            if cli.headless {
+            if cli.headless || !tui::should_use_tui() {
                 println!("infs: Inference unified CLI toolchain");
                 println!();
                 println!("Run 'infs --help' for usage information.");
                 println!("Run 'infs build --help' for build command options.");
+                Ok(())
             } else {
-                println!("TUI mode is not yet implemented.");
-                println!("Use 'infs --headless' or 'infs build <file> --codegen -o' for now.");
+                tui::run()
             }
-            Ok(())
         }
     }
 }

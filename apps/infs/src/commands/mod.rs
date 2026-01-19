@@ -9,6 +9,11 @@
 //! - [`build`] - Compile Inference source files
 //! - [`version`] - Display version information
 //!
+//! ## Project Management Commands
+//!
+//! - [`new`] - Create a new Inference project
+//! - [`init`] - Initialize an existing directory as an Inference project
+//!
 //! ## Toolchain Management Commands
 //!
 //! - [`install`] - Install toolchain versions
@@ -21,8 +26,10 @@
 pub mod build;
 pub mod default;
 pub mod doctor;
+pub mod init;
 pub mod install;
 pub mod list;
+pub mod new;
 pub mod self_cmd;
 pub mod uninstall;
 pub mod version;
