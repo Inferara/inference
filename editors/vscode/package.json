@@ -2,7 +2,7 @@
   "name": "inference",
   "displayName": "Inference",
   "description": "Language support for Inference - a programming language for verified WebAssembly",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "inference-lang",
   "license": "GPL-3.0",
   "icon": "icons/inference.png",
