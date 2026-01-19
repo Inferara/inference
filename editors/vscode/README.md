@@ -89,7 +89,7 @@ Learn more:
 
 ## Contributing
 
-Contributions are welcome! Please see the [main repository](https://github.com/inference-lang/inference) for contribution guidelines.
+Contributions are welcome! Please see the [main repository](https://github.com/Inferara/inference) for contribution guidelines.
 
 ## License
 
