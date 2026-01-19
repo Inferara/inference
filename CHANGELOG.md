@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Editor Support
+
+- Add VS Code extension with syntax highlighting for Inference language ([#94])
+- Add TextMate grammar with hierarchical scopes for non-deterministic keywords (`forall`, `exists`, `assume`, `unique`, `@`)
+- Add language configuration with bracket matching, comment toggling, and code folding
+- Publish extension to VS Code Marketplace: [inference-lang.inference](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
+
 ### Breaking Changes
 
 - ast: Remove `source` field from `Location` struct ([#69])
@@ -157,3 +164,4 @@ Initial tagged release.
 [#60]: https://github.com/Inferara/inference/pull/60
 [#69]: https://github.com/Inferara/inference/pull/69
 [#86]: https://github.com/Inferara/inference/pull/86
+[#94]: https://github.com/Inferara/inference/pull/94

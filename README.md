@@ -10,6 +10,12 @@ Inference is a programming language designed for building verifiable software. I
 > [!IMPORTANT]
 > The project is in early development. Internal design and implementation are subject to change. So please be patient with us as we build out the language and tools.
 
+## Editor Support
+
+Install the official VS Code extension for syntax highlighting:
+
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/inference-lang.inference?label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
+
 ## Learn
 
 - Inference [homepage](https://inference-lang.org)

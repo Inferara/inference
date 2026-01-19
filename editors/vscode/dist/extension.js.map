@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/extension.ts"],
+  "sourcesContent": ["import * as vscode from 'vscode';\n\nexport function activate(context: vscode.ExtensionContext) {\n    // Syntax-only extension - no activation logic needed\n    // TextMate grammar and language configuration handle everything\n    console.log('Inference extension activated');\n}\n\nexport function deactivate() {\n    // Nothing to clean up\n}\n"],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;AAEO,SAAS,SAAS,SAAkC;AAGvD,UAAQ,IAAI,+BAA+B;AAC/C;AAEO,SAAS,aAAa;AAE7B;",
+  "names": []
+}

@@ -1,0 +1,69 @@
+{
+  "name": "inference",
+  "displayName": "Inference",
+  "description": "Language support for Inference - a programming language for verified WebAssembly",
+  "version": "0.0.1",
+  "publisher": "inference-lang",
+  "license": "GPL-3.0",
+  "icon": "icons/inference.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Inferara/inference"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "inference",
+    "webassembly",
+    "wasm",
+    "rocq",
+    "coq",
+    "formal-verification"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "inference",
+        "aliases": [
+          "Inference",
+          "inference",
+          "inf"
+        ],
+        "extensions": [
+          ".inf"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/file_icon.svg",
+          "dark": "./icons/file_icon.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "inference",
+        "scopeName": "source.inference",
+        "path": "./syntaxes/inference.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "build:prod": "node esbuild.mjs --production",
+    "watch": "node esbuild.mjs --watch",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
+  }
+}

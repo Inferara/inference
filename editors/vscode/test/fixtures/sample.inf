@@ -1,0 +1,140 @@
+// Test fixture for VS Code extension
+// This file tests syntax highlighting for all Inference language constructs
+
+/* Block comment
+   spanning multiple lines */
+
+/// Documentation comment for main function
+pub fn main() -> i32 {
+    const x: i32 = 42;
+    let mut y: i32 = 0;
+
+    // Control flow
+    if x > 0 {
+        y = x + 1;
+    } else {
+        y = x - 1;
+    }
+
+    // Loop construct
+    loop {
+        y = y + 1;
+        if y > 100 {
+            break;
+        }
+    }
+
+    // Non-deterministic forall block
+    forall {
+        const witness: i32 = @;
+        assume {
+            const valid: bool = witness > 0;
+        }
+    }
+
+    // Non-deterministic exists block
+    exists {
+        assume {
+            const _: bool = true;
+        }
+    }
+
+    // Unique constraint
+    unique {
+        const single: i32 = @;
+    }
+
+    return y;
+}
+
+// Struct definition
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+// Enum definition
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+// Type alias
+type Coordinate = Point;
+
+// External function declaration
+external fn print(value: i32) -> ();
+
+// Spec block for verification
+spec fn add_spec(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+// Function with primed identifier (invariant notation)
+fn compute'(input: i32) -> i32 {
+    return input * 2;
+}
+
+// Various literal forms
+fn literals() -> () {
+    const decimal: i32 = 123;
+    const hex: i32 = 0xFF;
+    const binary: i32 = 0b1010;
+    const octal: i32 = 0o77;
+    const negative: i32 = -42;
+    const flag: bool = true;
+    const other_flag: bool = false;
+    const message: [u8] = "Hello, World!\n";
+    const escaped: [u8] = "Tab:\tNewline:\n";
+    return ();
+}
+
+// All primitive types
+fn primitives(
+    a: i8,
+    b: i16,
+    c: i32,
+    d: i64,
+    e: u8,
+    f: u16,
+    g: u32,
+    h: u64,
+    i: bool,
+) -> () {
+    return ();
+}
+
+// Operators demonstration
+fn operators(x: i32, y: i32) -> i32 {
+    // Arithmetic
+    const sum: i32 = x + y;
+    const diff: i32 = x - y;
+    const prod: i32 = x * y;
+    const quot: i32 = x / y;
+    const rem: i32 = x % y;
+    const power: i32 = x ** y;
+
+    // Comparison
+    const eq: bool = x == y;
+    const ne: bool = x != y;
+    const lt: bool = x < y;
+    const le: bool = x <= y;
+    const gt: bool = x > y;
+    const ge: bool = x >= y;
+
+    // Logical
+    const and_result: bool = eq && ne;
+    const or_result: bool = eq || ne;
+    const not_result: bool = !eq;
+
+    // Bitwise
+    const bit_and: i32 = x & y;
+    const bit_or: i32 = x | y;
+    const bit_xor: i32 = x ^ y;
+    const bit_not: i32 = ~x;
+    const shift_left: i32 = x << 2;
+    const shift_right: i32 = x >> 2;
+
+    return sum;
+}
