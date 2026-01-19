@@ -135,14 +135,54 @@ jobs:
         run: |
           # Install MSYS2 for MinGW toolchain
           choco install msys2 -y --no-progress
-          
-          # Install MinGW UCRT64 toolchain (matches LLVM build)
-          C:\tools\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
-          C:\tools\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm mingw-w64-ucrt-x86_64-toolchain"
-          
+
+          # Configure pacman with faster mirrors and retry settings
+          # This helps avoid "Operation too slow" errors from unresponsive mirrors
+          $pacmanConf = "C:\tools\msys64\etc\pacman.conf"
+          (Get-Content $pacmanConf) -replace '#ParallelDownloads = 5', 'ParallelDownloads = 5' | Set-Content $pacmanConf
+
+          # Install MinGW UCRT64 toolchain with retry logic
+          $maxRetries = 3
+          $retryCount = 0
+          $success = $false
+
+          while (-not $success -and $retryCount -lt $maxRetries) {
+              $retryCount++
+              Write-Output "Attempt $retryCount of $maxRetries to install MinGW toolchain..."
+
+              try {
+                  # Update package database and system
+                  C:\tools\msys64\usr\bin\bash.exe -lc "pacman -Syu --noconfirm"
+
+                  # Install toolchain
+                  C:\tools\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-toolchain"
+
+                  # Verify installation
+                  if (Test-Path "C:\tools\msys64\ucrt64\bin\gcc.exe") {
+                      $success = $true
+                      Write-Output "MinGW toolchain installed successfully"
+                  } else {
+                      throw "gcc.exe not found after installation"
+                  }
+              } catch {
+                  Write-Output "Attempt $retryCount failed: $_"
+                  if ($retryCount -lt $maxRetries) {
+                      Write-Output "Waiting 10 seconds before retry..."
+                      Start-Sleep -Seconds 10
+                      # Clear pacman cache to force fresh download
+                      C:\tools\msys64\usr\bin\bash.exe -lc "pacman -Scc --noconfirm" 2>$null
+                  }
+              }
+          }
+
+          if (-not $success) {
+              Write-Error "Failed to install MinGW toolchain after $maxRetries attempts"
+              exit 1
+          }
+
           # Add MinGW to PATH
           Add-Content -Path $env:GITHUB_PATH -Value "C:\tools\msys64\ucrt64\bin"
-          
+
           Write-Output "Installed MSYS2 UCRT64 MinGW toolchain"
       
       - name: Install LLVM (Linux)
