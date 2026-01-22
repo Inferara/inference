@@ -1,5 +1,6 @@
 use inference_ast::nodes::Location;
 
+use always_assert::always;
 #[test]
 fn test_location_new() {
     let loc = Location::new(0, 10, 1, 0, 1, 10);
@@ -56,8 +57,8 @@ fn test_location_ne() {
 fn test_location_debug() {
     let loc = Location::new(10, 20, 3, 5, 3, 15);
     let debug_str = format!("{loc:?}");
-    assert!(debug_str.contains("Location"));
-    assert!(debug_str.contains("offset_start: 10"));
+    always!(debug_str.contains("Location"));
+    always!(debug_str.contains("offset_start: 10"));
 }
 
 #[test]

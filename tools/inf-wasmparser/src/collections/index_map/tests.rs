@@ -1,5 +1,6 @@
 use super::detail::{Entry, IndexMap};
 
+use always_assert::always;
 type TestMap = IndexMap<char, i32>;
 
 fn assert_get(map: &mut TestMap, key: char, expected: impl Into<Option<(usize, i32)>>) {
@@ -38,14 +39,14 @@ fn assert_get(map: &mut TestMap, key: char, expected: impl Into<Option<(usize, i
 #[test]
 fn new_works() {
     let mut map = <IndexMap<char, i32>>::new();
-    assert!(map.is_empty());
+    always!(map.is_empty());
     assert_eq!(map.len(), 0);
-    assert!(map.iter().eq([]));
-    assert!(map.keys().eq([].iter()));
-    assert!(map.values().eq([].iter()));
-    assert!(map.values_mut().eq([].iter()));
-    assert!(map.iter_mut().eq([]));
-    assert!(map.into_iter().eq([]));
+    always!(map.iter().eq([]));
+    always!(map.keys().eq([].iter()));
+    always!(map.values().eq([].iter()));
+    always!(map.values_mut().eq([].iter()));
+    always!(map.iter_mut().eq([]));
+    always!(map.into_iter().eq([]));
 }
 
 #[test]
@@ -62,7 +63,7 @@ fn insert_works() {
     assert_eq!(map.insert('a', 30), Some(10));
     assert_get(&mut map, 'a', (k0, 30));
     assert_eq!(map.len(), 2);
-    assert!(!map.is_empty());
+    always!(!map.is_empty());
 }
 
 #[test]
@@ -70,17 +71,17 @@ fn extend_works() {
     let mut map = <IndexMap<char, i32>>::new();
     let mut values = [('a', 0), ('b', 1), ('c', 2), ('d', 3), ('e', 4), ('f', 5)];
     map.extend(values);
-    assert!(!map.is_empty());
+    always!(!map.is_empty());
     assert_eq!(map.len(), values.len());
     for (index, (key, value)) in values.into_iter().enumerate() {
         assert_get(&mut map, key, (index, value));
     }
-    assert!(map.iter().eq(values.iter().map(|(k, v)| (k, v))));
-    assert!(map.iter_mut().eq(values.iter_mut().map(|(k, v)| (&*k, v))));
-    assert!(map.keys().eq(values.iter().map(|(k, _v)| k)));
-    assert!(map.values().eq(values.iter().map(|(_k, v)| v)));
-    assert!(map.values_mut().eq(values.iter_mut().map(|(_k, v)| v)));
-    assert!(map.into_iter().eq(values));
+    always!(map.iter().eq(values.iter().map(|(k, v)| (k, v))));
+    always!(map.iter_mut().eq(values.iter_mut().map(|(k, v)| (&*k, v))));
+    always!(map.keys().eq(values.iter().map(|(k, _v)| k)));
+    always!(map.values().eq(values.iter().map(|(_k, v)| v)));
+    always!(map.values_mut().eq(values.iter_mut().map(|(_k, v)| v)));
+    always!(map.into_iter().eq(values));
 }
 
 #[test]
@@ -88,14 +89,14 @@ fn clear_works() {
     let mut map = <IndexMap<char, i32>>::new();
     map.extend([('a', 0), ('b', 1), ('c', 2), ('d', 3), ('e', 4), ('f', 5)]);
     map.clear();
-    assert!(map.is_empty());
+    always!(map.is_empty());
     assert_eq!(map.len(), 0);
-    assert!(map.iter().eq([]));
-    assert!(map.keys().eq([].iter()));
-    assert!(map.values().eq([].iter()));
-    assert!(map.values_mut().eq([].iter()));
-    assert!(map.iter_mut().eq([]));
-    assert!(map.into_iter().eq([]));
+    always!(map.iter().eq([]));
+    always!(map.keys().eq([].iter()));
+    always!(map.values().eq([].iter()));
+    always!(map.values_mut().eq([].iter()));
+    always!(map.iter_mut().eq([]));
+    always!(map.into_iter().eq([]));
 }
 
 #[test]
@@ -175,7 +176,7 @@ fn entry_works_vacant() {
             }
         }
     }
-    assert!(!map.is_empty());
+    always!(!map.is_empty());
     assert_eq!(map.len(), values.len());
     for (index, (key, value)) in values.into_iter().enumerate() {
         assert_get(&mut map, key, (index, value));

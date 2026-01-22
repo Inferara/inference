@@ -593,7 +593,7 @@ impl SectionItem for Table<'_> {
     const ANCHOR: CustomPlaceAnchor = CustomPlaceAnchor::Table;
 
     fn encode(&self, section: &mut wasm_encoder::TableSection) {
-        assert!(self.exports.names.is_empty());
+        always!(self.exports.names.is_empty());
         match &self.kind {
             TableKind::Normal {
                 ty,
@@ -617,7 +617,7 @@ impl SectionItem for Memory<'_> {
     const ANCHOR: CustomPlaceAnchor = CustomPlaceAnchor::Memory;
 
     fn encode(&self, section: &mut wasm_encoder::MemorySection) {
-        assert!(self.exports.names.is_empty());
+        always!(self.exports.names.is_empty());
         match &self.kind {
             MemoryKind::Normal(t) => {
                 section.memory(t.to_memory_type());
@@ -632,7 +632,7 @@ impl SectionItem for Global<'_> {
     const ANCHOR: CustomPlaceAnchor = CustomPlaceAnchor::Global;
 
     fn encode(&self, section: &mut wasm_encoder::GlobalSection) {
-        assert!(self.exports.names.is_empty());
+        always!(self.exports.names.is_empty());
         let init = match &self.kind {
             GlobalKind::Inline(expr) => expr.to_const_expr(),
             _ => panic!("GlobalKind should be inline during encoding"),
@@ -669,6 +669,7 @@ impl SectionItem for Elem<'_> {
     fn encode(&self, section: &mut wasm_encoder::ElementSection) {
         use wasm_encoder::Elements;
 
+use always_assert::always;
         let elements = match &self.payload {
             ElemPayload::Indices(v) => {
                 Elements::Functions(Cow::Owned(v.iter().map(|i| i.unwrap_u32()).collect()))
@@ -727,7 +728,7 @@ impl Func<'_> {
         section: &mut wasm_encoder::CodeSection,
         mut dwarf: Option<&mut dwarf::Dwarf>,
     ) -> Vec<wasm_encoder::BranchHint> {
-        assert!(self.exports.names.is_empty());
+        always!(self.exports.names.is_empty());
         let (expr, locals) = match &self.kind {
             FuncKind::Inline { expression, locals } => (expression, locals),
             _ => panic!("should only have inline functions in emission"),
@@ -1214,7 +1215,7 @@ impl Names<'_> {
 
 impl Encode for Id<'_> {
     fn encode(&self, dst: &mut Vec<u8>) {
-        assert!(!self.is_gensym());
+        always!(!self.is_gensym());
         self.name().encode(dst);
     }
 }

@@ -61,3 +61,4 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 leb128 = "0.2.5"
 rustc-hash = "2.1.1"
 inkwell = { version = "0.8.0", features = ["llvm21-1"] }
+always-assert = "0.1.0"

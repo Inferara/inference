@@ -33,6 +33,7 @@ use crate::{
 use crate::{prelude::*, CompositeInnerType, Ordering};
 use core::ops::{Deref, DerefMut};
 
+use always_assert::always;
 #[cfg(feature = "simd")]
 mod simd;
 
@@ -259,7 +260,7 @@ enum MaybeType<T = ValType> {
 // current expected size.
 #[test]
 fn assert_maybe_type_small() {
-    assert!(core::mem::size_of::<MaybeType>() == 4);
+    always!(core::mem::size_of::<MaybeType>() == 4);
 }
 
 impl core::fmt::Display for MaybeType {

@@ -3,6 +3,7 @@ use crate::utils::{
 };
 use inference_ast::builder::Builder;
 use inference_ast::nodes::{
+use always_assert::always;
     AstNode, Definition, Expression, Literal, OperatorKind, Statement, Visibility,
 };
 
@@ -31,7 +32,7 @@ fn test_invalid_syntax_return_missing_left_operand_is_rejected() {
     let result = std::panic::catch_unwind(|| {
         build_ast(source.to_string());
     });
-    assert!(
+    always!(
         result.is_err(),
         "Invalid syntax 'return >= 0;' should panic during parsing"
     );
@@ -44,7 +45,7 @@ fn test_invalid_syntax_in_forall_block_is_rejected() {
     let result = std::panic::catch_unwind(|| {
         build_ast(source.to_string());
     });
-    assert!(
+    always!(
         result.is_err(),
         "Invalid syntax inside forall block should panic during parsing"
     );
@@ -65,7 +66,7 @@ fn test_missing_semicolon_not_yet_detected() {
     // FIXME: This should fail (is_err()), but currently passes because
     // MISSING nodes are not detected. Update this assertion when the
     // issue is fixed.
-    assert!(
+    always!(
         result.is_ok(),
         "FIXME: Missing semicolon is currently NOT detected (uses MISSING node, not ERROR)"
     );
@@ -719,7 +720,7 @@ fn test_parse_external_function_with_return() {
     assert_eq!(ext_funcs.len(), 1);
 
     if let AstNode::Definition(Definition::ExternalFunction(ext_func)) = &ext_funcs[0] {
-        assert!(ext_func.returns.is_some(), "Should have return type");
+        always!(ext_func.returns.is_some(), "Should have return type");
     }
 }
 
@@ -1014,7 +1015,7 @@ fn test_parse_function_with_forall_and_variable() {
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "sum");
 
-    assert!(func_def.has_parameters());
+    always!(func_def.has_parameters());
     let args = func_def.arguments.as_ref().expect("Should have arguments");
     assert_eq!(args.len(), 1);
     if let inference_ast::nodes::ArgumentType::Argument(arg) = &args[0] {
@@ -1023,7 +1024,7 @@ fn test_parse_function_with_forall_and_variable() {
         panic!("Expected Argument type");
     }
 
-    assert!(!func_def.is_void());
+    always!(!func_def.is_void());
 
     let statements = func_def.body.statements();
     assert_eq!(
@@ -1044,8 +1045,8 @@ fn test_parse_function_with_forall_extended() {
     assert_eq!(source_file.function_definitions().len(), 1);
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "test");
-    assert!(!func_def.has_parameters());
-    assert!(func_def.is_void());
+    always!(!func_def.has_parameters());
+    always!(func_def.is_void());
 }
 
 #[test]
@@ -1059,10 +1060,10 @@ fn test_parse_function_with_assume_extended() {
     assert_eq!(source_file.function_definitions().len(), 1);
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "test");
-    assert!(!func_def.has_parameters());
-    assert!(func_def.is_void());
+    always!(!func_def.has_parameters());
+    always!(func_def.is_void());
     let statements = func_def.body.statements();
-    assert!(!statements.is_empty());
+    always!(!statements.is_empty());
 }
 
 #[test]
@@ -1076,11 +1077,11 @@ fn test_parse_function_with_filter() {
     assert_eq!(source_file.function_definitions().len(), 1);
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "add");
-    assert!(func_def.has_parameters());
+    always!(func_def.has_parameters());
     assert_eq!(func_def.arguments.as_ref().unwrap().len(), 2);
-    assert!(!func_def.is_void());
+    always!(!func_def.is_void());
     let statements = func_def.body.statements();
-    assert!(statements.len() >= 2);
+    always!(statements.len() >= 2);
 }
 
 #[test]
@@ -1105,10 +1106,10 @@ fn test() -> HashMap { return HashMap {}; }"#;
     assert_eq!(use_dirs.len(), 1);
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "test");
-    assert!(!func_def.has_parameters());
-    assert!(!func_def.is_void());
+    always!(!func_def.has_parameters());
+    always!(!func_def.is_void());
     let use_directive = &use_dirs[0];
-    assert!(use_directive.imported_types.is_some() || use_directive.segments.is_some());
+    always!(use_directive.imported_types.is_some() || use_directive.segments.is_some());
 }
 
 // FIXME: tree-sitter grammar does not support typeof() syntax yet.
@@ -1195,10 +1196,10 @@ fn test_parse_struct_with_multiple_fields() {
     assert_eq!(struct_def.name(), "Point");
     assert_eq!(struct_def.fields.len(), 4);
     let field_names: Vec<String> = struct_def.fields.iter().map(|f| f.name.name()).collect();
-    assert!(field_names.contains(&"x".to_string()));
-    assert!(field_names.contains(&"y".to_string()));
-    assert!(field_names.contains(&"z".to_string()));
-    assert!(field_names.contains(&"label".to_string()));
+    always!(field_names.contains(&"x".to_string()));
+    always!(field_names.contains(&"y".to_string()));
+    always!(field_names.contains(&"z".to_string()));
+    always!(field_names.contains(&"label".to_string()));
 }
 
 #[test]
@@ -1222,10 +1223,10 @@ fn test_parse_enum_with_variants() {
     assert_eq!(enum_def.name(), "Color");
     assert_eq!(enum_def.variants.len(), 4);
     let variant_names: Vec<String> = enum_def.variants.iter().map(|v| v.name()).collect();
-    assert!(variant_names.contains(&"Red".to_string()));
-    assert!(variant_names.contains(&"Green".to_string()));
-    assert!(variant_names.contains(&"Blue".to_string()));
-    assert!(variant_names.contains(&"Custom".to_string()));
+    always!(variant_names.contains(&"Red".to_string()));
+    always!(variant_names.contains(&"Green".to_string()));
+    always!(variant_names.contains(&"Blue".to_string()));
+    always!(variant_names.contains(&"Custom".to_string()));
 }
 
 #[test]
@@ -1254,7 +1255,7 @@ fn test_parse_nested_struct_expression() {
 
     let struct_exprs =
         arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Struct(_))));
-    assert!(
+    always!(
         !struct_exprs.is_empty(),
         "Should find at least 1 struct expression"
     );
@@ -1271,8 +1272,8 @@ fn test_parse_complex_binary_expression() {
     assert_eq!(source_file.function_definitions().len(), 1);
     let func_def = &source_file.function_definitions()[0];
     assert_eq!(func_def.name(), "test");
-    assert!(!func_def.has_parameters());
-    assert!(!func_def.is_void());
+    always!(!func_def.has_parameters());
+    always!(!func_def.is_void());
     let statements = func_def.body.statements();
     assert_eq!(statements.len(), 1);
 }
@@ -1297,7 +1298,7 @@ fn test_parse_if_elseif_else() {
     assert_function_signature(&arena, "test", Some(1), true);
 
     let ifs = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::If(_))));
-    assert!(!ifs.is_empty(), "Should find at least 1 if statement");
+    always!(!ifs.is_empty(), "Should find at least 1 if statement");
 }
 
 #[test]
@@ -1396,7 +1397,7 @@ fn test_parse_array_of_arrays() {
             AstNode::Expression(Expression::Literal(Literal::Array(_)))
         )
     });
-    assert!(
+    always!(
         array_literals.len() >= 3,
         "Should find at least 3 array literals (outer + 2 inner)"
     );
@@ -1415,7 +1416,7 @@ fn test_parse_function_with_self_param() {
                 .arguments
                 .as_ref()
                 .expect("Function should have arguments");
-            assert!(
+            always!(
                 args.iter()
                     .any(|arg| matches!(arg, inference_ast::nodes::ArgumentType::SelfReference(_))),
                 "Function should have a self parameter"

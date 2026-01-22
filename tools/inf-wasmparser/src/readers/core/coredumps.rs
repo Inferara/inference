@@ -1,6 +1,7 @@
 use crate::prelude::*;
 use crate::{BinaryReader, FromReader, Result};
 
+use always_assert::always;
 /// The data portion of a custom section representing a core dump. Per the
 /// tool-conventions repo, this section just specifies the executable name that
 /// the core dump came from while the rest of the core dump information is
@@ -14,7 +15,7 @@ use crate::{BinaryReader, FromReader, Result};
 ///      0x73, 0x6d];
 /// let mut reader = BinaryReader::new(data, 0);
 /// let core = CoreDumpSection::new(reader).unwrap();
-/// assert!(core.name == "test.wasm")
+/// always!(core.name == "test.wasm")
 /// ```
 pub struct CoreDumpSection<'a> {
     /// The name of the process that created the core dump
@@ -50,7 +51,7 @@ impl<'a> CoreDumpSection<'a> {
 /// let data: &[u8] = &[0x01, 0x00, 0x04, 0x74, 0x65, 0x73, 0x74];
 /// let reader = BinaryReader::new(data, 0);
 /// let modules_section = CoreDumpModulesSection::new(reader).unwrap();
-/// assert!(modules_section.modules[0] == "test")
+/// always!(modules_section.modules[0] == "test")
 /// ```
 #[derive(Debug)]
 pub struct CoreDumpModulesSection<'a> {
@@ -157,14 +158,14 @@ impl<'a> FromReader<'a> for CoreDumpInstance {
 ///     0x2a, 0x33, 0x01, 0x7f, 0x01, 0x01, 0x7f, 0x02];
 /// let reader = BinaryReader::new(data, 0);
 /// let corestack = CoreDumpStackSection::new(reader).unwrap();
-/// assert!(corestack.name == "main");
-/// assert!(corestack.frames.len() == 1);
+/// always!(corestack.name == "main");
+/// always!(corestack.frames.len() == 1);
 /// let frame = &corestack.frames[0];
-/// assert!(frame.instanceidx == 4);
-/// assert!(frame.funcidx == 42);
-/// assert!(frame.codeoffset == 51);
-/// assert!(frame.locals.len() == 1);
-/// assert!(frame.stack.len() == 1);
+/// always!(frame.instanceidx == 4);
+/// always!(frame.funcidx == 42);
+/// always!(frame.codeoffset == 51);
+/// always!(frame.locals.len() == 1);
+/// always!(frame.stack.len() == 1);
 /// ```
 pub struct CoreDumpStackSection<'a> {
     /// The thread name

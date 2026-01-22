@@ -94,11 +94,12 @@ mod tests {
     use std::panic;
     use std::path::PathBuf;
 
+use always_assert::always;
     #[test]
     fn test_parse_test_data() {
         let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
 
-        assert!(
+        always!(
             test_data_dir.exists(),
             "test_data directory not found at {:?}",
             test_data_dir
@@ -119,7 +120,7 @@ mod tests {
 
         wasm_files.sort();
 
-        assert!(
+        always!(
             !wasm_files.is_empty(),
             "No .wasm files found in test_data directory"
         );
@@ -150,7 +151,7 @@ mod tests {
             match result {
                 Ok(Ok(translation)) => {
                     println!("✓ Successfully parsed {}", file_name);
-                    assert!(
+                    always!(
                         !translation.is_empty(),
                         "Translation result is empty for {}",
                         file_name

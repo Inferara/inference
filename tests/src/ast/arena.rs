@@ -18,7 +18,7 @@ fn test_find_parent_node_returns_correct_parent() {
     let source_file = &source_files[0];
 
     let parent_id = arena.find_parent_node(function.id);
-    assert!(parent_id.is_some(), "Function should have a parent");
+    always!(parent_id.is_some(), "Function should have a parent");
     assert_eq!(
         parent_id.unwrap(),
         source_file.id,
@@ -36,7 +36,7 @@ fn test_find_parent_node_root_returns_none() {
     let source_file = &source_files[0];
 
     let parent_id = arena.find_parent_node(source_file.id);
-    assert!(
+    always!(
         parent_id.is_none(),
         "Root SourceFile node should have no parent (not Some(u32::MAX))"
     );
@@ -49,7 +49,7 @@ fn test_find_parent_node_nonexistent_returns_none() {
 
     let nonexistent_id = u32::MAX - 1;
     let parent_id = arena.find_parent_node(nonexistent_id);
-    assert!(
+    always!(
         parent_id.is_none(),
         "Non-existent node ID should return None"
     );
@@ -69,14 +69,14 @@ fn test_find_parent_node_nested_hierarchy() {
 
     let var_def = &statements[0];
     let var_parent_id = arena.find_parent_node(var_def.id());
-    assert!(
+    always!(
         var_parent_id.is_some(),
         "Variable definition should have a parent"
     );
 
     let block_node = arena.find_node(var_parent_id.unwrap());
-    assert!(block_node.is_some(), "Parent block should exist in arena");
-    assert!(
+    always!(block_node.is_some(), "Parent block should exist in arena");
+    always!(
         matches!(block_node.unwrap(), AstNode::Statement(Statement::Block(_))),
         "Variable definition's parent should be a Block"
     );
@@ -114,7 +114,7 @@ fn test_list_children_empty_for_leaf_node() {
 
     let children = arena.get_children_cmp(constant.id(), |_| true);
 
-    assert!(
+    always!(
         !children.is_empty(),
         "Constant definition should have child nodes (identifier, type, literal)"
     );
@@ -132,7 +132,7 @@ fn test_get_children_cmp_traverses_tree() {
     let all_statements =
         arena.get_children_cmp(function.id, |node| matches!(node, AstNode::Statement(_)));
 
-    assert!(
+    always!(
         all_statements.len() >= 3,
         "Should find at least 3 statements (block + 2 var defs or returns)"
     );
@@ -162,7 +162,7 @@ fn test_get_children_cmp_with_filter() {
     let statements =
         arena.get_children_cmp(function.id, |node| matches!(node, AstNode::Statement(_)));
 
-    assert!(
+    always!(
         !statements.is_empty(),
         "Should find statements when traversing from function"
     );
@@ -185,12 +185,12 @@ fn test_find_parent_chain_to_root() {
     while let Some(parent_id) = arena.find_parent_node(current_id) {
         current_id = parent_id;
         depth += 1;
-        assert!(depth < MAX_DEPTH, "Parent chain should not be circular");
+        always!(depth < MAX_DEPTH, "Parent chain should not be circular");
     }
 
     let root_node = arena.find_node(current_id);
-    assert!(root_node.is_some(), "Should reach a valid root node");
-    assert!(
+    always!(root_node.is_some(), "Should reach a valid root node");
+    always!(
         matches!(root_node.unwrap(), AstNode::Ast(Ast::SourceFile(_))),
         "Root node should be SourceFile"
     );
@@ -210,7 +210,7 @@ fn test_multiple_source_definitions_have_same_parent() {
 
     for func in &functions {
         let parent_id = arena.find_parent_node(func.id);
-        assert!(parent_id.is_some());
+        always!(parent_id.is_some());
         assert_eq!(
             parent_id.unwrap(),
             expected_parent_id,
@@ -239,7 +239,7 @@ fn test_struct_fields_have_struct_as_ancestor() {
 
     for field in &struct_fields {
         let parent_id = arena.find_parent_node(field.id());
-        assert!(parent_id.is_some(), "Field should have a parent");
+        always!(parent_id.is_some(), "Field should have a parent");
         assert_eq!(
             parent_id.unwrap(),
             struct_def.id(),
@@ -274,7 +274,7 @@ fn test_children_lookup_consistency() {
             current_id = parent_id;
         }
 
-        assert!(
+        always!(
             found_ancestor,
             "Every child returned by get_children_cmp should have the queried node as an ancestor"
         );
@@ -294,7 +294,7 @@ fn test_get_node_source_returns_function_source() {
     let function = &functions[0];
 
     let function_source = arena.get_node_source(function.id);
-    assert!(
+    always!(
         function_source.is_some(),
         "Function source should be retrievable"
     );
@@ -325,9 +325,9 @@ fn test_get_node_source_for_nested_identifier() {
         }
     });
 
-    assert!(value_identifier.is_some(), "Should find 'value' identifier");
+    always!(value_identifier.is_some(), "Should find 'value' identifier");
     let ident_source = arena.get_node_source(value_identifier.unwrap().id());
-    assert!(
+    always!(
         ident_source.is_some(),
         "Identifier source should be retrievable"
     );
@@ -348,7 +348,7 @@ fn test_get_node_source_for_source_file() {
     let source_file = &source_files[0];
 
     let file_source = arena.get_node_source(source_file.id);
-    assert!(
+    always!(
         file_source.is_some(),
         "SourceFile source should be retrievable"
     );
@@ -366,7 +366,7 @@ fn test_get_node_source_nonexistent_returns_none() {
 
     let nonexistent_id = u32::MAX - 1;
     let result = arena.get_node_source(nonexistent_id);
-    assert!(result.is_none(), "Non-existent node ID should return None");
+    always!(result.is_none(), "Non-existent node ID should return None");
 }
 
 #[test]
@@ -381,14 +381,14 @@ fn test_get_node_source_for_binary_expression() {
         )
     });
 
-    assert!(
+    always!(
         !binary_expressions.is_empty(),
         "Should find binary expression"
     );
     let binary_expr = &binary_expressions[0];
 
     let expr_source = arena.get_node_source(binary_expr.id());
-    assert!(
+    always!(
         expr_source.is_some(),
         "Binary expression source should be retrievable"
     );
@@ -411,7 +411,7 @@ fn test_get_node_source_for_return_statement() {
     let return_stmt = &return_statements[0];
 
     let stmt_source = arena.get_node_source(return_stmt.id());
-    assert!(
+    always!(
         stmt_source.is_some(),
         "Return statement source should be retrievable"
     );
@@ -436,7 +436,7 @@ fn test_find_source_file_for_function_returns_correct_id() {
     let expected_source_file_id = source_files[0].id;
 
     let found_source_file_id = arena.find_source_file_for_node(function.id);
-    assert!(
+    always!(
         found_source_file_id.is_some(),
         "Should find SourceFile for function"
     );
@@ -457,7 +457,7 @@ fn test_find_source_file_for_source_file_returns_self() {
     let source_file = &source_files[0];
 
     let found_id = arena.find_source_file_for_node(source_file.id);
-    assert!(found_id.is_some(), "SourceFile should find itself");
+    always!(found_id.is_some(), "SourceFile should find itself");
     assert_eq!(
         found_id.unwrap(),
         source_file.id,
@@ -472,7 +472,7 @@ fn test_find_source_file_for_nonexistent_returns_none() {
 
     let nonexistent_id = u32::MAX - 1;
     let result = arena.find_source_file_for_node(nonexistent_id);
-    assert!(result.is_none(), "Non-existent node ID should return None");
+    always!(result.is_none(), "Non-existent node ID should return None");
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn test_get_node_source_zero_length_span() {
     let function = &functions[0];
 
     let func_source = arena.get_node_source(function.id);
-    assert!(
+    always!(
         func_source.is_some(),
         "Function with empty body should still have retrievable source"
     );
@@ -513,14 +513,14 @@ fn test_find_source_file_for_deeply_nested_node() {
         )
     });
 
-    assert!(
+    always!(
         !binary_expressions.is_empty(),
         "Should find binary expressions"
     );
 
     for expr in &binary_expressions {
         let found_id = arena.find_source_file_for_node(expr.id());
-        assert!(
+        always!(
             found_id.is_some(),
             "Deeply nested expression should have SourceFile ancestor"
         );
@@ -548,7 +548,7 @@ fn test_get_node_source_for_variable_definition() {
     let var_def = &var_definitions[0];
 
     let def_source = arena.get_node_source(var_def.id());
-    assert!(
+    always!(
         def_source.is_some(),
         "Variable definition source should be retrievable"
     );
@@ -571,7 +571,7 @@ fn test_get_node_source_for_struct_definition() {
     let struct_def = &struct_defs[0];
 
     let struct_source = arena.get_node_source(struct_def.id());
-    assert!(
+    always!(
         struct_source.is_some(),
         "Struct definition source should be retrievable"
     );
@@ -593,21 +593,21 @@ fn test_get_node_source_multiple_functions() {
     let first_source = arena.get_node_source(functions[0].id);
     let second_source = arena.get_node_source(functions[1].id);
 
-    assert!(
+    always!(
         first_source.is_some(),
         "First function source should be retrievable"
     );
-    assert!(
+    always!(
         second_source.is_some(),
         "Second function source should be retrievable"
     );
 
     let sources: Vec<&str> = vec![first_source.unwrap(), second_source.unwrap()];
-    assert!(
+    always!(
         sources.contains(&"fn first() -> i32 { return 1; }"),
         "Should find first function source"
     );
-    assert!(
+    always!(
         sources.contains(&"fn second() -> i32 { return 2; }"),
         "Should find second function source"
     );
@@ -636,9 +636,9 @@ type MyArray = [i32; 10];"#;
     assert_eq!(type_defs.len(), 3, "Should find 3 type definitions");
 
     let names: Vec<&str> = type_defs.iter().map(|td| td.name.name.as_str()).collect();
-    assert!(names.contains(&"MyInt"));
-    assert!(names.contains(&"MyBool"));
-    assert!(names.contains(&"MyArray"));
+    always!(names.contains(&"MyInt"));
+    always!(names.contains(&"MyBool"));
+    always!(names.contains(&"MyArray"));
 }
 
 #[test]
@@ -647,7 +647,7 @@ fn test_list_type_definitions_empty_when_no_types() {
     let arena = build_ast(source.to_string());
 
     let type_defs = arena.list_type_definitions();
-    assert!(type_defs.is_empty(), "Should find no type definitions");
+    always!(type_defs.is_empty(), "Should find no type definitions");
 }
 
 #[test]
@@ -672,14 +672,14 @@ type MyBool = bool;"#;
 fn test_get_node_source_with_manually_constructed_arena_invalid_source_file() {
     let arena = Arena::default();
     let result = arena.get_node_source(12345);
-    assert!(result.is_none(), "Empty arena should return None");
+    always!(result.is_none(), "Empty arena should return None");
 }
 
 #[test]
 fn test_find_source_file_for_nonexistent_node_in_empty_arena() {
     let arena = Arena::default();
     let result = arena.find_source_file_for_node(99999);
-    assert!(
+    always!(
         result.is_none(),
         "Non-existent node in empty arena should return None"
     );
@@ -689,7 +689,7 @@ fn test_find_source_file_for_nonexistent_node_in_empty_arena() {
 fn test_find_parent_node_in_empty_arena() {
     let arena = Arena::default();
     let result = arena.find_parent_node(12345);
-    assert!(
+    always!(
         result.is_none(),
         "Empty arena should return None for parent lookup"
     );
@@ -699,7 +699,7 @@ fn test_find_parent_node_in_empty_arena() {
 fn test_find_node_in_empty_arena() {
     let arena = Arena::default();
     let result = arena.find_node(12345);
-    assert!(
+    always!(
         result.is_none(),
         "Empty arena should return None for find_node"
     );
@@ -709,7 +709,7 @@ fn test_find_node_in_empty_arena() {
 fn test_get_children_cmp_on_nonexistent_node() {
     let arena = Arena::default();
     let children = arena.get_children_cmp(99999, |_| true);
-    assert!(
+    always!(
         children.is_empty(),
         "Non-existent node should return empty children"
     );
@@ -719,7 +719,7 @@ fn test_get_children_cmp_on_nonexistent_node() {
 fn test_filter_nodes_on_empty_arena() {
     let arena = Arena::default();
     let filtered = arena.filter_nodes(|_| true);
-    assert!(
+    always!(
         filtered.is_empty(),
         "Empty arena should return no filtered nodes"
     );
@@ -729,7 +729,7 @@ fn test_filter_nodes_on_empty_arena() {
 fn test_source_files_on_empty_arena() {
     let arena = Arena::default();
     let source_files = arena.source_files();
-    assert!(
+    always!(
         source_files.is_empty(),
         "Empty arena should return no source files"
     );
@@ -739,7 +739,7 @@ fn test_source_files_on_empty_arena() {
 fn test_functions_on_empty_arena() {
     let arena = Arena::default();
     let functions = arena.functions();
-    assert!(
+    always!(
         functions.is_empty(),
         "Empty arena should return no functions"
     );
@@ -749,7 +749,7 @@ fn test_functions_on_empty_arena() {
 fn test_list_type_definitions_on_empty_arena() {
     let arena = Arena::default();
     let type_defs = arena.list_type_definitions();
-    assert!(
+    always!(
         type_defs.is_empty(),
         "Empty arena should return no type definitions"
     );
@@ -800,7 +800,7 @@ fn test_add_node_valid_succeeds() {
     let node = AstNode::Expression(inference_ast::nodes::Expression::Identifier(identifier));
 
     arena.add_node(node, u32::MAX);
-    assert!(
+    always!(
         arena.find_node(1).is_some(),
         "Added node should be retrievable"
     );
@@ -810,6 +810,7 @@ fn test_add_node_valid_succeeds() {
 fn test_add_node_with_parent_creates_relationship() {
     use std::rc::Rc;
 
+use always_assert::always;
     let mut arena = Arena::default();
 
     let parent_ident = Rc::new(Identifier::new(

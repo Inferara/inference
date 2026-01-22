@@ -10,6 +10,7 @@ mod error_recovery_tests {
     use crate::utils::build_ast;
     use inference_type_checker::TypeCheckerBuilder;
 
+use always_assert::always;
     fn try_type_check(
         source: &str,
     ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
@@ -27,14 +28,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect multiple unknown variables"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var1") && error_msg.contains("unknown_var2"),
                 "Error message should contain both unknown variables, got: {}",
                 error_msg
@@ -53,14 +54,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect errors in both functions"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var1") && error_msg.contains("unknown_var2"),
                 "Error message should contain errors from both functions, got: {}",
                 error_msg
@@ -76,14 +77,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect both registration and inference errors"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownType") && error_msg.contains("unknown_var"),
                 "Error message should contain both unknown type and unknown variable, got: {}",
                 error_msg
@@ -102,19 +103,19 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should report unknown type error"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownType"),
                 "Error message should mention unknown type, got: {}",
                 error_msg
             );
-            assert!(
+            always!(
                 !error_msg.contains("undefined function `helper`"),
                 "Error message should NOT contain undefined function error, got: {}",
                 error_msg
@@ -134,7 +135,7 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown type error"
         );
@@ -142,7 +143,7 @@ mod error_recovery_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             let unknown_type_count = error_msg.matches("unknown type `UnknownType`").count();
-            assert!(
+            always!(
                 unknown_type_count <= 3,
                 "UnknownType error should not be excessively duplicated (found {} occurrences), got: {}",
                 unknown_type_count,
@@ -159,14 +160,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect errors in method call"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var") || error_msg.contains("cannot call method"),
                 "Error message should contain unknown variable or method call error, got: {}",
                 error_msg
@@ -182,14 +183,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect undefined struct"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UndefinedStruct") || error_msg.contains("unknown type"),
                 "Error message should mention undefined struct or unknown type, got: {}",
                 error_msg
@@ -205,11 +206,11 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Type checker should detect undefined enum");
+        always!(result.is_err(), "Type checker should detect undefined enum");
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UndefinedEnum") || error_msg.contains("unknown type"),
                 "Error message should mention undefined enum or unknown type, got: {}",
                 error_msg
@@ -225,7 +226,7 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect all unknown types"
         );
@@ -242,7 +243,7 @@ mod error_recovery_tests {
                 .filter(|&&x| x)
                 .count();
 
-            assert!(
+            always!(
                 type_count >= 2,
                 "Error message should contain at least 2 unknown types, got: {}",
                 error_msg
@@ -258,7 +259,7 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown variable"
         );
@@ -266,7 +267,7 @@ mod error_recovery_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             let has_location_prefix = error_msg.contains(":");
-            assert!(
+            always!(
                 has_location_prefix,
                 "Error message should include location information (line:col prefix), got: {}",
                 error_msg
@@ -282,14 +283,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown identifiers in binary expression"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var1") || error_msg.contains("unknown_var2"),
                 "Error message should contain at least one unknown variable, got: {}",
                 error_msg
@@ -305,14 +306,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect undefined function"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("undefined_func") || error_msg.contains("unknown_var"),
                 "Error message should mention undefined function or unknown variable, got: {}",
                 error_msg
@@ -332,7 +333,7 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown field types"
         );
@@ -342,7 +343,7 @@ mod error_recovery_tests {
             let has_type1 = error_msg.contains("UnknownType1");
             let has_type2 = error_msg.contains("UnknownType2");
 
-            assert!(
+            always!(
                 has_type1 || has_type2,
                 "Error message should contain at least one unknown type, got: {}",
                 error_msg
@@ -362,14 +363,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown types in method signature"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownParam") || error_msg.contains("UnknownReturn"),
                 "Error message should contain unknown parameter or return type, got: {}",
                 error_msg
@@ -391,14 +392,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect errors in invalid function"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownType") || error_msg.contains("unknown_var"),
                 "Error message should contain errors from invalid function, got: {}",
                 error_msg
@@ -416,14 +417,14 @@ mod error_recovery_tests {
             }
         "#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect both unknown type and unknown variable"
         );
 
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownType") || error_msg.contains("unknown_var"),
                 "Error message should contain at least one error, got: {}",
                 error_msg
@@ -435,7 +436,7 @@ mod error_recovery_tests {
     fn test_error_deduplication_same_unknown_type_multiple_uses() {
         let source = r#"fn test(a: UnknownType, b: UnknownType) -> UnknownType { let c: UnknownType = a; return c; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Type checker should detect unknown type");
+        always!(result.is_err(), "Type checker should detect unknown type");
         if let Err(error) = result {
             let error_msg = error.to_string();
             let count = error_msg.matches("unknown type `UnknownType`").count();
@@ -451,7 +452,7 @@ mod error_recovery_tests {
     fn test_error_deduplication_same_undefined_function_multiple_calls() {
         let source = r#"fn test() -> i32 { let x: i32 = missing_func(); let y: i32 = missing_func(); return x + y; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect undefined function"
         );
@@ -472,7 +473,7 @@ mod error_recovery_tests {
     fn test_error_deduplication_same_unknown_identifier_multiple_uses() {
         let source = r#"fn test() -> i32 { let x: i32 = unknown_var; let y: i32 = unknown_var; return x + y + unknown_var; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown identifier"
         );
@@ -493,7 +494,7 @@ mod error_recovery_tests {
     fn test_error_deduplication_same_undefined_struct_multiple_uses() {
         let source = r#"fn test(a: MissingStruct) -> MissingStruct { let b: MissingStruct = MissingStruct { }; return b; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect undefined struct"
         );
@@ -503,7 +504,7 @@ mod error_recovery_tests {
                 .matches("struct `MissingStruct` is not defined")
                 .count();
             let type_count = error_msg.matches("unknown type `MissingStruct`").count();
-            assert!(
+            always!(
                 struct_count <= 1 && type_count <= 1,
                 "MissingStruct error should appear at most once due to deduplication (struct: {}, type: {}), error: {}",
                 struct_count,
@@ -518,14 +519,14 @@ mod error_recovery_tests {
         let source =
             r#"fn test() -> MissingEnum { let x: MissingEnum = MissingEnum::Variant; return x; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Type checker should detect undefined enum");
+        always!(result.is_err(), "Type checker should detect undefined enum");
         if let Err(error) = result {
             let error_msg = error.to_string();
             let enum_count = error_msg
                 .matches("enum `MissingEnum` is not defined")
                 .count();
             let type_count = error_msg.matches("unknown type `MissingEnum`").count();
-            assert!(
+            always!(
                 enum_count <= 1 && type_count <= 1,
                 "MissingEnum error should appear at most once due to deduplication (enum: {}, type: {}), error: {}",
                 enum_count,
@@ -539,7 +540,7 @@ mod error_recovery_tests {
     fn test_multiple_different_errors_all_collected() {
         let source = r#"fn test(x: UnknownType1) -> UnknownType2 { let y: i32 = unknown_var; return missing_func(); }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect multiple errors"
         );
@@ -553,7 +554,7 @@ mod error_recovery_tests {
                 .iter()
                 .filter(|&&x| x)
                 .count();
-            assert!(
+            always!(
                 error_count >= 3,
                 "Should collect at least 3 different errors (found {}): {}",
                 error_count,
@@ -567,13 +568,13 @@ mod error_recovery_tests {
         let source =
             r#"fn test() -> i32 { let x: i32 = true; let y: i32 = unknown_var; return y; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect type mismatch and unknown variable"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("type mismatch") || error_msg.contains("unknown_var"),
                 "Should report both type mismatch and unknown identifier errors: {}",
                 error_msg
@@ -586,13 +587,13 @@ mod error_recovery_tests {
         let source =
             r#"fn test() -> i32 { return true; } fn test2() -> i32 { return undefined_func(); }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect errors in both functions"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("type mismatch") || error_msg.contains("undefined"),
                 "Should report errors from both functions: {}",
                 error_msg
@@ -604,7 +605,7 @@ mod error_recovery_tests {
     fn test_error_recovery_continues_through_multiple_statements() {
         let source = r#"fn test() -> i32 { let a: i32 = unknown1; let b: i32 = unknown2; let c: i32 = unknown3; return a + b + c; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect all unknown variables"
         );
@@ -614,7 +615,7 @@ mod error_recovery_tests {
             let count2 = error_msg.contains("unknown2");
             let count3 = error_msg.contains("unknown3");
             let total_errors = [count1, count2, count3].iter().filter(|&&x| x).count();
-            assert!(
+            always!(
                 total_errors >= 2,
                 "Should continue collecting errors through all statements (found {}): {}",
                 total_errors,
@@ -627,13 +628,13 @@ mod error_recovery_tests {
     fn test_error_recovery_in_nested_blocks() {
         let source = r#"fn test() -> i32 { if true { let x: i32 = unknown1; } let y: i32 = unknown2; return y; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown variables in nested blocks"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown1") || error_msg.contains("unknown2"),
                 "Should detect errors in both nested and outer scopes: {}",
                 error_msg
@@ -645,18 +646,18 @@ mod error_recovery_tests {
     fn test_import_error_has_location() {
         let source = r#"use nonexistent::module; fn test() -> i32 { return 42; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect import resolution failure"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("nonexistent::module"),
                 "Error should mention the import path: {}",
                 error_msg
             );
-            assert!(
+            always!(
                 error_msg.contains(":"),
                 "Error should include location information: {}",
                 error_msg
@@ -668,7 +669,7 @@ mod error_recovery_tests {
     fn test_multiple_import_errors_collected() {
         let source = r#"use missing1::Item1; use missing2::Item2; fn test() -> i32 { return 42; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect multiple import failures"
         );
@@ -676,7 +677,7 @@ mod error_recovery_tests {
             let error_msg = error.to_string();
             let has_import1 = error_msg.contains("missing1") || error_msg.contains("Item1");
             let has_import2 = error_msg.contains("missing2") || error_msg.contains("Item2");
-            assert!(
+            always!(
                 has_import1 || has_import2,
                 "Should report at least one import error: {}",
                 error_msg
@@ -688,10 +689,10 @@ mod error_recovery_tests {
     fn test_type_mismatch_followed_by_valid_code() {
         let source = r#"fn test() -> i32 { let x: i32 = true; return 42; } fn valid() -> i32 { return 10; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Type checker should detect type mismatch");
+        always!(result.is_err(), "Type checker should detect type mismatch");
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("type mismatch"),
                 "Should report type mismatch error: {}",
                 error_msg
@@ -703,7 +704,7 @@ mod error_recovery_tests {
     fn test_error_deduplication_with_different_error_types() {
         let source = r#"fn test(x: MissingType) -> i32 { let y: i32 = missing_var; return missing_func(); }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect multiple distinct errors"
         );
@@ -712,17 +713,17 @@ mod error_recovery_tests {
             let missing_type_count = error_msg.matches("MissingType").count();
             let missing_var_count = error_msg.matches("missing_var").count();
             let missing_func_count = error_msg.matches("missing_func").count();
-            assert!(
+            always!(
                 missing_type_count <= 2,
                 "MissingType should not be excessively duplicated: {}",
                 error_msg
             );
-            assert!(
+            always!(
                 missing_var_count <= 2,
                 "missing_var should not be excessively duplicated: {}",
                 error_msg
             );
-            assert!(
+            always!(
                 missing_func_count <= 2,
                 "missing_func should not be excessively duplicated: {}",
                 error_msg
@@ -734,18 +735,18 @@ mod error_recovery_tests {
     fn test_function_registered_despite_return_type_error() {
         let source = r#"fn helper() -> UnknownReturnType { return 42; } fn caller() -> i32 { return helper(); }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect unknown return type"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("UnknownReturnType"),
                 "Should report unknown return type: {}",
                 error_msg
             );
-            assert!(
+            always!(
                 !error_msg.contains("undefined function `helper`"),
                 "helper should be registered despite return type error: {}",
                 error_msg
@@ -757,13 +758,13 @@ mod error_recovery_tests {
     fn test_array_index_error_continues_inference() {
         let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; let idx: bool = true; let val: i32 = arr[idx]; return unknown_var; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect array index type error and unknown variable"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var") || error_msg.contains("index"),
                 "Should continue after array index error: {}",
                 error_msg
@@ -775,13 +776,13 @@ mod error_recovery_tests {
     fn test_struct_field_error_continues_inference() {
         let source = r#"struct Point { x: i32; y: i32; } fn test(p: Point) -> i32 { let z: i32 = p.missing_field; return unknown_var; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect field not found and unknown variable"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var") || error_msg.contains("field"),
                 "Should continue after field error: {}",
                 error_msg
@@ -794,13 +795,13 @@ mod error_recovery_tests {
         let source =
             r#"fn test() -> i32 { let x: i32 = 10 + true; let y: i32 = unknown_var; return y; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect binary operation error and unknown variable"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var") || error_msg.contains("type"),
                 "Should continue after binary operation error: {}",
                 error_msg
@@ -812,13 +813,13 @@ mod error_recovery_tests {
     fn test_method_not_found_continues_inference() {
         let source = r#"struct MyStruct { value: i32; } fn test(s: MyStruct) -> i32 { let x: i32 = s.missing_method(); return unknown_var; }"#;
         let result = try_type_check(source);
-        assert!(
+        always!(
             result.is_err(),
             "Type checker should detect method not found and unknown variable"
         );
         if let Err(error) = result {
             let error_msg = error.to_string();
-            assert!(
+            always!(
                 error_msg.contains("unknown_var") || error_msg.contains("method"),
                 "Should continue after method not found error: {}",
                 error_msg
@@ -845,10 +846,10 @@ mod error_recovery_tests {
         ];
         for (source, error_substring) in test_cases {
             let result = try_type_check(source);
-            assert!(result.is_err(), "Should detect error in: {}", source);
+            always!(result.is_err(), "Should detect error in: {}", source);
             if let Err(error) = result {
                 let error_msg = error.to_string();
-                assert!(
+                always!(
                     error_msg.contains(":"),
                     "Error should have location (contains ':') for {}: {}",
                     error_substring,

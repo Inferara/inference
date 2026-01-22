@@ -285,6 +285,7 @@ mod tests {
     use crate::types::CoreTypeId;
     use crate::{HeapType, RefType};
 
+use always_assert::always;
     struct EmptyResources(crate::SubType);
 
     impl Default for EmptyResources {
@@ -365,11 +366,11 @@ mod tests {
         assert_eq!(v.operand_stack_height(), 0);
 
         // Pushing a constant value makes use have one value on the stack.
-        assert!(v.op(0, &Operator::I32Const { value: 0 }).is_ok());
+        always!(v.op(0, &Operator::I32Const { value: 0 }).is_ok());
         assert_eq!(v.operand_stack_height(), 1);
 
         // Entering a new control block does not affect the stack height.
-        assert!(v
+        always!(v
             .op(
                 1,
                 &Operator::Block {
@@ -380,7 +381,7 @@ mod tests {
         assert_eq!(v.operand_stack_height(), 1);
 
         // Pushing another constant value makes use have two values on the stack.
-        assert!(v.op(2, &Operator::I32Const { value: 99 }).is_ok());
+        always!(v.op(2, &Operator::I32Const { value: 99 }).is_ok());
         assert_eq!(v.operand_stack_height(), 2);
     }
 }

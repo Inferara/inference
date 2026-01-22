@@ -43,8 +43,8 @@ pub fn validate(bytes: &[u8]) -> Result<Types> {
 
 #[test]
 fn test_validate() {
-    assert!(validate(&[0x0, 0x61, 0x73, 0x6d, 0x1, 0x0, 0x0, 0x0]).is_ok());
-    assert!(validate(&[0x0, 0x61, 0x73, 0x6d, 0x2, 0x0, 0x0, 0x0]).is_err());
+    always!(validate(&[0x0, 0x61, 0x73, 0x6d, 0x1, 0x0, 0x0, 0x0]).is_ok());
+    always!(validate(&[0x0, 0x61, 0x73, 0x6d, 0x2, 0x0, 0x0, 0x0]).is_err());
 }
 
 #[cfg(feature = "component-model")]
@@ -457,13 +457,13 @@ impl Validator {
             components,
         } = self;
 
-        assert!(
+        always!(
             matches!(state, State::End),
             "cannot reset a validator that did not successfully complete validation"
         );
-        assert!(module.is_none());
+        always!(module.is_none());
         #[cfg(feature = "component-model")]
-        assert!(components.is_empty());
+        always!(components.is_empty());
 
         *state = State::default();
     }
@@ -664,7 +664,7 @@ impl Validator {
         self.state = match encoding {
             Encoding::Module => {
                 if num == WASM_MODULE_VERSION {
-                    assert!(self.module.is_none());
+                    always!(self.module.is_none());
                     self.module = Some(ModuleState::default());
                     State::Module
                 } else {
@@ -1529,6 +1529,7 @@ mod tests {
     use crate::{GlobalType, MemoryType, RefType, TableType, ValType, Validator, WasmFeatures};
     use anyhow::Result;
 
+use always_assert::always;
     #[test]
     fn test_module_type_information() -> Result<()> {
         let bytes = wat::parse_str(
@@ -1642,13 +1643,13 @@ mod tests {
         let a2_id = types.component_defined_type_at(2);
 
         // The ids should all be the same
-        assert!(t_id == a1_id);
-        assert!(t_id == a2_id);
-        assert!(a1_id == a2_id);
+        always!(t_id == a1_id);
+        always!(t_id == a2_id);
+        always!(a1_id == a2_id);
 
         // However, they should all point to the same type
-        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
-        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
+        always!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        always!(std::ptr::eq(&types[t_id], &types[a2_id],));
 
         Ok(())
     }
@@ -1676,13 +1677,13 @@ mod tests {
         let a2_id = types.component_defined_type_at(2);
 
         // The ids should all be the same
-        assert!(t_id != a1_id);
-        assert!(t_id != a2_id);
-        assert!(a1_id != a2_id);
+        always!(t_id != a1_id);
+        always!(t_id != a2_id);
+        always!(a1_id != a2_id);
 
         // However, they should all point to the same type
-        assert!(std::ptr::eq(&types[t_id], &types[a1_id],));
-        assert!(std::ptr::eq(&types[t_id], &types[a2_id],));
+        always!(std::ptr::eq(&types[t_id], &types[a1_id],));
+        always!(std::ptr::eq(&types[t_id], &types[a2_id],));
 
         Ok(())
     }

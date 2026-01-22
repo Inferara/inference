@@ -19,6 +19,7 @@ use crate::{
 };
 use core::ops::Range;
 
+use always_assert::always;
 /// Represents a core WebAssembly element segment.
 #[derive(Clone)]
 pub struct Element<'a> {
@@ -134,7 +135,7 @@ impl<'a> FromReader<'a> for Element<'a> {
         let items = if exprs {
             ElementItems::Expressions(ty.unwrap_or(RefType::FUNCREF), SectionLimited::new(data)?)
         } else {
-            assert!(ty.is_none());
+            always!(ty.is_none());
             ElementItems::Functions(SectionLimited::new(data)?)
         };
 

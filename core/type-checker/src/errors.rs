@@ -1,5 +1,6 @@
 use std::fmt::{self, Display, Formatter};
 
+use always_assert::always;
 use inference_ast::nodes::{Location, OperatorKind, UnaryOperatorKind};
 use thiserror::Error;
 
@@ -932,9 +933,9 @@ mod tests {
             location: test_location(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("Point"));
-        assert!(msg.contains("distance"));
-        assert!(msg.contains("requires a receiver"));
+        always!(msg.contains("Point"));
+        always!(msg.contains("distance"));
+        always!(msg.contains("requires a receiver"));
     }
 
     #[test]
@@ -945,8 +946,8 @@ mod tests {
             location: test_location(),
         };
         let msg = err.to_string();
-        assert!(msg.contains("Point"));
-        assert!(msg.contains("new"));
-        assert!(msg.contains("cannot be called on an instance"));
+        always!(msg.contains("Point"));
+        always!(msg.contains("new"));
+        always!(msg.contains("cannot be called on an instance"));
     }
 }

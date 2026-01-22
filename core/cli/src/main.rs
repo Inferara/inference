@@ -112,6 +112,7 @@ use clap::Parser;
 use inference::{analyze, codegen, parse, type_check, wasm_to_v};
 use parser::Cli;
 use std::{
+use always_assert::always;
     fs,
     path::PathBuf,
     process::{self},
@@ -297,7 +298,7 @@ mod test {
     //         &mod_name,
     //         bytes.as_slice(),
     //     );
-    //     assert!(coq.is_ok());
+    //     always!(coq.is_ok());
     //     let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
     //     std::fs::write(coq_file_path, coq.unwrap()).unwrap();
     // }

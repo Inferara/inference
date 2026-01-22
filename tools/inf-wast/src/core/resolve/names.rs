@@ -384,6 +384,7 @@ impl<'a, 'b> ExprResolver<'a, 'b> {
     fn resolve_instr(&mut self, instr: &mut Instruction<'a>) -> Result<(), Error> {
         use Instruction::*;
 
+use always_assert::always;
         if let Some(m) = instr.memarg_mut() {
             self.resolver.resolve(&mut m.memory, Ns::Memory)?;
         }
@@ -445,7 +446,7 @@ impl<'a, 'b> ExprResolver<'a, 'b> {
             }
 
             LocalSet(i) | LocalGet(i) | LocalTee(i) => {
-                assert!(self.scopes.len() > 0);
+                always!(self.scopes.len() > 0);
                 // Resolve a local by iterating over scopes from most recent
                 // to less recent. This allows locals added by `let` blocks to
                 // shadow less recent locals.
@@ -461,7 +462,7 @@ impl<'a, 'b> ExprResolver<'a, 'b> {
                     }
                 }
                 // We must have taken the `break` and resolved the local
-                assert!(i.is_resolved());
+                always!(i.is_resolved());
             }
 
             Call(i) | RefFunc(i) | ReturnCall(i) => {

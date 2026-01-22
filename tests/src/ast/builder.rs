@@ -166,6 +166,7 @@ fn test_parse_use_directive_with_imports() {
 fn test_parse_multiple_use_directives() {
     let source = r#"use inference::std;
 use inference::std::types::Address;"#;
+use always_assert::always;
     let arena = build_ast(source.to_string());
     let source_files = &arena.source_files();
     assert_eq!(source_files.len(), 1);
@@ -563,7 +564,7 @@ fn test_parse_if_else_statement() {
     assert_eq!(ifs.len(), 1, "Should find 1 if statement");
 
     if let AstNode::Statement(Statement::If(if_stmt)) = &ifs[0] {
-        assert!(
+        always!(
             if_stmt.else_arm.is_some(),
             "If statement should have else arm"
         );
@@ -630,7 +631,7 @@ fn test_parse_parenthesized_expression() {
 
     let parens = arena
         .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Parenthesized(_))));
-    assert!(!parens.is_empty(), "Should find parenthesized expression");
+    always!(!parens.is_empty(), "Should find parenthesized expression");
 }
 
 #[test]
@@ -648,7 +649,7 @@ fn test_parse_bool_literal_true() {
     assert_eq!(bool_literals.len(), 1, "Should find 1 bool literal");
 
     if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0] {
-        assert!(lit.value, "Bool literal should be true");
+        always!(lit.value, "Bool literal should be true");
     } else {
         panic!("Expected bool literal");
     }
@@ -669,7 +670,7 @@ fn test_parse_bool_literal_false() {
     assert_eq!(bool_literals.len(), 1, "Should find 1 bool literal");
 
     if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0] {
-        assert!(!lit.value, "Bool literal should be false");
+        always!(!lit.value, "Bool literal should be false");
     } else {
         panic!("Expected bool literal");
     }
@@ -690,7 +691,7 @@ fn test_parse_string_literal() {
     assert_eq!(string_literals.len(), 1, "Should find 1 string literal");
 
     if let AstNode::Expression(Expression::Literal(Literal::String(lit))) = &string_literals[0] {
-        assert!(
+        always!(
             lit.value.contains("hello"),
             "String literal should contain 'hello'"
         );
@@ -715,7 +716,7 @@ fn test_parse_array_literal_empty() {
 
     if let AstNode::Expression(Expression::Literal(Literal::Array(lit))) = &array_literals[0] {
         let is_empty = lit.elements.as_ref().is_none_or(Vec::is_empty);
-        assert!(is_empty, "Array literal should be empty");
+        always!(is_empty, "Array literal should be empty");
     } else {
         panic!("Expected array literal");
     }
@@ -768,7 +769,7 @@ fn test_parse_chained_member_access() {
 
     let member_accesses =
         arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::MemberAccess(_))));
-    assert!(
+    always!(
         !member_accesses.is_empty(),
         "Should find at least 1 member access"
     );
@@ -862,7 +863,7 @@ fn test_parse_empty_block() {
 
     let functions = arena.functions();
     let func = &functions[0];
-    assert!(
+    always!(
         func.body.statements().is_empty(),
         "Empty function should have no statements"
     );
@@ -895,7 +896,7 @@ fn test_parse_nested_blocks() {
             AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Block(_)))
         )
     });
-    assert!(
+    always!(
         !blocks.is_empty(),
         "Should find at least 1 nested block statement"
     );

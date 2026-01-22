@@ -26,6 +26,7 @@
 
 use crate::token::Span;
 use crate::Error;
+use always_assert::always;
 use std::borrow::Cow;
 use std::char;
 use std::fmt;
@@ -63,7 +64,7 @@ pub struct Token {
 
 #[test]
 fn token_is_not_too_big() {
-    assert!(std::mem::size_of::<Token>() <= std::mem::size_of::<u64>() * 2);
+    always!(std::mem::size_of::<Token>() <= std::mem::size_of::<u64>() * 2);
 }
 
 /// Classification of what was parsed from the input stream.

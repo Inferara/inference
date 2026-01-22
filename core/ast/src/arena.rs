@@ -1,4 +1,5 @@
 use crate::nodes::{Ast, AstNode, Definition, FunctionDefinition, SourceFile, TypeDefinition};
+use always_assert::{always, never};
 use rustc_hash::FxHashMap;
 use std::rc::Rc;
 
@@ -52,9 +53,9 @@ impl Arena {
     /// Panics if the node ID is zero or if a node with the same ID already exists.
     /// These conditions indicate bugs in the builder, not recoverable runtime errors.
     pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
-        assert!(node.id() != 0, "node ID must be non-zero");
-        assert!(
-            !self.nodes.contains_key(&node.id()),
+        always!(node.id() != 0, "node ID must be non-zero");
+        never!(
+            self.nodes.contains_key(&node.id()),
             "node with ID {} already exists in the arena",
             node.id()
         );

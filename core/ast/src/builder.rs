@@ -63,6 +63,8 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+use always_assert::always;
+
 use crate::nodes::{
     ArgumentType, Ast, Directive, IgnoreArgument, Misc, ModuleDefinition, SelfReference,
     StructExpression, TypeMemberAccessExpression, Visibility,
@@ -112,7 +114,7 @@ impl<'a> Builder<'a> {
     ///
     /// This function will panic if the `root` node is not of type `source_file`.
     pub fn add_source_code(&mut self, root: Node<'a>, code: &'a [u8]) {
-        assert!(
+        always!(
             root.kind() == "source_file",
             "Expected a root node of type `source_file`"
         );

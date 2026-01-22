@@ -69,6 +69,7 @@
 
 use super::{RecGroupId, TypeAlloc, TypeList};
 use crate::{
+use always_assert::always;
     types::{CoreTypeId, TypeIdentifier},
     BinaryReaderError, CompositeInnerType, CompositeType, PackedIndex, RecGroup, Result,
     StorageType, UnpackedIndex, ValType, WasmFeatures,
@@ -422,7 +423,7 @@ impl<'a> TypeCanonicalizer<'a> {
 
                     let rec_group_len = rec_group_elems.end.index() - rec_group_elems.start.index();
                     let rec_group_len = u32::try_from(rec_group_len).unwrap();
-                    assert!(local_index < rec_group_len);
+                    always!(local_index < rec_group_len);
 
                     let rec_group_start = u32::try_from(rec_group_elems.start.index()).unwrap();
 

@@ -1,5 +1,6 @@
 use inf_wasmparser::*;
 
+use always_assert::always;
 #[test]
 fn name_annotations() -> anyhow::Result<()> {
     assert_module_name("foo", r#"(module $foo)"#)?;
@@ -21,7 +22,7 @@ fn assert_module_name(expected_name: &str, wat: &str) -> anyhow::Result<()> {
             _ => {}
         }
     }
-    assert!(found);
+    always!(found);
     Ok(())
 }
 
@@ -48,7 +49,7 @@ fn assert_func_name(name: &str, wat: &str) -> anyhow::Result<()> {
             _ => {}
         }
     }
-    assert!(found);
+    always!(found);
     Ok(())
 }
 
@@ -92,7 +93,7 @@ fn assert_local_name(name: &str, wat: &str) -> anyhow::Result<()> {
             _ => {}
         }
     }
-    assert!(found);
+    always!(found);
     Ok(())
 }
 

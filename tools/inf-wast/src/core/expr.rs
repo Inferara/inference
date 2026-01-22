@@ -6,6 +6,7 @@ use crate::parser::{Cursor, Parse, Parser, Result};
 use crate::token::*;
 use std::mem;
 
+use always_assert::always;
 /// An expression, or a list of instructions, in the WebAssembly text format.
 ///
 /// This expression type will parse s-expression-folded instructions into a flat
@@ -1230,7 +1231,7 @@ instructions! {
 fn assert_instruction_not_too_large() {
     let size = std::mem::size_of::<Instruction<'_>>();
     let pointer = std::mem::size_of::<u64>();
-    assert!(size <= pointer * 11);
+    always!(size <= pointer * 11);
 }
 
 impl<'a> Instruction<'a> {

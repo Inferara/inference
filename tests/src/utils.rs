@@ -107,6 +107,7 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
 pub(crate) fn parse_simple_type(type_name: &str) -> Option<inference_ast::nodes::SimpleTypeKind> {
     use inference_ast::nodes::SimpleTypeKind;
 
+use always_assert::always;
     match type_name {
         "unit" => Some(SimpleTypeKind::Unit),
         "bool" => Some(SimpleTypeKind::Bool),
@@ -194,7 +195,7 @@ pub(crate) fn assert_function_signature(
     has_return: bool,
 ) {
     let functions = arena.functions();
-    assert!(!functions.is_empty(), "Expected at least 1 function");
+    always!(!functions.is_empty(), "Expected at least 1 function");
 
     let func = functions.iter().find(|f| f.name.name == name);
     let func = func.unwrap_or_else(|| panic!("Expected function named '{name}'"));
@@ -230,7 +231,7 @@ pub(crate) fn assert_constant_def(arena: &Arena, name: &str) {
     let const_defs =
         arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Constant(_))));
 
-    assert!(
+    always!(
         !const_defs.is_empty(),
         "Expected at least 1 constant definition"
     );
@@ -243,7 +244,7 @@ pub(crate) fn assert_constant_def(arena: &Arena, name: &str) {
         }
     });
 
-    assert!(found, "Expected constant named '{name}'");
+    always!(found, "Expected constant named '{name}'");
 }
 
 /// Asserts that a single variable definition with expected name exists.
@@ -254,7 +255,7 @@ pub(crate) fn assert_variable_def(arena: &Arena, name: &str) {
     let var_defs = arena
         .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
 
-    assert!(
+    always!(
         !var_defs.is_empty(),
         "Expected at least 1 variable definition"
     );
@@ -267,7 +268,7 @@ pub(crate) fn assert_variable_def(arena: &Arena, name: &str) {
         }
     });
 
-    assert!(found, "Expected variable named '{name}'");
+    always!(found, "Expected variable named '{name}'");
 }
 
 /// Asserts that a struct definition with expected name and field count exists.
@@ -278,7 +279,7 @@ pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<u
     let structs =
         arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
 
-    assert!(!structs.is_empty(), "Expected at least 1 struct definition");
+    always!(!structs.is_empty(), "Expected at least 1 struct definition");
 
     let struct_def = structs.iter().find_map(|node| {
         if let AstNode::Definition(Definition::Struct(s)) = node
@@ -310,7 +311,7 @@ pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<u
 pub(crate) fn assert_enum_def(arena: &Arena, name: &str, variant_count: Option<usize>) {
     let enums = arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Enum(_))));
 
-    assert!(!enums.is_empty(), "Expected at least 1 enum definition");
+    always!(!enums.is_empty(), "Expected at least 1 enum definition");
 
     let enum_def = enums.iter().find_map(|node| {
         if let AstNode::Definition(Definition::Enum(e)) = node

@@ -43,7 +43,7 @@ pub(crate) struct LoweredTypes {
 
 impl LoweredTypes {
     fn new(max: usize) -> Self {
-        assert!(max <= MAX_LOWERED_TYPES);
+        always!(max <= MAX_LOWERED_TYPES);
         Self {
             types: [ValType::I32; MAX_LOWERED_TYPES],
             len: 0,
@@ -490,7 +490,7 @@ pub struct ComponentDefinedTypeId {
 
 #[test]
 fn assert_defined_type_small() {
-    assert!(core::mem::size_of::<ComponentDefinedTypeId>() <= 8);
+    always!(core::mem::size_of::<ComponentDefinedTypeId>() <= 8);
 }
 
 impl TypeIdentifier for ComponentDefinedTypeId {
@@ -987,7 +987,7 @@ impl ComponentFuncType {
                 // Function will have a single pointer parameter to pass the arguments
                 // via linear memory
                 info.params.clear();
-                assert!(info.params.push(ValType::I32));
+                always!(info.params.push(ValType::I32));
                 info.requires_memory = true;
 
                 // We need realloc as well when lifting a function
@@ -1016,9 +1016,9 @@ impl ComponentFuncType {
                         info.results.clear();
                         if is_lower {
                             info.params.max = MAX_LOWERED_TYPES;
-                            assert!(info.params.push(ValType::I32));
+                            always!(info.params.push(ValType::I32));
                         } else {
-                            assert!(info.results.push(ValType::I32));
+                            always!(info.results.push(ValType::I32));
                         }
                         info.requires_memory = true;
                     }
@@ -3148,6 +3148,7 @@ impl<'a> SubtypeCx<'a> {
     ) -> Result<()> {
         use ComponentDefinedType::*;
 
+use always_assert::always;
         // Note that the implementation of subtyping here diverges from the
         // upstream specification intentionally, see the documentation on
         // function subtyping for more information.
@@ -3318,7 +3319,7 @@ impl<'a> SubtypeCx<'a> {
                 },
             ) => {
                 let prev = type_map.insert(expected, actual);
-                assert!(prev.is_none());
+                always!(prev.is_none());
             }
             (ComponentEntityType::Instance(expected), ComponentEntityType::Instance(actual)) => {
                 let actual = &self.a[actual];

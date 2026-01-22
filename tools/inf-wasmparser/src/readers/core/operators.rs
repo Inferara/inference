@@ -17,6 +17,7 @@ use crate::limits::{MAX_WASM_CATCHES, MAX_WASM_HANDLERS};
 use crate::prelude::*;
 use crate::{BinaryReader, BinaryReaderError, FromReader, Result, ValType};
 
+use always_assert::always;
 /// Represents a block type.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum BlockType {
@@ -330,7 +331,7 @@ impl<'a> IntoIterator for OperatorsReader<'a> {
     ///     let body = body.expect("function body");
     ///     let mut op_reader = body.get_operators_reader().expect("op reader");
     ///     let ops = op_reader.into_iter().collect::<Result<Vec<Operator>>>().expect("ops");
-    ///     assert!(
+    ///     always!(
     ///         if let [Operator::Nop, Operator::End] = ops.as_slice() { true } else { false },
     ///         "found {:?}",
     ///         ops
@@ -386,7 +387,7 @@ impl<'a> Iterator for OperatorsIteratorWithOffsets<'a> {
     ///     let body = body.expect("function body");
     ///     let mut op_reader = body.get_operators_reader().expect("op reader");
     ///     let ops = op_reader.into_iter_with_offsets().collect::<Result<Vec<(Operator, usize)>>>().expect("ops");
-    ///     assert!(
+    ///     always!(
     ///         if let [(Operator::Nop, 23), (Operator::End, 24)] = ops.as_slice() { true } else { false },
     ///         "found {:?}",
     ///         ops

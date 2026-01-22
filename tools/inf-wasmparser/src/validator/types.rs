@@ -93,7 +93,7 @@ macro_rules! define_type_id {
         // The size of type IDs was seen to have a large-ish impact in #844, so
         // this assert ensures that it stays relatively small.
         const _: () = {
-            assert!(core::mem::size_of::<$name>() <= 4);
+            always!(core::mem::size_of::<$name>() <= 4);
         };
     };
 }
@@ -109,7 +109,7 @@ pub struct CoreTypeId {
 
 #[test]
 fn assert_core_type_id_small() {
-    assert!(core::mem::size_of::<CoreTypeId>() <= 4);
+    always!(core::mem::size_of::<CoreTypeId>() <= 4);
 }
 
 impl TypeIdentifier for CoreTypeId {
@@ -213,7 +213,7 @@ impl TypeInfo {
     }
 
     fn _new(size: u32, contains_borrow: bool) -> TypeInfo {
-        assert!(size < (1 << 24));
+        always!(size < (1 << 24));
         TypeInfo(size | ((contains_borrow as u32) << 31))
     }
 
@@ -743,7 +743,7 @@ impl<T> SnapshotList<T> {
     /// Same as `Vec::truncate` but can only truncate uncommitted elements.
     #[cfg(feature = "component-model")]
     pub(crate) fn truncate(&mut self, len: usize) {
-        assert!(len >= self.snapshots_total);
+        always!(len >= self.snapshots_total);
         self.cur.truncate(len - self.snapshots_total);
     }
 
@@ -1211,6 +1211,7 @@ impl TypeList {
     /// ids, otherwise this method will panic.
     pub fn top_type(&self, heap_type: &HeapType) -> HeapType {
         use AbstractHeapType::*;
+use always_assert::always;
         match *heap_type {
             HeapType::Concrete(idx) => {
                 let ty = &self[idx.as_core_type_id().unwrap()].composite_type;

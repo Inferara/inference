@@ -15,6 +15,7 @@
 
 use crate::{BinaryReader, FromReader, Result, SectionLimited};
 
+use always_assert::always;
 /// A reader for the producers custom section of a WebAssembly module.
 ///
 /// # Examples
@@ -26,11 +27,11 @@ use crate::{BinaryReader, FromReader, Result, SectionLimited};
 /// let reader = BinaryReader::new(data, 0);
 /// let reader = ProducersSectionReader::new(reader).expect("producers reader");
 /// let field = reader.into_iter().next().unwrap().expect("producers field");
-/// assert!(field.name == "language");
+/// always!(field.name == "language");
 /// let value = field.values.into_iter().collect::<Result<Vec<_>>>().expect("values");
-/// assert!(value.len() == 2);
-/// assert!(value[0].name == "wat" && value[0].version == "1");
-/// assert!(value[1].name == "C" && value[1].version == "9.0");
+/// always!(value.len() == 2);
+/// always!(value[0].name == "wat" && value[0].version == "1");
+/// always!(value[1].name == "C" && value[1].version == "9.0");
 /// ```
 pub type ProducersSectionReader<'a> = SectionLimited<'a, ProducersField<'a>>;
 

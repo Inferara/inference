@@ -1,3 +1,5 @@
+use always_assert::always;
+
 pub(crate) trait Encode {
     fn encode(&self, e: &mut Vec<u8>);
 }
@@ -38,7 +40,7 @@ impl Encode for str {
 
 impl Encode for usize {
     fn encode(&self, e: &mut Vec<u8>) {
-        assert!(*self <= u32::max_value() as usize);
+        always!(*self <= u32::max_value() as usize);
         (*self as u32).encode(e)
     }
 }

@@ -3,6 +3,7 @@ use crate::core;
 use crate::core::EncodeOptions;
 use crate::token::{Id, NameAnnotation};
 use wasm_encoder::{
+use always_assert::always;
     CanonicalFunctionSection, ComponentAliasSection, ComponentCoreTypeEncoder,
     ComponentDefinedTypeEncoder, ComponentExportSection, ComponentImportSection,
     ComponentInstanceSection, ComponentNameSection, ComponentSection, ComponentSectionId,
@@ -728,7 +729,7 @@ impl From<&CoreItemRef<'_, core::ExportKind>> for (wasm_encoder::ExportKind, u32
 
 impl<T> From<&ItemRef<'_, T>> for u32 {
     fn from(i: &ItemRef<'_, T>) -> Self {
-        assert!(i.export_names.is_empty());
+        always!(i.export_names.is_empty());
         i.idx.into()
     }
 }

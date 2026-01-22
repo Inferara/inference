@@ -930,6 +930,7 @@ impl SymbolTable {
 mod tests {
     use super::*;
     use crate::type_info::{NumberType, TypeInfoKind};
+    use always_assert::always;
 
     mod symbol_type_alias {
         use super::*;
@@ -953,9 +954,9 @@ mod tests {
             };
             let symbol = Symbol::TypeAlias(type_info.clone());
             let result = symbol.as_type_info();
-            assert!(result.is_some());
+            always!(result.is_some());
             let result_type = result.unwrap();
-            assert!(matches!(
+            always!(matches!(
                 result_type.kind,
                 TypeInfoKind::Number(NumberType::U64)
             ));
@@ -969,9 +970,9 @@ mod tests {
             };
             let symbol = Symbol::TypeAlias(type_info);
             let result = symbol.as_type_info();
-            assert!(result.is_some());
+            always!(result.is_some());
             let result_type = result.unwrap();
-            assert!(matches!(result_type.kind, TypeInfoKind::Custom(ref s) if s == "MyType"));
+            always!(matches!(result_type.kind, TypeInfoKind::Custom(ref s) if s == "MyType"));
         }
 
         #[test]
@@ -981,7 +982,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-            assert!(symbol.is_public());
+            always!(symbol.is_public());
         }
 
         #[test]
@@ -990,36 +991,36 @@ mod tests {
             let mut table = SymbolTable::default();
             let simple_type = Type::Simple(SimpleTypeKind::I32);
             let result = table.register_type("MyInt", Some(&simple_type));
-            assert!(result.is_ok());
+            always!(result.is_ok());
             let lookup = table.lookup_type("MyInt");
-            assert!(lookup.is_some());
+            always!(lookup.is_some());
         }
 
         #[test]
         fn register_type_creates_custom_type_when_none_provided() {
             let mut table = SymbolTable::default();
             let result = table.register_type("MyCustomType", None);
-            assert!(result.is_ok());
+            always!(result.is_ok());
             let lookup = table.lookup_type("MyCustomType");
-            assert!(lookup.is_some());
+            always!(lookup.is_some());
             let type_info = lookup.unwrap();
-            assert!(matches!(type_info.kind, TypeInfoKind::Custom(ref s) if s == "MyCustomType"));
+            always!(matches!(type_info.kind, TypeInfoKind::Custom(ref s) if s == "MyCustomType"));
         }
 
         #[test]
         fn builtin_types_are_registered_as_type_aliases() {
             let table = SymbolTable::default();
-            assert!(table.lookup_type("i8").is_some());
-            assert!(table.lookup_type("i16").is_some());
-            assert!(table.lookup_type("i32").is_some());
-            assert!(table.lookup_type("i64").is_some());
-            assert!(table.lookup_type("u8").is_some());
-            assert!(table.lookup_type("u16").is_some());
-            assert!(table.lookup_type("u32").is_some());
-            assert!(table.lookup_type("u64").is_some());
-            assert!(table.lookup_type("bool").is_some());
-            assert!(table.lookup_type("unit").is_some());
-            assert!(table.lookup_type("string").is_some());
+            always!(table.lookup_type("i8").is_some());
+            always!(table.lookup_type("i16").is_some());
+            always!(table.lookup_type("i32").is_some());
+            always!(table.lookup_type("i64").is_some());
+            always!(table.lookup_type("u8").is_some());
+            always!(table.lookup_type("u16").is_some());
+            always!(table.lookup_type("u32").is_some());
+            always!(table.lookup_type("u64").is_some());
+            always!(table.lookup_type("bool").is_some());
+            always!(table.lookup_type("unit").is_some());
+            always!(table.lookup_type("string").is_some());
         }
 
         #[test]
@@ -1027,7 +1028,7 @@ mod tests {
             let mut table = SymbolTable::default();
             table.register_type("TestType", None).unwrap();
             let result = table.lookup_type("TestType");
-            assert!(result.is_some());
+            always!(result.is_some());
         }
 
         #[test]
@@ -1037,7 +1038,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-            assert!(symbol.as_function().is_none());
+            always!(symbol.as_function().is_none());
         }
 
         #[test]
@@ -1047,7 +1048,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-            assert!(symbol.as_struct().is_none());
+            always!(symbol.as_struct().is_none());
         }
 
         #[test]
@@ -1057,7 +1058,7 @@ mod tests {
                 type_params: vec![],
             };
             let symbol = Symbol::TypeAlias(type_info);
-            assert!(symbol.as_enum().is_none());
+            always!(symbol.as_enum().is_none());
         }
     }
 
@@ -1083,7 +1084,7 @@ mod tests {
             let mut table = SymbolTable::default();
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-            assert!(
+            always!(
                 scope.borrow().name.starts_with("anonymous_"),
                 "Anonymous scope name should start with 'anonymous_'"
             );
@@ -1108,7 +1109,7 @@ mod tests {
                 inner2.borrow().full_path,
                 "Nested anonymous scopes should have different full_paths"
             );
-            assert!(
+            always!(
                 inner1.borrow().full_path.contains("test_func"),
                 "Full path should include parent function name"
             );
@@ -1121,7 +1122,7 @@ mod tests {
             let scope = table.get_scope(scope_id).unwrap();
             let full_path = scope.borrow().full_path.clone();
             let path_segments: Vec<String> = full_path.split("::").map(String::from).collect();
-            assert!(
+            always!(
                 table.find_module_scope(&path_segments).is_none(),
                 "Anonymous scopes should not be registered in mod_scopes"
             );
@@ -1162,7 +1163,7 @@ mod tests {
                     expected_depth,
                     "Deeply nested scope at level {i} should have correct path depth"
                 );
-                assert!(
+                always!(
                     scope_borrow.name.starts_with("anonymous_"),
                     "All nested scopes should have anonymous_ prefix"
                 );
@@ -1201,7 +1202,7 @@ mod tests {
             let child_scope = table.get_scope(child_id).unwrap();
             let parent_scope = table.get_scope(parent_id).unwrap();
             let child_parent = child_scope.borrow().parent.clone();
-            assert!(
+            always!(
                 child_parent.is_some(),
                 "Anonymous child scope should have parent"
             );
@@ -1228,7 +1229,7 @@ mod tests {
             let mut table = SymbolTable::default();
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
-            assert!(
+            always!(
                 matches!(scope.borrow().visibility, Visibility::Private),
                 "Anonymous scopes should have private visibility"
             );
@@ -1265,7 +1266,7 @@ mod tests {
                 full_path, expected_path,
                 "Anonymous scope full_path should include all parent module names"
             );
-            assert!(
+            always!(
                 full_path.contains("::anonymous_"),
                 "Full path should contain the anonymous scope name with separator"
             );
@@ -1277,11 +1278,11 @@ mod tests {
             let scope_id = table.push_scope();
             let scope = table.get_scope(scope_id).unwrap();
             let full_path = scope.borrow().full_path.clone();
-            assert!(
+            always!(
                 !full_path.starts_with("::"),
                 "Root-level anonymous scope should not start with ::"
             );
-            assert!(
+            always!(
                 full_path.starts_with("anonymous_"),
                 "Root-level anonymous scope full_path should be just the name"
             );
@@ -1305,7 +1306,7 @@ mod tests {
                 scope_id: 0,
                 has_self: true,
             };
-            assert!(method_info.is_instance_method());
+            always!(method_info.is_instance_method());
         }
 
         #[test]
@@ -1323,7 +1324,7 @@ mod tests {
                 scope_id: 0,
                 has_self: false,
             };
-            assert!(!method_info.is_instance_method());
+            always!(!method_info.is_instance_method());
         }
 
         #[test]
@@ -1339,12 +1340,12 @@ mod tests {
                 definition_scope_id: 0,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, true);
-            assert!(result.is_ok());
+            always!(result.is_ok());
             let method_info = table.lookup_method("TestType", "instance_method");
-            assert!(method_info.is_some());
+            always!(method_info.is_some());
             let method_info = method_info.unwrap();
-            assert!(method_info.has_self);
-            assert!(method_info.is_instance_method());
+            always!(method_info.has_self);
+            always!(method_info.is_instance_method());
         }
 
         #[test]
@@ -1360,12 +1361,12 @@ mod tests {
                 definition_scope_id: 0,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, false);
-            assert!(result.is_ok());
+            always!(result.is_ok());
             let method_info = table.lookup_method("TestType", "constructor");
-            assert!(method_info.is_some());
+            always!(method_info.is_some());
             let method_info = method_info.unwrap();
-            assert!(!method_info.has_self);
-            assert!(!method_info.is_instance_method());
+            always!(!method_info.has_self);
+            always!(!method_info.is_instance_method());
         }
 
         #[test]

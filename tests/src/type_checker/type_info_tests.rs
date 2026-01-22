@@ -19,26 +19,26 @@ mod type_info_construction {
     #[test]
     fn test_boolean_constructor() {
         let ti = TypeInfo::boolean();
-        assert!(ti.is_bool());
-        assert!(!ti.is_number());
-        assert!(!ti.is_array());
-        assert!(!ti.is_struct());
-        assert!(!ti.is_generic());
+        always!(ti.is_bool());
+        always!(!ti.is_number());
+        always!(!ti.is_array());
+        always!(!ti.is_struct());
+        always!(!ti.is_generic());
     }
 
     #[test]
     fn test_string_constructor() {
         let ti = TypeInfo::string();
-        assert!(matches!(ti.kind, TypeInfoKind::String));
-        assert!(!ti.is_bool());
-        assert!(!ti.is_number());
+        always!(matches!(ti.kind, TypeInfoKind::String));
+        always!(!ti.is_bool());
+        always!(!ti.is_number());
     }
 
     #[test]
     fn test_default_is_unit() {
         let ti = TypeInfo::default();
-        assert!(matches!(ti.kind, TypeInfoKind::Unit));
-        assert!(ti.type_params.is_empty());
+        always!(matches!(ti.kind, TypeInfoKind::Unit));
+        always!(ti.type_params.is_empty());
     }
 
     #[test]
@@ -73,7 +73,7 @@ mod type_info_predicates {
                 kind: TypeInfoKind::Number(kind),
                 type_params: vec![],
             };
-            assert!(ti.is_number(), "Expected {:?} to be a number", kind);
+            always!(ti.is_number(), "Expected {:?} to be a number", kind);
         }
     }
 
@@ -84,8 +84,8 @@ mod type_info_predicates {
             kind: TypeInfoKind::Array(Box::new(element), 10),
             type_params: vec![],
         };
-        assert!(array_type.is_array());
-        assert!(!array_type.is_number());
+        always!(array_type.is_array());
+        always!(!array_type.is_number());
     }
 
     #[test]
@@ -94,8 +94,8 @@ mod type_info_predicates {
             kind: TypeInfoKind::Struct("Point".to_string()),
             type_params: vec![],
         };
-        assert!(struct_type.is_struct());
-        assert!(!struct_type.is_bool());
+        always!(struct_type.is_struct());
+        always!(!struct_type.is_bool());
     }
 
     #[test]
@@ -104,8 +104,8 @@ mod type_info_predicates {
             kind: TypeInfoKind::Generic("T".to_string()),
             type_params: vec![],
         };
-        assert!(generic.is_generic());
-        assert!(!TypeInfo::boolean().is_generic());
+        always!(generic.is_generic());
+        always!(!TypeInfo::boolean().is_generic());
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod type_info_predicates {
         ];
 
         for ti in non_numeric {
-            assert!(!ti.is_number(), "Expected {:?} to not be a number", ti.kind);
+            always!(!ti.is_number(), "Expected {:?} to not be a number", ti.kind);
         }
     }
 }
@@ -143,7 +143,7 @@ mod type_substitution {
         subs.insert("T".to_string(), TypeInfo::boolean());
 
         let result = generic.substitute(&subs);
-        assert!(result.is_bool());
+        always!(result.is_bool());
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod type_substitution {
         subs.insert("T".to_string(), TypeInfo::boolean());
 
         let result = generic.substitute(&subs);
-        assert!(result.is_generic());
+        always!(result.is_generic());
         if let TypeInfoKind::Generic(name) = &result.kind {
             assert_eq!(name, "U");
         } else {
@@ -187,7 +187,7 @@ mod type_substitution {
 
         let result = array.substitute(&subs);
         if let TypeInfoKind::Array(elem, _) = &result.kind {
-            assert!(elem.is_number());
+            always!(elem.is_number());
         } else {
             panic!("Expected array type");
         }
@@ -210,7 +210,7 @@ mod type_substitution {
 
         let result = array.substitute(&subs);
         if let TypeInfoKind::Array(elem, length) = &result.kind {
-            assert!(elem.is_bool());
+            always!(elem.is_bool());
             assert_eq!(*length, 5);
         } else {
             panic!("Expected array type");
@@ -224,7 +224,7 @@ mod type_substitution {
         subs.insert("T".to_string(), TypeInfo::string());
 
         let result = bool_type.substitute(&subs);
-        assert!(result.is_bool());
+        always!(result.is_bool());
     }
 
     #[test]
@@ -236,7 +236,7 @@ mod type_substitution {
         let subs = FxHashMap::default();
 
         let result = generic.substitute(&subs);
-        assert!(result.is_generic());
+        always!(result.is_generic());
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod type_substitution {
         if let TypeInfoKind::Array(outer_elem, outer_len) = &result.kind {
             assert_eq!(*outer_len, 10);
             if let TypeInfoKind::Array(inner_elem, _) = &outer_elem.kind {
-                assert!(inner_elem.is_bool());
+                always!(inner_elem.is_bool());
             } else {
                 panic!("Expected inner array");
             }
@@ -283,14 +283,14 @@ mod has_unresolved_params {
             kind: TypeInfoKind::Generic("T".to_string()),
             type_params: vec![],
         };
-        assert!(generic.has_unresolved_params());
+        always!(generic.has_unresolved_params());
     }
 
     #[test]
     fn test_primitive_no_unresolved() {
-        assert!(!TypeInfo::boolean().has_unresolved_params());
-        assert!(!TypeInfo::string().has_unresolved_params());
-        assert!(!TypeInfo::default().has_unresolved_params());
+        always!(!TypeInfo::boolean().has_unresolved_params());
+        always!(!TypeInfo::string().has_unresolved_params());
+        always!(!TypeInfo::default().has_unresolved_params());
     }
 
     #[test]
@@ -299,7 +299,7 @@ mod has_unresolved_params {
             kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
         };
-        assert!(!i32_type.has_unresolved_params());
+        always!(!i32_type.has_unresolved_params());
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod has_unresolved_params {
             ),
             type_params: vec![],
         };
-        assert!(array.has_unresolved_params());
+        always!(array.has_unresolved_params());
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod has_unresolved_params {
             kind: TypeInfoKind::Array(Box::new(TypeInfo::boolean()), 5),
             type_params: vec![],
         };
-        assert!(!array.has_unresolved_params());
+        always!(!array.has_unresolved_params());
     }
 
     #[test]
@@ -344,7 +344,7 @@ mod has_unresolved_params {
             ),
             type_params: vec![],
         };
-        assert!(nested.has_unresolved_params());
+        always!(nested.has_unresolved_params());
     }
 
     #[test]
@@ -353,7 +353,7 @@ mod has_unresolved_params {
             kind: TypeInfoKind::Struct("Point".to_string()),
             type_params: vec![],
         };
-        assert!(!struct_type.has_unresolved_params());
+        always!(!struct_type.has_unresolved_params());
     }
 
     #[test]
@@ -362,7 +362,7 @@ mod has_unresolved_params {
             kind: TypeInfoKind::Enum("Color".to_string()),
             type_params: vec![],
         };
-        assert!(!enum_type.has_unresolved_params());
+        always!(!enum_type.has_unresolved_params());
     }
 }
 
@@ -539,10 +539,10 @@ mod type_info_kind {
     #[test]
     fn test_kind_is_number() {
         let numeric_kind = TypeInfoKind::Number(NumberType::I32);
-        assert!(numeric_kind.is_number());
+        always!(numeric_kind.is_number());
 
         let bool_kind = TypeInfoKind::Bool;
-        assert!(!bool_kind.is_number());
+        always!(!bool_kind.is_number());
     }
 
     #[test]
@@ -581,14 +581,14 @@ mod number_type_methods {
     #[test]
     fn test_all_contains_all_variants() {
         assert_eq!(NumberType::ALL.len(), 8);
-        assert!(NumberType::ALL.contains(&NumberType::I8));
-        assert!(NumberType::ALL.contains(&NumberType::I16));
-        assert!(NumberType::ALL.contains(&NumberType::I32));
-        assert!(NumberType::ALL.contains(&NumberType::I64));
-        assert!(NumberType::ALL.contains(&NumberType::U8));
-        assert!(NumberType::ALL.contains(&NumberType::U16));
-        assert!(NumberType::ALL.contains(&NumberType::U32));
-        assert!(NumberType::ALL.contains(&NumberType::U64));
+        always!(NumberType::ALL.contains(&NumberType::I8));
+        always!(NumberType::ALL.contains(&NumberType::I16));
+        always!(NumberType::ALL.contains(&NumberType::I32));
+        always!(NumberType::ALL.contains(&NumberType::I64));
+        always!(NumberType::ALL.contains(&NumberType::U8));
+        always!(NumberType::ALL.contains(&NumberType::U16));
+        always!(NumberType::ALL.contains(&NumberType::U32));
+        always!(NumberType::ALL.contains(&NumberType::U64));
     }
 
     #[test]
@@ -638,10 +638,10 @@ mod number_type_methods {
 
     #[test]
     fn test_from_str_invalid() {
-        assert!("invalid".parse::<NumberType>().is_err());
-        assert!("f32".parse::<NumberType>().is_err());
-        assert!("i128".parse::<NumberType>().is_err());
-        assert!("".parse::<NumberType>().is_err());
+        always!("invalid".parse::<NumberType>().is_err());
+        always!("f32".parse::<NumberType>().is_err());
+        always!("i128".parse::<NumberType>().is_err());
+        always!("".parse::<NumberType>().is_err());
     }
 }
 
@@ -656,9 +656,9 @@ mod type_info_kind_builtin_methods {
             .iter()
             .map(|(name, _)| *name)
             .collect();
-        assert!(names.contains(&"unit"));
-        assert!(names.contains(&"bool"));
-        assert!(names.contains(&"string"));
+        always!(names.contains(&"unit"));
+        always!(names.contains(&"bool"));
+        always!(names.contains(&"string"));
     }
 
     #[test]
@@ -826,7 +826,7 @@ mod type_info_from_ast {
         let ty = make_simple_type("i32");
         let ti = TypeInfo::new(&ty);
         assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
-        assert!(ti.type_params.is_empty());
+        always!(ti.type_params.is_empty());
     }
 
     #[test]
@@ -977,8 +977,8 @@ mod type_info_from_ast {
         let ti = TypeInfo::new(&ty);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
-            assert!(sig.contains("Function<0"));
-            assert!(sig.contains("Unit"));
+            always!(sig.contains("Function<0"));
+            always!(sig.contains("Unit"));
         } else {
             panic!("Expected function type");
         }
@@ -996,8 +996,8 @@ mod type_info_from_ast {
         let ti = TypeInfo::new(&ty);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
-            assert!(sig.contains("Function<2"));
-            assert!(sig.contains("String"));
+            always!(sig.contains("Function<2"));
+            always!(sig.contains("String"));
         } else {
             panic!("Expected function type");
         }
@@ -1016,18 +1016,18 @@ mod is_signed_methods {
 
     #[test]
     fn test_number_type_is_signed_signed_types() {
-        assert!(NumberType::I8.is_signed(), "i8 should be signed");
-        assert!(NumberType::I16.is_signed(), "i16 should be signed");
-        assert!(NumberType::I32.is_signed(), "i32 should be signed");
-        assert!(NumberType::I64.is_signed(), "i64 should be signed");
+        always!(NumberType::I8.is_signed(), "i8 should be signed");
+        always!(NumberType::I16.is_signed(), "i16 should be signed");
+        always!(NumberType::I32.is_signed(), "i32 should be signed");
+        always!(NumberType::I64.is_signed(), "i64 should be signed");
     }
 
     #[test]
     fn test_number_type_is_signed_unsigned_types() {
-        assert!(!NumberType::U8.is_signed(), "u8 should not be signed");
-        assert!(!NumberType::U16.is_signed(), "u16 should not be signed");
-        assert!(!NumberType::U32.is_signed(), "u32 should not be signed");
-        assert!(!NumberType::U64.is_signed(), "u64 should not be signed");
+        always!(!NumberType::U8.is_signed(), "u8 should not be signed");
+        always!(!NumberType::U16.is_signed(), "u16 should not be signed");
+        always!(!NumberType::U32.is_signed(), "u32 should not be signed");
+        always!(!NumberType::U64.is_signed(), "u64 should not be signed");
     }
 
     #[test]
@@ -1046,11 +1046,11 @@ mod is_signed_methods {
         ];
 
         for nt in signed_types {
-            assert!(nt.is_signed(), "{:?} should be signed", nt);
+            always!(nt.is_signed(), "{:?} should be signed", nt);
         }
 
         for nt in unsigned_types {
-            assert!(!nt.is_signed(), "{:?} should not be signed", nt);
+            always!(!nt.is_signed(), "{:?} should not be signed", nt);
         }
     }
 
@@ -1076,7 +1076,7 @@ mod is_signed_methods {
         ];
 
         for ti in signed_types {
-            assert!(
+            always!(
                 ti.is_signed_integer(),
                 "{:?} should be a signed integer",
                 ti.kind
@@ -1106,7 +1106,7 @@ mod is_signed_methods {
         ];
 
         for ti in unsigned_types {
-            assert!(
+            always!(
                 !ti.is_signed_integer(),
                 "{:?} should not be a signed integer",
                 ti.kind
@@ -1143,7 +1143,7 @@ mod is_signed_methods {
         ];
 
         for ti in non_numeric {
-            assert!(
+            always!(
                 !ti.is_signed_integer(),
                 "{:?} should not be a signed integer",
                 ti.kind
@@ -1157,7 +1157,7 @@ mod is_signed_methods {
             kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec!["T".to_string()],
         };
-        assert!(
+        always!(
             ti.is_signed_integer(),
             "i32 with type params should still be a signed integer"
         );
@@ -1168,6 +1168,7 @@ mod type_info_with_type_params {
     use super::*;
     use inference_ast::nodes::Location;
 
+use always_assert::always;
     fn dummy_location() -> Location {
         Location::new(0, 0, 0, 0, 0, 0)
     }
@@ -1279,7 +1280,7 @@ mod type_info_with_type_params {
         let type_params = vec!["T".to_string(), "U".to_string()];
         let ti = TypeInfo::new_with_type_params(&ty, &type_params);
 
-        assert!(matches!(ti.kind, TypeInfoKind::Function(_)));
+        always!(matches!(ti.kind, TypeInfoKind::Function(_)));
     }
 
     #[test]

@@ -335,7 +335,7 @@ impl ComponentState {
         offset: usize,
         check_limit: bool,
     ) -> Result<()> {
-        assert!(!components.is_empty());
+        always!(!components.is_empty());
 
         fn current(components: &mut Vec<ComponentState>) -> &mut ComponentState {
             components.last_mut().unwrap()
@@ -832,7 +832,7 @@ impl ComponentState {
         let ty = &types[*id];
         for (old, new) in ty.defined_resources.iter().zip(&resources) {
             let prev = mapping.resources.insert(*old, new.resource());
-            assert!(prev.is_none());
+            always!(prev.is_none());
 
             let mut base = vec![self.imports.len()];
             base.extend(ty.explicit_resources[old].iter().copied());
@@ -1246,7 +1246,7 @@ impl ComponentState {
 
         self.check_options(None, &info, options, types, offset, features, true)?;
 
-        assert!(info.results.iter().next().is_none());
+        always!(info.results.iter().next().is_none());
 
         self.core_funcs
             .push(types.intern_func_type(FuncType::new(info.params.iter(), []), offset));
@@ -2663,7 +2663,7 @@ impl ComponentState {
 
         let mut state = components.pop().unwrap();
 
-        assert!(state.imported_resources.is_empty());
+        always!(state.imported_resources.is_empty());
 
         Ok(ComponentInstanceType {
             info: state.type_info,
@@ -2680,7 +2680,7 @@ impl ComponentState {
             defined_resources: mem::take(&mut state.defined_resources)
                 .into_iter()
                 .map(|(id, rep)| {
-                    assert!(rep.is_none());
+                    always!(rep.is_none());
                     id
                 })
                 .collect(),
@@ -3009,7 +3009,7 @@ impl ComponentState {
             .zip(&fresh_defined_resources)
         {
             let prev = mapping.resources.insert(*old, *new);
-            assert!(prev.is_none());
+            always!(prev.is_none());
         }
 
         // Perform the remapping operation over all the exports that will be
@@ -3061,9 +3061,9 @@ impl ComponentState {
             for ty in exports.values() {
                 types.free_variables_component_entity(ty, &mut free);
             }
-            assert!(fresh_defined_resources.is_subset(&free));
+            always!(fresh_defined_resources.is_subset(&free));
             for resource in fresh_defined_resources.iter() {
-                assert!(explicit_resources.contains_key(resource));
+                always!(explicit_resources.contains_key(resource));
             }
         }
 
@@ -3112,7 +3112,7 @@ impl ComponentState {
         let names = ComponentNameContext::default();
 
         for export in exports {
-            assert!(export.ty.is_none());
+            always!(export.ty.is_none());
             let ty = match export.kind {
                 ComponentExternalKind::Module => {
                     ComponentEntityType::Module(self.module_at(export.index, offset)?)
@@ -4136,7 +4136,7 @@ impl ComponentNameContext {
     fn register(&mut self, name: &str, id: AliasableResourceId) {
         let idx = self.all_resource_names.len();
         let prev = self.resource_name_map.insert(id, idx);
-        assert!(
+        always!(
             prev.is_none(),
             "for {id:?}, inserted {idx:?} but already had {prev:?}"
         );
@@ -4356,6 +4356,7 @@ mod append_only {
     use core::hash::Hash;
     use core::ops::Deref;
 
+use always_assert::always;
     pub struct IndexMapAppendOnly<K, V>(IndexMap<K, V>);
 
     impl<K, V> IndexMapAppendOnly<K, V>
@@ -4364,7 +4365,7 @@ mod append_only {
     {
         pub fn insert(&mut self, key: K, value: V) {
             let prev = self.0.insert(key, value);
-            assert!(prev.is_none());
+            always!(prev.is_none());
         }
     }
 

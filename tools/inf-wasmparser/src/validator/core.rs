@@ -298,7 +298,7 @@ impl ModuleState {
         validator.ops.finish(ops.original_position())?;
 
         // See comment in `RefFunc` below for why this is an assert.
-        assert!(!validator.uninserted_funcref);
+        always!(!validator.uninserted_funcref);
 
         self.const_expr_allocs = validator.ops.into_allocations();
 
@@ -1324,6 +1324,7 @@ mod arc {
     use alloc::sync::Arc;
     use core::ops::Deref;
 
+use always_assert::always;
     enum Inner<T> {
         Owned(T),
         Shared(Arc<T>),

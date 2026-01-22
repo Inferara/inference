@@ -66,19 +66,19 @@ pub struct PackedIndex(u32);
 // Assert that we can fit indices up to `MAX_WASM_TYPES` inside `RefType`.
 #[test]
 fn can_fit_max_wasm_types_in_packed_index() {
-    assert!(PackedIndex::can_represent_index(
+    always!(PackedIndex::can_represent_index(
         crate::limits::MAX_WASM_TYPES as u32
     ));
-    assert!(PackedIndex::can_represent_index(
+    always!(PackedIndex::can_represent_index(
         0b00000000_00001111_00000000_00000000
     ));
-    assert!(PackedIndex::can_represent_index(
+    always!(PackedIndex::can_represent_index(
         0b00000000_00000000_11111111_00000000
     ));
-    assert!(PackedIndex::can_represent_index(
+    always!(PackedIndex::can_represent_index(
         0b00000000_00000000_00000000_11111111
     ));
-    assert!(PackedIndex::can_represent_index(0));
+    always!(PackedIndex::can_represent_index(0));
 }
 
 impl PackedIndex {
@@ -664,7 +664,7 @@ impl FuncType {
     ///
     /// If `len_params` is greater than the length of `params_results` combined.
     pub(crate) fn from_raw_parts(params_results: Box<[ValType]>, len_params: usize) -> Self {
-        assert!(len_params <= params_results.len());
+        always!(len_params <= params_results.len());
         Self {
             params_results,
             len_params,
@@ -1009,9 +1009,9 @@ impl fmt::Display for RefType {
 #[test]
 fn can_fit_max_wasm_types_in_ref_type() {
     fn can_roundtrip_index(index: u32) -> bool {
-        assert!(RefType::can_represent_type_index(index));
+        always!(RefType::can_represent_type_index(index));
         let rt = RefType::concrete(true, PackedIndex::from_module_index(index).unwrap());
-        assert!(rt.is_nullable());
+        always!(rt.is_nullable());
         let actual_index = match rt.type_index() {
             Some(i) => i,
             None => panic!(),
@@ -1019,11 +1019,11 @@ fn can_fit_max_wasm_types_in_ref_type() {
         actual_index.as_module_index() == Some(index)
     }
 
-    assert!(can_roundtrip_index(crate::limits::MAX_WASM_TYPES as u32));
-    assert!(can_roundtrip_index(0b00000000_00001111_00000000_00000000));
-    assert!(can_roundtrip_index(0b00000000_00000000_11111111_00000000));
-    assert!(can_roundtrip_index(0b00000000_00000000_00000000_11111111));
-    assert!(can_roundtrip_index(0));
+    always!(can_roundtrip_index(crate::limits::MAX_WASM_TYPES as u32));
+    always!(can_roundtrip_index(0b00000000_00001111_00000000_00000000));
+    always!(can_roundtrip_index(0b00000000_00000000_11111111_00000000));
+    always!(can_roundtrip_index(0b00000000_00000000_00000000_11111111));
+    always!(can_roundtrip_index(0));
 }
 
 impl RefType {
@@ -1803,6 +1803,7 @@ impl<'a> FromReader<'a> for HeapType {
 impl<'a> FromReader<'a> for AbstractHeapType {
     fn from_reader(reader: &mut BinaryReader<'a>) -> Result<Self> {
         use AbstractHeapType::*;
+use always_assert::always;
         match reader.read_u8()? {
             0x70 => Ok(Func),
             0x6F => Ok(Extern),

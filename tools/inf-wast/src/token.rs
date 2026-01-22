@@ -5,6 +5,7 @@
 use crate::annotation;
 use crate::lexer::Float;
 use crate::parser::{Cursor, Parse, Parser, Peek, Result};
+use always_assert::always;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str;
@@ -566,7 +567,7 @@ macro_rules! float {
             let mut significand: $int = lead_nonzero_digit << significand_pos;
             let mut discarded_extra_nonzero = false;
 
-            assert!(significand_pos >= 0, "$int should be at least 4 bits wide");
+            always!(significand_pos >= 0, "$int should be at least 4 bits wide");
 
             // Adjust for leading zeros in the first digit.
             exponent = exponent.checked_mul(4)?.checked_sub(lz + 1)?;

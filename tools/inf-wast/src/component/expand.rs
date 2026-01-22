@@ -86,8 +86,8 @@ impl<'a> Expander<'a> {
         let mut cur = 0;
         while cur < decls.len() {
             expand(self, &mut decls[cur]);
-            assert!(self.component_fields_to_prepend.is_empty());
-            assert!(self.component_fields_to_append.is_empty());
+            always!(self.component_fields_to_prepend.is_empty());
+            always!(self.component_fields_to_append.is_empty());
             let amt = self.types_to_prepend.len();
             decls.splice(cur..cur, self.types_to_prepend.drain(..).map(From::from));
             cur += 1 + amt;
@@ -399,6 +399,7 @@ impl<'a> Expander<'a> {
     fn expand_module_ty(&mut self, ty: &mut ModuleType<'a>) {
         use crate::core::resolve::types::{FuncKey, TypeKey, TypeReference};
 
+use always_assert::always;
         // Note that this is a custom implementation from everything else in
         // this file since this is using core wasm types instead of component
         // types, so a small part of the core wasm expansion process is

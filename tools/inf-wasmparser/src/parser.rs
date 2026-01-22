@@ -495,7 +495,7 @@ impl Parser {
     ///     loop {
     ///         let (payload, consumed) = match cur.parse(&buf, eof)? {
     ///             Chunk::NeedMoreData(hint) => {
-    ///                 assert!(!eof); // otherwise an error would be returned
+    ///                 always!(!eof); // otherwise an error would be returned
     ///
     ///                 // Use the hint to preallocate more space, then read
     ///                 // some more data into our buffer.
@@ -1358,6 +1358,7 @@ fn clear_hint(mut err: BinaryReaderError) -> BinaryReaderError {
 mod tests {
     use super::*;
 
+use always_assert::always;
     macro_rules! assert_matches {
         ($a:expr, $b:pat $(,)?) => {
             match $a {
@@ -1369,7 +1370,7 @@ mod tests {
 
     #[test]
     fn header() {
-        assert!(Parser::default().parse(&[], true).is_err());
+        always!(Parser::default().parse(&[], true).is_err());
         assert_matches!(
             Parser::default().parse(&[], false),
             Ok(Chunk::NeedMoreData(4)),
@@ -1437,9 +1438,9 @@ mod tests {
             parser_after_header().parse(&[], false),
             Ok(Chunk::NeedMoreData(1)),
         );
-        assert!(parser_after_header().parse(&[8], true).is_err());
-        assert!(parser_after_header().parse(&[8, 1], true).is_err());
-        assert!(parser_after_header().parse(&[8, 2], true).is_err());
+        always!(parser_after_header().parse(&[8], true).is_err());
+        always!(parser_after_header().parse(&[8, 1], true).is_err());
+        always!(parser_after_header().parse(&[8, 2], true).is_err());
         assert_matches!(
             parser_after_header().parse(&[8], false),
             Ok(Chunk::NeedMoreData(1)),
@@ -1459,8 +1460,8 @@ mod tests {
                 payload: Payload::StartSection { func: 1, .. },
             }),
         );
-        assert!(parser_after_header().parse(&[8, 2, 1, 1], false).is_err());
-        assert!(parser_after_header().parse(&[8, 0], false).is_err());
+        always!(parser_after_header().parse(&[8, 2, 1, 1], false).is_err());
+        always!(parser_after_header().parse(&[8, 0], false).is_err());
     }
 
     #[test]
@@ -1476,9 +1477,9 @@ mod tests {
 
     #[test]
     fn type_section() {
-        assert!(parser_after_header().parse(&[1], true).is_err());
-        assert!(parser_after_header().parse(&[1, 0], false).is_err());
-        assert!(parser_after_header().parse(&[8, 2], true).is_err());
+        always!(parser_after_header().parse(&[1], true).is_err());
+        always!(parser_after_header().parse(&[1, 0], false).is_err());
+        always!(parser_after_header().parse(&[8, 2], true).is_err());
         assert_matches!(
             parser_after_header().parse(&[1], false),
             Ok(Chunk::NeedMoreData(1)),
@@ -1505,9 +1506,9 @@ mod tests {
 
     #[test]
     fn custom_section() {
-        assert!(parser_after_header().parse(&[0], true).is_err());
-        assert!(parser_after_header().parse(&[0, 0], false).is_err());
-        assert!(parser_after_header().parse(&[0, 1, 1], false).is_err());
+        always!(parser_after_header().parse(&[0], true).is_err());
+        always!(parser_after_header().parse(&[0, 0], false).is_err());
+        always!(parser_after_header().parse(&[0, 1, 1], false).is_err());
         assert_matches!(
             parser_after_header().parse(&[0, 2, 1], false),
             Ok(Chunk::NeedMoreData(1)),
@@ -1566,9 +1567,9 @@ mod tests {
 
     #[test]
     fn function_section() {
-        assert!(parser_after_header().parse(&[10], true).is_err());
-        assert!(parser_after_header().parse(&[10, 0], true).is_err());
-        assert!(parser_after_header().parse(&[10, 1], true).is_err());
+        always!(parser_after_header().parse(&[10], true).is_err());
+        always!(parser_after_header().parse(&[10, 0], true).is_err());
+        always!(parser_after_header().parse(&[10, 1], true).is_err());
         assert_matches!(
             parser_after_header().parse(&[10], false),
             Ok(Chunk::NeedMoreData(1))

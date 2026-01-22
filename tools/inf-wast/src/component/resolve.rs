@@ -6,6 +6,7 @@ use crate::token::Span;
 use crate::token::{Id, Index};
 use crate::Error;
 
+use always_assert::always;
 /// Resolve the fields of a component and everything nested within it, changing
 /// `Index::Id` to `Index::Num` and expanding alias syntax sugar.
 pub fn resolve(component: &mut Component<'_>) -> Result<(), Error> {
@@ -123,7 +124,7 @@ impl<'a> Resolver<'a> {
     where
         T: From<Alias<'a>>,
     {
-        assert!(self.aliases_to_insert.is_empty());
+        always!(self.aliases_to_insert.is_empty());
 
         // Iterate through the fields of the component. We use an index
         // instead of an iterator because we'll be inserting aliases
@@ -600,7 +601,7 @@ impl<'a> Resolver<'a> {
                 // here for core types early.
                 self.current().core_types.register(field.id, "core type")?;
                 self.current().resolve_type_def(ty)?;
-                assert!(self.aliases_to_insert.is_empty());
+                always!(self.aliases_to_insert.is_empty());
             }
             CoreTypeDef::Module(t) => {
                 self.stack.push(ComponentState::new(field.id));
@@ -620,7 +621,7 @@ impl<'a> Resolver<'a> {
         for ty in rec.types.iter_mut() {
             self.current().resolve_type(ty)?;
         }
-        assert!(self.aliases_to_insert.is_empty());
+        always!(self.aliases_to_insert.is_empty());
         Ok(())
     }
 
