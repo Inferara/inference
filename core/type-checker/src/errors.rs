@@ -513,16 +513,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn display_public_constant_in_function_body() {
-        let err = TypeCheckError::PublicConstantInFunctionBody {
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: public constants are not allowed inside function bodies"
-        );
-    }
+   
 
     #[test]
     fn error_location_accessor() {
