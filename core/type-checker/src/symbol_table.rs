@@ -745,6 +745,15 @@ impl SymbolTable {
         self.current_scope.as_ref().map(|s| s.borrow().id)
     }
 
+    pub(crate) fn enter_scope(&mut self, scope_id: u32) -> bool {
+        if let Some(scope) = self.scopes.get(&scope_id) {
+            self.current_scope = Some(Rc::clone(scope));
+            true
+        } else {
+            false
+        }
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn get_scope(&self, scope_id: u32) -> Option<ScopeRef> {
         self.scopes.get(&scope_id).cloned()
@@ -956,7 +965,7 @@ impl SymbolTable {
             }
             Definition::Module(module_definition) => {
                 let _scope_id = self.enter_module(module_definition);
-                if let Some(body) = &module_definition.body {
+                if let Some(body) = module_definition.body.borrow().as_ref() {
                     for definition in body {
                         self.register_definition_from_external(definition)?;
                     }

@@ -451,7 +451,7 @@ ast_nodes! {
     pub struct ModuleDefinition {
         pub visibility: Visibility,
         pub name: Rc<Identifier>,
-        pub body: Option<Vec<Definition>>,
+        pub body: RefCell<Option<Vec<Definition>>>,
     }
 
     pub struct Argument {

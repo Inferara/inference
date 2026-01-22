@@ -53,8 +53,8 @@ Parse builds the typed AST; analyze performs semantic/type inference; codegen em
 pub(crate) struct Cli {
     /// Path to the source file to compile.
     ///
-    /// Currently only single-file compilation is supported. Multi-file projects
-    /// and project file (`.infp`) support is planned for future releases.
+    /// Multi-file projects are supported via `mod name;` declarations that
+    /// resolve submodule files relative to this path.
     pub(crate) path: std::path::PathBuf,
 
     /// Run the parse phase to build the typed AST.

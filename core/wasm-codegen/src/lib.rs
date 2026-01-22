@@ -75,6 +75,7 @@
 
 #![warn(clippy::pedantic)]
 
+use inference_ast::nodes::Definition;
 use inference_type_checker::typed_context::TypedContext;
 use inkwell::{
     context::Context,
@@ -90,8 +91,7 @@ mod utils;
 ///
 /// # Errors
 ///
-/// Returns an error if more than one source file is present in the AST, as multi-file
-/// support is not yet implemented.
+/// Supports multiple source files by traversing all parsed modules.
 ///
 /// Returns an error if code generation fails.
 pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
@@ -102,10 +102,6 @@ pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
     if typed_context.source_files().is_empty() {
         return compiler.compile_to_wasm("output.wasm", 3);
     }
-    if typed_context.source_files().len() > 1 {
-        todo!("Multi-file support not yet implemented");
-    }
-
     traverse_t_ast_with_compiler(typed_context, &compiler);
     let wasm_bytes = compiler.compile_to_wasm("output.wasm", 3)?;
     Ok(wasm_bytes)
@@ -127,11 +123,29 @@ pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
 ///
 /// - Only function definitions are compiled
 /// - Type definitions, constants, and other top-level items are ignored
-/// - Multi-file compilation is not fully tested (see `codegen` function)
+/// - Module name mangling is not yet implemented for nested functions
 fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &Compiler) {
     for source_file in &typed_context.source_files() {
-        for func_def in source_file.function_definitions() {
-            compiler.visit_function_definition(&func_def, typed_context);
+        compile_definitions(&source_file.definitions, typed_context, compiler);
+    }
+}
+
+fn compile_definitions(
+    definitions: &[Definition],
+    typed_context: &TypedContext,
+    compiler: &Compiler,
+) {
+    for definition in definitions {
+        match definition {
+            Definition::Function(func_def) => {
+                compiler.visit_function_definition(func_def, typed_context);
+            }
+            Definition::Module(module_def) => {
+                if let Some(body) = module_def.body.borrow().as_ref() {
+                    compile_definitions(body, typed_context, compiler);
+                }
+            }
+            _ => {}
         }
     }
 }

@@ -443,7 +443,7 @@ impl ModuleDefinition {
             location,
             visibility,
             name,
-            body,
+            body: RefCell::new(body),
         }
     }
 

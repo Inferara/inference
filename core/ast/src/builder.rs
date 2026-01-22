@@ -84,10 +84,18 @@ use crate::{
 };
 use tree_sitter::Node;
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct LocationBase {
+    pub(crate) offset: u32,
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+}
+
 pub struct Builder<'a> {
     arena: Arena,
     source_code: Vec<(Node<'a>, &'a [u8])>,
     errors: Vec<anyhow::Error>,
+    location_base: LocationBase,
 }
 
 impl Default for Builder<'_> {
@@ -103,7 +111,32 @@ impl<'a> Builder<'a> {
             arena: Arena::default(),
             source_code: Vec::new(),
             errors: Vec::new(),
+            location_base: LocationBase::default(),
         }
+    }
+
+    pub(crate) fn set_location_base(&mut self, base: LocationBase) {
+        self.location_base = base;
+    }
+
+    pub(crate) fn reset_location_base(&mut self) {
+        self.location_base = LocationBase::default();
+    }
+
+    pub(crate) fn take_errors(&mut self) -> Vec<anyhow::Error> {
+        std::mem::take(&mut self.errors)
+    }
+
+    pub(crate) fn next_node_id() -> u32 {
+        Self::get_node_id()
+    }
+
+    pub(crate) fn add_node(&mut self, node: AstNode, parent_id: u32) {
+        self.arena.add_node(node, parent_id);
+    }
+
+    pub(crate) fn into_arena(self) -> Arena {
+        self.arena
     }
 
     /// Adds a source code and CST to the builder.
@@ -132,7 +165,7 @@ impl<'a> Builder<'a> {
     pub fn build_ast(&'_ mut self) -> anyhow::Result<Arena> {
         for (root, code) in &self.source_code.clone() {
             let id = Self::get_node_id();
-            let location = Self::get_location(root, code);
+            let location = self.get_location(root, code);
             let source = String::from_utf8_lossy(code);
             debug_assert!(
                 !source.contains('\u{FFFD}'),
@@ -169,7 +202,7 @@ impl<'a> Builder<'a> {
         Ok(self.arena.clone())
     }
 
-    fn build_use_directive(
+    pub(crate) fn build_use_directive(
         &mut self,
         parent_id: u32,
         node: &Node,
@@ -177,7 +210,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<UseDirective> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let mut segments = None;
         let mut imported_types = None;
         let mut from = None;
@@ -228,7 +261,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<SpecDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut definitions = Vec::new();
 
@@ -261,7 +294,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<EnumDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut variants = Vec::new();
 
@@ -288,7 +321,12 @@ impl<'a> Builder<'a> {
         node
     }
 
-    fn build_definition(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Definition {
+    pub(crate) fn build_definition(
+        &mut self,
+        parent_id: u32,
+        node: &Node,
+        code: &[u8],
+    ) -> Definition {
         let kind = node.kind();
         match kind {
             "spec_definition" => {
@@ -316,7 +354,7 @@ impl<'a> Builder<'a> {
             _ => panic!(
                 "Unexpected definition kind: {}, {}",
                 node.kind(),
-                Self::get_location(node, code)
+                self.get_location(node, code)
             ),
         }
     }
@@ -329,7 +367,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<StructDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut fields = Vec::new();
         let mut cursor = node.walk();
@@ -365,7 +403,7 @@ impl<'a> Builder<'a> {
     fn build_struct_field(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<StructField> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
@@ -383,7 +421,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<ConstantDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let value = self.build_literal(id, &node.child_by_field_name("value").unwrap(), code);
@@ -411,7 +449,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<FunctionDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let mut arguments = None;
         let mut returns = None;
         let mut type_parameters = None;
@@ -469,7 +507,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<ExternalFunctionDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut arguments = None;
         let mut returns = None;
@@ -511,7 +549,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<TypeDefinition> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let node = Rc::new(TypeDefinition::new(
@@ -574,7 +612,7 @@ impl<'a> Builder<'a> {
     fn build_argument(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Argument> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name_node = node.child_by_field_name("name").unwrap();
         let type_node = node.child_by_field_name("type").unwrap();
         let ty = self.build_type(id, &type_node, code);
@@ -598,7 +636,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<SelfReference> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let is_mut = node
             .child_by_field_name("mut")
             .is_some_and(|n| n.kind() == "true");
@@ -618,7 +656,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<IgnoreArgument> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let node = Rc::new(IgnoreArgument::new(id, location, ty));
         self.arena.add_node(
@@ -631,7 +669,7 @@ impl<'a> Builder<'a> {
     fn build_block(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> BlockType {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         match node.kind() {
             "assume_block" => {
                 let statements = self.build_block_statements(
@@ -697,7 +735,7 @@ impl<'a> Builder<'a> {
             _ => panic!(
                 "Unexpected block type: {}, {}",
                 node.kind(),
-                Self::get_location(node, code)
+                self.get_location(node, code)
             ),
         }
     }
@@ -756,7 +794,7 @@ impl<'a> Builder<'a> {
             _ => panic!(
                 "Unexpected statement type: {}, {}",
                 node.kind(),
-                Self::get_location(node, code)
+                self.get_location(node, code)
             ),
         }
     }
@@ -769,14 +807,14 @@ impl<'a> Builder<'a> {
     ) -> Rc<ReturnStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expr_node = &node.child_by_field_name("expression");
         let expression = if let Some(expr) = expr_node {
             self.build_expression(id, expr, code)
         } else {
             Expression::Literal(Literal::Unit(Rc::new(UnitLiteral::new(
                 Self::get_node_id(),
-                Self::get_location(node, code),
+                self.get_location(node, code),
             ))))
         };
         let node = Rc::new(ReturnStatement::new(id, location, expression));
@@ -795,7 +833,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<LoopStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let condition = node
             .child_by_field_name("condition")
             .map(|n| self.build_expression(id, &n, code));
@@ -810,7 +848,7 @@ impl<'a> Builder<'a> {
     fn build_if_statement(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<IfStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let condition_node = node.child_by_field_name("condition").unwrap();
         let condition = self.build_expression(id, &condition_node, code);
         let if_arm_node = node.child_by_field_name("if_arm").unwrap();
@@ -832,7 +870,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<VariableDefinitionStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let value = node
@@ -858,7 +896,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<TypeDefinitionStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
@@ -908,7 +946,7 @@ impl<'a> Builder<'a> {
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
             _ => panic!(
                 "Unexpected expression node kind: {node_kind} at {}",
-                Self::get_location(node, code)
+                self.get_location(node, code)
             ),
         }
     }
@@ -921,7 +959,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<AssignStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
         let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
 
@@ -941,7 +979,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<ArrayIndexAccessExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let array = self.build_expression(id, &node.named_child(0).unwrap(), code);
         let index = self.build_expression(id, &node.named_child(1).unwrap(), code);
 
@@ -961,7 +999,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<MemberAccessExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expression =
             self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -981,7 +1019,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<TypeMemberAccessExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expression =
             self.build_expression(id, &node.child_by_field_name("expression").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -1003,7 +1041,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<FunctionCallExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let function =
             self.build_expression(id, &node.child_by_field_name("function").unwrap(), code);
         let mut argument_name_expression_map: Vec<(Option<Rc<Identifier>>, Expression)> =
@@ -1075,7 +1113,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<StructExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
         let mut field_name_expression_map: Vec<(Rc<Identifier>, Expression)> = Vec::new();
         let mut pending_name: Option<Rc<Identifier>> = None;
@@ -1129,7 +1167,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<PrefixUnaryExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
 
         let operator_node = node.child_by_field_name("operator").unwrap();
@@ -1158,7 +1196,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<AssertStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
         let node = Rc::new(AssertStatement::new(id, location, expression));
         self.arena.add_node(
@@ -1176,7 +1214,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<BreakStatement> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let node = Rc::new(BreakStatement::new(id, location));
         self.arena.add_node(
             AstNode::Statement(Statement::Break(node.clone())),
@@ -1193,7 +1231,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<ParenthesizedExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let expression = self.build_expression(id, &node.child(1).unwrap(), code);
 
         let node = Rc::new(ParenthesizedExpression::new(id, location, expression));
@@ -1212,7 +1250,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<BinaryExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let left = self.build_expression(id, &node.child_by_field_name("left").unwrap(), code);
         let operator_node = node.child_by_field_name("operator").unwrap();
         let operator_kind = operator_node.kind();
@@ -1268,7 +1306,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<ArrayLiteral> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let mut elements = Vec::new();
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -1291,7 +1329,7 @@ impl<'a> Builder<'a> {
     fn build_bool_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<BoolLiteral> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let value = match node.utf8_text(code).unwrap() {
             "true" => true,
             "false" => false,
@@ -1314,7 +1352,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<StringLiteral> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(StringLiteral::new(id, location, value));
         self.arena.add_node(
@@ -1332,7 +1370,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<NumberLiteral> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let value = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(NumberLiteral::new(id, location, value));
         self.arena.add_node(
@@ -1345,7 +1383,7 @@ impl<'a> Builder<'a> {
     fn build_unit_literal(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<UnitLiteral> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let node = Rc::new(UnitLiteral::new(id, location));
         self.arena.add_node(
             AstNode::Expression(Expression::Literal(Literal::Unit(node.clone()))),
@@ -1383,7 +1421,7 @@ impl<'a> Builder<'a> {
                 Type::Custom(name)
             }
             _ => {
-                let location = Self::get_location(node, code);
+                let location = self.get_location(node, code);
                 panic!("Unexpected type: {node_kind}, {location}")
             }
         }
@@ -1392,7 +1430,7 @@ impl<'a> Builder<'a> {
     fn build_type_array(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<TypeArray> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let element_type = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let length_node = node.child_by_field_name("length").unwrap();
         let size = self.build_expression(id, &length_node, code);
@@ -1408,7 +1446,7 @@ impl<'a> Builder<'a> {
     fn build_generic_type(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<GenericType> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let base = self.build_identifier(id, &node.child_by_field_name("base_type").unwrap(), code);
 
         let args = node.child(1).unwrap();
@@ -1436,7 +1474,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<FunctionType> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let mut arguments = None;
         let mut cursor = node.walk();
         let mut returns = None;
@@ -1467,7 +1505,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<TypeQualifiedName> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let alias = self.build_identifier(id, &node.child_by_field_name("alias").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
 
@@ -1487,7 +1525,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<QualifiedName> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let qualifier =
             self.build_identifier(id, &node.child_by_field_name("qualifier").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
@@ -1508,7 +1546,7 @@ impl<'a> Builder<'a> {
     ) -> Rc<UzumakiExpression> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let node = Rc::new(UzumakiExpression::new(id, location));
         self.arena.add_node(
             AstNode::Expression(Expression::Uzumaki(node.clone())),
@@ -1520,7 +1558,7 @@ impl<'a> Builder<'a> {
     fn build_identifier(&mut self, parent_id: u32, node: &Node, code: &[u8]) -> Rc<Identifier> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
-        let location = Self::get_location(node, code);
+        let location = self.get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
         let node = Rc::new(Identifier::new(id, name, location));
         self.arena.add_node(
@@ -1540,15 +1578,31 @@ impl<'a> Builder<'a> {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn get_location(node: &Node, _code: &[u8]) -> Location {
-        let offset_start = node.start_byte() as u32;
-        let offset_end = node.end_byte() as u32;
+    pub(crate) fn get_location(&self, node: &Node, _code: &[u8]) -> Location {
+        let mut offset_start = node.start_byte() as u32;
+        let mut offset_end = node.end_byte() as u32;
         let start_position = node.start_position();
         let end_position = node.end_position();
-        let start_line = start_position.row as u32 + 1;
-        let start_column = start_position.column as u32 + 1;
-        let end_line = end_position.row as u32 + 1;
-        let end_column = end_position.column as u32 + 1;
+        let mut start_line = start_position.row as u32 + 1;
+        let mut start_column = start_position.column as u32 + 1;
+        let mut end_line = end_position.row as u32 + 1;
+        let mut end_column = end_position.column as u32 + 1;
+
+        if self.location_base.offset != 0
+            || self.location_base.line != 0
+            || self.location_base.column != 0
+        {
+            offset_start += self.location_base.offset;
+            offset_end += self.location_base.offset;
+            start_line += self.location_base.line;
+            end_line += self.location_base.line;
+            if start_position.row == 0 {
+                start_column += self.location_base.column;
+            }
+            if end_position.row == 0 {
+                end_column += self.location_base.column;
+            }
+        }
 
         Location {
             offset_start,
@@ -1564,7 +1618,7 @@ impl<'a> Builder<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if child.is_error() {
-                let location = Self::get_location(&child, code);
+                let location = self.get_location(&child, code);
                 let source_snippet = String::from_utf8_lossy(
                     &code[location.offset_start as usize..location.offset_end as usize],
                 );
