@@ -109,8 +109,10 @@ impl<T: WasmModuleResources> FuncValidator<T> {
                 let push_count = self.validator.pop_push_count.1 - pop_push_snapshot.1;
 
                 if pop_count != params || push_count != results {
-                    panic!("arity mismatch in validation. Expecting {} operands popped, {} pushed, but got {} popped, {} pushed.",
-                           params, results, pop_count, push_count);
+                    panic!(
+                        "arity mismatch in validation. Expecting {} operands popped, {} pushed, but got {} popped, {} pushed.",
+                        params, results, pop_count, push_count
+                    );
                 }
             }
         }
@@ -369,14 +371,15 @@ mod tests {
         assert_eq!(v.operand_stack_height(), 1);
 
         // Entering a new control block does not affect the stack height.
-        assert!(v
-            .op(
+        assert!(
+            v.op(
                 1,
                 &Operator::Block {
                     blockty: crate::BlockType::Empty
                 }
             )
-            .is_ok());
+            .is_ok()
+        );
         assert_eq!(v.operand_stack_height(), 1);
 
         // Pushing another constant value makes use have two values on the stack.

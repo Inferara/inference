@@ -1,5 +1,5 @@
 use anyhow::Result;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use inf_wasmparser::VisitSimdOperator;
 use inf_wasmparser::{
     DataKind, ElementKind, Parser, Payload, Validator, VisitOperator, WasmFeatures,

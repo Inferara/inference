@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use inf_wast::{
+        Wat,
         core::*,
         parser::{self, ParseBuffer},
-        Wat,
     };
 
     #[test]

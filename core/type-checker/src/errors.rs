@@ -314,9 +314,6 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: `uzumaki` can only be used in variable declaration statements")]
-    UzumakiMisuse { location: Location },
-
     /// Instance method called as associated function.
     ///
     /// This occurs when `Type::method()` syntax is used for a method that requires `self`.
@@ -380,7 +377,6 @@ impl TypeCheckError {
             | TypeCheckError::CannotInferTypeParameter { location, .. }
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
-            | TypeCheckError::UzumakiMisuse { location }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
         }

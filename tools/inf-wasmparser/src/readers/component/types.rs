@@ -1,6 +1,6 @@
+use crate::RecGroup;
 use crate::limits::*;
 use crate::prelude::*;
-use crate::RecGroup;
 use crate::{
     BinaryReader, ComponentAlias, ComponentExportName, ComponentImport, ComponentTypeRef,
     FromReader, Import, Result, SectionLimited, TypeRef, ValType,

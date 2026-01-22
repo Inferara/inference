@@ -327,9 +327,8 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 /// - Unreachable code paths
 /// - Dead code that should be removed
 /// - Control flow violations (e.g., missing return statements)
-pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
-    // todo!("Type analysis not yet implemented");
-    Ok(())
+pub fn analyze(typed_context: &TypedContext) -> anyhow::Result<()> {
+    inference_semantic_analysis::analyze(typed_context)
 }
 
 /// Generates WebAssembly binary format from the typed AST.

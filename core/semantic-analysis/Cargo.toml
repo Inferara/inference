@@ -1,5 +1,5 @@
 [package]
-name = "inference"
+name = "inference-semantic-analysis"
 version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
@@ -7,11 +7,10 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+inference-ast.workspace = true
+inference-type-checker.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+[dev-dependencies]
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
-inference-ast.workspace = true
-inference-wasm-codegen.workspace = true
-inference-wasm-to-v-translator.workspace = true
-inference-type-checker.workspace = true
-inference-semantic-analysis.workspace = true

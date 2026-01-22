@@ -7,18 +7,18 @@ pub(crate) use canonical::InternRecGroup;
 use self::arc::MaybeOwned;
 use super::{
     check_max, combine_type_sizes,
-    operators::{ty_to_str, OperatorValidator, OperatorValidatorAllocations},
+    operators::{OperatorValidator, OperatorValidatorAllocations, ty_to_str},
     types::{CoreTypeId, EntityType, RecGroupId, TypeAlloc, TypeList},
 };
 #[cfg(feature = "simd")]
 use crate::VisitSimdOperator;
 use crate::{
-    limits::*, BinaryReaderError, ConstExpr, Data, DataKind, Element, ElementKind, ExternalKind,
-    FuncType, Global, GlobalType, HeapType, MemoryType, RecGroup, RefType, Result, SubType, Table,
-    TableInit, TableType, TagType, TypeRef, UnpackedIndex, ValType, VisitOperator, WasmFeatures,
-    WasmModuleResources,
+    BinaryReaderError, ConstExpr, Data, DataKind, Element, ElementKind, ExternalKind, FuncType,
+    Global, GlobalType, HeapType, MemoryType, RecGroup, RefType, Result, SubType, Table, TableInit,
+    TableType, TagType, TypeRef, UnpackedIndex, ValType, VisitOperator, WasmFeatures,
+    WasmModuleResources, limits::*,
 };
-use crate::{prelude::*, CompositeInnerType};
+use crate::{CompositeInnerType, prelude::*};
 use alloc::sync::Arc;
 use core::mem;
 

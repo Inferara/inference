@@ -2263,7 +2263,7 @@ impl ComponentState {
                             return Err(BinaryReaderError::new(
                                 "canonical option `memory` is specified more than once",
                                 offset,
-                            ))
+                            ));
                         }
                     }
                 }
@@ -2286,7 +2286,7 @@ impl ComponentState {
                             return Err(BinaryReaderError::new(
                                 "canonical option `realloc` is specified more than once",
                                 offset,
-                            ))
+                            ));
                         }
                     }
                 }
@@ -2314,7 +2314,7 @@ impl ComponentState {
                             return Err(BinaryReaderError::new(
                                 "canonical option `post-return` is specified more than once",
                                 offset,
-                            ))
+                            ));
                         }
                     }
                 }
@@ -2359,7 +2359,7 @@ impl ComponentState {
                             return Err(BinaryReaderError::new(
                                 "canonical option `callback` is specified more than once",
                                 offset,
-                            ))
+                            ));
                         }
                     }
                 }

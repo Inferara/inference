@@ -970,7 +970,8 @@ mod type_inference_tests {
                 let c: i32 = @;
                 let d: i64 = @;
 
-                let e: u8 = @;
+                let e: u8;
+                e = @;
                 let f: u16 = @;
                 let g: u32 = @;
                 let h: u64 = @;
@@ -1045,48 +1046,31 @@ mod type_inference_tests {
         }
 
         #[test]
-        fn test_uzumaki_in_return_fails() {
+        fn test_uzumaki_in_return_statement() {
             let source = r#"fn test() -> i32 { return @; }"#;
-            let result = try_type_check(source);
-            assert!(result.is_err(), "Uzumaki in return should fail");
-            assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("uzumaki can only be used in variable declaration statements"),
-                "Error message should mention restriction"
-            );
-        }
+            let arena = build_ast(source.to_string());
+            let uzumaki_nodes = arena
+                .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Uzumaki(_))));
+            assert_eq!(uzumaki_nodes.len(), 1, "Expected 1 uzumaki expression");
 
-        #[test]
-        fn test_uzumaki_in_assignment_fails() {
-            let source = r#"fn test() { let x: i32 = 0; x = @; }"#;
-            let result = try_type_check(source);
-            assert!(result.is_err(), "Uzumaki in assignment should fail");
-            assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("uzumaki can only be used in variable declaration statements"),
-                "Error message should mention restriction"
-            );
-        }
+            let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+                .unwrap()
+                .typed_context();
 
-        #[test]
-        fn test_uzumaki_in_expression_fails() {
-            let source = r#"fn test() { let x: i32 = 1 + @; }"#;
-            let result = try_type_check(source);
-            assert!(result.is_err(), "Uzumaki in expression should fail");
-            assert!(
-                result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("uzumaki can only be used in variable declaration statements"),
-                "Error message should mention restriction"
-            );
+            if let AstNode::Expression(Expression::Uzumaki(uzumaki)) = &uzumaki_nodes[0] {
+                let type_info = typed_context.get_node_typeinfo(uzumaki.id);
+                assert!(
+                    type_info.is_some(),
+                    "Uzumaki in return should have type info"
+                );
+                assert!(
+                    matches!(
+                        type_info.unwrap().kind,
+                        TypeInfoKind::Number(NumberType::I32)
+                    ),
+                    "Uzumaki should infer return type i32"
+                );
+            }
         }
     }
 
