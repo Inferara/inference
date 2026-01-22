@@ -236,7 +236,7 @@ impl TypeChecker {
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
-                            .register_spec(&spec_definition.name())
+                            .register_spec(&spec_definition.name(), spec_definition.visibility.clone())
                             .unwrap_or_else(|_| {
                                 self.errors.push(TypeCheckError::RegistrationFailed {
                                     kind: RegistrationKind::Spec,
@@ -1673,7 +1673,7 @@ impl TypeChecker {
                     }
                     Definition::Spec(spec_definition) => {
                         self.symbol_table
-                            .register_spec(&spec_definition.name())
+                            .register_spec(&spec_definition.name(), spec_definition.visibility.clone())
                             .unwrap_or_else(|_| {
                                 self.errors.push(TypeCheckError::RegistrationFailed {
                                     kind: RegistrationKind::Spec,

@@ -993,7 +993,24 @@ fn test_parse_spec_definition_visibility_private() {
         assert_eq!(
             spec.visibility,
             Visibility::Private,
-            "Spec definitions should always be private (no grammar support for pub)"
+            "Spec without pub should have Private visibility"
+        );
+    } else {
+        panic!("Expected spec definition");
+    }
+}
+
+#[test]
+fn test_parse_spec_definition_visibility_public() {
+    let source = r#"pub spec MySpec { fn verify() -> bool { return true; } }"#;
+    let arena = build_ast(source.to_string());
+    let specs = arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Spec(_))));
+    assert_eq!(specs.len(), 1, "Should find 1 spec definition");
+    if let AstNode::Definition(Definition::Spec(spec)) = &specs[0] {
+        assert_eq!(
+            spec.visibility,
+            Visibility::Public,
+            "Spec with pub should have Public visibility"
         );
     } else {
         panic!("Expected spec definition");
