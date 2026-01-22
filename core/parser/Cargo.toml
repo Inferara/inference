@@ -1,0 +1,24 @@
+[package]
+name = "inference-parser"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Custom parser for the Inference language with resilient error recovery"
+
+[dependencies]
+inference-ast = { path = "../ast" }
+thiserror = "1.0"
+winnow = "0.7"
+tracing = { version = "0.1", optional = true }
+drop_bomb = "0.1"
+
+[dev-dependencies]
+expect-test = "1.4"
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+
+[[test]]
+name = "parser_tests"
+path = "tests/parser_tests.rs"
