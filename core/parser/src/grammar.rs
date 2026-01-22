@@ -1,86 +1,67 @@
-/// Grammar module for parsing Inference language
+/// Grammar module - Parsing rules for Inference language constructs
 /// 
-/// Optimized for >95% test coverage with simplified rules
+/// This module provides the grammar parsing functions called by parse_module().
+/// Each function parses a specific construct and advances the parser position.
 
 use crate::parser::Parser;
+use crate::syntax_kind::SyntaxKind;
 
-mod items;
-mod expressions;
-mod types;
-mod patterns;
+pub mod items;
+pub mod expressions;
+pub mod types;
 
 pub use items::*;
 pub use expressions::*;
+pub use types::*;
 
-/// Parse the root source file/module
-pub fn parse_source_file(p: &mut Parser) {
-    while !p.at_eof() {
-        p.eat_whitespace_and_comments();
-        if p.at_eof() {
-            break;
-        }
-        parse_item(p);
-    }
-}
-
-/// Parse a single item (function, struct, etc.)
-fn parse_item(p: &mut Parser) {
-    let mut _vis = false;
-    if p.at(crate::syntax_kind::SyntaxKind::PUB) {
+/// Parse a top-level item (function, struct, enum, etc.)
+pub fn parse_item(p: &mut Parser) {
+    // Check for pub visibility modifier
+    if p.at(SyntaxKind::PUB) {
         p.bump();
-        _vis = true;
     }
 
     match p.current() {
-        crate::syntax_kind::SyntaxKind::FN => items::parse_function(p),
-        crate::syntax_kind::SyntaxKind::STRUCT => items::parse_struct(p),
-        crate::syntax_kind::SyntaxKind::ENUM => items::parse_enum(p),
-        crate::syntax_kind::SyntaxKind::IMPL => items::parse_impl(p),
-        crate::syntax_kind::SyntaxKind::TRAIT => items::parse_trait(p),
-        crate::syntax_kind::SyntaxKind::TYPE => items::parse_type_alias(p),
-        crate::syntax_kind::SyntaxKind::CONST => items::parse_const(p),
-        crate::syntax_kind::SyntaxKind::IMPORT => items::parse_import(p),
-        crate::syntax_kind::SyntaxKind::MOD => items::parse_module(p),
+        SyntaxKind::FN => items::parse_function(p),
+        SyntaxKind::STRUCT => items::parse_struct(p),
+        SyntaxKind::ENUM => items::parse_enum(p),
+        SyntaxKind::TRAIT => items::parse_trait(p),
+        SyntaxKind::IMPL => items::parse_impl(p),
+        SyntaxKind::TYPE => items::parse_type_alias(p),
+        SyntaxKind::CONST => items::parse_const(p),
+        SyntaxKind::IMPORT => items::parse_import(p),
+        SyntaxKind::MOD => items::parse_module(p),
+        SyntaxKind::LET => items::parse_let_binding(p),
         _ => {
+            // Unknown item - skip it
+            if !p.at_eof() {
+                p.bump();
+            }
+        }
+    }
+}
+
+/// Parse a statement inside a block
+pub fn parse_statement(p: &mut Parser) {
+    match p.current() {
+        SyntaxKind::LET => items::parse_let_binding(p),
+        SyntaxKind::IF => expressions::parse_if_expr(p),
+        SyntaxKind::WHILE => expressions::parse_while_expr(p),
+        SyntaxKind::FOR => expressions::parse_for_expr(p),
+        SyntaxKind::LOOP => expressions::parse_loop_expr(p),
+        SyntaxKind::RETURN => expressions::parse_return_expr(p),
+        SyntaxKind::BREAK => {
             p.bump();
         }
-    }
-}
-
-/// Parse a statement within a block
-pub fn parse_statement(p: &mut Parser) {
-    use crate::syntax_kind::SyntaxKind;
-
-    match p.current() {
-        SyntaxKind::LET => items::parse_let_statement(p),
-        SyntaxKind::RETURN | SyntaxKind::BREAK | SyntaxKind::CONTINUE => {
-            expressions::parse_expr(p);
-            if p.at(SyntaxKind::SEMICOLON) {
-                p.bump();
-            }
-        }
-        SyntaxKind::L_BRACE => {
-            expressions::parse_block_expr(p);
-        }
-        SyntaxKind::IF => {
-            expressions::parse_if_expr(p);
-        }
-        SyntaxKind::WHILE => {
-            expressions::parse_while_expr(p);
-        }
-        SyntaxKind::FOR => {
-            expressions::parse_for_expr(p);
-        }
-        SyntaxKind::LOOP => {
-            expressions::parse_loop_expr(p);
+        SyntaxKind::CONTINUE => {
+            p.bump();
         }
         _ => {
-            expressions::parse_expr(p);
+            // Try to parse as expression
+            expressions::parse_expression(p);
             if p.at(SyntaxKind::SEMICOLON) {
                 p.bump();
             }
         }
     }
-
-    p.eat_whitespace_and_comments();
 }
