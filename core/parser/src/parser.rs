@@ -67,12 +67,6 @@ impl Parser {
         self.advance_stack.pop();
     }
 
-    #[allow(dead_code)]
-    #[inline]
-    fn advance_drop(&mut self) {
-        self.advance_stack.pop();
-    }
-
     fn expect(&mut self, expected: TokenKind) -> Result<Token, ParseError> {
         if std::mem::discriminant(&self.current().kind) == std::mem::discriminant(&expected) {
             Ok(self.bump())

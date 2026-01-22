@@ -25,22 +25,15 @@ fn test_struct_definition() {
 fn test_variable_declaration() {
     let source = "let x: i32;";
     let mut parser = Parser::new(source);
-    match parser.parse_module() {
-        Ok(()) | Err(_) => {
-            // Accept both success and error for now
-        }
-    }
+    // Variable declarations at module level are invalid syntax
+    assert!(parser.parse_module().is_err());
 }
 
 #[test]
 fn test_if_statement() {
     let source = "fn test() { if true { } }";
     let mut parser = Parser::new(source);
-    match parser.parse_module() {
-        Ok(()) | Err(_) => {
-            // Accept both
-        }
-    }
+    assert!(parser.parse_module().is_ok());
 }
 
 #[test]
@@ -78,9 +71,5 @@ fn test_import_statement() {
 fn test_simple_expression() {
     let source = "fn test() { let x = 5; }";
     let mut parser = Parser::new(source);
-    match parser.parse_module() {
-        Ok(()) | Err(_) => {
-            // Accept both
-        }
-    }
+    assert!(parser.parse_module().is_ok());
 }
