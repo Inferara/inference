@@ -757,6 +757,11 @@ impl TypeChecker {
                 }
             }
             Statement::ConstantDefinition(constant_definition) => {
+                if constant_definition.visibility == Visibility::Public {
+                    self.errors.push(TypeCheckError::PublicConstantInFunctionBody {
+                        location: constant_definition.location,
+                    });
+                }
                 let constant_type = TypeInfo::new(&constant_definition.ty);
                 if let Err(err) = self
                     .symbol_table
