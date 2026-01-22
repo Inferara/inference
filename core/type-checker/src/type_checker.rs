@@ -597,13 +597,9 @@ impl TypeChecker {
                 let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
                 let right_expr = assign_statement.right.borrow();
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
-                    if let Some(target) = &target_type {
-                        ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
-                    } else {
-                        self.errors.push(TypeCheckError::CannotInferUzumakiType {
-                            location: uzumaki_rc.location,
-                        });
-                    }
+                    self.errors.push(TypeCheckError::UzumakiMisuse {
+                        location: uzumaki_rc.location,
+                    });
                 } else {
                     let value_type = self.infer_expression(&right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
@@ -629,14 +625,10 @@ impl TypeChecker {
                 self.infer_expression(expression, ctx);
             }
             Statement::Return(return_statement) => {
-                if matches!(
-                    &*return_statement.expression.borrow(),
-                    Expression::Uzumaki(_)
-                ) {
-                    ctx.set_node_typeinfo(
-                        return_statement.expression.borrow().id(),
-                        return_type.clone(),
-                    );
+                if let Expression::Uzumaki(u) = &*return_statement.expression.borrow() {
+                    self.errors.push(TypeCheckError::UzumakiMisuse {
+                        location: u.location,
+                    });
                 } else {
                     let value_type =
                         self.infer_expression(&return_statement.expression.borrow(), ctx);
@@ -1537,7 +1529,12 @@ impl TypeChecker {
                 }
                 Some(type_info)
             }
-            Expression::Uzumaki(uzumaki) => ctx.get_node_typeinfo(uzumaki.id),
+            Expression::Uzumaki(uzumaki) => {
+                self.errors.push(TypeCheckError::UzumakiMisuse {
+                    location: uzumaki.location,
+                });
+                None
+            }
         }
     }
 
