@@ -1,23 +1,22 @@
 //! Symbol Table
 //!
-//! This module implements a tree-based symbol table for managing scopes and symbols
-//! during type checking. It supports:
-//!
+//! Tree-based scope management for type checking:
 //! - Hierarchical scopes with parent-child relationships
-//! - Type alias, struct, enum, spec, and function symbol registration
-//! - Variable tracking within scopes
-//! - Method resolution on types
-//! - Import registration and resolution
+//! - Type/struct/enum/spec and function registration
+//! - Variable, method, and import tracking
 //! - Visibility checking for access control
 //!
-//! Scopes form a tree structure where each scope can have multiple child scopes.
-//! Symbol lookup walks up the tree from current scope to root until a match is found.
+//! ## Scope Tree
+//!
+//! Symbol lookup walks **up** the parent chain from current scope to root.
+//! Inner scopes can shadow outer scope symbols. Scope navigation:
+//! - `push_scope()` - Create child scope and move down
+//! - `pop_scope()` - Return to parent scope
 //!
 //! ## Default Return Types
 //!
-//! Functions without an explicit return type default to the unit type. This is
-//! represented using `Type::Simple(SimpleTypeKind::Unit)`, which provides a
-//! lightweight value-based representation without heap allocation.
+//! Functions without explicit return type default to unit (`Type::Simple(SimpleTypeKind::Unit)`).
+
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -311,6 +310,7 @@ impl Scope {
         if let Some(symbol) = self.lookup_symbol_local(name) {
             return Some(symbol.clone());
         }
+        // Recursively search parent scopes
         if let Some(parent) = &self.parent {
             return parent.borrow().lookup_symbol(name);
         }
@@ -340,6 +340,7 @@ impl Scope {
         if let Some((_, ty)) = self.lookup_variable_local(name) {
             return Some(ty);
         }
+        // Search parent scopes (enables shadowing)
         if let Some(parent) = &self.parent {
             return parent.borrow().lookup_variable(name);
         }
@@ -362,6 +363,7 @@ impl Scope {
         {
             return Some(method_info.clone());
         }
+        // Search parent scopes
         if let Some(parent) = &self.parent {
             return parent.borrow().lookup_method(type_name, method_name);
         }
@@ -455,6 +457,11 @@ impl SymbolTable {
         self.push_scope_with_name(&name, Visibility::Private)
     }
 
+    /// Create a new child scope and move down.
+    ///
+    /// Links the new scope to the current scope as its parent, builds the full path
+    /// (e.g., "module::inner"), and updates `current_scope`. Used when entering function
+    /// bodies, blocks, or nested modules.
     pub(crate) fn push_scope_with_name(&mut self, name: &str, visibility: Visibility) -> u32 {
         let parent = self.current_scope.clone();
         let scope_id = self.next_scope_id;
@@ -483,6 +490,10 @@ impl SymbolTable {
         scope_id
     }
 
+    /// Pop the current scope and move back to its parent.
+    ///
+    /// Counterpart to `push_scope()` / `push_scope_with_name()`. Called when exiting
+    /// a scope (function end, block end) to restore the parent scope as `current_scope`.
     pub(crate) fn pop_scope(&mut self) {
         if let Some(current) = &self.current_scope {
             let parent = current.borrow().parent.clone();
