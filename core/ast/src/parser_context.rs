@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::arena::Arena;
-use crate::nodes::ModuleDefinition;
+use crate::builder::Builder;
+use crate::nodes::{Definition, ModuleDefinition};
+use tree_sitter::Parser;
 
 /// Queue entry for pending file parsing.
 #[allow(dead_code)]
@@ -69,9 +71,8 @@ impl ParserContext {
     ///
     /// Will add the file to the queue with its parent scope ID, enabling
     /// proper scope relationships when the file is parsed.
-    #[allow(clippy::unused_self)]
-    pub fn push_file(&mut self, _scope_id: u32, _file_path: PathBuf) {
-        // Not yet implemented - see module documentation
+    pub fn push_file(&mut self, scope_id: u32, file_path: PathBuf) {
+        self.queue.push(ParseQueueEntry { scope_id, file_path });
     }
 
     /// Parses all queued files and builds the unified AST.
@@ -92,6 +93,34 @@ impl ParserContext {
     /// ```
     #[must_use]
     pub fn parse_all(&mut self) -> Arena {
+        while let Some(entry) = self.queue.pop() {
+            let Some(file_arena) = Self::parse_file(&entry.file_path) else {
+                continue;
+            };
+
+            for source_file in file_arena.source_files() {
+                for definition in &source_file.definitions {
+                    if let Definition::Module(module_definition) = definition {
+                        self.process_module(module_definition, entry.scope_id, &entry.file_path);
+                    }
+                }
+            }
+
+            let Arena {
+                nodes,
+                parent_map,
+                children_map,
+            } = file_arena;
+            self.arena.nodes.extend(nodes);
+            self.arena.parent_map.extend(parent_map);
+            for (parent_id, children) in children_map {
+                self.arena
+                    .children_map
+                    .entry(parent_id)
+                    .or_default()
+                    .extend(children);
+            }
+        }
         std::mem::take(&mut self.arena)
     }
 
@@ -118,11 +147,26 @@ impl ParserContext {
     #[allow(dead_code, clippy::unused_self)]
     fn process_module(
         &mut self,
-        _module: &Rc<ModuleDefinition>,
+        module: &Rc<ModuleDefinition>,
         _parent_scope_id: u32,
-        _current_file_path: &PathBuf,
+        current_file_path: &PathBuf,
     ) {
-        // Not yet implemented - see module documentation
+        let module_scope_id = self.next_node_id();
+
+        if module.body.is_none() {
+            if let Some(mod_path) = find_submodule_path(current_file_path, &module.name()) {
+                self.push_file(module_scope_id, mod_path);
+            }
+            return;
+        }
+
+        if let Some(body) = &module.body {
+            for definition in body {
+                if let Definition::Module(child_module) = definition {
+                    self.process_module(child_module, module_scope_id, current_file_path);
+                }
+            }
+        }
     }
 
     /// Generates a new unique node ID.
@@ -131,6 +175,17 @@ impl ParserContext {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    fn parse_file(file_path: &PathBuf) -> Option<Arena> {
+        let source = std::fs::read_to_string(file_path).ok()?;
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_inference::language()).ok()?;
+        let tree = parser.parse(&source, None)?;
+
+        let mut builder = Builder::new();
+        builder.add_source_code(tree.root_node(), source.as_bytes());
+        builder.build_ast().ok()
     }
 }
 
@@ -142,8 +197,17 @@ impl ParserContext {
 /// 1. `{current_dir}/{module_name}.inf`
 /// 2. `{current_dir}/{module_name}/mod.inf`
 ///
-/// Returns `None` until multi-file support is implemented.
+/// Returns the first path that exists, or `None` if no candidate is found.
 #[must_use]
-pub fn find_submodule_path(_current_file: &PathBuf, _module_name: &str) -> Option<PathBuf> {
+pub fn find_submodule_path(current_file: &PathBuf, module_name: &str) -> Option<PathBuf> {
+    let current_dir = current_file.parent()?;
+    let file_candidate = current_dir.join(format!("{module_name}.inf"));
+    if file_candidate.exists() {
+        return Some(file_candidate);
+    }
+    let mod_candidate = current_dir.join(module_name).join("mod.inf");
+    if mod_candidate.exists() {
+        return Some(mod_candidate);
+    }
     None
 }

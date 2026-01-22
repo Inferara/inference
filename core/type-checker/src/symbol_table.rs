@@ -859,8 +859,7 @@ impl SymbolTable {
 
     /// Register a definition from an external module into the current scope.
     ///
-    /// Currently handles: Struct, Enum, Spec, Function, Type.
-    /// Skips: Constant, ExternalFunction, Module (deferred to future phases).
+    /// Currently handles: Struct, Enum, Spec, Function, Type, Constant, ExternalFunction, Module.
     #[allow(dead_code)]
     fn register_definition_from_external(&mut self, definition: &Definition) -> anyhow::Result<()> {
         match definition {
@@ -920,7 +919,50 @@ impl SymbolTable {
             Definition::Type(t) => {
                 self.register_type(&t.name(), Some(&t.ty))?;
             }
-            Definition::Constant(_) | Definition::ExternalFunction(_) | Definition::Module(_) => {}
+            Definition::Constant(constant_definition) => {
+                self.push_variable_to_scope(
+                    &constant_definition.name(),
+                    TypeInfo::new(&constant_definition.ty),
+                )?;
+            }
+            Definition::ExternalFunction(external_function_definition) => {
+                let param_types: Vec<_> = external_function_definition
+                    .arguments
+                    .as_ref()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|param| match param {
+                        ArgumentType::SelfReference(_) => None,
+                        ArgumentType::IgnoreArgument(ignore_argument) => {
+                            Some(ignore_argument.ty.clone())
+                        }
+                        ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                        ArgumentType::Type(ty) => Some(ty.clone()),
+                    })
+                    .collect();
+                let return_type = external_function_definition
+                    .returns
+                    .clone()
+                    .unwrap_or(Type::Simple(SimpleTypeKind::Unit));
+
+                self.register_function_with_visibility(
+                    &external_function_definition.name(),
+                    vec![],
+                    &param_types,
+                    &return_type,
+                    external_function_definition.visibility.clone(),
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+            }
+            Definition::Module(module_definition) => {
+                let _scope_id = self.enter_module(module_definition);
+                if let Some(body) = &module_definition.body {
+                    for definition in body {
+                        self.register_definition_from_external(definition)?;
+                    }
+                }
+                self.pop_scope();
+            }
         }
         Ok(())
     }
