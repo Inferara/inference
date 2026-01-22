@@ -606,15 +606,15 @@ impl TypeChecker {
                     }
                 } else {
                     let value_type = self.infer_expression(&right_expr, ctx);
-                    if let (Some(target), Some(val)) = (target_type, value_type)
-                        && target != val
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target,
-                            found: val,
-                            context: TypeMismatchContext::Assignment,
-                            location: assign_statement.location,
-                        });
+                    if let (Some(target), Some(val)) = (target_type, value_type) {
+                        if !target.is_error() && !val.is_error() && target != val {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target,
+                                found: val,
+                                context: TypeMismatchContext::Assignment,
+                                location: assign_statement.location,
+                            });
+                        }
                     }
                 }
             }
@@ -640,10 +640,11 @@ impl TypeChecker {
                 } else {
                     let value_type =
                         self.infer_expression(&return_statement.expression.borrow(), ctx);
-                    if *return_type != value_type.clone().unwrap_or_default() {
+                    let val = value_type.unwrap_or_default();
+                    if !return_type.is_error() && !val.is_error() && *return_type != val {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
-                            found: value_type.unwrap_or_default(),
+                            found: val,
                             context: TypeMismatchContext::Return,
                             location: return_statement.location,
                         });
@@ -653,12 +654,19 @@ impl TypeChecker {
             Statement::Loop(loop_statement) => {
                 if let Some(condition) = &*loop_statement.condition.borrow() {
                     let condition_type = self.infer_expression(condition, ctx);
-                    if condition_type.is_none()
-                        || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                    {
+                    if let Some(cond_type) = condition_type {
+                        if !cond_type.is_error() && !cond_type.is_bool() {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: TypeInfo::boolean(),
+                                found: cond_type,
+                                context: TypeMismatchContext::Condition,
+                                location: loop_statement.location,
+                            });
+                        }
+                    } else {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: TypeInfo::boolean(),
-                            found: condition_type.unwrap_or_default(),
+                            found: TypeInfo::default(),
                             context: TypeMismatchContext::Condition,
                             location: loop_statement.location,
                         });
@@ -673,12 +681,19 @@ impl TypeChecker {
             Statement::Break(_) => {}
             Statement::If(if_statement) => {
                 let condition_type = self.infer_expression(&if_statement.condition.borrow(), ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
+                if let Some(cond_type) = condition_type {
+                    if !cond_type.is_error() && !cond_type.is_bool() {
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: TypeInfo::boolean(),
+                            found: cond_type,
+                            context: TypeMismatchContext::Condition,
+                            location: if_statement.location,
+                        });
+                    }
+                } else {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
+                        found: TypeInfo::default(),
                         context: TypeMismatchContext::Condition,
                         location: if_statement.location,
                     });
@@ -703,15 +718,18 @@ impl TypeChecker {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
-                        && init_type != TypeInfo::new(&variable_definition_statement.ty)
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target_type.clone(),
-                            found: init_type,
-                            context: TypeMismatchContext::VariableDefinition,
-                            location: variable_definition_statement.location,
-                        });
+                    } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx) {
+                        if !target_type.is_error()
+                            && !init_type.is_error()
+                            && init_type != TypeInfo::new(&variable_definition_statement.ty)
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: init_type,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location: variable_definition_statement.location,
+                            });
+                        }
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
@@ -745,12 +763,19 @@ impl TypeChecker {
             Statement::Assert(assert_statement) => {
                 let condition_type =
                     self.infer_expression(&assert_statement.expression.borrow(), ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
+                if let Some(cond_type) = condition_type {
+                    if !cond_type.is_error() && !cond_type.is_bool() {
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: TypeInfo::boolean(),
+                            found: cond_type,
+                            context: TypeMismatchContext::Condition,
+                            location: assert_statement.location,
+                        });
+                    }
+                } else {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
+                        found: TypeInfo::default(),
                         context: TypeMismatchContext::Condition,
                         location: assert_statement.location,
                     });
@@ -790,12 +815,13 @@ impl TypeChecker {
                 {
                     if let Some(index_type) =
                         self.infer_expression(&array_index_access_expression.index.borrow(), ctx)
-                        && !index_type.is_number()
                     {
-                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
-                            found: index_type,
-                            location: array_index_access_expression.location,
-                        });
+                        if !index_type.is_error() && !index_type.is_number() {
+                            self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                                found: index_type,
+                                location: array_index_access_expression.location,
+                            });
+                        }
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -805,12 +831,16 @@ impl TypeChecker {
                             );
                             Some((**element_type).clone())
                         }
+                        TypeInfoKind::Error => Some(array_type.clone()),
                         _ => {
                             self.errors.push(TypeCheckError::ExpectedArrayType {
                                 found: array_type,
                                 location: array_index_access_expression.location,
                             });
-                            None
+                            Some(TypeInfo {
+                                kind: TypeInfoKind::Error,
+                                type_params: vec![],
+                            })
                         }
                     }
                 } else {
@@ -823,6 +853,10 @@ impl TypeChecker {
                 } else if let Some(object_type) =
                     self.infer_expression(&member_access_expression.expression.borrow(), ctx)
                 {
+                    if object_type.is_error() {
+                        ctx.set_node_typeinfo(member_access_expression.id, object_type.clone());
+                        return Some(object_type);
+                    }
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -862,7 +896,10 @@ impl TypeChecker {
                                     field_name: field_name.clone(),
                                     location: member_access_expression.location,
                                 });
-                                None
+                                return Some(TypeInfo {
+                                    kind: TypeInfoKind::Error,
+                                    type_params: vec![],
+                                });
                             }
                         } else {
                             self.errors.push(TypeCheckError::FieldNotFound {
@@ -870,14 +907,20 @@ impl TypeChecker {
                                 field_name: field_name.clone(),
                                 location: member_access_expression.location,
                             });
-                            None
+                            return Some(TypeInfo {
+                                kind: TypeInfoKind::Error,
+                                type_params: vec![],
+                            });
                         }
                     } else {
                         self.errors.push(TypeCheckError::ExpectedStructType {
                             found: object_type,
                             location: member_access_expression.location,
                         });
-                        None
+                        return Some(TypeInfo {
+                            kind: TypeInfoKind::Error,
+                            type_params: vec![],
+                        });
                     }
                 } else {
                     None
@@ -902,7 +945,10 @@ impl TypeChecker {
                                     found: TypeInfo::new(ty),
                                     location: type_member_access_expression.location,
                                 });
-                                return None;
+                                return Some(TypeInfo {
+                                    kind: TypeInfoKind::Error,
+                                    type_params: vec![],
+                                });
                             }
                         }
                     }
@@ -916,12 +962,16 @@ impl TypeChecker {
                         ) {
                             match &expr_type.kind {
                                 TypeInfoKind::Enum(name) => name.clone(),
+                                TypeInfoKind::Error => return Some(expr_type.clone()),
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
                                         location: type_member_access_expression.location,
                                     });
-                                    return None;
+                                    return Some(TypeInfo {
+                                        kind: TypeInfoKind::Error,
+                                        type_params: vec![],
+                                    });
                                 }
                             }
                         } else {
@@ -957,14 +1007,20 @@ impl TypeChecker {
                             variant_name: variant_name.clone(),
                             location: type_member_access_expression.location,
                         });
-                        None
+                        Some(TypeInfo {
+                            kind: TypeInfoKind::Error,
+                            type_params: vec![],
+                        })
                     }
                 } else {
                     self.push_error_dedup(TypeCheckError::UndefinedEnum {
                         name: enum_name,
                         location: type_member_access_expression.location,
                     });
-                    None
+                    Some(TypeInfo {
+                        kind: TypeInfoKind::Error,
+                        type_params: vec![],
+                    })
                 }
             }
             Expression::FunctionCall(function_call_expression) => {
@@ -1078,6 +1134,9 @@ impl TypeChecker {
                         self.infer_expression(&member_access.expression.borrow(), ctx);
 
                     if let Some(receiver_type) = receiver_type {
+                        if receiver_type.is_error() {
+                            return Some(receiver_type);
+                        }
                         let type_name = match &receiver_type.kind {
                             TypeInfoKind::Struct(name) => Some(name.clone()),
                             TypeInfoKind::Custom(name) => {
@@ -1162,7 +1221,10 @@ impl TypeChecker {
                                 method_name: method_name.clone(),
                                 location: member_access.location,
                             });
-                            return None;
+                            return Some(TypeInfo {
+                                kind: TypeInfoKind::Error,
+                                type_params: vec![],
+                            });
                         }
                         self.errors.push(TypeCheckError::MethodCallOnNonStruct {
                             found: receiver_type,
@@ -1174,7 +1236,10 @@ impl TypeChecker {
                                 self.infer_expression(&arg.1.borrow(), ctx);
                             }
                         }
-                        return None;
+                        return Some(TypeInfo {
+                            kind: TypeInfoKind::Error,
+                            type_params: vec![],
+                        });
                     }
                     // Receiver type inference failed; infer arguments for better error recovery
                     if let Some(arguments) = &function_call_expression.arguments {
@@ -1182,7 +1247,10 @@ impl TypeChecker {
                             self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
-                    return None;
+                    return Some(TypeInfo {
+                        kind: TypeInfoKind::Error,
+                        type_params: vec![],
+                    });
                 }
 
                 let signature = if let Some(s) = self
@@ -1209,7 +1277,10 @@ impl TypeChecker {
                             self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
-                    return None;
+                    return Some(TypeInfo {
+                        kind: TypeInfoKind::Error,
+                        type_params: vec![],
+                    });
                 };
                 if let Some(arguments) = &function_call_expression.arguments
                     && arguments.len() != signature.param_types.len()
@@ -1224,7 +1295,10 @@ impl TypeChecker {
                     for arg in arguments {
                         self.infer_expression(&arg.1.borrow(), ctx);
                     }
-                    return None;
+                    return Some(TypeInfo {
+                        kind: TypeInfoKind::Error,
+                        type_params: vec![],
+                    });
                 }
 
                 // Build substitution map for generic functions
@@ -1306,7 +1380,12 @@ impl TypeChecker {
                     name: struct_expression.name(),
                     location: struct_expression.location,
                 });
-                None
+                let error_type = TypeInfo {
+                    kind: TypeInfoKind::Error,
+                    type_params: vec![],
+                };
+                ctx.set_node_typeinfo(struct_expression.id, error_type.clone());
+                Some(error_type)
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
@@ -1314,7 +1393,7 @@ impl TypeChecker {
                         let expression_type_op = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
                         if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_bool() {
+                            if expression_type.is_bool() || expression_type.is_error() {
                                 ctx.set_node_typeinfo(
                                     prefix_unary_expression.id,
                                     expression_type.clone(),
@@ -1334,7 +1413,7 @@ impl TypeChecker {
                         let expression_type_op = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
                         if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_signed_integer() {
+                            if expression_type.is_signed_integer() || expression_type.is_error() {
                                 ctx.set_node_typeinfo(
                                     prefix_unary_expression.id,
                                     expression_type.clone(),
@@ -1354,7 +1433,7 @@ impl TypeChecker {
                         let expression_type_op = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
                         if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_number() {
+                            if expression_type.is_number() || expression_type.is_error() {
                                 ctx.set_node_typeinfo(
                                     prefix_unary_expression.id,
                                     expression_type.clone(),
@@ -1387,7 +1466,7 @@ impl TypeChecker {
                 let left_type = self.infer_expression(&binary_expression.left.borrow(), ctx);
                 let right_type = self.infer_expression(&binary_expression.right.borrow(), ctx);
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
-                    if left_type != right_type {
+                    if !left_type.is_error() && !right_type.is_error() && left_type != right_type {
                         self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
                             operator: binary_expression.operator.clone(),
                             left: left_type.clone(),
@@ -1410,7 +1489,10 @@ impl TypeChecker {
                                     found_types: (left_type, right_type),
                                     location: binary_expression.location,
                                 });
-                                return None;
+                                return Some(TypeInfo {
+                                    kind: TypeInfoKind::Error,
+                                    type_params: vec![],
+                                });
                             }
                         }
                         OperatorKind::Eq
@@ -1471,14 +1553,17 @@ impl TypeChecker {
                     {
                         for element in &elements[1..] {
                             let element_type = self.infer_expression(&element.borrow(), ctx);
-                            if let Some(element_type) = element_type
-                                && element_type != element_type_info
-                            {
-                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                    expected: element_type_info.clone(),
-                                    found: element_type,
-                                    location: array_literal.location,
-                                });
+                            if let Some(element_type) = element_type {
+                                if !element_type.is_error()
+                                    && !element_type_info.is_error()
+                                    && element_type != element_type_info
+                                {
+                                    self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                        expected: element_type_info.clone(),
+                                        found: element_type,
+                                        location: array_literal.location,
+                                    });
+                                }
                             }
                         }
                         let array_type = TypeInfo {
@@ -1526,7 +1611,12 @@ impl TypeChecker {
                         name: identifier.name.clone(),
                         location: identifier.location,
                     });
-                    None
+                    let error_type = TypeInfo {
+                        kind: TypeInfoKind::Error,
+                        type_params: vec![],
+                    };
+                    ctx.set_node_typeinfo(identifier.id, error_type.clone());
+                    Some(error_type)
                 }
             }
             Expression::Type(type_expr) => {
