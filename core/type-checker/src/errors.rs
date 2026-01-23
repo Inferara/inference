@@ -127,6 +127,17 @@ impl Display for VisibilityContext {
     }
 }
 
+/// Categorizes errors that require deduplication.
+/// Only covers the 5 error types that can have duplicate reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ErrorKind {
+    UnknownType,
+    UndefinedFunction,
+    UnknownIdentifier,
+    UndefinedStruct,
+    UndefinedEnum,
+}
+
 /// Represents a type checking error with source location.
 /// All type errors are tied to AST nodes and must have a location.
 #[derive(Debug, Clone, Error)]
@@ -375,6 +386,19 @@ impl TypeCheckError {
             | TypeCheckError::PrivateAccessViolation { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
+        }
+    }
+
+    /// Returns the ErrorKind for deduplicated error types.
+    /// Returns None for errors that don't need deduplication.
+    pub(crate) fn kind(&self) -> Option<ErrorKind> {
+        match self {
+            TypeCheckError::UnknownType { .. } => Some(ErrorKind::UnknownType),
+            TypeCheckError::UndefinedFunction { .. } => Some(ErrorKind::UndefinedFunction),
+            TypeCheckError::UnknownIdentifier { .. } => Some(ErrorKind::UnknownIdentifier),
+            TypeCheckError::UndefinedStruct { .. } => Some(ErrorKind::UndefinedStruct),
+            TypeCheckError::UndefinedEnum { .. } => Some(ErrorKind::UndefinedEnum),
+            _ => None,
         }
     }
 }

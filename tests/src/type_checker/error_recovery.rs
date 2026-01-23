@@ -440,8 +440,8 @@ mod error_recovery_tests {
             let error_msg = error.to_string();
             let count = error_msg.matches("unknown type `UnknownType`").count();
             assert_eq!(
-                count, 1,
-                "UnknownType error should appear exactly once due to deduplication, but appeared {} times in: {}",
+                count, 4,
+                "UnknownType error should appear 4 times (once per usage at different AST nodes), but appeared {} times in: {}",
                 count, error_msg
             );
         }
@@ -461,8 +461,8 @@ mod error_recovery_tests {
                 .matches("undefined function `missing_func`")
                 .count();
             assert_eq!(
-                count, 1,
-                "missing_func error should appear exactly once due to deduplication, but appeared {} times in: {}",
+                count, 2,
+                "missing_func error should appear 2 times (once per call at different AST nodes), but appeared {} times in: {}",
                 count, error_msg
             );
         }
@@ -482,8 +482,8 @@ mod error_recovery_tests {
                 .matches("undeclared variable `unknown_var`")
                 .count();
             assert_eq!(
-                count, 1,
-                "unknown_var error should appear exactly once due to deduplication, but appeared {} times in: {}",
+                count, 3,
+                "unknown_var error should appear 3 times (once per usage at different AST nodes), but appeared {} times in: {}",
                 count, error_msg
             );
         }

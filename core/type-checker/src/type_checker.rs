@@ -24,7 +24,7 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
+    errors::{ErrorKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{FuncInfo, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -35,7 +35,7 @@ pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
-    reported_error_keys: FxHashSet<String>,
+    reported_errors: FxHashSet<(ErrorKind, u32)>,
 }
 
 impl TypeChecker {
@@ -440,10 +440,13 @@ impl TypeChecker {
                     .lookup_type(&generic_type.base.name())
                     .is_none()
                 {
-                    self.push_error_dedup(TypeCheckError::UnknownType {
-                        name: generic_type.base.name(),
-                        location: generic_type.base.location,
-                    });
+                    self.push_error_dedup(
+                        TypeCheckError::UnknownType {
+                            name: generic_type.base.name(),
+                            location: generic_type.base.location,
+                        },
+                        generic_type.base.id,
+                    );
                 }
                 // Validate each parameter in the generic type
                 for param in &generic_type.parameters {
@@ -451,10 +454,13 @@ impl TypeChecker {
                     if !type_param_names.contains(&param.name())
                         && self.symbol_table.lookup_type(&param.name()).is_none()
                     {
-                        self.push_error_dedup(TypeCheckError::UnknownType {
-                            name: param.name(),
-                            location: param.location,
-                        });
+                        self.push_error_dedup(
+                            TypeCheckError::UnknownType {
+                                name: param.name(),
+                                location: param.location,
+                            },
+                            param.id,
+                        );
                     }
                 }
             }
@@ -465,10 +471,13 @@ impl TypeChecker {
                     return;
                 }
                 if self.symbol_table.lookup_type(&identifier.name).is_none() {
-                    self.push_error_dedup(TypeCheckError::UnknownType {
-                        name: identifier.name.clone(),
-                        location: identifier.location,
-                    });
+                    self.push_error_dedup(
+                        TypeCheckError::UnknownType {
+                            name: identifier.name.clone(),
+                            location: identifier.location,
+                        },
+                        identifier.id,
+                    );
                 }
             }
         }
@@ -960,10 +969,13 @@ impl TypeChecker {
                         None
                     }
                 } else {
-                    self.push_error_dedup(TypeCheckError::UndefinedEnum {
-                        name: enum_name,
-                        location: type_member_access_expression.location,
-                    });
+                    self.push_error_dedup(
+                        TypeCheckError::UndefinedEnum {
+                            name: enum_name,
+                            location: type_member_access_expression.location,
+                        },
+                        type_member_access_expression.id,
+                    );
                     None
                 }
             }
@@ -1200,10 +1212,13 @@ impl TypeChecker {
                     );
                     s.clone()
                 } else {
-                    self.push_error_dedup(TypeCheckError::UndefinedFunction {
-                        name: function_call_expression.name(),
-                        location: function_call_expression.location,
-                    });
+                    self.push_error_dedup(
+                        TypeCheckError::UndefinedFunction {
+                            name: function_call_expression.name(),
+                            location: function_call_expression.location,
+                        },
+                        function_call_expression.id,
+                    );
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
                             self.infer_expression(&arg.1.borrow(), ctx);
@@ -1302,10 +1317,13 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
                     return Some(struct_type);
                 }
-                self.push_error_dedup(TypeCheckError::UndefinedStruct {
-                    name: struct_expression.name(),
-                    location: struct_expression.location,
-                });
+                self.push_error_dedup(
+                    TypeCheckError::UndefinedStruct {
+                        name: struct_expression.name(),
+                        location: struct_expression.location,
+                    },
+                    struct_expression.id,
+                );
                 None
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
@@ -1522,10 +1540,13 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(identifier.id, var_ty.clone());
                     Some(var_ty)
                 } else {
-                    self.push_error_dedup(TypeCheckError::UnknownIdentifier {
-                        name: identifier.name.clone(),
-                        location: identifier.location,
-                    });
+                    self.push_error_dedup(
+                        TypeCheckError::UnknownIdentifier {
+                            name: identifier.name.clone(),
+                            location: identifier.location,
+                        },
+                        identifier.id,
+                    );
                     None
                 }
             }
@@ -2075,26 +2096,19 @@ impl TypeChecker {
         substitutions
     }
 
-    /// Push an error, deduplicating errors for the same unknown type/function/identifier.
+    /// Push an error, deduplicating errors for the same AST node.
     /// This prevents duplicate errors when registration fails but inference continues.
-    fn push_error_dedup(&mut self, error: TypeCheckError) {
-        let key = match &error {
-            TypeCheckError::UnknownType { name, .. } => Some(format!("UnknownType:{name}")),
-            TypeCheckError::UndefinedFunction { name, .. } => {
-                Some(format!("UndefinedFunction:{name}"))
-            }
-            TypeCheckError::UnknownIdentifier { name, .. } => {
-                Some(format!("UnknownIdentifier:{name}"))
-            }
-            TypeCheckError::UndefinedStruct { name, .. } => Some(format!("UndefinedStruct:{name}")),
-            TypeCheckError::UndefinedEnum { name, .. } => Some(format!("UndefinedEnum:{name}")),
-            _ => None,
-        };
-        if let Some(key) = key {
-            if self.reported_error_keys.contains(&key) {
+    ///
+    /// # Arguments
+    /// * `error` - The error to report
+    /// * `node_id` - The AST node ID where the error occurred
+    fn push_error_dedup(&mut self, error: TypeCheckError, node_id: u32) {
+        if let Some(kind) = error.kind() {
+            let key = (kind, node_id);
+            if self.reported_errors.contains(&key) {
                 return;
             }
-            self.reported_error_keys.insert(key);
+            self.reported_errors.insert(key);
         }
         self.errors.push(error);
     }
