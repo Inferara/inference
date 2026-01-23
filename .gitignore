@@ -39,3 +39,6 @@ external/
 !CHANGELOG.md
 *.vsix
 editors/vscode/package-lock.json
+
+# Local build artifacts
+/refcell_eq

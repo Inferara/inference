@@ -140,8 +140,7 @@
 //!
 //! ## Current Limitations
 //!
-//! - **Single-file support**: Multi-file compilation is not yet implemented.
-//!   The AST expects a single source file as input.
+//! - **Multi-file support**: Submodules are resolved via `mod name;` declarations.
 //! - **Analyze phase**: The semantic analysis phase is work-in-progress and
 //!   currently returns `Ok(())` without performing any checks.
 //!
@@ -152,7 +151,8 @@
 //! - [`inference_type_checker::TypeCheckerBuilder`] - Type checking entry point
 //! - [`inference_type_checker::typed_context::TypedContext`] - Type information storage
 
-use inference_ast::{arena::Arena, builder::Builder};
+use inference_ast::{arena::Arena, builder::Builder, parser_context::ParserContext};
+use std::path::Path;
 use inference_type_checker::typed_context::TypedContext;
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
@@ -212,6 +212,15 @@ pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
     builder.add_source_code(root_node, code);
     let arena = builder.build_ast()?;
     Ok(arena)
+}
+
+/// Parses a source file and any `mod`-referenced submodules into a unified AST arena.
+///
+/// This entry point enables multi-file projects by following `mod name;` declarations
+/// and parsing submodule files on disk.
+pub fn parse_file(path: &Path) -> anyhow::Result<Arena> {
+    let mut context = ParserContext::new(path.to_path_buf());
+    context.parse_all()
 }
 
 /// Performs bidirectional type checking and inference on the AST.

@@ -76,23 +76,7 @@ impl TypeChecker {
         // Continue to inference phase even if registration had errors
         // to collect all errors before returning
         for source_file in ctx.source_files() {
-            for def in &source_file.definitions {
-                match def {
-                    Definition::Function(function_definition) => {
-                        self.infer_variables(function_definition.clone(), ctx);
-                    }
-                    Definition::Struct(struct_definition) => {
-                        let struct_type = TypeInfo {
-                            kind: TypeInfoKind::Struct(struct_definition.name()),
-                            type_params: vec![],
-                        };
-                        for method in &struct_definition.methods {
-                            self.infer_method_variables(method.clone(), struct_type.clone(), ctx);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            self.infer_definitions(&source_file.definitions, ctx, &[]);
         }
         if !self.errors.is_empty() {
             let error_messages: Vec<String> = std::mem::take(&mut self.errors)
@@ -107,150 +91,159 @@ impl TypeChecker {
     /// Registers `Definition::Type`, `Definition::Struct`, `Definition::Enum`, and `Definition::Spec`
     fn register_types(&mut self, ctx: &mut TypedContext) {
         for source_file in ctx.source_files() {
-            for definition in &source_file.definitions {
-                match definition {
-                    Definition::Type(type_definition) => {
-                        self.symbol_table
-                            .register_type(&type_definition.name(), Some(&type_definition.ty))
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Type,
-                                    name: type_definition.name(),
-                                    reason: None,
-                                    location: type_definition.location,
-                                });
+            self.register_types_in_definitions(&source_file.definitions);
+        }
+    }
+
+    fn register_types_in_definitions(&mut self, definitions: &[Definition]) {
+        for definition in definitions {
+            match definition {
+                Definition::Type(type_definition) => {
+                    self.symbol_table
+                        .register_type(&type_definition.name(), Some(&type_definition.ty))
+                        .unwrap_or_else(|_| {
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Type,
+                                name: type_definition.name(),
+                                reason: None,
+                                location: type_definition.location,
                             });
-                    }
-                    Definition::Struct(struct_definition) => {
-                        let fields: Vec<(String, TypeInfo, Visibility)> = struct_definition
-                            .fields
+                        });
+                }
+                Definition::Struct(struct_definition) => {
+                    let fields: Vec<(String, TypeInfo, Visibility)> = struct_definition
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.name.clone(),
+                                TypeInfo::new(&f.type_),
+                                Visibility::Private,
+                            )
+                        })
+                        .collect();
+                    self.symbol_table
+                        .register_struct(
+                            &struct_definition.name(),
+                            &fields,
+                            vec![],
+                            struct_definition.visibility.clone(),
+                        )
+                        .unwrap_or_else(|_| {
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Struct,
+                                name: struct_definition.name(),
+                                reason: None,
+                                location: struct_definition.location,
+                            });
+                        });
+
+                    let struct_name = struct_definition.name();
+                    for method in &struct_definition.methods {
+                        let has_self = method.arguments.as_ref().is_some_and(|args| {
+                            args.iter()
+                                .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
+                        });
+
+                        let param_types: Vec<TypeInfo> = method
+                            .arguments
+                            .as_ref()
+                            .unwrap_or(&vec![])
                             .iter()
-                            .map(|f| {
-                                (
-                                    f.name.name.clone(),
-                                    TypeInfo::new(&f.type_),
-                                    Visibility::Private,
-                                )
+                            .filter_map(|param| match param {
+                                ArgumentType::SelfReference(_) => None,
+                                ArgumentType::IgnoreArgument(ignore_arg) => {
+                                    Some(TypeInfo::new(&ignore_arg.ty))
+                                }
+                                ArgumentType::Argument(arg) => Some(TypeInfo::new(&arg.ty)),
+                                ArgumentType::Type(ty) => Some(TypeInfo::new(ty)),
                             })
                             .collect();
-                        self.symbol_table
-                            .register_struct(
-                                &struct_definition.name(),
-                                &fields,
-                                vec![],
-                                struct_definition.visibility.clone(),
-                            )
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Struct,
-                                    name: struct_definition.name(),
-                                    reason: None,
-                                    location: struct_definition.location,
-                                });
-                            });
 
-                        let struct_name = struct_definition.name();
-                        for method in &struct_definition.methods {
-                            let has_self = method.arguments.as_ref().is_some_and(|args| {
-                                args.iter()
-                                    .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
-                            });
+                        let return_type = method
+                            .returns
+                            .as_ref()
+                            .map(TypeInfo::new)
+                            .unwrap_or_default();
 
-                            let param_types: Vec<TypeInfo> = method
-                                .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .filter_map(|param| match param {
-                                    ArgumentType::SelfReference(_) => None,
-                                    ArgumentType::IgnoreArgument(ignore_arg) => {
-                                        Some(TypeInfo::new(&ignore_arg.ty))
-                                    }
-                                    ArgumentType::Argument(arg) => Some(TypeInfo::new(&arg.ty)),
-                                    ArgumentType::Type(ty) => Some(TypeInfo::new(ty)),
-                                })
-                                .collect();
-
-                            let return_type = method
-                                .returns
-                                .as_ref()
-                                .map(TypeInfo::new)
-                                .unwrap_or_default();
-
-                            let type_params: Vec<String> = method
-                                .type_parameters
-                                .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .map(|p| p.name())
-                                .collect();
-
-                            let definition_scope_id =
-                                self.symbol_table.current_scope_id().unwrap_or(0);
-                            let signature = FuncInfo {
-                                name: method.name(),
-                                type_params,
-                                param_types,
-                                return_type,
-                                visibility: method.visibility.clone(),
-                                definition_scope_id,
-                            };
-
-                            self.symbol_table
-                                .register_method(
-                                    &struct_name,
-                                    signature,
-                                    method.visibility.clone(),
-                                    has_self,
-                                )
-                                .unwrap_or_else(|err| {
-                                    self.errors.push(TypeCheckError::RegistrationFailed {
-                                        kind: RegistrationKind::Method,
-                                        name: format!("{struct_name}::{}", method.name()),
-                                        reason: Some(err.to_string()),
-                                        location: method.location,
-                                    });
-                                });
-                        }
-                    }
-                    Definition::Enum(enum_definition) => {
-                        let variants: Vec<&str> = enum_definition
-                            .variants
+                        let type_params: Vec<String> = method
+                            .type_parameters
+                            .as_ref()
+                            .unwrap_or(&vec![])
                             .iter()
-                            .map(|v| v.name.as_str())
+                            .map(|p| p.name())
                             .collect();
+
+                        let definition_scope_id = self.symbol_table.current_scope_id().unwrap_or(0);
+                        let signature = FuncInfo {
+                            name: method.name(),
+                            type_params,
+                            param_types,
+                            return_type,
+                            visibility: method.visibility.clone(),
+                            definition_scope_id,
+                        };
+
                         self.symbol_table
-                            .register_enum(
-                                &enum_definition.name(),
-                                &variants,
-                                enum_definition.visibility.clone(),
+                            .register_method(
+                                &struct_name,
+                                signature,
+                                method.visibility.clone(),
+                                has_self,
                             )
-                            .unwrap_or_else(|_| {
+                            .unwrap_or_else(|err| {
                                 self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Enum,
-                                    name: enum_definition.name(),
-                                    reason: None,
-                                    location: enum_definition.location,
+                                    kind: RegistrationKind::Method,
+                                    name: format!("{struct_name}::{}", method.name()),
+                                    reason: Some(err.to_string()),
+                                    location: method.location,
                                 });
                             });
                     }
-                    Definition::Spec(spec_definition) => {
-                        self.symbol_table
-                            .register_spec(&spec_definition.name())
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Spec,
-                                    name: spec_definition.name(),
-                                    reason: None,
-                                    location: spec_definition.location,
-                                });
-                            });
-                    }
-                    Definition::Constant(_)
-                    | Definition::Function(_)
-                    | Definition::ExternalFunction(_)
-                    | Definition::Module(_) => {}
                 }
+                Definition::Enum(enum_definition) => {
+                    let variants: Vec<&str> = enum_definition
+                        .variants
+                        .iter()
+                        .map(|v| v.name.as_str())
+                        .collect();
+                    self.symbol_table
+                        .register_enum(
+                            &enum_definition.name(),
+                            &variants,
+                            enum_definition.visibility.clone(),
+                        )
+                        .unwrap_or_else(|_| {
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Enum,
+                                name: enum_definition.name(),
+                                reason: None,
+                                location: enum_definition.location,
+                            });
+                        });
+                }
+                Definition::Spec(spec_definition) => {
+                    self.symbol_table
+                        .register_spec(&spec_definition.name())
+                        .unwrap_or_else(|_| {
+                            self.errors.push(TypeCheckError::RegistrationFailed {
+                                kind: RegistrationKind::Spec,
+                                name: spec_definition.name(),
+                                reason: None,
+                                location: spec_definition.location,
+                            });
+                        });
+                }
+                Definition::Module(module_definition) => {
+                    let _scope_id = self.symbol_table.enter_module(module_definition);
+                    if let Some(body) = module_definition.body.borrow().as_ref() {
+                        self.register_types_in_definitions(body);
+                    }
+                    self.symbol_table.pop_scope();
+                }
+                Definition::Constant(_)
+                | Definition::Function(_)
+                | Definition::ExternalFunction(_) => {}
             }
         }
     }
@@ -259,153 +252,208 @@ impl TypeChecker {
     #[allow(clippy::too_many_lines)]
     fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
         for sf in ctx.source_files() {
-            for definition in &sf.definitions {
-                match definition {
-                    Definition::Constant(constant_definition) => {
-                        let const_type = TypeInfo::new(&constant_definition.ty);
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope(&constant_definition.name(), const_type.clone())
-                        {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Variable,
-                                name: constant_definition.name(),
-                                reason: Some(err.to_string()),
-                                location: constant_definition.location,
-                            });
-                        }
-                        ctx.set_node_typeinfo(constant_definition.value.id(), const_type);
+            self.collect_function_and_constant_definitions_in_definitions(
+                &sf.definitions,
+                ctx,
+                &[],
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn collect_function_and_constant_definitions_in_definitions(
+        &mut self,
+        definitions: &[Definition],
+        ctx: &mut TypedContext,
+        path: &[String],
+    ) {
+        for definition in definitions {
+            match definition {
+                Definition::Constant(constant_definition) => {
+                    let const_type = TypeInfo::new(&constant_definition.ty);
+                    if let Err(err) = self
+                        .symbol_table
+                        .push_variable_to_scope(&constant_definition.name(), const_type.clone())
+                    {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Variable,
+                            name: constant_definition.name(),
+                            reason: Some(err.to_string()),
+                            location: constant_definition.location,
+                        });
                     }
-                    Definition::Function(function_definition) => {
-                        for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
-                            match param {
-                                ArgumentType::SelfReference(self_ref) => {
-                                    self.errors.push(TypeCheckError::SelfReferenceInFunction {
-                                        function_name: function_definition.name(),
-                                        location: self_ref.location,
-                                    });
-                                }
-                                ArgumentType::IgnoreArgument(ignore_argument) => {
-                                    self.validate_type(
-                                        &ignore_argument.ty,
-                                        function_definition.type_parameters.as_ref(),
-                                    );
-                                    ctx.set_node_typeinfo(
-                                        ignore_argument.id,
-                                        TypeInfo::new(&ignore_argument.ty),
-                                    );
-                                }
-                                ArgumentType::Argument(arg) => {
-                                    self.validate_type(
-                                        &arg.ty,
-                                        function_definition.type_parameters.as_ref(),
-                                    );
-                                    let type_info = TypeInfo::new(&arg.ty);
-                                    ctx.set_node_typeinfo(arg.id, type_info.clone());
-                                    ctx.set_node_typeinfo(arg.name.id, type_info);
-                                }
-                                ArgumentType::Type(ty) => {
-                                    self.validate_type(
-                                        ty,
-                                        function_definition.type_parameters.as_ref(),
-                                    );
-                                }
+                    ctx.set_node_typeinfo(constant_definition.value.id(), const_type);
+                }
+                Definition::Function(function_definition) => {
+                    for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
+                        match param {
+                            ArgumentType::SelfReference(self_ref) => {
+                                self.errors.push(TypeCheckError::SelfReferenceInFunction {
+                                    function_name: function_definition.name(),
+                                    location: self_ref.location,
+                                });
+                            }
+                            ArgumentType::IgnoreArgument(ignore_argument) => {
+                                self.validate_type(
+                                    &ignore_argument.ty,
+                                    function_definition.type_parameters.as_ref(),
+                                );
+                                ctx.set_node_typeinfo(
+                                    ignore_argument.id,
+                                    TypeInfo::new(&ignore_argument.ty),
+                                );
+                            }
+                            ArgumentType::Argument(arg) => {
+                                self.validate_type(
+                                    &arg.ty,
+                                    function_definition.type_parameters.as_ref(),
+                                );
+                                let type_info = TypeInfo::new(&arg.ty);
+                                ctx.set_node_typeinfo(arg.id, type_info.clone());
+                                ctx.set_node_typeinfo(arg.name.id, type_info);
+                            }
+                            ArgumentType::Type(ty) => {
+                                self.validate_type(ty, function_definition.type_parameters.as_ref());
                             }
                         }
-                        ctx.set_node_typeinfo(
-                            function_definition.name.id,
-                            TypeInfo {
-                                kind: TypeInfoKind::Function(function_definition.name()),
-                                type_params: function_definition
-                                    .type_parameters
-                                    .as_ref()
-                                    .map_or(vec![], |p| p.iter().map(|i| i.name.clone()).collect()),
-                            },
-                        );
-                        if let Some(return_type) = &function_definition.returns {
-                            self.validate_type(
-                                return_type,
-                                function_definition.type_parameters.as_ref(),
-                            );
-                            ctx.set_node_typeinfo(return_type.id(), TypeInfo::new(return_type));
-                        }
-                        // Register function even if parameter validation had errors
-                        // to allow error recovery and prevent spurious UndefinedFunction errors
-                        if let Err(err) = self.symbol_table.register_function(
-                            &function_definition.name(),
-                            function_definition
+                    }
+                    ctx.set_node_typeinfo(
+                        function_definition.name.id,
+                        TypeInfo {
+                            kind: TypeInfoKind::Function(function_definition.name()),
+                            type_params: function_definition
                                 .type_parameters
                                 .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .map(|param| param.name())
-                                .collect::<Vec<_>>(),
-                            &function_definition
-                                .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .filter_map(|param| match param {
-                                    ArgumentType::SelfReference(_) => None,
-                                    ArgumentType::IgnoreArgument(ignore_argument) => {
-                                        Some(ignore_argument.ty.clone())
-                                    }
-                                    ArgumentType::Argument(argument) => Some(argument.ty.clone()),
-                                    ArgumentType::Type(ty) => Some(ty.clone()),
-                                })
-                                .collect::<Vec<_>>(),
-                            &function_definition
-                                .returns
-                                .as_ref()
-                                .unwrap_or(&Type::Simple(SimpleTypeKind::Unit))
-                                .clone(),
-                        ) {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Function,
-                                name: function_definition.name(),
-                                reason: Some(err),
-                                location: function_definition.location,
-                            });
-                        }
+                                .map_or(vec![], |p| p.iter().map(|i| i.name.clone()).collect()),
+                        },
+                    );
+                    if let Some(return_type) = &function_definition.returns {
+                        self.validate_type(return_type, function_definition.type_parameters.as_ref());
+                        ctx.set_node_typeinfo(return_type.id(), TypeInfo::new(return_type));
                     }
-                    Definition::ExternalFunction(external_function_definition) => {
-                        if let Err(err) = self.symbol_table.register_function(
-                            &external_function_definition.name(),
-                            vec![],
-                            &external_function_definition
-                                .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .filter_map(|param| match param {
-                                    ArgumentType::SelfReference(_) => None,
-                                    ArgumentType::IgnoreArgument(ignore_argument) => {
-                                        Some(ignore_argument.ty.clone())
-                                    }
-                                    ArgumentType::Argument(argument) => Some(argument.ty.clone()),
-                                    ArgumentType::Type(ty) => Some(ty.clone()),
-                                })
-                                .collect::<Vec<_>>(),
-                            &external_function_definition
-                                .returns
-                                .as_ref()
-                                .unwrap_or(&Type::Simple(SimpleTypeKind::Unit))
-                                .clone(),
-                        ) {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Function,
-                                name: external_function_definition.name(),
-                                reason: Some(err),
-                                location: external_function_definition.location,
-                            });
-                        }
+                    if let Err(err) = self.symbol_table.register_function(
+                        &function_definition.name(),
+                        function_definition
+                            .type_parameters
+                            .as_ref()
+                            .unwrap_or(&vec![])
+                            .iter()
+                            .map(|param| param.name())
+                            .collect::<Vec<_>>(),
+                        &function_definition
+                            .arguments
+                            .as_ref()
+                            .unwrap_or(&vec![])
+                            .iter()
+                            .filter_map(|param| match param {
+                                ArgumentType::SelfReference(_) => None,
+                                ArgumentType::IgnoreArgument(ignore_argument) => {
+                                    Some(ignore_argument.ty.clone())
+                                }
+                                ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                                ArgumentType::Type(ty) => Some(ty.clone()),
+                            })
+                            .collect::<Vec<_>>(),
+                        &function_definition
+                            .returns
+                            .as_ref()
+                            .unwrap_or(&Type::Simple(SimpleTypeKind::Unit))
+                            .clone(),
+                    ) {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Function,
+                            name: function_definition.name(),
+                            reason: Some(err),
+                            location: function_definition.location,
+                        });
                     }
-                    Definition::Spec(_)
-                    | Definition::Struct(_)
-                    | Definition::Enum(_)
-                    | Definition::Type(_)
-                    | Definition::Module(_) => {}
                 }
+                Definition::ExternalFunction(external_function_definition) => {
+                    if let Err(err) = self.symbol_table.register_function(
+                        &external_function_definition.name(),
+                        vec![],
+                        &external_function_definition
+                            .arguments
+                            .as_ref()
+                            .unwrap_or(&vec![])
+                            .iter()
+                            .filter_map(|param| match param {
+                                ArgumentType::SelfReference(_) => None,
+                                ArgumentType::IgnoreArgument(ignore_argument) => {
+                                    Some(ignore_argument.ty.clone())
+                                }
+                                ArgumentType::Argument(argument) => Some(argument.ty.clone()),
+                                ArgumentType::Type(ty) => Some(ty.clone()),
+                            })
+                            .collect::<Vec<_>>(),
+                        &external_function_definition
+                            .returns
+                            .as_ref()
+                            .unwrap_or(&Type::Simple(SimpleTypeKind::Unit))
+                            .clone(),
+                    ) {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Function,
+                            name: external_function_definition.name(),
+                            reason: Some(err),
+                            location: external_function_definition.location,
+                        });
+                    }
+                }
+                Definition::Module(module_definition) => {
+                    let mut next_path = path.to_vec();
+                    next_path.push(module_definition.name());
+                    if let Some(scope_id) = self.symbol_table.find_module_scope(&next_path) {
+                        self.symbol_table.enter_scope(scope_id);
+                    } else {
+                        let _ = self.symbol_table.enter_module(module_definition);
+                    }
+                    if let Some(body) = module_definition.body.borrow().as_ref() {
+                        self.collect_function_and_constant_definitions_in_definitions(
+                            body,
+                            ctx,
+                            &next_path,
+                        );
+                    }
+                    self.symbol_table.pop_scope();
+                }
+                Definition::Spec(_)
+                | Definition::Struct(_)
+                | Definition::Enum(_)
+                | Definition::Type(_) => {}
+            }
+        }
+    }
+
+    fn infer_definitions(&mut self, definitions: &[Definition], ctx: &mut TypedContext, path: &[String]) {
+        for definition in definitions {
+            match definition {
+                Definition::Function(function_definition) => {
+                    self.infer_variables(function_definition.clone(), ctx);
+                }
+                Definition::Struct(struct_definition) => {
+                    let struct_type = TypeInfo {
+                        kind: TypeInfoKind::Struct(struct_definition.name()),
+                        type_params: vec![],
+                    };
+                    for method in &struct_definition.methods {
+                        self.infer_method_variables(method.clone(), struct_type.clone(), ctx);
+                    }
+                }
+                Definition::Module(module_definition) => {
+                    let mut next_path = path.to_vec();
+                    next_path.push(module_definition.name());
+                    if let Some(scope_id) = self.symbol_table.find_module_scope(&next_path) {
+                        self.symbol_table.enter_scope(scope_id);
+                    } else {
+                        let _ = self.symbol_table.enter_module(module_definition);
+                    }
+                    if let Some(body) = module_definition.body.borrow().as_ref() {
+                        self.infer_definitions(body, ctx, &next_path);
+                    }
+                    self.symbol_table.pop_scope();
+                }
+                _ => {}
             }
         }
     }
@@ -1607,7 +1655,7 @@ impl TypeChecker {
     ) -> anyhow::Result<()> {
         let _scope_id = self.symbol_table.enter_module(module);
 
-        if let Some(body) = &module.body {
+        if let Some(body) = module.body.borrow().as_ref() {
             for definition in body {
                 match definition {
                     Definition::Type(type_definition) => {

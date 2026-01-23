@@ -31,7 +31,7 @@
 //! - [`arena::Arena`] - Central storage for all AST nodes with O(1) lookups
 //! - [`builder::Builder`] - Builds AST from tree-sitter concrete syntax tree
 //! - [`nodes`] - AST node type definitions (`SourceFile`, `FunctionDefinition`, etc.)
-//! - [`parser_context::ParserContext`] - Multi-file parsing context (WIP)
+//! - [`parser_context::ParserContext`] - Multi-file parsing context
 //!
 //! # Key Features
 //!

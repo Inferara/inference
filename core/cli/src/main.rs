@@ -95,7 +95,7 @@
 //!
 //! ## Current Limitations
 //!
-//! - Single-file compilation only (multi-file projects not yet supported)
+//! - Module path resolution for nested modules is best-effort
 //! - Output directory is relative to CWD, not source file location
 //! - Analysis phase is work-in-progress
 //!
@@ -109,7 +109,7 @@
 
 mod parser;
 use clap::Parser;
-use inference::{analyze, codegen, parse, type_check, wasm_to_v};
+use inference::{analyze, codegen, parse_file, type_check, wasm_to_v};
 use parser::Cli;
 use std::{
     fs,
@@ -182,10 +182,9 @@ fn main() {
         process::exit(1);
     }
 
-    let source_code = fs::read_to_string(&args.path).expect("Error reading source file");
     let mut t_ast = None;
     if need_codegen || need_analyze || need_parse {
-        match parse(source_code.as_str()) {
+        match parse_file(&args.path) {
             Ok(ast) => {
                 println!("Parsed: {}", args.path.display());
                 t_ast = Some(ast);
