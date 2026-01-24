@@ -101,6 +101,7 @@ mod error_recovery_tests {
                 return helper(10);
             }
         "#;
+        cov_mark::check!(type_checker_error_dedup_first_occurrence);
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -125,14 +126,12 @@ mod error_recovery_tests {
     #[test]
     fn test_error_deduplication() {
         let source = r#"
-            struct Container {
-                value: UnknownType;
-            }
-            fn test(c: Container) -> UnknownType {
-                let x: UnknownType = c.value;
-                return x;
+            fn test(a: UnknownType, b: UnknownType) -> UnknownType {
+                let x: UnknownType = a;
+                return b;
             }
         "#;
+        cov_mark::check!(type_checker_error_dedup_skips_duplicate);
         let result = try_type_check(source);
         assert!(
             result.is_err(),
