@@ -1309,6 +1309,23 @@ impl TypeChecker {
                 None
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
+                fn is_prefix_unary(expr: &Expression) -> bool {
+                    match expr {
+                        Expression::PrefixUnary(_) => true,
+                        Expression::Parenthesized(inner) => {
+                            is_prefix_unary(&inner.expression.borrow())
+                        }
+                        Expression::Literal(Literal::Number(num)) => num.value.starts_with('-'),
+                        _ => false,
+                    }
+                }
+
+                if is_prefix_unary(&prefix_unary_expression.expression.borrow()) {
+                    self.errors.push(TypeCheckError::CombinedUnaryOperators {
+                        location: prefix_unary_expression.location,
+                    });
+                    return None;
+                }
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Not => {
                         let expression_type_op = self
