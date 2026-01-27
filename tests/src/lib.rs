@@ -4,6 +4,7 @@
 
 mod ast;
 mod codegen;
+mod semantic_analysis;
 mod type_checker;
 mod utils;
 

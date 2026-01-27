@@ -227,9 +227,6 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: combined unary operators are prohibited")]
-    CombinedUnaryOperators { location: Location },
-
     #[error(
         "{location}: cannot apply operator `{operator:?}` to operands of different types: `{left}` and `{right}`"
     )]
@@ -360,7 +357,6 @@ impl TypeCheckError {
             | TypeCheckError::MissingTypeParameters { location, .. }
             | TypeCheckError::InvalidBinaryOperand { location, .. }
             | TypeCheckError::InvalidUnaryOperand { location, .. }
-            | TypeCheckError::CombinedUnaryOperators { location }
             | TypeCheckError::BinaryOperandTypeMismatch { location, .. }
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }

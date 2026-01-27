@@ -2166,12 +2166,10 @@ mod unary_operator_tests {
         fn test_double_negate() {
             let source = r#"fn test(x: i32) -> i32 { return --(x); }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Double negation should be prohibited");
-            let err_msg = result.err().unwrap().to_string();
             assert!(
-                err_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators, got: {}",
-                err_msg
+                result.is_ok(),
+                "Double negation should succeed, got: {:?}",
+                result.err()
             );
         }
     }
@@ -2284,12 +2282,10 @@ mod unary_operator_tests {
         fn test_bitnot_combined_with_negate() {
             let source = r#"fn test(x: i32) -> i32 { return ~-(x); }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Combined unary operators should be prohibited");
-            let err_msg = result.err().unwrap().to_string();
             assert!(
-                err_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators, got: {}",
-                err_msg
+                result.is_ok(),
+                "Combining BitNot and Neg should succeed, got: {:?}",
+                result.err()
             );
         }
 
@@ -2297,25 +2293,10 @@ mod unary_operator_tests {
         fn test_negate_combined_with_bitnot() {
             let source = r#"fn test(x: i32) -> i32 { return -(~x); }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Combined unary operators should be prohibited");
-            let err_msg = result.err().unwrap().to_string();
             assert!(
-                err_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators, got: {}",
-                err_msg
-            );
-        }
-
-        #[test]
-        fn test_bitnot_then_neg_literal_combination_errors() {
-            let source = r#"fn test() -> i32 { return -~42; }"#;
-            let result = try_type_check(source);
-            assert!(result.is_err(), "Combined unary operators should be prohibited");
-            let err_msg = result.err().unwrap().to_string();
-            assert!(
-                err_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators, got: {}",
-                err_msg
+                result.is_ok(),
+                "Combining Neg and BitNot should succeed, got: {:?}",
+                result.err()
             );
         }
     }
@@ -2351,12 +2332,10 @@ mod unary_operator_tests {
         fn test_double_logical_not() {
             let source = r#"fn test(x: bool) -> bool { return !!x; }"#;
             let result = try_type_check(source);
-            assert!(result.is_err(), "Double logical NOT should be prohibited");
-            let err_msg = result.err().unwrap().to_string();
             assert!(
-                err_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators, got: {}",
-                err_msg
+                result.is_ok(),
+                "Double logical NOT should succeed, got: {:?}",
+                result.err()
             );
         }
     }

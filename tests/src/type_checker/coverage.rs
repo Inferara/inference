@@ -751,15 +751,11 @@ mod expression_coverage {
     fn test_unary_neg_nested() {
         let source = r#"fn test() -> i32 { return --42; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Double unary neg should be prohibited");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("combined unary operators"),
-                "Error should mention combined unary operators: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Double unary neg should work, got: {:?}",
+            result.err()
+        );
     }
 
     // FIXME: Test disabled due to parser or type checker limitation
