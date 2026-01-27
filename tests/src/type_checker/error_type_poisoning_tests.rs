@@ -26,10 +26,7 @@ mod error_type_poisoning_tests {
 
         #[test]
         fn test_error_type_is_error() {
-            let error_type = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
+            let error_type = TypeInfo::error("test error");
             assert!(error_type.is_error());
         }
 
@@ -55,19 +52,13 @@ mod error_type_poisoning_tests {
 
         #[test]
         fn test_error_type_display() {
-            let error_type = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
-            assert_eq!(error_type.to_string(), "{unknown}");
+            let error_type = TypeInfo::error("test message");
+            assert_eq!(error_type.to_string(), "{unknown: test message}");
         }
 
         #[test]
         fn test_error_type_has_no_unresolved_params() {
-            let error_type = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
+            let error_type = TypeInfo::error("test error");
             assert!(!error_type.has_unresolved_params());
         }
 
@@ -75,10 +66,7 @@ mod error_type_poisoning_tests {
         fn test_error_type_substitute_unchanged() {
             use rustc_hash::FxHashMap;
 
-            let error_type = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
+            let error_type = TypeInfo::error("test error");
             let mut subs = FxHashMap::default();
             subs.insert("T".to_string(), TypeInfo::boolean());
 
@@ -446,23 +434,17 @@ mod error_type_poisoning_tests {
 
         #[test]
         fn test_error_types_are_equal() {
-            let error1 = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
-            let error2 = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
+            let error1 = TypeInfo::error("same message");
+            let error2 = TypeInfo::error("same message");
             assert_eq!(error1, error2);
+
+            let error3 = TypeInfo::error("different message");
+            assert_ne!(error1, error3);
         }
 
         #[test]
         fn test_error_not_equal_to_other_types() {
-            let error = TypeInfo {
-                kind: TypeInfoKind::Error,
-                type_params: vec![],
-            };
+            let error = TypeInfo::error("test error");
             assert_ne!(error, TypeInfo::boolean());
             assert_ne!(error, TypeInfo::string());
             assert_ne!(error, TypeInfo::default());

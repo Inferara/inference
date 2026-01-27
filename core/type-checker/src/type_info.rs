@@ -111,7 +111,7 @@ pub enum TypeInfoKind {
     Struct(String),
     Enum(String),
     Spec(String),
-    Error,
+    Error(String),
 }
 
 impl Display for TypeInfoKind {
@@ -130,7 +130,7 @@ impl Display for TypeInfoKind {
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
             TypeInfoKind::Generic(ty) => write!(f, "{ty}'"),
-            TypeInfoKind::Error => write!(f, "{{unknown}}"),
+            TypeInfoKind::Error(msg) => write!(f, "{{unknown: {msg}}}"),
         }
     }
 }
@@ -222,6 +222,14 @@ impl TypeInfo {
     pub fn boolean() -> Self {
         Self {
             kind: TypeInfoKind::Bool,
+            type_params: vec![],
+        }
+    }
+
+    #[must_use]
+    pub fn error(msg: impl Into<String>) -> Self {
+        Self {
+            kind: TypeInfoKind::Error(msg.into()),
             type_params: vec![],
         }
     }
@@ -347,7 +355,7 @@ impl TypeInfo {
 
     #[must_use]
     pub fn is_error(&self) -> bool {
-        matches!(self.kind, TypeInfoKind::Error)
+        matches!(self.kind, TypeInfoKind::Error(_))
     }
 
     /// Returns true if this is a signed integer type (i8, i16, i32, i64).
@@ -394,7 +402,7 @@ impl TypeInfo {
             | TypeInfoKind::Struct(_)
             | TypeInfoKind::Enum(_)
             | TypeInfoKind::Spec(_)
-            | TypeInfoKind::Error => self.clone(),
+            | TypeInfoKind::Error(_) => self.clone(),
         }
     }
 
@@ -416,7 +424,7 @@ impl TypeInfo {
             | TypeInfoKind::Struct(_)
             | TypeInfoKind::Enum(_)
             | TypeInfoKind::Spec(_)
-            | TypeInfoKind::Error => false,
+            | TypeInfoKind::Error(_) => false,
         }
     }
 

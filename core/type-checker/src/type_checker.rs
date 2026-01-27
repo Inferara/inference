@@ -831,16 +831,13 @@ impl TypeChecker {
                             );
                             Some((**element_type).clone())
                         }
-                        TypeInfoKind::Error => Some(array_type.clone()),
+                        TypeInfoKind::Error(_) => Some(array_type.clone()),
                         _ => {
                             self.errors.push(TypeCheckError::ExpectedArrayType {
                                 found: array_type,
                                 location: array_index_access_expression.location,
                             });
-                            Some(TypeInfo {
-                                kind: TypeInfoKind::Error,
-                                type_params: vec![],
-                            })
+                            Some(TypeInfo::error("Expected array type"))
                         }
                     }
                 } else {
@@ -896,10 +893,7 @@ impl TypeChecker {
                                     field_name: field_name.clone(),
                                     location: member_access_expression.location,
                                 });
-                                return Some(TypeInfo {
-                                    kind: TypeInfoKind::Error,
-                                    type_params: vec![],
-                                });
+                                return Some(TypeInfo::error("Field not found"));
                             }
                         } else {
                             self.errors.push(TypeCheckError::FieldNotFound {
@@ -907,20 +901,14 @@ impl TypeChecker {
                                 field_name: field_name.clone(),
                                 location: member_access_expression.location,
                             });
-                            return Some(TypeInfo {
-                                kind: TypeInfoKind::Error,
-                                type_params: vec![],
-                            });
+                            return Some(TypeInfo::error("Struct not found for field access"));
                         }
                     } else {
                         self.errors.push(TypeCheckError::ExpectedStructType {
                             found: object_type,
                             location: member_access_expression.location,
                         });
-                        return Some(TypeInfo {
-                            kind: TypeInfoKind::Error,
-                            type_params: vec![],
-                        });
+                        return Some(TypeInfo::error("Expected struct type for member access"));
                     }
                 } else {
                     None
@@ -945,10 +933,7 @@ impl TypeChecker {
                                     found: TypeInfo::new(ty),
                                     location: type_member_access_expression.location,
                                 });
-                                return Some(TypeInfo {
-                                    kind: TypeInfoKind::Error,
-                                    type_params: vec![],
-                                });
+                                return Some(TypeInfo::error("Expected enum type for variant access"));
                             }
                         }
                     }
@@ -962,16 +947,13 @@ impl TypeChecker {
                         ) {
                             match &expr_type.kind {
                                 TypeInfoKind::Enum(name) => name.clone(),
-                                TypeInfoKind::Error => return Some(expr_type.clone()),
+                                TypeInfoKind::Error(_) => return Some(expr_type.clone()),
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
                                         location: type_member_access_expression.location,
                                     });
-                                    return Some(TypeInfo {
-                                        kind: TypeInfoKind::Error,
-                                        type_params: vec![],
-                                    });
+                                    return Some(TypeInfo::error("Expected enum type"));
                                 }
                             }
                         } else {
@@ -1007,20 +989,14 @@ impl TypeChecker {
                             variant_name: variant_name.clone(),
                             location: type_member_access_expression.location,
                         });
-                        Some(TypeInfo {
-                            kind: TypeInfoKind::Error,
-                            type_params: vec![],
-                        })
+                        Some(TypeInfo::error("Enum variant not found"))
                     }
                 } else {
                     self.push_error_dedup(TypeCheckError::UndefinedEnum {
                         name: enum_name,
                         location: type_member_access_expression.location,
                     });
-                    Some(TypeInfo {
-                        kind: TypeInfoKind::Error,
-                        type_params: vec![],
-                    })
+                    Some(TypeInfo::error("Undefined enum"))
                 }
             }
             Expression::FunctionCall(function_call_expression) => {
@@ -1221,26 +1197,20 @@ impl TypeChecker {
                                 method_name: method_name.clone(),
                                 location: member_access.location,
                             });
-                            return Some(TypeInfo {
-                                kind: TypeInfoKind::Error,
-                                type_params: vec![],
-                            });
+                            return Some(TypeInfo::error("Method not found"));
                         }
                         self.errors.push(TypeCheckError::MethodCallOnNonStruct {
-                            found: receiver_type,
-                            location: function_call_expression.location,
-                        });
-                        // Infer arguments even for non-struct receiver for better error recovery
-                        if let Some(arguments) = &function_call_expression.arguments {
-                            for arg in arguments {
-                                self.infer_expression(&arg.1.borrow(), ctx);
+                                found: receiver_type,
+                                location: function_call_expression.location,
+                            });
+                            // Infer arguments even for non-struct receiver for better error recovery
+                            if let Some(arguments) = &function_call_expression.arguments {
+                                for arg in arguments {
+                                    self.infer_expression(&arg.1.borrow(), ctx);
+                                }
                             }
+                            return Some(TypeInfo::error("Method call on non-struct"));
                         }
-                        return Some(TypeInfo {
-                            kind: TypeInfoKind::Error,
-                            type_params: vec![],
-                        });
-                    }
                     // Receiver type inference failed; infer arguments for better error recovery
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
@@ -1248,7 +1218,7 @@ impl TypeChecker {
                         }
                     }
                     return Some(TypeInfo {
-                        kind: TypeInfoKind::Error,
+                        kind: TypeInfoKind::Error("Poisoned type from error".to_string()),
                         type_params: vec![],
                     });
                 }
@@ -1278,7 +1248,7 @@ impl TypeChecker {
                         }
                     }
                     return Some(TypeInfo {
-                        kind: TypeInfoKind::Error,
+                        kind: TypeInfoKind::Error("Poisoned type from error".to_string()),
                         type_params: vec![],
                     });
                 };
@@ -1296,7 +1266,7 @@ impl TypeChecker {
                         self.infer_expression(&arg.1.borrow(), ctx);
                     }
                     return Some(TypeInfo {
-                        kind: TypeInfoKind::Error,
+                        kind: TypeInfoKind::Error("Poisoned type from error".to_string()),
                         type_params: vec![],
                     });
                 }
@@ -1380,10 +1350,7 @@ impl TypeChecker {
                     name: struct_expression.name(),
                     location: struct_expression.location,
                 });
-                let error_type = TypeInfo {
-                    kind: TypeInfoKind::Error,
-                    type_params: vec![],
-                };
+                let error_type = TypeInfo::error("Undefined struct");
                 ctx.set_node_typeinfo(struct_expression.id, error_type.clone());
                 Some(error_type)
             }
@@ -1489,10 +1456,7 @@ impl TypeChecker {
                                     found_types: (left_type, right_type),
                                     location: binary_expression.location,
                                 });
-                                return Some(TypeInfo {
-                                    kind: TypeInfoKind::Error,
-                                    type_params: vec![],
-                                });
+                                return Some(TypeInfo::error("Invalid binary operand"));
                             }
                         }
                         OperatorKind::Eq
@@ -1611,10 +1575,7 @@ impl TypeChecker {
                         name: identifier.name.clone(),
                         location: identifier.location,
                     });
-                    let error_type = TypeInfo {
-                        kind: TypeInfoKind::Error,
-                        type_params: vec![],
-                    };
+                    let error_type = TypeInfo::error("Undefined identifier");
                     ctx.set_node_typeinfo(identifier.id, error_type.clone());
                     Some(error_type)
                 }
