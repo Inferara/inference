@@ -53,7 +53,7 @@ mod error_type_poisoning_tests {
         #[test]
         fn test_error_type_display() {
             let error_type = TypeInfo::error("test message");
-            assert_eq!(error_type.to_string(), "{unknown: test message}");
+            assert_eq!(error_type.to_string(), "{error: test message}");
         }
 
         #[test]
@@ -92,12 +92,12 @@ mod error_type_poisoning_tests {
                     "Should report undeclared variable: {}",
                     error_msg
                 );
-                // Should NOT have type mismatch between i32 and {unknown}
+                // Should NOT have type mismatch between i32 and {error}
                 let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{unknown}");
+                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
                 assert!(
                     !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{unknown}}: {}",
+                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }
@@ -136,12 +136,12 @@ mod error_type_poisoning_tests {
                     "Should report undefined function: {}",
                     error_msg
                 );
-                // Should NOT have type mismatch between i32 and {unknown}
+                // Should NOT have type mismatch between i32 and {error}
                 let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{unknown}");
+                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
                 assert!(
                     !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{unknown}}: {}",
+                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }
@@ -219,10 +219,10 @@ mod error_type_poisoning_tests {
                 // Should NOT report "expected bool type" for the condition
                 // because the condition is Error type
                 let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{unknown}");
+                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
                 assert!(
                     !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{unknown}}: {}",
+                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }

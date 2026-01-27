@@ -130,7 +130,7 @@ impl Display for TypeInfoKind {
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
             TypeInfoKind::Generic(ty) => write!(f, "{ty}'"),
-            TypeInfoKind::Error(msg) => write!(f, "{{unknown: {msg}}}"),
+            TypeInfoKind::Error(msg) => write!(f, "{{error: {msg}}}"),
         }
     }
 }
