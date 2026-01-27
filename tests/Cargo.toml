@@ -17,6 +17,7 @@ inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
 inference.workspace = true
+inference-semantic-analysis.workspace = true
 inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true

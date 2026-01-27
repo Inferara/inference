@@ -19,3 +19,4 @@ inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
 inference-type-checker.workspace = true
 inference-analysis.workspace = true
+inference-semantic-analysis.workspace = true
