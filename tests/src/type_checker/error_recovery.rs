@@ -101,8 +101,8 @@ mod error_recovery_tests {
                 return helper(10);
             }
         "#;
-        cov_mark::check!(type_checker_error_dedup_first_occurrence);
         let result = try_type_check(source);
+        cov_mark::check!(type_checker_error_dedup_first_occurrence);
         assert!(
             result.is_err(),
             "Type checker should report unknown type error"
