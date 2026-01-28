@@ -6,8 +6,9 @@
 //!
 //! ## Current Checks
 //!
-//! - **Combined unary operators**: Prohibits chained/unparenthesized unary operator
+//! - **Combined unary operators**: Warns about chained/unparenthesized unary operator
 //!   combinations such as `--x`, `-~x`, `!!x`, and parenthesized variants like `-(~x)`.
+//!   These are style/readability concerns that produce warnings (not errors).
 //!
 //! ## Diagnostics
 //!
@@ -17,6 +18,7 @@
 //! - `Info` — informational notes about code style or usage
 
 pub mod diagnostics;
+pub mod errors;
 
 use diagnostics::{SemanticDiagnostic, SemanticResult, Severity};
 use inference_ast::nodes::{AstNode, Expression, Literal};
@@ -37,19 +39,19 @@ pub fn analyze(ctx: &TypedContext) -> SemanticResult {
 /// Detects chained prefix unary operators like `--x`, `!!x`, `-~x`,
 /// and parenthesized variants like `-(~x)`, `~(-x)`.
 fn check_combined_unary_operators(ctx: &TypedContext, result: &mut SemanticResult) {
-    let prefix_unary_nodes = ctx.filter_nodes(|node| {
-        matches!(node, AstNode::Expression(Expression::PrefixUnary(_)))
-    });
+    let prefix_unary_nodes =
+        ctx.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
 
     for node in prefix_unary_nodes {
-        if let AstNode::Expression(Expression::PrefixUnary(ref prefix_expr)) = node {
-            if is_combined_unary(&prefix_expr.expression.borrow()) {
-                result.diagnostics.push(SemanticDiagnostic {
-                    severity: Severity::Error,
-                    message: "combined unary operators are prohibited".to_string(),
-                    location: node.location(),
-                });
-            }
+        if let AstNode::Expression(Expression::PrefixUnary(ref prefix_expr)) = node
+            && is_combined_unary(&prefix_expr.expression.borrow())
+        {
+            result.diagnostics.push(SemanticDiagnostic {
+                severity: Severity::Warning,
+                message: "combined unary operators are hard to read; consider simplifying"
+                    .to_string(),
+                location: node.location(),
+            });
         }
     }
 }

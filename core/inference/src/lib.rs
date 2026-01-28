@@ -509,8 +509,16 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 /// # Errors
 ///
 /// Returns an error if any semantic diagnostic with `Error` severity is found.
+/// Warnings are reported to stderr but do not fail compilation.
 pub fn analyze(ctx: &TypedContext) -> anyhow::Result<()> {
     let result = inference_semantic_analysis::analyze(ctx);
+
+    // Report warnings to stderr
+    if result.has_warnings() {
+        eprintln!("{}", result.format_warnings());
+    }
+
+    // Only fail on errors
     if result.has_errors() {
         return Err(anyhow::anyhow!("{}", result.format_errors()));
     }

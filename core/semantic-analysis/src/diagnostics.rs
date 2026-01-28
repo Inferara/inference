@@ -63,7 +63,34 @@ impl SemanticResult {
     pub fn format_errors(&self) -> String {
         self.errors()
             .iter()
-            .map(|d| d.to_string())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Returns `true` if any diagnostic has `Warning` severity.
+    #[must_use]
+    pub fn has_warnings(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning)
+    }
+
+    /// Returns only the warning-level diagnostics.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<&SemanticDiagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect()
+    }
+
+    /// Formats all warning diagnostics into a single message string.
+    #[must_use]
+    pub fn format_warnings(&self) -> String {
+        self.warnings()
+            .iter()
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n")
     }
