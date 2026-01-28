@@ -416,6 +416,16 @@ pub enum TypeCheckError {
         method_name: String,
         location: Location,
     },
+
+    /// Double unary operator is prohibited.
+    ///
+    /// This occurs when the same unary operator is applied twice consecutively,
+    /// such as `--x` or `~~x`. These patterns are prohibited as they are likely mistakes.
+    #[error("{location}: double unary operator `{operator:?}{operator:?}` is prohibited")]
+    DoubleUnaryOperator {
+        operator: UnaryOperatorKind,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -455,7 +465,8 @@ impl TypeCheckError {
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
-            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
+            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
+            | TypeCheckError::DoubleUnaryOperator { location, .. } => location,
         }
     }
 }
@@ -1029,5 +1040,29 @@ mod tests {
         assert!(msg.contains("Point"));
         assert!(msg.contains("new"));
         assert!(msg.contains("cannot be called on an instance"));
+    }
+
+    #[test]
+    fn display_double_unary_operator() {
+        let err = TypeCheckError::DoubleUnaryOperator {
+            operator: UnaryOperatorKind::Neg,
+            location: test_location(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("double unary operator"));
+        assert!(msg.contains("Neg"));
+        assert!(msg.contains("prohibited"));
+    }
+
+    #[test]
+    fn display_double_unary_operator_bitnot() {
+        let err = TypeCheckError::DoubleUnaryOperator {
+            operator: UnaryOperatorKind::BitNot,
+            location: test_location(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("double unary operator"));
+        assert!(msg.contains("BitNot"));
+        assert!(msg.contains("prohibited"));
     }
 }

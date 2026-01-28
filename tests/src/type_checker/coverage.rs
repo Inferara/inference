@@ -748,12 +748,72 @@ mod expression_coverage {
     }
 
     #[test]
-    fn test_unary_neg_nested() {
-        let source = r#"fn test() -> i32 { return --42; }"#;
+    fn test_double_unary_neg_prohibited() {
+        let source = r#"fn test(x: i32) -> i32 { return --x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Double unary neg (--) should be prohibited"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("double unary operator"),
+                "Error should mention double unary operator: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_double_unary_bitnot_prohibited() {
+        let source = r#"fn test(x: i32) -> i32 { return ~~x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Double unary bitnot (~~) should be prohibited"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("double unary operator"),
+                "Error should mention double unary operator: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_unary_operators_allowed() {
+        // -~x and ~-x should still be allowed (different operators)
+        let source = r#"fn test(x: i32) -> i32 { return -~x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
-            "Double unary neg should work, got: {:?}",
+            "Mixed unary operators (-~) should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_mixed_unary_operators_reversed_allowed() {
+        let source = r#"fn test(x: i32) -> i32 { return ~-x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Mixed unary operators (~-) should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_double_not_allowed() {
+        // !!x is logical NOT twice, which is allowed (returns boolean)
+        let source = r#"fn test(b: bool) -> bool { return !!b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Double logical NOT (!!) should be allowed, got: {:?}",
             result.err()
         );
     }

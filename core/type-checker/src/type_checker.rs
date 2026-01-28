@@ -1309,6 +1309,21 @@ impl TypeChecker {
                 None
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
+                // Check for prohibited double unary operators (-- or ~~)
+                if let Expression::PrefixUnary(inner_unary) =
+                    &*prefix_unary_expression.expression.borrow()
+                    && prefix_unary_expression.operator == inner_unary.operator
+                    && matches!(
+                        prefix_unary_expression.operator,
+                        UnaryOperatorKind::Neg | UnaryOperatorKind::BitNot
+                    )
+                {
+                    self.errors.push(TypeCheckError::DoubleUnaryOperator {
+                        operator: prefix_unary_expression.operator.clone(),
+                        location: prefix_unary_expression.location,
+                    });
+                    return None;
+                }
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Not => {
                         let expression_type_op = self
