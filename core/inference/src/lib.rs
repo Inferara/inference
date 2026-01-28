@@ -514,6 +514,7 @@ pub fn analyze(ctx: &TypedContext) -> anyhow::Result<()> {
     if result.has_errors() {
         return Err(anyhow::anyhow!("{}", result.format_errors()));
     }
+    Ok(())
 }
 /// Generates WebAssembly binary format from the typed AST.
 ///
