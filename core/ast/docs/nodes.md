@@ -1204,11 +1204,20 @@ let expr = ret_stmt.expression.borrow();
 
 ## Node Construction
 
-Nodes are typically created by `AstBuilder` during parsing:
+Nodes are typically created by `Builder` during parsing:
 
 ```rust
-let mut builder = AstBuilder::new(source);
-let arena = builder.build();
+use inference_ast::builder::Builder;
+use tree_sitter::Parser;
+
+let source = "fn main() -> i32 { return 0; }";
+let mut parser = Parser::new();
+parser.set_language(&tree_sitter_inference::language()).unwrap();
+let tree = parser.parse(source, None).unwrap();
+
+let mut builder = Builder::new();
+builder.add_source_code(tree.root_node(), source.as_bytes());
+let arena = builder.build_ast().unwrap();
 ```
 
 For testing, you can manually construct nodes:

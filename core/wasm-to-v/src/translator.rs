@@ -1,41 +1,46 @@
 //! Rocq Code Generation from Parsed WASM Data
 //!
-//! This module converts structured WASM data (from [`crate::wasm_parser`]) into
-//! Rocq (Coq) formal verification code.
+//! This module provides the translation phase (Phase 2) of WASM to Rocq conversion.
+//! It converts structured WASM data (from [`crate::wasm_parser`]) into Rocq (Coq)
+//! formal verification code.
 //!
 //! ## Overview
 //!
-//! The translator takes [`WasmParseData`] and generates a complete Rocq module
-//! that represents the WASM module in a form suitable for formal verification.
+//! The translator takes [`WasmParseData`] populated during parsing and generates a
+//! complete Rocq module that represents the WASM module in a form suitable for
+//! formal verification using the Rocq proof assistant.
 //!
 //! ## Translation Process
 //!
-//! The translation happens in [`WasmParseData::translate`]:
+//! The translation happens in [`WasmParseData::translate`] through these steps:
 //!
-//! 1. **Generate header**: Rocq imports and helper definitions
-//! 2. **Translate types**: WASM types → Rocq type constructors
-//! 3. **Translate imports**: External dependencies → Rocq import records
-//! 4. **Translate exports**: Public interface → Rocq export records
-//! 5. **Translate tables**: Indirect call tables → Rocq table definitions
-//! 6. **Translate memory**: Linear memory → Rocq memory definitions
-//! 7. **Translate globals**: Global variables → Rocq global definitions
-//! 8. **Translate data**: Memory initialization → Rocq data segments
-//! 9. **Translate elements**: Table initialization → Rocq element segments
-//! 10. **Translate functions**: Function bodies → Rocq function definitions
-//! 11. **Generate module record**: Assemble all parts into final Rocq module
+//! 1. **Generate Header**: Rocq imports from standard libraries (`List`, `String`, `BinNat`, `ZArith`, `Wasm`)
+//! 2. **Generate Helpers**: Convenience constructors (`Vi32`, `Vi64`, `Mt`, `Mm`, `Mg`, `Mi`, `Me`, `Ma`)
+//! 3. **Translate Imports**: External dependencies → `Mi` records (module, name, descriptor)
+//! 4. **Translate Exports**: Public interface → `Me` records (name, descriptor)
+//! 5. **Translate Tables**: Indirect call tables → `Mt` definitions (limits, element type)
+//! 6. **Translate Memory**: Linear memory → `Mm` definitions (size limits)
+//! 7. **Translate Globals**: Global variables → `Mg` definitions (type, mutability, initialization)
+//! 8. **Translate Data**: Memory initialization → data segment records
+//! 9. **Translate Elements**: Table initialization → element segment records
+//! 10. **Translate Types**: Function signatures → Rocq function type definitions
+//! 11. **Translate Functions**: Function bodies → `module_func` definitions with locals and instructions
+//! 12. **Generate Module**: Assemble all components into final `module` record
 //!
 //! ## Code Generation Strategy
 //!
 //! The translator generates Rocq code as strings using helper functions for each
-//! WASM construct. This approach prioritizes:
+//! WASM construct. This string-based approach prioritizes:
 //!
 //! - **Correctness**: Direct mapping from WASM semantics to Rocq types
-//! - **Readability**: Well-formatted output with proper indentation
+//! - **Readability**: Well-formatted output with consistent indentation
 //! - **Debuggability**: Preserve names from WASM custom sections
+//! - **Simplicity**: Easy to understand and maintain translation logic
 //!
 //! ## Expression Translation
 //!
-//! WASM instructions are converted to structured Rocq expressions:
+//! WASM's stack-based instruction model is converted to structured Rocq expression lists.
+//! The translator reconstructs control flow from linear instruction sequences:
 //!
 //! ```text
 //! WASM (stack-based)          Rocq (structured)
@@ -46,26 +51,112 @@
 //!                             nil
 //! ```
 //!
-//! Control flow is reconstructed from linear instruction sequences using
-//! [`Expression`] and helper structs [`BlockExpr`] and [`ConditionExpr`].
+//! ### Expression Reconstruction
+//!
+//! Control flow is reconstructed using helper structures:
+//!
+//! - [`Expression`] - Represents a sequence of WASM instructions as Rocq expressions
+//! - [`BlockExpr`] - Represents a structured block with type and body
+//! - [`ConditionExpr`] - Represents an if-then-else conditional
+//! - [`ExpressionPart`] - Discriminated union for different expression types
+//!
+//! These structures enable proper nesting and scoping of Rocq expressions.
 //!
 //! ## Helper Definitions
 //!
-//! The translator generates these Rocq helper definitions for convenience:
+//! The translator generates these Rocq helper definitions at the top of every file
+//! to simplify generated code:
 //!
-//! - `Vi32`, `Vi64`: Integer literal constructors
-//! - `Mt`: Table type constructor
-//! - `Mm`: Memory type constructor
-//! - `Mg`: Global constructor
-//! - `Mi`: Import constructor
-//! - `Me`: Export constructor
-//! - `Ma`: Memory argument constructor
+//! - `Vi32 i`: Construct i32 value from integer literal
+//! - `Vi64 i`: Construct i64 value from integer literal
+//! - `Mt l et`: Construct table type with limits and element type
+//! - `Mm l`: Construct memory type with limits
+//! - `Mg mut t init`: Construct global with mutability, type, and initializer
+//! - `Mi m n d`: Construct import with module name, import name, and descriptor
+//! - `Me n d`: Construct export with name and descriptor
+//! - `Ma of al`: Construct memory argument with offset and alignment
+//!
+//! ## Translation Functions
+//!
+//! The module provides numerous translation functions, organized by WASM construct:
+//!
+//! ### Type Translation
+//! - `translate_ref_type` - Reference types (funcref, externref)
+//! - `translate_value_type` - Value types (i32, i64, f32, f64, v128)
+//! - `translate_block_type` - Block result types
+//! - `translate_function_type` - Function signatures from RecGroup
+//!
+//! ### Section Translation
+//! - `translate_module_import` - Import section entries
+//! - `translate_export_module` - Export section entries
+//! - `translate_table_type` - Table definitions
+//! - `translate_memory_type` - Memory definitions
+//! - `translate_global` - Global variable definitions
+//! - `translate_data` - Data segment definitions
+//! - `translate_element` - Element segment definitions
+//!
+//! ### Instruction Translation
+//! - `translate_expression` - Main expression translation entry point
+//! - `translate_expr` - Recursive expression builder
+//! - `translate_basic_operator` - Individual WASM operators
+//! - `translate_memarg` - Memory operation arguments
 //!
 //! ## Error Recovery
 //!
-//! Unlike the parser (which fails fast), the translator collects errors from
-//! all sections before returning. This provides better diagnostics for complex
-//! translation failures.
+//! Unlike the parser (which fails fast), the translator uses **error recovery**:
+//!
+//! 1. Collect translation errors from all sections into a `Vec<anyhow::Error>`
+//! 2. Continue translating remaining sections even after errors
+//! 3. Return the first error only if translation failed
+//!
+//! This approach provides better diagnostics by showing multiple related errors
+//! instead of requiring users to fix one error at a time.
+//!
+//! ## Name Generation
+//!
+//! Generated Rocq identifiers follow these rules:
+//!
+//! - **Named functions**: Use names from custom name section if available
+//! - **Anonymous functions**: Generate unique names using UUID (`func_<uuid>`)
+//! - **Module name**: Use name from custom section, or parameter to `translate_bytes`
+//!
+//! ## Output Format
+//!
+//! The generated Rocq file has this structure:
+//!
+//! ```coq
+//! (* Standard library imports *)
+//! Require Import List.
+//! Require Import String.
+//! Require Import BinNat.
+//! Require Import ZArith.
+//! From Wasm Require Import bytes.
+//! From Wasm Require Import numerics.
+//! From Wasm Require Import datatypes.
+//!
+//! (* Helper definitions *)
+//! Definition Vi32 i := ...
+//! Definition Vi64 i := ...
+//! (* ... more helpers ... *)
+//!
+//! (* Function definitions *)
+//! Definition func_0 : module_func := ...
+//! Definition func_1 : module_func := ...
+//!
+//! (* Module record *)
+//! Definition module_name : module := {|
+//!   mod_types := ...;
+//!   mod_funcs := ...;
+//!   mod_tables := ...;
+//!   mod_mems := ...;
+//!   mod_globals := ...;
+//!   mod_elems := ...;
+//!   mod_datas := ...;
+//!   mod_start := ...;
+//!   mod_imports := ...;
+//!   mod_exports := ...;
+//! |}.
+//! ```
 
 use core::fmt;
 use std::{collections::HashMap, fmt::Display};

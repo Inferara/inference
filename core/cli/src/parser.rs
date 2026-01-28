@@ -2,6 +2,8 @@
 //!
 //! This module defines the CLI interface using `clap`. The `Cli` struct captures
 //! all command line flags and arguments passed to the `infc` binary.
+//!
+//! For comprehensive usage documentation, see `README.md` in this crate.
 
 use clap::Parser;
 

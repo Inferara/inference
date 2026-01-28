@@ -298,17 +298,33 @@ ast_enums! {
     }
 }
 
+/// Visibility modifier for definitions.
+///
+/// Controls whether a definition (function, struct, constant, etc.) is accessible
+/// from outside its containing module.
+///
+/// # Default
+///
+/// Definitions are `Private` by default, following the principle of least privilege.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Visibility {
+    /// Private visibility (default). Definition is only accessible within its module.
     #[default]
     Private,
+    /// Public visibility (marked with `pub`). Definition is accessible from other modules.
     Public,
 }
 
+/// Unary operator kinds for prefix expressions.
+///
+/// Represents operators that take a single operand.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UnaryOperatorKind {
+    /// Logical negation: `!expr`
     Not,
+    /// Numeric negation: `-expr`
     Neg,
+    /// Bitwise NOT: `~expr`
     BitNot,
 }
 
@@ -349,27 +365,51 @@ impl SimpleTypeKind {
     }
 }
 
+/// Binary operator kinds for expressions.
+///
+/// Represents operators that take two operands (left and right).
+/// Operators are listed roughly in order of precedence groups.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OperatorKind {
+    /// Exponentiation: `a ** b`
     Pow,
+    /// Addition: `a + b`
     Add,
+    /// Subtraction: `a - b`
     Sub,
+    /// Multiplication: `a * b`
     Mul,
+    /// Division: `a / b`
     Div,
+    /// Modulo (remainder): `a % b`
     Mod,
+    /// Logical AND: `a && b`
     And,
+    /// Logical OR: `a || b`
     Or,
+    /// Equality: `a == b`
     Eq,
+    /// Inequality: `a != b`
     Ne,
+    /// Less than: `a < b`
     Lt,
+    /// Less than or equal: `a <= b`
     Le,
+    /// Greater than: `a > b`
     Gt,
+    /// Greater than or equal: `a >= b`
     Ge,
+    /// Bitwise AND: `a & b`
     BitAnd,
+    /// Bitwise OR: `a | b`
     BitOr,
+    /// Bitwise XOR: `a ^ b`
     BitXor,
+    /// Bitwise NOT: `~a` (Note: This is actually a unary operator in most contexts)
     BitNot,
+    /// Bitwise left shift: `a << b`
     Shl,
+    /// Bitwise right shift: `a >> b`
     Shr,
 }
 
