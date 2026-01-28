@@ -22,10 +22,97 @@
 //!
 //! # Compilation Pipeline
 //!
-//! 1. Write LLVM IR to temporary `.ll` file
-//! 2. Run inf-llc to compile to `.o` object file
-//! 3. Run rust-lld to link object file into `.wasm` module
-//! 4. Read WASM bytes and clean up temporary files
+//! ## Stage 1: IR Emission
+//!
+//! The LLVM module is serialized to a temporary `.ll` file (LLVM IR text format).
+//! The module is configured with the `wasm32-unknown-unknown` target triple.
+//!
+//! ## Stage 2: Object Compilation (inf-llc)
+//!
+//! The inf-llc compiler processes the IR file with these arguments:
+//! - `-mcpu=mvp` - Target WebAssembly MVP (Minimum Viable Product) feature set
+//! - `-filetype=obj` - Output object file format
+//! - `-O{0-3}` - Optimization level (0=none, 3=aggressive)
+//!
+//! Output: `.o` WebAssembly object file
+//!
+//! ## Stage 3: Linking (rust-lld)
+//!
+//! The rust-lld linker combines the object file into a final WebAssembly module:
+//! - `-flavor wasm` - Use WebAssembly linker mode
+//! - `--no-entry` - Reactor model (no implicit `_start` function)
+//! - `--export=main` - Explicitly export `main` function if present
+//!
+//! Output: `.wasm` WebAssembly module
+//!
+//! ## Stage 4: Cleanup
+//!
+//! Read the final WASM bytes and remove temporary files. The WASM module is returned
+//! as a byte vector.
+//!
+//! # WebAssembly Execution Model
+//!
+//! Inference uses the **reactor model** rather than the command model for WebAssembly modules.
+//!
+//! ## Command Model (Rust, Zig, C with WASI)
+//!
+//! Languages like Rust and Zig targeting `wasm32-wasi` generate a `_start` entry point:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │  WASM Module (wasm32-wasi)              │
+//! │                                         │
+//! │  _start() ──┬──> runtime init           │
+//! │  (entry)    ├──> main()                 │
+//! │             └──> exit syscall           │
+//! └─────────────────────────────────────────┘
+//!
+//! Execution: wasmtime module.wasm
+//!            (automatically invokes _start)
+//! ```
+//!
+//! ## Reactor Model (Inference)
+//!
+//! Inference targets `wasm32-unknown-unknown` and produces modules without an entry point.
+//! Functions marked `pub` are exported and can be called individually:
+//!
+//! ```text
+//! ┌─────────────────────────────────────────┐
+//! │  WASM Module (wasm32-unknown-unknown)   │
+//! │                                         │
+//! │  Exports:                               │
+//! │    ├─ main  (pub fn main)               │
+//! │    └─ foo   (pub fn foo)                │
+//! │                                         │
+//! │  Internal (not exported):               │
+//! │    └─ bar   (fn bar)                    │
+//! └─────────────────────────────────────────┘
+//!
+//! Execution: wasmtime --invoke main module.wasm
+//!            (caller explicitly invokes exported function)
+//! ```
+//!
+//! Note: The `--invoke` argument requires the function name. Multiple exported
+//! functions can exist in the same module, and the caller chooses which to invoke.
+//!
+//! ## Why Reactor Model?
+//!
+//! - **Simplicity**: No runtime initialization overhead
+//! - **Flexibility**: Multiple entry points, caller chooses which function to invoke
+//! - **Embedding**: Better suited for embedding in host applications
+//! - **Verification**: Aligns with formal verification where functions are verified individually
+//!
+//! ## Linker Flags
+//!
+//! - `--no-entry`: Tells LLD there's no `_start` function (reactor mode)
+//! - `--export=main`: Explicitly exports `main` if present (LLD creates argc/argv wrapper)
+//!
+//! ## Future Consideration
+//!
+//! If WASI command-style execution is needed, the compiler would need to:
+//! 1. Generate a `_start` function calling `main`
+//! 2. Remove `--no-entry` flag
+//! 3. Optionally switch target to `wasm32-wasi`
 
 use std::{path::PathBuf, process::Command};
 
@@ -49,6 +136,7 @@ use tempfile::tempdir;
 /// - `module` - LLVM module containing the IR to compile
 /// - `output_fname` - Base filename for intermediate files (extensions added automatically)
 /// - `optimization_level` - LLVM optimization level (0-3, clamped to max 3)
+/// - `has_main` - Whether to export a `main` function (only if the module contains one)
 ///
 /// # Returns
 ///
@@ -61,11 +149,38 @@ use tempfile::tempdir;
 /// - Compilation or linking fails (non-zero exit status)
 /// - File I/O operations fail
 /// - Temporary directory creation fails
+///
+/// # Error Details
+///
+/// When compilation or linking fails, the error message includes:
+/// - Exit status of the failed tool
+/// - Complete stderr output from the tool
+///
+/// This information is essential for debugging LLVM IR issues or linker problems.
+/// Common failures include:
+/// - Invalid LLVM IR syntax
+/// - Undefined references in linking
+/// - Unsupported WebAssembly features
+///
+/// # Example Error Messages
+///
+/// ```text
+/// Error: inf-llc failed with status: exit status: 1
+/// stderr: <input>:5:10: error: expected value token
+///   ret i32 %invalid_var
+///           ^
+/// ```
+///
+/// ```text
+/// Error: rust-lld failed with status: exit status: 1
+/// stderr: wasm-ld: error: undefined symbol: external_function
+/// ```
 #[allow(clippy::similar_names)]
 pub(crate) fn compile_to_wasm(
     module: &Module,
     output_fname: &str,
     optimization_level: u32,
+    has_main: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let llc_path = get_inf_llc_path()?;
     let temp_dir = tempdir()?;
@@ -100,15 +215,15 @@ pub(crate) fn compile_to_wasm(
     let wasm_path = temp_dir.path().join(output_fname).with_extension("wasm");
     let mut lld_cmd = Command::new(&rust_lld_path);
     configure_llvm_env(&mut lld_cmd)?;
-    let wasm_lld_output = lld_cmd
+    lld_cmd
         .arg("-flavor")
         .arg("wasm")
         .arg(&obj_path)
-        .arg("--no-entry")
-        // .arg("--export=hello_world")
-        .arg("-o")
-        .arg(&wasm_path)
-        .output()?;
+        .arg("--no-entry");
+    if has_main {
+        lld_cmd.arg("--export=main");
+    }
+    let wasm_lld_output = lld_cmd.arg("-o").arg(&wasm_path).output()?;
 
     if !wasm_lld_output.status.success() {
         return Err(anyhow::anyhow!(

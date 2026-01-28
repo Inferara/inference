@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! New project command for the infs CLI.
 //!
 //! Creates a new Inference project with a standard directory structure.
@@ -7,25 +5,25 @@
 //! ## Usage
 //!
 //! ```bash
-//! infs new myproject           # Create in current directory
-//! infs new myproject --no-git  # Skip git initialization
-//! infs new myproject ./path    # Create in specified directory
+//! infs new myproject                    # Create project in current directory
+//! infs new myproject --no-git           # Skip git initialization
+//! infs new myproject ./path             # Create in specified directory
 //! ```
 //!
 //! ## Project Structure
 //!
-//! The command creates the following structure:
+//! Creates the following structure:
 //!
 //! ```text
 //! myproject/
-//! ├── Inference.toml
-//! ├── src/
-//! │   └── main.inf
-//! ├── tests/
-//! │   └── .gitkeep
-//! ├── proofs/
-//! │   └── .gitkeep
-//! └── .gitignore
+//! +-- Inference.toml
+//! +-- src/
+//! |   +-- main.inf
+//! +-- tests/
+//! |   +-- .gitkeep
+//! +-- proofs/
+//! |   +-- .gitkeep
+//! +-- .gitignore
 //! ```
 
 use anyhow::Result;
@@ -84,7 +82,7 @@ pub fn execute(args: &NewArgs) -> Result<()> {
     println!("  infs build src/main.inf --codegen -o");
     println!();
     println!("To learn more about Inference, visit:");
-    println!("  https://inferara.com");
+    println!("  https://inference-lang.org");
 
     Ok(())
 }

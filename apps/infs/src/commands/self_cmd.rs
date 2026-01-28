@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Self command for the infs CLI.
 //!
 //! Provides subcommands for managing the `infs` binary itself.
@@ -13,7 +11,10 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
-use crate::toolchain::{Platform, ToolchainPaths, download_file, fetch_manifest, verify_checksum};
+use crate::toolchain::{
+    Platform, ToolchainPaths, download_file, extract_archive, fetch_manifest, latest_stable,
+    latest_version, verify_checksum,
+};
 
 /// Arguments for the self command.
 #[derive(Args)]
@@ -76,10 +77,10 @@ async fn execute_update() -> Result<()> {
     println!("Checking for updates...");
     let manifest = fetch_manifest().await?;
 
-    let latest_version = match &manifest.latest_infs {
-        Some(v) => v.clone(),
-        None => manifest.latest_stable.clone(),
-    };
+    let latest_entry = latest_stable(&manifest)
+        .or_else(|| latest_version(&manifest))
+        .context("No version found in manifest")?;
+    let latest_version = &latest_entry.version;
 
     if latest_version == current_version {
         println!("infs is already up to date.");
@@ -88,32 +89,34 @@ async fn execute_update() -> Result<()> {
 
     let current_semver = semver::Version::parse(current_version)
         .with_context(|| format!("Invalid current version: {current_version}"))?;
-    let latest_semver = semver::Version::parse(&latest_version)
+    let latest_semver = semver::Version::parse(latest_version)
         .with_context(|| format!("Invalid latest version: {latest_version}"))?;
 
     if current_semver >= latest_semver {
-        println!("infs is already up to date (current: {current_version}, available: {latest_version}).");
+        println!(
+            "infs is already up to date (current: {current_version}, available: {latest_version})."
+        );
         return Ok(());
     }
 
-    let artifact = manifest
+    let artifact = latest_entry
         .find_infs_artifact(platform)
         .with_context(|| format!("No infs binary available for platform {platform}"))?;
 
     println!("Updating infs from {current_version} to {latest_version}...");
 
-    let download_filename = format!("infs-{latest_version}-{platform}.zip");
-    let download_path = paths.download_path(&download_filename);
+    let download_filename = artifact.filename();
+    let download_path = paths.download_path(download_filename);
 
     println!("Downloading from {}...", artifact.url);
-    download_file(&artifact.url, &download_path, artifact.size).await?;
+    download_file(&artifact.url, &download_path).await?;
 
     println!("Verifying checksum...");
     verify_checksum(&download_path, &artifact.sha256)?;
 
     println!("Extracting...");
     let temp_dir = paths.downloads.join(format!("infs-{latest_version}-temp"));
-    extract_zip(&download_path, &temp_dir)?;
+    extract_archive(&download_path, &temp_dir)?;
 
     let new_binary_name = format!("infs{}", platform.executable_extension());
     let new_binary_path = temp_dir.join(&new_binary_name);
@@ -144,52 +147,9 @@ async fn execute_update() -> Result<()> {
     Ok(())
 }
 
-/// Extracts a ZIP archive to the destination directory.
-fn extract_zip(archive_path: &std::path::Path, dest_dir: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(archive_path)
-        .with_context(|| format!("Failed to open archive: {}", archive_path.display()))?;
-
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("Failed to read ZIP archive: {}", archive_path.display()))?;
-
-    std::fs::create_dir_all(dest_dir)
-        .with_context(|| format!("Failed to create directory: {}", dest_dir.display()))?;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .with_context(|| format!("Failed to read archive entry {i}"))?;
-
-        let entry_path = entry
-            .enclosed_name()
-            .with_context(|| format!("Invalid entry path in archive: entry {i}"))?;
-
-        let output_path = dest_dir.join(entry_path);
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&output_path)
-                .with_context(|| format!("Failed to create directory: {}", output_path.display()))?;
-        } else {
-            if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
-
-            let mut outfile = std::fs::File::create(&output_path)
-                .with_context(|| format!("Failed to create file: {}", output_path.display()))?;
-
-            std::io::copy(&mut entry, &mut outfile)
-                .with_context(|| format!("Failed to extract: {}", output_path.display()))?;
-        }
-    }
-
-    Ok(())
-}
-
 /// Replaces the current binary with a new one.
 fn replace_binary(new_binary: &std::path::Path, _platform: Platform) -> Result<()> {
-    let current_exe = std::env::current_exe()
-        .context("Failed to get current executable path")?;
+    let current_exe = std::env::current_exe().context("Failed to get current executable path")?;
 
     #[cfg(unix)]
     {
@@ -202,14 +162,15 @@ fn replace_binary(new_binary: &std::path::Path, _platform: Platform) -> Result<(
         std::fs::set_permissions(new_binary, perms)
             .with_context(|| format!("Failed to set permissions: {}", new_binary.display()))?;
 
-        std::fs::rename(new_binary, &current_exe)
-            .with_context(|| format!(
+        std::fs::rename(new_binary, &current_exe).with_context(|| {
+            format!(
                 "Failed to replace binary. You may need to run with elevated privileges.\n\
                  Source: {}\n\
                  Destination: {}",
                 new_binary.display(),
                 current_exe.display()
-            ))?;
+            )
+        })?;
     }
 
     #[cfg(windows)]
@@ -220,18 +181,18 @@ fn replace_binary(new_binary: &std::path::Path, _platform: Platform) -> Result<(
             std::fs::remove_file(&old_binary).ok();
         }
 
-        std::fs::rename(&current_exe, &old_binary)
-            .with_context(|| format!(
+        std::fs::rename(&current_exe, &old_binary).with_context(|| {
+            format!(
                 "Failed to rename current binary to {}",
                 old_binary.display()
-            ))?;
+            )
+        })?;
 
         if let Err(e) = std::fs::rename(new_binary, &current_exe) {
             std::fs::rename(&old_binary, &current_exe).ok();
-            return Err(e).with_context(|| format!(
-                "Failed to install new binary at {}",
-                current_exe.display()
-            ));
+            return Err(e).with_context(|| {
+                format!("Failed to install new binary at {}", current_exe.display())
+            });
         }
     }
 

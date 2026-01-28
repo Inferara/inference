@@ -1,4 +1,4 @@
-fn hello_const_i32() -> i32 {
+pub fn hello_const_i32() -> i32 {
     const a: i32 = 42;
     return a;
 }

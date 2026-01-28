@@ -734,13 +734,21 @@ file.inf:10:15: type mismatch in return: expected `i32`, found `bool`
 
 ### 1. Check for Multiple Errors
 
+The type checker collects multiple errors before failing. Always handle the possibility of multiple error messages:
+
 ```rust
 match TypeCheckerBuilder::build_typed_context(arena) {
-    Ok(completed) => { /* success */ }
+    Ok(completed) => {
+        let typed_context = completed.typed_context();
+        // Success path
+    }
     Err(e) => {
-        // Error may contain multiple messages
-        for error_msg in e.to_string().split("; ") {
-            eprintln!("Error: {}", error_msg);
+        // Error may contain multiple messages separated by "; "
+        eprintln!("Type checking failed with {} error(s):",
+            e.to_string().split("; ").count());
+
+        for (idx, error_msg) in e.to_string().split("; ").enumerate() {
+            eprintln!("  [{}] {}", idx + 1, error_msg);
         }
     }
 }
@@ -748,12 +756,16 @@ match TypeCheckerBuilder::build_typed_context(arena) {
 
 ### 2. Provide User-Friendly Messages
 
+Format errors for human readability with context and suggestions:
+
 ```rust
 match TypeCheckerBuilder::build_typed_context(arena) {
     Err(e) => {
         eprintln!("Type checking failed:");
         eprintln!("{}", e);
         eprintln!("\nPlease fix the errors above and try again.");
+        eprintln!("Tip: Read error messages from top to bottom - later errors");
+        eprintln!("     may be consequences of earlier ones.");
     }
     Ok(completed) => { /* ... */ }
 }
@@ -761,13 +773,106 @@ match TypeCheckerBuilder::build_typed_context(arena) {
 
 ### 3. Log Errors for Debugging
 
+Use structured logging for programmatic error analysis:
+
 ```rust
 match TypeCheckerBuilder::build_typed_context(arena) {
     Err(e) => {
-        log::error!("Type check error: {}", e);
+        log::error!("Type check failed: {}", e);
+
+        // Count errors for metrics
+        let error_count = e.to_string().split("; ").count();
+        log::info!("Total errors: {}", error_count);
+
         // Continue or abort based on context
+        return Err(e);
     }
-    Ok(completed) => { /* ... */ }
+    Ok(completed) => {
+        log::info!("Type checking succeeded");
+        // ...
+    }
+}
+```
+
+### 4. Extract Location Information
+
+While the current error format includes locations in the message, you can parse them if needed:
+
+```rust
+fn parse_error_location(error_msg: &str) -> Option<(usize, usize)> {
+    // Error format: "line:column: message"
+    let parts: Vec<&str> = error_msg.splitn(2, ": ").collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let location = parts[0];
+    let coords: Vec<&str> = location.split(':').collect();
+    if coords.len() != 2 {
+        return None;
+    }
+
+    let line = coords[0].parse::<usize>().ok()?;
+    let column = coords[1].parse::<usize>().ok()?;
+    Some((line, column))
+}
+```
+
+### 5. Categorize Errors for IDEs
+
+Build structured error reports for editor integration:
+
+```rust
+#[derive(Debug)]
+struct Diagnostic {
+    line: usize,
+    column: usize,
+    severity: Severity,
+    message: String,
+}
+
+#[derive(Debug)]
+enum Severity {
+    Error,
+    Warning,
+}
+
+fn extract_diagnostics(error: anyhow::Error) -> Vec<Diagnostic> {
+    error.to_string()
+        .split("; ")
+        .filter_map(|msg| {
+            let location = parse_error_location(msg)?;
+            Some(Diagnostic {
+                line: location.0,
+                column: location.1,
+                severity: Severity::Error,
+                message: msg.to_string(),
+            })
+        })
+        .collect()
+}
+```
+
+### 6. Handle Partial Results
+
+Since the type checker fails on first unrecoverable error, consider saving partial progress:
+
+```rust
+fn incremental_type_check(source: &str) -> Result<TypedContext, Vec<String>> {
+    let arena = parse_source(source)
+        .map_err(|e| vec![format!("Parse error: {}", e)])?;
+
+    match TypeCheckerBuilder::build_typed_context(arena) {
+        Ok(completed) => Ok(completed.typed_context()),
+        Err(e) => {
+            // Extract individual errors
+            let errors: Vec<String> = e.to_string()
+                .split("; ")
+                .map(|s| s.to_string())
+                .collect();
+            Err(errors)
+        }
+    }
 }
 ```
 

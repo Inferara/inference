@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Terminal User Interface for the infs CLI.
 //!
 //! This module provides an interactive TUI for the Inference toolchain,
@@ -13,43 +11,45 @@
 //! ## Headless Detection
 //!
 //! The TUI will not launch in headless environments:
-//! - When `CI=true` or `CI=1` environment variable is set
-//! - When `NO_COLOR` environment variable is set (any value)
+//! - When `INFS_NO_TUI` environment variable is set (any value)
 //! - When stdout is not a terminal (piped or redirected)
 //!
 //! ## Modules
 //!
 //! - [`terminal`] - Terminal setup and cleanup with RAII guard
 //! - [`app`] - Main application state and event loop
+//! - [`state`] - Screen state machine and view states
+//! - [`theme`] - Color theme system
+//! - [`menu`] - Menu navigation
+//! - [`views`] - Screen rendering modules
+//! - [`widgets`] - Reusable widget components
 
-mod app;
-mod terminal;
+pub mod app;
+pub mod install_task;
+pub mod menu;
+pub mod state;
+pub mod terminal;
+pub mod theme;
+pub mod views;
+pub mod widgets;
 
 use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
 
+use crate::toolchain::ToolchainPaths;
 use terminal::TerminalGuard;
 
 /// Determines whether the TUI should be used based on environment.
 ///
 /// Returns `false` in headless environments:
-/// - `CI=true` or `CI=1` environment variable
-/// - `NO_COLOR` environment variable (any value)
+/// - `INFS_NO_TUI` environment variable (any value)
 /// - Non-TTY stdout (piped or redirected)
 #[must_use]
 pub fn should_use_tui() -> bool {
-    if let Ok(ci) = std::env::var("CI") {
-        let ci_lower = ci.to_lowercase();
-        if ci_lower == "true" || ci_lower == "1" {
-            return false;
-        }
-    }
-
-    if std::env::var("NO_COLOR").is_ok() {
+    if std::env::var("INFS_NO_TUI").is_ok() {
         return false;
     }
-
     std::io::stdout().is_terminal()
 }
 
@@ -58,18 +58,78 @@ pub fn should_use_tui() -> bool {
 /// This function sets up the terminal, runs the main event loop,
 /// and ensures proper cleanup on exit or error.
 ///
+/// If the TUI exits with a pending command (e.g., `build`, `run`, `verify`),
+/// this function restores the terminal, executes the command, waits for user
+/// to press Enter, and then restarts the TUI.
+///
 /// # Errors
 ///
 /// Returns an error if:
 /// - Terminal setup fails
 /// - Event handling fails
 /// - Drawing fails
+/// - Command execution fails
 pub fn run() -> Result<()> {
-    let mut guard = TerminalGuard::new().context("failed to initialize terminal")?;
+    // Initialize ~/.inference directory on first launch
+    if let Ok(paths) = ToolchainPaths::new() {
+        let _ = paths.ensure_directories();
+    }
 
-    app::run_app(&mut guard).context("TUI application error")?;
+    loop {
+        let pending_command = {
+            let mut guard = TerminalGuard::new().context("failed to initialize terminal")?;
+            app::run_app(&mut guard).context("TUI application error")?
+            // Guard is dropped here, restoring terminal
+        };
+
+        match pending_command {
+            Some(command) => {
+                execute_pending_command(&command)?;
+                wait_for_enter();
+                // Loop continues, restarting TUI
+            }
+            None => {
+                // No pending command, exit normally
+                break;
+            }
+        }
+    }
 
     Ok(())
+}
+
+/// Executes a pending command after the TUI has exited.
+fn execute_pending_command(command: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("failed to get current executable")?;
+
+    println!();
+    let status = std::process::Command::new(&exe)
+        .arg(command)
+        .status()
+        .with_context(|| format!("failed to execute 'infs {command}'"))?;
+
+    if !status.success() {
+        // Log failure but don't exit - we'll return to TUI
+        eprintln!(
+            "\nCommand 'infs {command}' exited with status: {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
+    Ok(())
+}
+
+/// Waits for the user to press Enter before returning to the TUI.
+fn wait_for_enter() {
+    use std::io::{BufRead, Write};
+
+    print!("\nPress Enter to return to TUI...");
+    let _ = std::io::stdout().flush();
+
+    let stdin = std::io::stdin();
+    let mut handle = stdin.lock();
+    let mut buffer = String::new();
+    let _ = handle.read_line(&mut buffer);
 }
 
 #[cfg(test)]
@@ -87,58 +147,29 @@ mod tests {
     }
 
     #[test]
-    fn should_use_tui_respects_ci_env() {
+    #[serial_test::serial]
+    fn should_use_tui_respects_infs_no_tui_env() {
         // Save original value
-        let original = std::env::var("CI").ok();
+        let original = std::env::var("INFS_NO_TUI").ok();
 
-        // SAFETY: Tests run single-threaded with #[test], so setting env vars is safe
-        // for the duration of this test.
+        // SAFETY: This test is marked #[serial_test::serial] to ensure exclusive
+        // access to environment variables. No other tests run concurrently.
         unsafe {
-            std::env::set_var("CI", "true");
+            std::env::set_var("INFS_NO_TUI", "1");
         }
         assert!(!should_use_tui());
 
+        // Empty string still disables TUI (env var is set)
         unsafe {
-            std::env::set_var("CI", "1");
-        }
-        assert!(!should_use_tui());
-
-        unsafe {
-            std::env::set_var("CI", "TRUE");
+            std::env::set_var("INFS_NO_TUI", "");
         }
         assert!(!should_use_tui());
 
         // Restore original
         unsafe {
             match original {
-                Some(val) => std::env::set_var("CI", val),
-                None => std::env::remove_var("CI"),
-            }
-        }
-    }
-
-    #[test]
-    fn should_use_tui_respects_no_color_env() {
-        // Save original value
-        let original = std::env::var("NO_COLOR").ok();
-
-        // SAFETY: Tests run single-threaded with #[test], so setting env vars is safe
-        // for the duration of this test.
-        unsafe {
-            std::env::set_var("NO_COLOR", "1");
-        }
-        assert!(!should_use_tui());
-
-        unsafe {
-            std::env::set_var("NO_COLOR", "");
-        }
-        assert!(!should_use_tui());
-
-        // Restore original
-        unsafe {
-            match original {
-                Some(val) => std::env::set_var("NO_COLOR", val),
-                None => std::env::remove_var("NO_COLOR"),
+                Some(val) => std::env::set_var("INFS_NO_TUI", val),
+                None => std::env::remove_var("INFS_NO_TUI"),
             }
         }
     }

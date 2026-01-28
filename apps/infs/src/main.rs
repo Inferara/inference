@@ -11,6 +11,7 @@
 //! - `new` - Create a new Inference project
 //! - `init` - Initialize an existing directory as an Inference project
 //! - `build` - Compile Inference source files
+//! - `run` - Build and execute WASM with wasmtime
 //! - `version` - Display version information
 //! - `install` - Install toolchain versions
 //! - `uninstall` - Remove toolchain versions
@@ -24,7 +25,7 @@
 //! ### Interactive Mode (default)
 //!
 //! When run without subcommands, `infs` will launch a TUI (Terminal User Interface)
-//! for interactive project management. This mode is planned for Phase 4.
+//! for interactive project management.
 //!
 //! ### Headless Mode (`--headless`)
 //!
@@ -40,7 +41,7 @@
 //!
 //! Build a source file:
 //! ```bash
-//! infs build example.inf --codegen -o
+//! infs build example.inf
 //! ```
 //!
 //! Install the latest toolchain:
@@ -54,13 +55,17 @@
 //! ```
 
 mod commands;
+mod errors;
 mod project;
 mod toolchain;
 mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use commands::{build, default, doctor, init, install, list, new, self_cmd, uninstall, version};
+use commands::{
+    build, default, doctor, init, install, list, new, run, self_cmd, uninstall, version, versions,
+};
+use errors::InfsError;
 
 /// Inference unified CLI toolchain.
 ///
@@ -71,9 +76,21 @@ use commands::{build, default, doctor, init, install, list, new, self_cmd, unins
     name = "infs",
     author,
     version,
-    about = "Inference unified CLI toolchain",
+    about = "Inference Start is a unified CLI toolchain",
     long_about = "The 'infs' command is the unified entry point for the Inference programming \
-    language toolchain. Use subcommands like 'build' to compile source files."
+    language toolchain. Use subcommands like 'build' to compile source files.",
+    after_help = "\
+COMPILER RESOLUTION:
+    The infc compiler is located using the following priority order:
+    1. INFC_PATH environment variable (explicit override)
+    2. System PATH (via 'which infc')
+    3. Managed toolchain (~/.inference/toolchains/VERSION/bin/infc)
+
+ENVIRONMENT VARIABLES:
+    INFS_NO_TUI             Disable interactive TUI
+    INFC_PATH               Explicit path to infc binary
+    INFERENCE_HOME          Toolchain directory (default: ~/.inference)
+    INFS_DIST_SERVER        Distribution server URL (default: https://inference-lang.org)"
 )]
 pub struct Cli {
     /// Run in headless mode without TUI.
@@ -111,8 +128,17 @@ pub enum Commands {
     /// codegen.
     Build(build::BuildArgs),
 
+    /// Build and run a source file.
+    ///
+    /// Compiles the source file to WASM and executes it with wasmtime.
+    /// Arguments after the path are passed to the program.
+    Run(run::RunArgs),
+
     /// Display version information.
-    Version,
+    ///
+    /// Shows the version of the infs CLI. Use -v or --verbose for detailed
+    /// information including build date, platform, and compiler version.
+    Version(version::VersionArgs),
 
     /// Install a toolchain version.
     ///
@@ -130,6 +156,12 @@ pub enum Commands {
     /// Displays all installed toolchain versions and indicates which
     /// one is currently set as the default.
     List,
+
+    /// List available toolchain versions.
+    ///
+    /// Fetches the release manifest and displays all available versions
+    /// with their stability status and platform availability.
+    Versions(versions::VersionsArgs),
 
     /// Set the default toolchain version.
     ///
@@ -152,9 +184,22 @@ pub enum Commands {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("Error: {e:?}");
-        std::process::exit(1);
+        let exit_code = handle_error(&e);
+        std::process::exit(exit_code);
     }
+}
+
+/// Handles an error and returns the appropriate exit code.
+///
+/// For `ProcessExitCode` errors, returns the embedded exit code without
+/// printing an error message (the subprocess already printed its output).
+/// For all other errors, prints the error and returns exit code 1.
+fn handle_error(e: &anyhow::Error) -> i32 {
+    if let Some(InfsError::ProcessExitCode { code }) = e.downcast_ref::<InfsError>() {
+        return *code;
+    }
+    eprintln!("Error: {e:?}");
+    1
 }
 
 async fn run() -> Result<()> {
@@ -164,10 +209,12 @@ async fn run() -> Result<()> {
         Some(Commands::New(args)) => new::execute(&args),
         Some(Commands::Init(args)) => init::execute(&args),
         Some(Commands::Build(args)) => build::execute(&args),
-        Some(Commands::Version) => version::execute(),
+        Some(Commands::Run(args)) => run::execute(&args),
+        Some(Commands::Version(args)) => version::execute(&args),
         Some(Commands::Install(args)) => install::execute(&args).await,
         Some(Commands::Uninstall(args)) => uninstall::execute(&args).await,
         Some(Commands::List) => list::execute().await,
+        Some(Commands::Versions(args)) => versions::execute(&args).await,
         Some(Commands::Default(args)) => default::execute(&args).await,
         Some(Commands::Doctor) => doctor::execute().await,
         Some(Commands::SelfCmd(args)) => self_cmd::execute(&args).await,

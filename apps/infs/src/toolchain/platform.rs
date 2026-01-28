@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Platform detection for the infs toolchain.
 //!
 //! This module provides OS and architecture detection to determine which
@@ -11,7 +9,7 @@
 //! - macOS ARM64 (`macos-arm64`)
 //! - Windows `x86_64` (`windows-x64`)
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fmt;
 
 /// Represents a supported platform for toolchain binaries.
@@ -74,7 +72,7 @@ impl Platform {
     /// Returns the platform identifier string used in manifest URLs and file names.
     ///
     /// These strings match the naming convention used in the release manifest.
-    #[must_use]
+    #[must_use = "returns the platform string without side effects"]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LinuxX64 => "linux-x64",
@@ -86,7 +84,7 @@ impl Platform {
     /// Returns the executable file extension for this platform.
     ///
     /// Returns `.exe` on Windows, empty string on Unix platforms.
-    #[must_use]
+    #[must_use = "returns the extension string without side effects"]
     pub fn executable_extension(self) -> &'static str {
         match self {
             Self::WindowsX64 => ".exe",
@@ -95,9 +93,26 @@ impl Platform {
     }
 
     /// Returns whether this platform is Windows.
-    #[must_use]
+    #[must_use = "returns platform check result without side effects"]
     pub fn is_windows(self) -> bool {
         matches!(self, Self::WindowsX64)
+    }
+
+    /// Returns the OS name for this platform.
+    ///
+    /// This is used for matching against the manifest format which
+    /// identifies artifacts by OS and tool name.
+    ///
+    /// # Returns
+    ///
+    /// One of: `"linux"`, `"macos"`, `"windows"`
+    #[must_use = "returns the OS string without side effects"]
+    pub fn os(self) -> &'static str {
+        match self {
+            Self::LinuxX64 => "linux",
+            Self::MacosArm64 => "macos",
+            Self::WindowsX64 => "windows",
+        }
     }
 }
 
@@ -150,5 +165,12 @@ mod tests {
 
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         assert!(matches!(result, Ok(Platform::WindowsX64)));
+    }
+
+    #[test]
+    fn os_returns_expected_values() {
+        assert_eq!(Platform::LinuxX64.os(), "linux");
+        assert_eq!(Platform::MacosArm64.os(), "macos");
+        assert_eq!(Platform::WindowsX64.os(), "windows");
     }
 }

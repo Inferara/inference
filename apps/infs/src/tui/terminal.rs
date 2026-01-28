@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Terminal setup and cleanup utilities for the TUI.
 //!
 //! This module provides RAII-based terminal management that ensures

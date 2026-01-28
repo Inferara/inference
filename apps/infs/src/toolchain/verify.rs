@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Checksum verification for downloaded toolchain files.
 //!
 //! This module provides SHA256 checksum verification to ensure
@@ -69,9 +67,9 @@ pub fn compute_sha256(file_path: &Path) -> Result<String> {
     let mut buffer = [0u8; 8192];
 
     loop {
-        let bytes_read = file
-            .read(&mut buffer)
-            .with_context(|| format!("Failed to read file for checksum: {}", file_path.display()))?;
+        let bytes_read = file.read(&mut buffer).with_context(|| {
+            format!("Failed to read file for checksum: {}", file_path.display())
+        })?;
 
         if bytes_read == 0 {
             break;
@@ -96,7 +94,8 @@ mod tests {
         let test_file = temp_dir.join("test_file.txt");
 
         let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n").expect("Should write test content");
+        file.write_all(b"hello world\n")
+            .expect("Should write test content");
         drop(file);
 
         let hash = compute_sha256(&test_file).expect("Should compute hash");
@@ -116,7 +115,8 @@ mod tests {
         let test_file = temp_dir.join("test_file.txt");
 
         let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n").expect("Should write test content");
+        file.write_all(b"hello world\n")
+            .expect("Should write test content");
         drop(file);
 
         let result = verify_checksum(
@@ -135,7 +135,8 @@ mod tests {
         let test_file = temp_dir.join("test_file.txt");
 
         let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n").expect("Should write test content");
+        file.write_all(b"hello world\n")
+            .expect("Should write test content");
         drop(file);
 
         let result = verify_checksum(&test_file, "wrong_hash_value");
@@ -155,7 +156,8 @@ mod tests {
         let test_file = temp_dir.join("test_file.txt");
 
         let mut file = std::fs::File::create(&test_file).expect("Should create test file");
-        file.write_all(b"hello world\n").expect("Should write test content");
+        file.write_all(b"hello world\n")
+            .expect("Should write test content");
         drop(file);
 
         let result = verify_checksum(

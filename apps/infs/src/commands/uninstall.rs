@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Uninstall command for the infs CLI.
 //!
 //! Removes an installed toolchain version from the system.
@@ -13,7 +11,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
-use crate::toolchain::{Platform, ToolchainPaths};
+use crate::toolchain::ToolchainPaths;
 
 /// Arguments for the uninstall command.
 #[derive(Args)]
@@ -55,59 +53,40 @@ pub async fn execute(args: &UninstallArgs) -> Result<()> {
     println!("Uninstalling toolchain version {version}...");
 
     let toolchain_dir = paths.toolchain_dir(version);
-    std::fs::remove_dir_all(&toolchain_dir)
-        .with_context(|| format!("Failed to remove toolchain directory: {}", toolchain_dir.display()))?;
+    std::fs::remove_dir_all(&toolchain_dir).with_context(|| {
+        format!(
+            "Failed to remove toolchain directory: {}",
+            toolchain_dir.display()
+        )
+    })?;
 
+    // Handle symlinks and default version
     if is_default {
         let remaining_versions = paths.list_installed_versions()?;
 
         if remaining_versions.is_empty() {
             std::fs::remove_file(paths.default_file()).ok();
-            remove_symlinks(&paths)?;
+            paths.remove_symlinks()?;
             println!("No toolchains remaining. Default has been cleared.");
         } else {
-            let new_default = remaining_versions.last().unwrap_or(&remaining_versions[0]);
+            let new_default = remaining_versions
+                .last()
+                .expect("remaining_versions is non-empty");
             paths.set_default_version(new_default)?;
-            update_symlinks(&paths, new_default)?;
+            paths.update_symlinks(new_default)?;
             println!("Default toolchain changed to {new_default}.");
+        }
+    } else {
+        // Even if not uninstalling the default, validate and repair symlinks.
+        // This handles edge cases where symlinks might be broken.
+        let broken_symlinks = paths.validate_symlinks();
+        if !broken_symlinks.is_empty() {
+            println!("Repairing broken symlinks...");
+            paths.repair_symlinks()?;
         }
     }
 
     println!("Toolchain {version} uninstalled successfully.");
-
-    Ok(())
-}
-
-/// Removes all symlinks from the bin directory.
-fn remove_symlinks(paths: &ToolchainPaths) -> Result<()> {
-    let platform = Platform::detect()?;
-    let ext = platform.executable_extension();
-
-    let binaries = [
-        format!("inf-llc{ext}"),
-        format!("rust-lld{ext}"),
-    ];
-
-    for binary in &binaries {
-        paths.remove_symlink(binary)?;
-    }
-
-    Ok(())
-}
-
-/// Updates symlinks in the bin directory to point to the specified version.
-fn update_symlinks(paths: &ToolchainPaths, version: &str) -> Result<()> {
-    let platform = Platform::detect()?;
-    let ext = platform.executable_extension();
-
-    let binaries = [
-        format!("inf-llc{ext}"),
-        format!("rust-lld{ext}"),
-    ];
-
-    for binary in &binaries {
-        paths.create_symlink(version, binary)?;
-    }
 
     Ok(())
 }

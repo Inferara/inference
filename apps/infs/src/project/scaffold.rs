@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Project scaffolding operations.
 //!
 //! This module provides functions to create new Inference projects and
@@ -15,8 +13,7 @@
 //! Use [`init_project`] to initialize the current directory as an
 //! Inference project without creating a new directory.
 
-use crate::project::manifest::{InferenceToml, validate_project_name};
-use crate::project::templates::{TemplateFile, default_template_files};
+use crate::project::manifest::{InferenceToml, detect_infc_version, validate_project_name};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,7 +23,7 @@ use std::process::Command;
 /// This function:
 /// 1. Validates the project name
 /// 2. Creates the project directory
-/// 3. Generates all template files
+/// 3. Generates all project files
 /// 4. Optionally initializes a git repository
 ///
 /// # Arguments
@@ -58,17 +55,47 @@ pub fn create_project(name: &str, parent_path: Option<&Path>, init_git: bool) ->
         );
     }
 
-    std::fs::create_dir_all(&project_path)
-        .with_context(|| format!("Failed to create project directory: {}", project_path.display()))?;
+    std::fs::create_dir_all(&project_path).with_context(|| {
+        format!(
+            "Failed to create project directory: {}",
+            project_path.display()
+        )
+    })?;
 
-    let template_files = default_template_files(name);
-    write_template_files(&project_path, &template_files)?;
+    write_project_files(&project_path, name)?;
 
     if init_git {
+        write_git_files(&project_path)?;
         init_git_repository(&project_path);
     }
 
     Ok(project_path)
+}
+
+/// Creates a new Inference project using the default structure.
+///
+/// This is a convenience function that calls [`create_project`].
+///
+/// # Arguments
+///
+/// * `name` - The project name (used for directory and manifest)
+/// * `parent_path` - Optional parent directory (defaults to current directory)
+/// * `init_git` - Whether to initialize a git repository
+///
+/// # Returns
+///
+/// The path to the created project directory.
+///
+/// # Errors
+///
+/// Returns an error if project creation fails.
+#[allow(dead_code)]
+pub fn create_project_default(
+    name: &str,
+    parent_path: Option<&Path>,
+    init_git: bool,
+) -> Result<PathBuf> {
+    create_project(name, parent_path, init_git)
 }
 
 /// Initializes an existing directory as an Inference project.
@@ -107,10 +134,7 @@ pub fn init_project(path: Option<&Path>, name: Option<&str>, create_src: bool) -
     }
 
     let manifest = InferenceToml::new(&project_name);
-    let manifest_content = manifest.write()?;
-
-    std::fs::write(&manifest_path, manifest_content)
-        .with_context(|| format!("Failed to write manifest: {}", manifest_path.display()))?;
+    manifest.write_to_file(&manifest_path)?;
 
     if create_src {
         let src_dir = project_path.join("src");
@@ -119,30 +143,150 @@ pub fn init_project(path: Option<&Path>, name: Option<&str>, create_src: bool) -
 
         let main_path = src_dir.join("main.inf");
         if !main_path.exists() {
-            let main_content = "// Entry point for the Inference program\n\nfn main() -> i32 {\n    return 0;\n}\n";
-            std::fs::write(&main_path, main_content)
+            std::fs::write(&main_path, main_inf_content())
                 .with_context(|| format!("Failed to write main.inf: {}", main_path.display()))?;
         }
+    }
+
+    // If git is initialized, create git-related files (without overwriting existing ones)
+    if project_path.join(".git").exists() {
+        write_git_files_if_missing(project_path)?;
     }
 
     Ok(())
 }
 
-/// Writes template files to the project directory.
-fn write_template_files(project_path: &Path, files: &[TemplateFile]) -> Result<()> {
-    for file in files {
-        let file_path = project_path.join(&file.path);
+/// Writes git-related files only if they don't already exist.
+fn write_git_files_if_missing(project_path: &Path) -> Result<()> {
+    let tests_gitkeep = project_path.join("tests").join(".gitkeep");
+    if !tests_gitkeep.exists() {
+        std::fs::create_dir_all(project_path.join("tests"))
+            .with_context(|| "Failed to create tests directory")?;
+        std::fs::write(&tests_gitkeep, "").with_context(|| "Failed to write tests/.gitkeep")?;
+    }
 
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
+    let proofs_gitkeep = project_path.join("proofs").join(".gitkeep");
+    if !proofs_gitkeep.exists() {
+        std::fs::create_dir_all(project_path.join("proofs"))
+            .with_context(|| "Failed to create proofs directory")?;
+        std::fs::write(&proofs_gitkeep, "").with_context(|| "Failed to write proofs/.gitkeep")?;
+    }
 
-        std::fs::write(&file_path, &file.content)
-            .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
+    let gitignore_path = project_path.join(".gitignore");
+    if !gitignore_path.exists() {
+        std::fs::write(&gitignore_path, gitignore_content())
+            .with_context(|| "Failed to write .gitignore")?;
     }
 
     Ok(())
+}
+
+/// Writes core project files to the project directory.
+fn write_project_files(project_path: &Path, project_name: &str) -> Result<()> {
+    let manifest_path = project_path.join("Inference.toml");
+    std::fs::write(&manifest_path, manifest_content(project_name)).with_context(|| {
+        format!(
+            "Failed to write Inference.toml: {}",
+            manifest_path.display()
+        )
+    })?;
+
+    let src_dir = project_path.join("src");
+    std::fs::create_dir_all(&src_dir)
+        .with_context(|| format!("Failed to create src directory: {}", src_dir.display()))?;
+
+    let main_path = src_dir.join("main.inf");
+    std::fs::write(&main_path, main_inf_content())
+        .with_context(|| format!("Failed to write main.inf: {}", main_path.display()))?;
+
+    let tests_dir = project_path.join("tests");
+    std::fs::create_dir_all(&tests_dir)
+        .with_context(|| format!("Failed to create tests directory: {}", tests_dir.display()))?;
+
+    let proofs_dir = project_path.join("proofs");
+    std::fs::create_dir_all(&proofs_dir).with_context(|| {
+        format!(
+            "Failed to create proofs directory: {}",
+            proofs_dir.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Writes git-related files (.gitignore, .gitkeep).
+fn write_git_files(project_path: &Path) -> Result<()> {
+    std::fs::write(project_path.join("tests").join(".gitkeep"), "")
+        .with_context(|| "Failed to write tests/.gitkeep")?;
+    std::fs::write(project_path.join("proofs").join(".gitkeep"), "")
+        .with_context(|| "Failed to write proofs/.gitkeep")?;
+
+    let gitignore_path = project_path.join(".gitignore");
+    std::fs::write(&gitignore_path, gitignore_content())
+        .with_context(|| format!("Failed to write .gitignore: {}", gitignore_path.display()))?;
+
+    Ok(())
+}
+
+/// Generates the content for `Inference.toml`.
+fn manifest_content(project_name: &str) -> String {
+    let infc_version = detect_infc_version();
+    format!(
+        r#"[package]
+name = "{project_name}"
+version = "0.1.0"
+infc_version = "{infc_version}"
+
+# Optional fields:
+# description = "A brief description of the project"
+# authors = ["Your Name <you@example.com>"]
+# license = "MIT"
+
+# [dependencies]
+# Future: package dependencies
+# std = "0.1"
+
+# [build]
+# target = "wasm32"
+# optimize = "release"
+
+# [verification]
+# output-dir = "proofs/"
+"#
+    )
+}
+
+/// Generates the content for `src/main.inf`.
+fn main_inf_content() -> String {
+    String::from(
+        r"// Entry point for the Inference program
+
+pub fn main() -> i32 {
+    return 0;
+}
+",
+    )
+}
+
+/// Generates the content for `.gitignore`.
+fn gitignore_content() -> String {
+    String::from(
+        r"# Build outputs
+/out/
+/target/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+",
+    )
 }
 
 /// Initializes a git repository in the project directory.
@@ -170,7 +314,9 @@ fn init_git_repository(project_path: &Path) {
             if e.kind() == std::io::ErrorKind::NotFound {
                 eprintln!("Warning: git not found. Project created without git repository.");
             } else {
-                eprintln!("Warning: Failed to run git: {e}. Project created without git repository.");
+                eprintln!(
+                    "Warning: Failed to run git: {e}. Project created without git repository."
+                );
             }
         }
     }
@@ -178,12 +324,9 @@ fn init_git_repository(project_path: &Path) {
 
 /// Infers the project name from a directory path.
 fn infer_project_name(path: &Path) -> Result<String> {
-    let canonical = path.canonicalize().with_context(|| {
-        format!(
-            "Failed to resolve directory path: {}",
-            path.display()
-        )
-    })?;
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve directory path: {}", path.display()))?;
 
     canonical
         .file_name()
@@ -217,9 +360,42 @@ mod tests {
         assert!(project_path.exists());
         assert!(project_path.join("Inference.toml").exists());
         assert!(project_path.join("src").join("main.inf").exists());
+        assert!(project_path.join("tests").exists());
+        assert!(project_path.join("proofs").exists());
+        // With --no-git, git-related files should NOT be created
+        assert!(!project_path.join("tests").join(".gitkeep").exists());
+        assert!(!project_path.join("proofs").join(".gitkeep").exists());
+        assert!(!project_path.join(".gitignore").exists());
+
+        cleanup(&parent);
+    }
+
+    #[test]
+    fn test_create_project_with_git_creates_gitignore() {
+        let parent = temp_dir();
+        let result = create_project("git_enabled_project", Some(&parent), true);
+
+        assert!(result.is_ok());
+        let project_path = result.unwrap();
+        assert!(project_path.exists());
+        assert!(project_path.join("Inference.toml").exists());
+        assert!(project_path.join("src").join("main.inf").exists());
         assert!(project_path.join("tests").join(".gitkeep").exists());
         assert!(project_path.join("proofs").join(".gitkeep").exists());
         assert!(project_path.join(".gitignore").exists());
+
+        cleanup(&parent);
+    }
+
+    #[test]
+    fn test_create_project_default() {
+        let parent = temp_dir();
+        let result = create_project_default("my_project_default", Some(&parent), false);
+
+        assert!(result.is_ok());
+        let project_path = result.unwrap();
+        assert!(project_path.exists());
+        assert!(project_path.join("Inference.toml").exists());
 
         cleanup(&parent);
     }
@@ -329,21 +505,24 @@ mod tests {
     }
 
     #[test]
-    fn test_write_template_files() {
-        let dir = temp_dir();
-        let files = vec![
-            TemplateFile::new("file1.txt", "content1"),
-            TemplateFile::new(PathBuf::from("subdir").join("file2.txt"), "content2"),
-        ];
+    fn test_manifest_contains_project_name() {
+        let content = manifest_content("my_awesome_project");
+        assert!(content.contains("my_awesome_project"));
+        assert!(content.contains("version = \"0.1.0\""));
+        assert!(content.contains("infc_version = \""));
+    }
 
-        let result = write_template_files(&dir, &files);
+    #[test]
+    fn test_main_inf_has_entry_point() {
+        let content = main_inf_content();
+        assert!(content.contains("fn main()"));
+        assert!(content.contains("return"));
+    }
 
-        assert!(result.is_ok());
-        assert!(dir.join("file1.txt").exists());
-        assert!(dir.join("subdir").join("file2.txt").exists());
-
-        assert_eq!(fs::read_to_string(dir.join("file1.txt")).unwrap(), "content1");
-
-        cleanup(&dir);
+    #[test]
+    fn test_gitignore_excludes_build_dirs() {
+        let content = gitignore_content();
+        assert!(content.contains("/out/"));
+        assert!(content.contains("/target/"));
     }
 }

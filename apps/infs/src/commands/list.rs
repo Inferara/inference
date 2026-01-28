@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! List command for the infs CLI.
 //!
 //! Displays installed toolchain versions and indicates the current default.
@@ -14,8 +12,8 @@
 //!
 //! ```text
 //! Installed toolchains:
-//!   0.1.0
-//! * 0.2.0 (default)
+//!   0.1.0    (installed today)
+//! * 0.2.0    (default, installed yesterday)
 //! ```
 
 use anyhow::Result;
@@ -25,6 +23,7 @@ use crate::toolchain::ToolchainPaths;
 /// Executes the list command.
 ///
 /// Lists all installed toolchain versions and marks the default with an asterisk.
+/// Also displays the installation date for each version if available.
 ///
 /// # Errors
 ///
@@ -47,10 +46,21 @@ pub async fn execute() -> Result<()> {
 
     for version in &versions {
         let is_default = default_version.as_deref() == Some(version.as_str());
+        let metadata = paths.read_metadata(version);
+
+        let mut info_parts = Vec::new();
         if is_default {
-            println!("* {version} (default)");
+            info_parts.push("default".to_string());
+        }
+        if let Some(meta) = metadata {
+            info_parts.push(format!("installed {}", meta.installed_ago()));
+        }
+
+        let marker = if is_default { "*" } else { " " };
+        if info_parts.is_empty() {
+            println!("{marker} {version}");
         } else {
-            println!("  {version}");
+            println!("{marker} {version}    ({})", info_parts.join(", "));
         }
     }
 

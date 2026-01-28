@@ -74,11 +74,24 @@ infs --version
 
 ## Distribution
 
-Prebuilt `infc` binaries distributables are arranged in the following directory structure:
+Prebuilt binaries are available for each release. Two CLI tools are distributed:
+
+- **`infs`** - Full-featured toolchain CLI (recommended for all users)
+- **`infc`** - Standalone compiler CLI (for direct compilation)
+
+### Release Artifacts
+
+| Platform | infs | infc |
+|----------|------|------|
+| Linux x64 | `infs-linux-x64.tar.gz` | `infc-linux-x64.tar.gz` |
+| Windows x64 | `infs-windows-x64.zip` | `infc-windows-x64.zip` |
+| macOS ARM64 | `infs-macos-apple-silicon.tar.gz` | `infc-macos-apple-silicon.tar.gz` |
+
+### Directory Structure
 
 ```
 <distribution-folder>/
-├── infc                    # The main CLI binary
+├── infs (or infc)          # The CLI binary
 ├── bin/
 │   ├── inf-llc            # LLVM compiler with Inference intrinsics
 │   └── rust-lld           # WebAssembly linker
@@ -89,7 +102,7 @@ Prebuilt `infc` binaries distributables are arranged in the following directory 
 **Notes:**
 - On Linux, the LLVM shared library must be in the `lib/` directory.
 - On Windows, all required DLL files should be placed in the `bin/` directory next to the executables.
-- The `infc` binary automatically locates these dependencies relative to its own location.
+- The CLI binaries automatically locate dependencies relative to their own location.
 - No system LLVM installation is required for end users.
 
 ## Building from Source
@@ -139,7 +152,7 @@ Download the following files for your platform and place them in the specified d
    cargo build --release
    ```
 
-The compiled `infc` binary will be in `target/release/infc`.
+The compiled binaries will be in `target/release/` (`infs` and `infc`).
 
 ### Build Commands
 

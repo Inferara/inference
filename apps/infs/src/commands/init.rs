@@ -1,5 +1,3 @@
-#![warn(clippy::pedantic)]
-
 //! Init command for the infs CLI.
 //!
 //! Initializes an existing directory as an Inference project.
@@ -15,7 +13,7 @@
 //!
 //! - Creates `Inference.toml` in the current directory
 //! - Creates `src/main.inf` with a basic entry point
-//! - Does not create tests/, proofs/, or .gitignore (unlike `new`)
+//! - If `.git/` exists, creates `.gitignore` and `.gitkeep` files (without overwriting)
 //! - Project name defaults to the directory name if not provided
 
 use anyhow::Result;
@@ -50,10 +48,7 @@ pub fn execute(args: &InitArgs) -> Result<()> {
 
     init_project(None, name, true)?;
 
-    let display_name = name.map_or_else(
-        || String::from("current directory"),
-        String::from,
-    );
+    let display_name = name.map_or_else(|| String::from("current directory"), String::from);
 
     println!("Initialized Inference project in {display_name}");
     println!();
@@ -61,7 +56,7 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     println!("  infs build src/main.inf --codegen -o");
     println!();
     println!("To learn more about Inference, visit:");
-    println!("  https://inferara.com");
+    println!("  https://inference-lang.org");
 
     Ok(())
 }

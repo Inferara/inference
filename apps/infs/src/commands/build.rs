@@ -1,10 +1,8 @@
-#![warn(clippy::pedantic)]
-
 //! Build command for the infs CLI.
 //!
-//! Compiles Inference source files through the three-phase compilation pipeline:
-//! parse, analyze, and codegen. This module contains logic migrated from the
-//! legacy `infc` CLI with improved error handling using `anyhow::Context`.
+//! Compiles Inference source files by delegating to the `infc` compiler
+//! via subprocess. This module acts as a lightweight bootstrapper, validating
+//! arguments and forwarding them to infc.
 //!
 //! ## Compilation Phases
 //!
@@ -17,8 +15,11 @@
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use inference::{analyze, codegen, parse, type_check, wasm_to_v};
-use std::{fs, path::{Path, PathBuf}};
+use std::path::PathBuf;
+use std::process::Command;
+
+use crate::errors::InfsError;
+use crate::toolchain::find_infc;
 
 /// Arguments for the build command.
 ///
@@ -68,22 +69,22 @@ pub struct BuildArgs {
 ///
 /// 1. Validates that the source file exists
 /// 2. Ensures at least one phase flag is specified
-/// 3. Executes compilation phases in canonical order
-/// 4. Generates output files if requested
+/// 3. Locates the infc compiler binary
+/// 4. Builds and executes the infc command with appropriate flags
+/// 5. Propagates exit code from infc
 ///
 /// ## Errors
 ///
 /// Returns an error if:
 /// - The source file does not exist
 /// - No phase flags are specified
-/// - Any compilation phase fails
-/// - Output file writing fails
+/// - infc compiler cannot be found
+/// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 pub fn execute(args: &BuildArgs) -> Result<()> {
     if !args.path.exists() {
         bail!("Path not found: {}", args.path.display());
     }
 
-    let output_path = PathBuf::from("out");
     let need_parse = args.parse;
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
@@ -92,76 +93,38 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
         bail!("At least one of --parse, --analyze, or --codegen must be specified");
     }
 
-    let source_code = fs::read_to_string(&args.path)
-        .with_context(|| format!("Failed to read source file: {}", args.path.display()))?;
+    let infc_path = find_infc()?;
 
-    let arena = parse(source_code.as_str())
-        .with_context(|| format!("Parse error in {}", args.path.display()))?;
-    println!("Parsed: {}", args.path.display());
+    let mut cmd = Command::new(&infc_path);
+    cmd.arg(&args.path);
 
-    if !need_codegen && !need_analyze {
-        return Ok(());
+    if need_parse {
+        cmd.arg("--parse");
     }
-
-    let typed_context = type_check(arena)
-        .with_context(|| format!("Type checking failed for {}", args.path.display()))?;
-
-    analyze(&typed_context)
-        .with_context(|| format!("Analysis failed for {}", args.path.display()))?;
-    println!("Analyzed: {}", args.path.display());
-
-    if !need_codegen {
-        return Ok(());
+    if need_analyze {
+        cmd.arg("--analyze");
     }
-
-    let wasm = codegen(&typed_context)
-        .with_context(|| format!("Codegen failed for {}", args.path.display()))?;
-    println!("WASM generated");
-
-    let source_fname = args
-        .path
-        .file_stem()
-        .unwrap_or_else(|| std::ffi::OsStr::new("module"))
-        .to_str()
-        .unwrap_or("module");
-
+    if need_codegen {
+        cmd.arg("--codegen");
+    }
     if args.generate_wasm_output {
-        write_wasm_output(&output_path, source_fname, &wasm)?;
+        cmd.arg("-o");
     }
-
     if args.generate_v_output {
-        write_v_output(&output_path, source_fname, &wasm)?;
+        cmd.arg("-v");
     }
 
-    Ok(())
-}
+    let status = cmd
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute infc at {}", infc_path.display()))?;
 
-/// Writes the WASM binary to the output directory.
-fn write_wasm_output(output_path: &Path, source_fname: &str, wasm: &[u8]) -> Result<()> {
-    fs::create_dir_all(output_path)
-        .with_context(|| format!("Failed to create output directory: {}", output_path.display()))?;
-
-    let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
-    fs::write(&wasm_file_path, wasm)
-        .with_context(|| format!("Failed to write WASM file: {}", wasm_file_path.display()))?;
-
-    println!("WASM generated at: {}", wasm_file_path.display());
-    Ok(())
-}
-
-/// Writes the Rocq (.v) translation to the output directory.
-fn write_v_output(output_path: &Path, source_fname: &str, wasm: &[u8]) -> Result<()> {
-    let wasm_vec = wasm.to_vec();
-    let v_output = wasm_to_v(source_fname, &wasm_vec)
-        .with_context(|| format!("WASM to Rocq translation failed for {source_fname}"))?;
-
-    fs::create_dir_all(output_path)
-        .with_context(|| format!("Failed to create output directory: {}", output_path.display()))?;
-
-    let v_file_path = output_path.join(format!("{source_fname}.v"));
-    fs::write(&v_file_path, v_output)
-        .with_context(|| format!("Failed to write Rocq file: {}", v_file_path.display()))?;
-
-    println!("V generated at: {}", v_file_path.display());
-    Ok(())
+    if status.success() {
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(1);
+        Err(InfsError::process_exit_code(code).into())
+    }
 }
