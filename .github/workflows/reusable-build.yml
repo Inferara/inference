@@ -292,7 +292,14 @@ jobs:
         if: runner.os == 'Linux' && !inputs.release-build
         run: |
           rustup component add miri
-          cargo miri test --verbose --workspace --exclude inference-wasm-codegen --exclude inference --exclude inference-cli --exclude infs --exclude inference-lsp --exclude inference-ide --exclude inference-ide-db
+          cargo miri test --verbose --workspace \
+            --exclude inference-wasm-codegen \
+            --exclude inference \
+            --exclude inference-cli \
+            --exclude infs \
+            --exclude inference-lsp \
+            --exclude inference-ide \
+            --exclude inference-ide-db
       
       - name: Install Cargo audit
         run: cargo install cargo-audit
