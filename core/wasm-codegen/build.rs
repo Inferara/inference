@@ -1,3 +1,19 @@
+//! Build script for inference-wasm-codegen crate.
+//!
+//! This script handles the deployment of external binaries required for WebAssembly compilation:
+//! - inf-llc: Modified LLVM compiler with Inference intrinsics support
+//! - rust-lld: WebAssembly linker from Rust toolchain
+//! - libLLVM: LLVM shared library (Linux only)
+//!
+//! The script performs the following tasks:
+//! 1. Detects the build platform (Linux, macOS, Windows)
+//! 2. Verifies that required binaries exist in `external/bin/{platform}/`
+//! 3. Copies binaries from workspace to `target/{profile}/bin/`
+//! 4. Sets executable permissions on Unix platforms
+//! 5. Emits cargo directives for rerun conditions
+//!
+//! If binaries are missing, the script fails with download URLs for the required files.
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -163,6 +179,17 @@ fn main() {
     println!("cargo:rerun-if-changed={}", source_lib_llvm.display());
 }
 
+/// Returns the download URL for a specific binary on a given platform.
+///
+/// # Parameters
+///
+/// - `platform` - Target platform: "linux", "macos", or "windows"
+/// - `binary` - Binary name: "inf-llc", "rust-lld", or "libLLVM"
+///
+/// # Returns
+///
+/// Google Cloud Storage URL for downloading the binary, or a fallback URL to the repository
+/// README if the binary/platform combination is not recognized.
 fn get_download_url(platform: &str, binary: &str) -> String {
     match (platform, binary) {
         ("linux", "inf-llc") => {

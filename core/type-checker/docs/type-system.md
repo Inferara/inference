@@ -84,7 +84,7 @@ fn test() -> bool {
 
 UTF-8 encoded strings.
 
-**Note**: String is not currently part of `SimpleTypeKind` as it's not yet fully implemented as a primitive type in the compiler. String support is under development.
+**Note**: String is not currently part of `SimpleTypeKind` as it's not yet fully implemented as a primitive type in the compiler. String support is under development. The type checker recognizes `string` as a valid type through the `TypeInfoKind::String` variant, but full runtime support is pending.
 
 ```rust
 fn greet(name: string) -> string {
@@ -94,8 +94,14 @@ fn greet(name: string) -> string {
 
 **Type Checker Representation**: `TypeInfoKind::String`
 
-**Operations**:
+**Current Operations**:
 - Comparison: `==`, `!=`
+
+**Planned Operations** (under development):
+- Concatenation: `+`
+- Length: `.len()` method
+- Indexing: `[i]` for character access
+- Slicing: `[start..end]`
 
 ### Numeric Types
 
@@ -856,20 +862,56 @@ fn add<T>(a: T, b: T) -> T {
 
 ## Future Type System Features
 
-### Planned
+### Planned Features
 
-- **Trait system**: Interface-based polymorphism with trait constraints
-- **Type inference improvements**: Let-polymorphism for better local inference
-- **Const generics**: Array sizes as generic parameters
-- **Associated types**: Types associated with traits
+**Trait System**:
+- Interface-based polymorphism with trait definitions
+- Trait bounds on generic type parameters: `fn foo<T: Trait>(x: T)`
+- Default implementations and trait inheritance
+- Associated types and associated constants
+- Coherence checking for trait implementations
+
+**Type Inference Improvements**:
+- Let-polymorphism for local variables
+- Better error messages with type hints and suggestions
+- Partial type inference with explicit type arguments
+- Bidirectional inference for lambdas and closures
+
+**Const Generics**:
+- Array sizes as generic parameters: `fn foo<const N: usize>(arr: [i32; N])`
+- Const expressions in type positions
+- Const bounds and where clauses
+- Compile-time array size validation
+
+**Associated Types**:
+- Types associated with traits: `trait Iterator { type Item; }`
+- Type projection in where clauses
+- Associated type bounds
 
 ### Under Consideration
 
-- **Implicit conversions**: Numeric type widening (i32 → i64)
-- **Type aliases with generics**: `type List<T> = [T; 10]`
-- **Union types**: `i32 | i64`
-- **Optional types**: `Option<T>`
-- **Result types**: `Result<T, E>`
+**Implicit Type Conversions**:
+- Numeric type widening (i32 → i64) for ergonomics
+- Subtyping relationships for function types
+- Coercion sites (function arguments, return values)
+
+**Advanced Type Features**:
+- Type aliases with generics: `type List<T> = [T; 10]`
+- Union types: `i32 | i64` for sum types
+- Intersection types: `T & U` for combined constraints
+- Refinement types: types with predicates
+
+**Standard Library Types**:
+- Optional types: `Option<T>` for nullable values
+- Result types: `Result<T, E>` for error handling
+- Never type: `!` for functions that never return
+- Tuple types: `(i32, bool, string)` for heterogeneous collections
+
+**Pattern Matching**:
+- Exhaustiveness checking for enums
+- Destructuring patterns for structs and tuples
+- Guard expressions in patterns
+- Pattern matching on ranges and literals
 
 ## Related Documentation
 

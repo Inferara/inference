@@ -153,8 +153,9 @@ Run tests to ensure everything is working:
 cargo test
 ```
 
-Run the CLI:
+Run the CLI (either `infs` or `infc`):
 ```powershell
+.\target\debug\infs.exe --help
 .\target\debug\infc.exe --help
 ```
 
