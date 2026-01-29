@@ -1,16 +1,18 @@
 //! Type Checker Implementation
 //!
-//! This module contains the core type checking logic that infers and validates
-//! types throughout the AST. The type checker operates in multiple phases:
-//!
-//! 1. **process_directives** - Register raw imports from use statements
+//! Multi-phase type checking with forward reference support:
+//! 1. **process_directives** - Register imports from use statements
 //! 2. **register_types** - Collect type/struct/enum/spec definitions
 //! 3. **resolve_imports** - Bind import paths to symbols
-//! 4. **collect_function_and_constant_definitions** - Register functions
+//! 4. **collect_function_and_constant_definitions** - Register function signatures
 //! 5. **infer_variables** - Type-check function bodies
 //!
-//! The type checker continues after encountering errors to collect all issues
-//! before returning. Errors are deduplicated to avoid repeated reports.
+//! Generic type parameters are tracked through phases 4-5. When a generic function is called,
+//! `infer_type_params_from_args()` infers concrete type substitutions from arguments.
+//! Type mismatches (conflicting inference, unresolvable parameters) are reported.
+//!
+//! Errors are collected and deduplicated to report all issues in a single pass.
+
 
 use std::rc::Rc;
 
@@ -60,14 +62,15 @@ impl TypeChecker {
 }
 
 impl TypeChecker {
-    /// Infer types for all definitions in the context.
+    /// Infer types for all definitions.
     ///
-    /// Phase ordering:
-    /// 1. `process_directives()` - Register raw imports in scopes
-    /// 2. `register_types()` - Collect type definitions into symbol table
-    /// 3. `resolve_imports()` - Bind import paths to symbols
-    /// 4. `collect_function_and_constant_definitions()` - Register functions
-    /// 5. Infer variable types in function bodies
+    /// Executes the 5-phase algorithm in order. Phase ordering is critical: types must be
+    /// registered before functions can reference them, and imports must be resolved before
+    /// they're used. Continues on errors to collect all issues.
+    ///
+    /// # Errors
+    ///
+    /// Returns error with all accumulated type errors if any occurred.
     pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
         self.process_directives(ctx);
         self.register_types(ctx);
@@ -475,6 +478,12 @@ impl TypeChecker {
     }
 
     #[allow(clippy::needless_pass_by_value)]
+    /// Infer types for function parameters and body.
+    ///
+    /// Creates a new scope for the function, collects type parameter names, registers
+    /// parameters as variables, and type-checks all statements. Generic type parameters
+    /// (e.g., `T` in `fn foo<T>(x: T)`) are preserved via `TypeInfo::new_with_type_params()`
+    /// for later substitution when the function is called.
     fn infer_variables(
         &mut self,
         function_definition: Rc<FunctionDefinition>,
@@ -482,7 +491,8 @@ impl TypeChecker {
     ) {
         self.symbol_table.push_scope();
 
-        // Collect type parameter names for proper TypeInfo construction
+        // Collect type parameter names for proper TypeInfo construction.
+        // These names identify which type references are generic variables vs. concrete types.
         let type_param_names: Vec<String> = function_definition
             .type_parameters
             .as_ref()
@@ -493,6 +503,9 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
+                        // Create TypeInfo with awareness of generic type parameters.
+                        // Non-generic arguments get concrete types, while references to
+                        // type parameters (e.g., 'T' in 'fn foo<T>(x: T)') become Generic kinds.
                         let arg_type = TypeInfo::new_with_type_params(&arg.ty, &type_param_names);
                         if let Err(err) = self
                             .symbol_table
@@ -517,7 +530,9 @@ impl TypeChecker {
             }
         }
 
-        // Build return type with type parameter awareness
+        // Build return type with type parameter awareness.
+        // The return type is needed for statement type checking to validate return statements.
+        // Generic type parameters in the return type will be resolved when the function is called.
         let return_type = function_definition
             .returns
             .as_ref()
@@ -2011,12 +2026,12 @@ impl TypeChecker {
         }
     }
 
-    /// Attempt to infer type parameters from argument types.
+    /// Infer concrete type substitutions for generic parameters from arguments.
     ///
-    /// For each parameter that is a type variable (Generic), try to find a
-    /// concrete type from the corresponding argument.
-    ///
-    /// Returns a substitution map if inference succeeds, empty map otherwise.
+    /// For each generic parameter in the signature, examines corresponding arguments to infer
+    /// concrete types. Detects conflicting inference (e.g., `fn id<T>(a: T, b: T)` called
+    /// with different types for a and b) and missing parameters (T appears in signature
+    /// but no argument provides it).
     #[allow(clippy::type_complexity)]
     fn infer_type_params_from_args(
         &mut self,
@@ -2032,19 +2047,17 @@ impl TypeChecker {
             None => return substitutions,
         };
 
-        // For each parameter, check if it contains a type variable
+        // Infer type from each argument if its parameter is generic
         for (i, param_type) in signature.param_types.iter().enumerate() {
             if i >= args.len() {
                 break;
             }
 
-            // If the parameter type is a type variable, infer from argument
             if let TypeInfoKind::Generic(type_param_name) = &param_type.kind {
-                // Infer the argument type
                 let arg_type = self.infer_expression(&args[i].1.borrow(), ctx);
 
                 if let Some(arg_type) = arg_type {
-                    // Check for conflicting inference
+                    // Check for conflicting inference across arguments
                     if let Some(existing) = substitutions.get(type_param_name) {
                         if *existing != arg_type {
                             self.errors.push(TypeCheckError::ConflictingTypeInference {
@@ -2061,7 +2074,7 @@ impl TypeChecker {
             }
         }
 
-        // Check if we found substitutions for all type parameters
+        // Verify all type parameters were inferred
         for type_param in &signature.type_params {
             if !substitutions.contains_key(type_param) {
                 self.errors.push(TypeCheckError::CannotInferTypeParameter {
