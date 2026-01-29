@@ -416,6 +416,9 @@ pub enum TypeCheckError {
         method_name: String,
         location: Location,
     },
+
+    #[error("{location}: public constants are not allowed inside function bodies")]
+    PublicConstantInFunctionBody { location: Location },
 }
 
 impl TypeCheckError {
@@ -455,7 +458,8 @@ impl TypeCheckError {
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
-            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
+            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
+            | TypeCheckError::PublicConstantInFunctionBody { location } => location,
         }
     }
 }
@@ -578,6 +582,19 @@ mod tests {
         assert_eq!(RegistrationKind::Method.to_string(), "method");
         assert_eq!(RegistrationKind::Variable.to_string(), "variable");
     }
+
+    #[test]
+    fn display_public_constant_in_function_body() {
+        let err = TypeCheckError::PublicConstantInFunctionBody {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: public constants are not allowed inside function bodies"
+        );
+    }
+
+   
 
     #[test]
     fn error_location_accessor() {
