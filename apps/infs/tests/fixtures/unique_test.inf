@@ -1,0 +1,6 @@
+fn test_unique() -> i32 {
+    unique x: i32 {
+        x == 42
+    }
+    0
+}

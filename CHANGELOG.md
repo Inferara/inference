@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Testing
+
+- Expand `infs` test coverage from 282 to 429 tests (360 unit + 69 integration) ([#96])
+  - Add TUI rendering tests using TestBackend for main_view, doctor_view, toolchain_view
+  - Add integration tests for non-deterministic features (forall, exists, assume, unique, oracle)
+  - Add tests for error handling, environment variables, and edge cases
+  - Consolidate test fixtures in `apps/infs/tests/fixtures/`
+- Move QA test suite to `apps/infs/docs/qa-test-suite.md` with 9 truly manual tests ([#96])
+
+### infs CLI
+
+- Add automatic PATH configuration on first install ([#96])
+  - Unix: Modifies shell profile (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`)
+  - Windows: Modifies user PATH in registry (`HKCU\Environment\Path`)
+  - Users only need to restart their terminal after installation
+- Rename environment variable and directory for consistency ([#96])
+  - `INFS_HOME` → `INFERENCE_HOME`
+  - `~/.infs` → `~/.inference`
+- Add `infc` symlink to installed toolchain alongside `inf-llc` and `rust-lld` ([#96])
+- Improve `infs install` to auto-set default toolchain when none is configured ([#96])
+  - When installing an already-installed version without a default toolchain, `infs install` now automatically sets that version as default and updates symlinks
+  - Provides graceful recovery if default toolchain file was manually removed
+- Improve `infs doctor` recommendations for missing default toolchain ([#96])
+  - When no default is set but toolchains exist, suggests `infs default <version>` instead of `infs install`
+  - When no toolchains exist, suggests `infs install`
+- Fix `infs install` and `infs self update` to fall back to latest pre-release version when no stable versions exist ([#96])
+  - Previously failed with "No stable version found in manifest" error
+  - Now uses latest stable version if available, otherwise falls back to latest version regardless of stability
+- Fix `infs install` failing with nested archive structure from GitHub releases ([#96])
+  - GitHub releases wrap tar.gz archives in ZIP files
+  - Now automatically detects and extracts nested tar.gz after ZIP extraction
+- Fix `infs uninstall` leaving broken symlinks when removing non-default toolchains ([#96])
+  - Previously, `Path::exists()` returned false for broken symlinks, causing them to remain in `~/.inference/bin/`
+  - Now uses `symlink_metadata().is_ok()` to correctly detect and remove both valid and broken symlinks
+  - Added `validate_symlinks()` to check for broken symlinks after uninstallation
+  - Added `repair_symlinks()` to automatically fix broken symlinks by updating them to the default version or removing them
+
+### Build
+
+- Add `infs` binaries to release artifacts for all platforms (Linux x64, Windows x64, macOS ARM64)
+- Update release manifest to schema version 2 with separate `infc` and `infs` tool entries
+
+### Project Manifest
+
+- Replace `manifest_version` field with `infc_version` in Inference.toml ([#96])
+  - `infc_version` is a String (semver format) that records the compiler version used to create the project
+  - Automatically detected from `infc --version` when running `infs new` or `infs init`
+  - Falls back to `infs` version if `infc` is not available
+  - All Inference ecosystem crates share the same version number
+
 ### Editor Support
 
 - Add VS Code extension with syntax highlighting for Inference language ([#94])
@@ -112,7 +162,6 @@ Initial tagged release.
 - Function definitions with generic type parameters
 - Module system with visibility modifiers
 - Add `undef` syntax support ([#10])
-- Rename `apply` to `verify` ([#10])
 
 ### Compiler
 
@@ -165,3 +214,4 @@ Initial tagged release.
 [#69]: https://github.com/Inferara/inference/pull/69
 [#86]: https://github.com/Inferara/inference/pull/86
 [#94]: https://github.com/Inferara/inference/pull/94
+[#96]: https://github.com/Inferara/inference/pull/96

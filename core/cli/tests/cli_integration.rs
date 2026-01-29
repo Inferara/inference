@@ -28,6 +28,10 @@
 //! ```
 //!
 //! Tests run in parallel and use temporary directories to avoid interference.
+//!
+//! ## See Also
+//!
+//! For comprehensive usage documentation and examples, see `README.md` in this crate.
 
 use assert_cmd::prelude::*;
 use assert_fs::prelude::*;

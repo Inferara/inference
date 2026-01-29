@@ -4,6 +4,14 @@
 //! WebAssembly bytecode via LLVM IR. It handles standard WASM instructions as well as
 //! custom intrinsics for non-deterministic operations (uzumaki, forall, exists, assume, unique).
 //!
+//! # Prerequisites
+//!
+//! Before reading this documentation, you should be familiar with:
+//! - LLVM IR fundamentals (basic blocks, instructions, types)
+//! - WebAssembly module structure and execution model
+//! - Inference language syntax and semantics (see language specification)
+//! - The concept of non-deterministic computation in formal verification
+//!
 //! # Architecture
 //!
 //! The compiler operates in several stages:
@@ -43,8 +51,35 @@
 //! - `assume { ... }` - Assumption block for preconditions (0xfc 0x3e start, 0xfc 0x3f end)
 //! - `unique { ... }` - Uniqueness constraint block (0xfc 0x40 start, 0xfc 0x41 end)
 //!
+//! ## Example: Uzumaki Code Generation
+//!
+//! Inference source:
+//! ```inference
+//! pub fn example() -> i32 {
+//!     return @;
+//! }
+//! ```
+//!
+//! Generated LLVM IR:
+//! ```llvm
+//! define i32 @example() {
+//! entry:
+//!   %uz_i32 = call i32 @llvm.wasm.uzumaki.i32()
+//!   ret i32 %uz_i32
+//! }
+//! declare i32 @llvm.wasm.uzumaki.i32()
+//! ```
+//!
+//! Compiled WebAssembly (text format):
+//! ```wat
+//! (func $example (export "example") (result i32)
+//!   i32.uzumaki  ;; 0xfc 0x3a
+//! )
+//! ```
+//!
 //! See the [language spec](https://github.com/Inferara/inference-language-spec) for details
-//! on non-deterministic semantics.
+//! on non-deterministic semantics and the [custom intrinsics PR](https://github.com/Inferara/llvm-project/pull/2)
+//! for LLVM implementation details.
 //!
 //! # Optimization Barriers
 //!
@@ -56,7 +91,7 @@
 #![allow(dead_code)]
 use crate::utils;
 use inference_ast::nodes::{
-    BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type,
+    BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type, Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -71,6 +106,20 @@ use inkwell::{
     values::{FunctionValue, PointerValue},
 };
 use std::{cell::RefCell, collections::HashMap, iter::Peekable, rc::Rc};
+
+// ================================================================================================
+// LLVM Intrinsic Names for Non-Deterministic Operations
+// ================================================================================================
+//
+// These constants define the intrinsic function names that LLVM recognizes and inf-llc compiles
+// to custom WebAssembly instructions. Each intrinsic has a specific binary encoding in the WASM
+// 0xfc prefix instruction space.
+//
+// The intrinsics are paired (start/end) for block constructs, ensuring proper scoping in the
+// generated WebAssembly. The compiler calls these intrinsics when lowering non-deterministic
+// blocks from the Inference AST.
+//
+// Reference: https://github.com/Inferara/llvm-project/pull/2
 
 /// LLVM intrinsic for non-deterministic i32 value generation.
 /// Compiles to WASM instruction 0xfc 0x3a.
@@ -128,6 +177,28 @@ const UNIQUE_END_INTRINSIC: &str = "llvm.wasm.unique.end";
 /// Local variables and constants are stored in a `RefCell<HashMap>` mapping names to
 /// (pointer, type) pairs. This allows mutation during IR generation while maintaining
 /// Rust's borrowing rules through interior mutability.
+///
+/// # Internal Usage Example
+///
+/// ```ignore
+/// use inkwell::context::Context;
+/// use inkwell::targets::{InitializationConfig, Target};
+///
+/// // Initialize WebAssembly target
+/// Target::initialize_webassembly(&InitializationConfig::default());
+///
+/// // Create LLVM context and compiler
+/// let context = Context::create();
+/// let compiler = Compiler::new(&context, "wasm_module");
+///
+/// // Visit function definitions from typed AST
+/// for func_def in typed_context.source_files()[0].function_definitions() {
+///     compiler.visit_function_definition(&func_def, &typed_context);
+/// }
+///
+/// // Compile to WebAssembly
+/// let wasm_bytes = compiler.compile_to_wasm("output.wasm", 3)?;
+/// ```
 pub(crate) struct Compiler<'ctx> {
     /// LLVM context for creating types and values.
     context: &'ctx Context,
@@ -139,7 +210,28 @@ pub(crate) struct Compiler<'ctx> {
     builder: Builder<'ctx>,
 
     /// Variable storage mapping names to stack-allocated pointers and their types.
+    ///
+    /// Each variable is stored as an alloca (stack allocation) in the LLVM IR entry block.
+    /// The `HashMap` maps variable names to tuples of (pointer to variable, LLVM type).
+    ///
+    /// This design enables:
+    /// - SSA (Static Single Assignment) form in LLVM IR through load/store operations
+    /// - Type-safe variable access during expression lowering
+    /// - Proper variable scoping (though current implementation uses a flat namespace)
+    ///
+    /// The `RefCell` provides interior mutability, allowing the compiler to add variables
+    /// during IR generation while maintaining Rust's borrowing rules.
     variables: RefCell<HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>>,
+
+    /// Tracks whether a `main` function was compiled.
+    ///
+    /// Used to conditionally export `main` during linking. When true, the linker receives
+    /// the `--export=main` flag, which creates a wrapper that provides argc/argv compatibility
+    /// for command-line style execution.
+    ///
+    /// Note: Only public `main` functions are tracked. Private `main` functions are compiled
+    /// but not exported from the WebAssembly module.
+    has_main: RefCell<bool>,
 }
 
 impl<'ctx> Compiler<'ctx> {
@@ -158,6 +250,7 @@ impl<'ctx> Compiler<'ctx> {
             module,
             builder,
             variables: RefCell::new(HashMap::new()),
+            has_main: RefCell::new(false), //TODO: revisit
         }
     }
 
@@ -250,10 +343,19 @@ impl<'ctx> Compiler<'ctx> {
         };
         let function = self.module.add_function(fn_name.as_str(), fn_type, None);
 
-        let export_name_attr = self
-            .context
-            .create_string_attribute("wasm-export-name", fn_name.as_str());
-        function.add_attribute(AttributeLoc::Function, export_name_attr);
+        // Only export public functions. Skip "main" - LLD handles its export specially
+        // to avoid duplicate export errors from the entry point wrapper.
+        let is_main = fn_name == "main";
+        let should_export = function_definition.visibility == Visibility::Public && !is_main;
+        if should_export {
+            let export_name_attr = self
+                .context
+                .create_string_attribute("wasm-export-name", fn_name.as_str());
+            function.add_attribute(AttributeLoc::Function, export_name_attr);
+        }
+        if is_main && function_definition.visibility == Visibility::Public {
+            *self.has_main.borrow_mut() = true;
+        }
         if function_definition.is_non_det() {
             self.add_optimization_barriers(function);
         }
@@ -292,6 +394,21 @@ impl<'ctx> Compiler<'ctx> {
     ///
     /// The intrinsic pairs ensure proper scoping in the generated WASM and are preserved
     /// by optimization barriers.
+    ///
+    /// # Parent Block Stack
+    ///
+    /// The `parent_blocks_stack` parameter tracks the nesting of blocks during traversal.
+    /// This is used to:
+    /// - Determine if we're inside a non-deterministic block (for special handling)
+    /// - Check if the current block is void-returning
+    /// - Implement proper scoping semantics (future work)
+    ///
+    /// Example stack during nested block compilation:
+    /// ```text
+    /// [BlockType::Forall, BlockType::Block, BlockType::Exists]
+    ///  ^                   ^                 ^
+    ///  outermost            middle            innermost (current)
+    /// ```
     ///
     /// # Parameters
     ///
@@ -398,7 +515,16 @@ impl<'ctx> Compiler<'ctx> {
             },
             Statement::Expression(expression) => {
                 let expr = self.lower_expression(&expression, ctx);
-                //FIXME: revisit this logic #45
+                // FIXME: revisit this logic #45
+                //
+                // This handles the case where a non-deterministic void block ends with an
+                // expression statement. To prevent LLVM from optimizing away the expression
+                // (which might contain important intrinsic calls), we store it in a temporary
+                // stack variable.
+                //
+                // This is a workaround that ensures side effects are preserved. A better
+                // approach would be to explicitly model void expressions or use LLVM's
+                // volatile operations for intrinsic calls.
                 if statements_iterator.peek().is_none()
                     && parent_blocks_stack.first().unwrap().is_non_det()
                     && parent_blocks_stack.first().unwrap().is_void()
@@ -416,19 +542,30 @@ impl<'ctx> Compiler<'ctx> {
             Statement::Break(_break_statement) => todo!(),
             Statement::If(_if_statement) => todo!(),
             Statement::VariableDefinition(_variable_definition_statement) => {
-                // let ctx_type = self.context.i32_type(); //TODO: support other types
-                // if let Some(value) = &variable_definition_statement.value {
-                //     if matches!(*value.borrow(), Expression::Uzumaki(_))
-                //         || matches!(*value.borrow(), Expression::Literal(_))
-                //     {
-                //     } else {
-                //         todo!()
-                //     }
-                // }
+                // Variable definition support is currently disabled pending implementation of:
+                // 1. Type resolution for non-i32 types
+                // 2. Complex expression evaluation (beyond uzumaki and literals)
+                // 3. Proper variable scoping (currently uses flat namespace)
+                // 4. Mutable vs immutable variable semantics
+                //
+                // When re-enabled, this will follow the same pattern as constant definitions:
+                // - Allocate stack storage (alloca)
+                // - Lower the initialization expression
+                // - Store the value to the allocated pointer
+                // - Register in the variables HashMap for later loads
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
+                // Constant definitions are lowered by:
+                // 1. Looking up the type from TypedContext
+                // 2. Creating a stack allocation (alloca) for the constant
+                // 3. Lowering the literal value to an LLVM constant
+                // 4. Storing the constant to the allocated pointer
+                // 5. Registering in the variables HashMap for identifier resolution
+                //
+                // Currently only i32 number literals are fully implemented. Other types
+                // will follow the same pattern once expression lowering is expanded.
                 match ctx
                     .get_node_typeinfo(constant_definition.id)
                     .expect("Constant definition must have a type info")
@@ -840,6 +977,7 @@ impl<'ctx> Compiler<'ctx> {
         output_fname: &str,
         optimization_level: u32,
     ) -> anyhow::Result<Vec<u8>> {
-        utils::compile_to_wasm(&self.module, output_fname, optimization_level)
+        let has_main = *self.has_main.borrow();
+        utils::compile_to_wasm(&self.module, output_fname, optimization_level, has_main)
     }
 }

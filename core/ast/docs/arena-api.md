@@ -75,29 +75,41 @@ IDs are:
 The primary way to create an arena is by parsing source code:
 
 ```rust
-use inference_ast::builder::AstBuilder;
+use inference_ast::builder::Builder;
+use tree_sitter::Parser;
 
 let source = r#"fn main() -> i32 { return 0; }"#;
-let mut builder = AstBuilder::new(source.to_string());
-let arena = builder.build();
+let mut parser = Parser::new();
+parser.set_language(&tree_sitter_inference::language()).unwrap();
+let tree = parser.parse(source, None).unwrap();
+
+let mut builder = Builder::new();
+builder.add_source_code(tree.root_node(), source.as_bytes());
+let arena = builder.build_ast()?;
 ```
 
 **What happens here:**
-1. `AstBuilder` parses source using tree-sitter
-2. Creates AST nodes for each language construct
-3. Assigns unique IDs sequentially
-4. Records parent-child relationships
-5. Returns an immutable `Arena`
+1. Tree-sitter parses source code into a concrete syntax tree
+2. `Builder` walks the CST and creates typed AST nodes
+3. Assigns unique IDs sequentially starting from 1
+4. Records parent-child relationships in the arena
+5. Returns an immutable `Arena` or error if parse errors exist
 
 ### From a File
 
 ```rust
 use std::fs;
-use inference_ast::builder::AstBuilder;
+use inference_ast::builder::Builder;
+use tree_sitter::Parser;
 
 let source = fs::read_to_string("examples/hello.inf")?;
-let mut builder = AstBuilder::new(source);
-let arena = builder.build();
+let mut parser = Parser::new();
+parser.set_language(&tree_sitter_inference::language()).unwrap();
+let tree = parser.parse(&source, None).unwrap();
+
+let mut builder = Builder::new();
+builder.add_source_code(tree.root_node(), source.as_bytes());
+let arena = builder.build_ast()?;
 ```
 
 ### Empty Arena

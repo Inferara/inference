@@ -54,19 +54,6 @@
 //! - macOS Apple Silicon (M1/M2)
 //! - Windows x86-64 (requires DLLs in `bin/` directory)
 //!
-//! # Example Usage
-//!
-//! ```no_run
-//! use inference_wasm_codegen::codegen;
-//! use inference_type_checker::typed_context::TypedContext;
-//!
-//! fn compile(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
-//!     // Generate WASM bytecode from typed AST
-//!     let wasm_bytes = codegen(typed_context)?;
-//!     Ok(wasm_bytes)
-//! }
-//! ```
-//!
 //! # Module Organization
 //!
 //! - [`compiler`] - LLVM IR generation and intrinsic handling (private)

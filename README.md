@@ -22,52 +22,76 @@ Install the official VS Code extension for syntax highlighting:
 - Access our Inference [book](https://inference-lang.org/book) for a guide on how to get started
 - Inference Programming Language [specification](https://github.com/Inferara/inference-language-spec)
 
-## Inference Compiler CLI (`infc`)
+## Inference Suite CLI (`infs`)
 
-`infc` drives the compilation pipeline for a single `.inf` source file. Phases are:
+`infs` is the unified toolchain CLI for Inference. It provides subcommands for building, managing, and working with Inference projects.
 
-1. Parse (`--parse`) – build the typed AST.
-2. Analyze (`--analyze`) – perform semantic/type inference (WIP).
-3. Codegen (`--codegen`) – emit WebAssembly and optionally translate to `.v` when `-o` is supplied.
+### Build Command
 
-You must specify at least one phase flag; requested phases run in canonical order.
+The `infs build` command compiles a single `.inf` source file through three phases:
 
-### Basic usage
+1. **Parse** (`--parse`) – Build the typed AST using tree-sitter
+2. **Analyze** (`--analyze`) – Perform type checking and semantic validation (WIP)
+3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
-```bash
-cargo run -p inference-cli -- infc path/to/file.inf --parse
-```
+You must specify at least one phase flag; phases run in canonical order (parse → analyze → codegen).
 
-After building you can call the binary directly:
+### Basic Usage
 
 ```bash
-./infc path/to/file.inf --codegen -o
+# Via cargo
+cargo run -p infs -- build path/to/file.inf --parse
+
+# After building, call the binary directly
+./target/debug/infs build path/to/file.inf --codegen -o
 ```
 
-### Show version
+### Output Flags
+
+- `-o` – Generate WASM binary file in `out/` directory
+- `-v` – Generate Rocq (.v) translation file in `out/` directory
+
+### Show Version
 
 ```bash
-infc --version
+infs version
+infs --version
 ```
 
-### Output artifacts
-
-Artifacts are written to an `out/` directory relative to the working directory. Rocq translation output is `out/out.v`.
-
-### Exit codes
+### Exit Codes
 
 | Code | Meaning                         |
 |------|---------------------------------|
 | 0    | Success                         |
 | 1    | Usage / IO / Parse failure      |
 
+### Future Commands (Planned)
+
+- `infs install` – Download and install toolchain versions
+- `infs new` – Scaffold new projects
+- `infs doctor` – Verify installation health
+- `infs` (no args) – Launch TUI interface
+
 ## Distribution
 
-Prebuilt `infc` binaries distributables are arranged in the following directory structure:
+Prebuilt binaries are available for each release. Two CLI tools are distributed:
+
+- **`infs`** - Full-featured toolchain CLI (recommended for all users)
+- **`infc`** - Standalone compiler CLI (for direct compilation)
+
+### Release Artifacts
+
+| Platform | infs | infc |
+|----------|------|------|
+| Linux x64 | `infs-linux-x64.tar.gz` | `infc-linux-x64.tar.gz` |
+| Windows x64 | `infs-windows-x64.zip` | `infc-windows-x64.zip` |
+| macOS ARM64 | `infs-macos-apple-silicon.tar.gz` | `infc-macos-apple-silicon.tar.gz` |
+
+### Directory Structure
 
 ```
 <distribution-folder>/
-├── infc                    # The main CLI binary
+├── infs (or infc)          # The CLI binary
 ├── bin/
 │   ├── inf-llc            # LLVM compiler with Inference intrinsics
 │   └── rust-lld           # WebAssembly linker
@@ -78,7 +102,7 @@ Prebuilt `infc` binaries distributables are arranged in the following directory 
 **Notes:**
 - On Linux, the LLVM shared library must be in the `lib/` directory.
 - On Windows, all required DLL files should be placed in the `bin/` directory next to the executables.
-- The `infc` binary automatically locates these dependencies relative to its own location.
+- The CLI binaries automatically locate dependencies relative to their own location.
 - No system LLVM installation is required for end users.
 
 ## Building from Source
@@ -128,7 +152,7 @@ Download the following files for your platform and place them in the specified d
    cargo build --release
    ```
 
-The compiled `infc` binary will be in `target/release/infc`.
+The compiled binaries will be in `target/release/` (`infs` and `infc`).
 
 ### Build Commands
 
