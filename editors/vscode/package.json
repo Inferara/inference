@@ -2,7 +2,7 @@
   "name": "inference",
   "displayName": "Inference",
   "description": "Language support for Inference - a programming language for verified WebAssembly",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "inference-lang",
   "license": "GPL-3.0",
   "icon": "icons/inference.png",
@@ -25,6 +25,9 @@
     "vscode": "^1.85.0"
   },
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.inf"
+  ],
   "contributes": {
     "languages": [
       {
@@ -50,12 +53,65 @@
         "scopeName": "source.inference",
         "path": "./syntaxes/inference.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "inference.installToolchain",
+        "title": "Inference: Install Toolchain"
+      },
+      {
+        "command": "inference.updateToolchain",
+        "title": "Inference: Update Toolchain"
+      },
+      {
+        "command": "inference.selectVersion",
+        "title": "Inference: Select Toolchain Version"
+      },
+      {
+        "command": "inference.runDoctor",
+        "title": "Inference: Run Doctor"
+      },
+      {
+        "command": "inference.showOutput",
+        "title": "Inference: Show Output"
+      }
+    ],
+    "configuration": {
+      "title": "Inference",
+      "properties": {
+        "inference.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to infs binary. Leave empty for auto-detection."
+        },
+        "inference.autoInstall": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prompt to install toolchain if not found."
+        },
+        "inference.channel": {
+          "type": "string",
+          "enum": [
+            "stable",
+            "latest",
+            "none"
+          ],
+          "default": "stable",
+          "description": "Release channel for update checks."
+        },
+        "inference.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check for toolchain updates on activation."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "node esbuild.mjs",
     "build:prod": "node esbuild.mjs --production",
     "watch": "node esbuild.mjs --watch",
+    "test": "node --import tsx --test src/test/**/*.test.ts",
     "package": "vsce package",
     "publish": "vsce publish"
   },
@@ -64,6 +120,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^2.22.0",
     "esbuild": "^0.20.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.3.0"
   }
 }

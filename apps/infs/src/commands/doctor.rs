@@ -17,6 +17,12 @@
 //! - inf-llc binary presence
 //! - rust-lld binary presence
 //! - libLLVM shared library (Linux only)
+//!
+//! ## Output Format (Public Contract)
+//!
+//! The output format of this command is parsed by `editors/vscode/src/toolchain/doctor.ts`.
+//! Each check line has the format: `  [OK|WARN|FAIL] <name>: <message>`
+//! Changes to this format require a corresponding update in the VS Code extension.
 
 use anyhow::Result;
 
