@@ -106,10 +106,10 @@ Maps parent ID to list of child IDs for O(1) children list retrieval:
 
 ### ID Assignment
 
-IDs are assigned sequentially during AST construction by `AstBuilder` using an atomic counter (Issue #86):
+IDs are assigned sequentially during AST construction by `Builder` using an atomic counter (Issue #86):
 
 ```rust
-impl AstBuilder {
+impl Builder {
     /// Generate a unique node ID using an atomic counter.
     ///
     /// Uses a global atomic counter to ensure unique IDs across all AST nodes.
