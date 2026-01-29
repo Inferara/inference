@@ -9,6 +9,7 @@ rustflags = ["-L", "native=external/lib/linux"]
 
 [target.'cfg(target_os = "linux")'.env]
 LD_LIBRARY_PATH = { value = "external/lib/linux", relative = true }
+LLVM_SYS_211_PREFIX = "/usr/lib/llvm-21"
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"

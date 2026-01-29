@@ -241,7 +241,7 @@ impl<'a> Builder<'a> {
 
         let node = Rc::new(SpecDefinition::new(
             id,
-            Visibility::default(),
+            Self::get_visibility(node),
             name,
             definitions,
             location,

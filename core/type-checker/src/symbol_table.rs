@@ -165,8 +165,16 @@ pub(crate) enum Symbol {
     TypeAlias(TypeInfo),
     Struct(StructInfo),
     Enum(EnumInfo),
-    Spec(String),
+    Spec(SpecInfo),
     Function(FuncInfo),
+}
+
+/// Information about a spec definition.
+#[derive(Debug, Clone)]
+pub(crate) struct SpecInfo {
+    pub(crate) name: String,
+    pub(crate) visibility: Visibility,
+    pub(crate) definition_scope_id: u32,
 }
 
 impl Symbol {
@@ -177,7 +185,7 @@ impl Symbol {
             Symbol::TypeAlias(ti) => ti.to_string(),
             Symbol::Struct(info) => info.name.clone(),
             Symbol::Enum(info) => info.name.clone(),
-            Symbol::Spec(name) => name.clone(),
+            Symbol::Spec(info) => info.name.clone(),
             Symbol::Function(sig) => sig.name.clone(),
         }
     }
@@ -221,8 +229,8 @@ impl Symbol {
                 kind: crate::type_info::TypeInfoKind::Enum(info.name.clone()),
                 type_params: vec![],
             }),
-            Symbol::Spec(name) => Some(TypeInfo {
-                kind: crate::type_info::TypeInfoKind::Spec(name.clone()),
+            Symbol::Spec(info) => Some(TypeInfo {
+                kind: crate::type_info::TypeInfoKind::Spec(info.name.clone()),
                 type_params: vec![],
             }),
             Symbol::Function(_) => None,
@@ -232,14 +240,14 @@ impl Symbol {
     /// Check if this symbol has public visibility.
     ///
     /// Structs, Enums, and Functions respect their visibility field.
-    /// Type aliases and Specs are currently treated as public.
+    /// Type aliases and Specs respect their visibility field.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_public(&self) -> bool {
         match self {
             Symbol::TypeAlias(_) => true,
             Symbol::Struct(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Enum(info) => matches!(info.visibility, Visibility::Public),
-            Symbol::Spec(_) => true,
+            Symbol::Spec(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Function(sig) => matches!(sig.visibility, Visibility::Public),
         }
     }
@@ -565,11 +573,17 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn register_spec(&mut self, name: &str) -> anyhow::Result<()> {
+    pub(crate) fn register_spec(&mut self, name: &str, visibility: Visibility) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
+            let scope_id = scope.borrow().id;
+            let spec_info = SpecInfo {
+                name: name.to_string(),
+                visibility,
+                definition_scope_id: scope_id,
+            };
             scope
                 .borrow_mut()
-                .insert_symbol(name, Symbol::Spec(name.to_string()))
+                .insert_symbol(name, Symbol::Spec(spec_info))
         } else {
             bail!("No active scope to register spec")
         }
@@ -883,7 +897,7 @@ impl SymbolTable {
                 self.register_enum(&e.name(), &variants, e.visibility.clone())?;
             }
             Definition::Spec(sp) => {
-                self.register_spec(&sp.name())?;
+                self.register_spec(&sp.name(), sp.visibility.clone())?;
             }
             Definition::Function(f) => {
                 let type_params = f
