@@ -8,7 +8,7 @@
 //!
 //! The error poisoning feature is inspired by rustc's TyKind::Error model.
 
-#[cfg(test)]
+
 mod error_type_poisoning_tests {
     use crate::utils::build_ast;
     use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
