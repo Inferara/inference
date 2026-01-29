@@ -5,6 +5,11 @@ import { getSettings } from './config/settings';
 import { exec } from './utils/exec';
 import { compareSemver } from './utils/semver';
 import { registerInstallCommand } from './commands/install';
+import { registerDoctorCommand } from './commands/doctor';
+import { registerSelectVersionCommand } from './commands/selectVersion';
+import { registerUpdateCommand, checkForUpdates } from './commands/update';
+import { createStatusBar, updateStatusBar } from './ui/statusBar';
+import { runDoctor } from './toolchain/doctor';
 
 /** Minimum infs CLI version the extension can work with. */
 const MIN_INFS_VERSION = '0.0.1-beta.1';
@@ -14,6 +19,9 @@ const outputChannel = vscode.window.createOutputChannel('Inference');
 export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(outputChannel);
 
+    const statusBarItem = createStatusBar();
+    context.subscriptions.push(statusBarItem);
+
     context.subscriptions.push(
         vscode.commands.registerCommand('inference.showOutput', () => {
             outputChannel.show();
@@ -21,23 +29,14 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(registerInstallCommand(outputChannel));
+    context.subscriptions.push(
+        registerDoctorCommand(outputChannel, statusBarItem),
+    );
 
-    // Registered so VS Code doesn't warn about missing handlers
-    for (const cmd of [
-        'inference.updateToolchain',
-        'inference.selectVersion',
-        'inference.runDoctor',
-    ]) {
-        context.subscriptions.push(
-            vscode.commands.registerCommand(cmd, () => {
-                vscode.window.showInformationMessage(
-                    'This command will be available in a future update.',
-                );
-            }),
-        );
-    }
+    context.subscriptions.push(registerUpdateCommand(outputChannel));
+    context.subscriptions.push(registerSelectVersionCommand(outputChannel));
 
-    checkToolchain().catch((err) =>
+    checkToolchain(statusBarItem).catch((err) =>
         outputChannel.appendLine(`Toolchain check failed: ${err}`),
     );
 }
@@ -46,12 +45,15 @@ export function deactivate() {
     // Nothing to clean up
 }
 
-async function checkToolchain(): Promise<void> {
+async function checkToolchain(
+    statusBarItem: vscode.StatusBarItem,
+): Promise<void> {
     const platform = detectPlatform();
     if (!platform) {
         outputChannel.appendLine(
             `Unsupported platform: ${process.platform}-${process.arch}`,
         );
+        updateStatusBar(statusBarItem, null);
         vscode.window
             .showWarningMessage(
                 `Inference: unsupported platform (${process.platform}-${process.arch}).`,
@@ -73,6 +75,7 @@ async function checkToolchain(): Promise<void> {
     const infsPath = detectInfs();
     if (!infsPath) {
         outputChannel.appendLine('infs binary not found.');
+        updateStatusBar(statusBarItem, null);
         const settings = getSettings();
         if (settings.autoInstall) {
             notifyMissing();
@@ -83,10 +86,18 @@ async function checkToolchain(): Promise<void> {
 
     const versionOk = await checkInfsVersion(infsPath);
     if (!versionOk) {
+        updateStatusBar(statusBarItem, null);
         return;
     }
 
     outputChannel.appendLine('Toolchain detection complete.');
+
+    const doctorResult = await runDoctor(infsPath);
+    updateStatusBar(statusBarItem, doctorResult);
+
+    checkForUpdates(infsPath, outputChannel).catch((err) =>
+        outputChannel.appendLine(`Update check failed: ${err}`),
+    );
 }
 
 /**
