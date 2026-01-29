@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import { detectInfs } from '../toolchain/detection';
-import { fetchVersions, getCurrentVersion, installAndSetDefault } from '../toolchain/versions';
+import { fetchVersions, getCurrentVersion } from '../toolchain/versions';
 import { compareSemver } from '../utils/semver';
+import { performVersionChange } from './versionChange';
 
 /** Guard against concurrent select operations. */
 let selecting = false;
@@ -103,63 +104,9 @@ export function registerSelectVersionCommand(
                     return;
                 }
 
-                await switchVersion(infsPath, selectedVersion, outputChannel);
+                await performVersionChange(infsPath, selectedVersion, outputChannel, 'Switching to');
             } finally {
                 selecting = false;
-            }
-        },
-    );
-}
-
-async function switchVersion(
-    infsPath: string,
-    version: string,
-    outputChannel: vscode.OutputChannel,
-): Promise<void> {
-    await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Inference Toolchain',
-            cancellable: false,
-        },
-        async (progress) => {
-            progress.report({ message: `Switching to v${version}...` });
-            outputChannel.appendLine(`Switching to toolchain v${version}...`);
-
-            const result = await installAndSetDefault(infsPath, version);
-
-            if (result.success) {
-                outputChannel.appendLine(`Switched to toolchain v${version}.`);
-                vscode.window
-                    .showInformationMessage(
-                        `Switched to Inference toolchain v${version}.`,
-                        'Show Output',
-                    )
-                    .then((action) => {
-                        if (action === 'Show Output') {
-                            outputChannel.show();
-                        }
-                    });
-                return;
-            }
-
-            outputChannel.appendLine(`Version switch failed: ${result.error}`);
-
-            if (result.installedButNotDefault) {
-                vscode.window
-                    .showWarningMessage(
-                        `Inference: v${version} was installed but could not be set as default. Run \`infs default ${version}\` manually.`,
-                        'Show Output',
-                    )
-                    .then((action) => {
-                        if (action === 'Show Output') {
-                            outputChannel.show();
-                        }
-                    });
-            } else {
-                vscode.window.showErrorMessage(
-                    `Inference: Failed to install v${version}: ${result.error}`,
-                );
             }
         },
     );

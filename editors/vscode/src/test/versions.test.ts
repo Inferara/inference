@@ -109,4 +109,55 @@ describe('parseCurrentVersion', () => {
 
         assert.strictEqual(result, '1.0.0');
     });
+
+    it('parses version with build metadata', () => {
+        const result = parseCurrentVersion('infs 0.1.0+build.123\n');
+
+        assert.strictEqual(result, '0.1.0+build.123');
+    });
+
+    it('returns null for just "infs" with no version', () => {
+        const result = parseCurrentVersion('infs ');
+
+        assert.strictEqual(result, null);
+    });
+
+    it('returns null for version output with different tool name', () => {
+        const result = parseCurrentVersion('infc 0.1.0\n');
+
+        assert.strictEqual(result, null);
+    });
+});
+
+describe('parseVersionsOutput edge cases', () => {
+    it('preserves entries with extra fields', () => {
+        const stdout = JSON.stringify([
+            {
+                version: '0.1.0',
+                stable: true,
+                platforms: ['linux'],
+                available_for_current: true,
+                extra_field: 'ignored',
+            },
+        ]);
+
+        const result = parseVersionsOutput(stdout);
+        assert.strictEqual(result.length, 1);
+        assert.strictEqual(result[0].version, '0.1.0');
+    });
+
+    it('returns empty array for null JSON', () => {
+        const result = parseVersionsOutput('null');
+        assert.strictEqual(result.length, 0);
+    });
+
+    it('returns empty array for numeric JSON', () => {
+        const result = parseVersionsOutput('42');
+        assert.strictEqual(result.length, 0);
+    });
+
+    it('returns empty array for string JSON', () => {
+        const result = parseVersionsOutput('"hello"');
+        assert.strictEqual(result.length, 0);
+    });
 });

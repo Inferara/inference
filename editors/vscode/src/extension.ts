@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { detectPlatform } from './toolchain/platform';
 import { detectInfs } from './toolchain/detection';
-import { getSettings } from './config/settings';
 import { exec } from './utils/exec';
 import { compareSemver } from './utils/semver';
 import { registerInstallCommand } from './commands/install';
@@ -78,10 +77,7 @@ async function checkToolchain(
         outputChannel.appendLine('infs binary not found.');
         updateStatusBar(statusBarItem, null);
         vscode.commands.executeCommand('setContext', 'inference.toolchainInstalled', false);
-        const settings = getSettings();
-        if (settings.autoInstall) {
-            notifyMissing();
-        }
+        notifyMissing();
         return;
     }
     outputChannel.appendLine(`infs found: ${infsPath}`);
@@ -132,10 +128,16 @@ async function checkInfsVersion(infsPath: string): Promise<boolean> {
             outputChannel.appendLine(
                 `infs version ${version} is below minimum ${MIN_INFS_VERSION}.`,
             );
-            vscode.window.showWarningMessage(
-                `Inference: infs version ${version} is outdated (minimum: ${MIN_INFS_VERSION}). Please update.`,
-                'Update',
-            );
+            vscode.window
+                .showWarningMessage(
+                    `Inference: infs version ${version} is outdated (minimum: ${MIN_INFS_VERSION}). Please update.`,
+                    'Update',
+                )
+                .then((action) => {
+                    if (action === 'Update') {
+                        vscode.commands.executeCommand('inference.updateToolchain');
+                    }
+                });
             return false;
         }
         return true;

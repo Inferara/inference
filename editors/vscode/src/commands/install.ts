@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { detectPlatform } from '../toolchain/platform';
+import { detectPlatform, PlatformInfo } from '../toolchain/platform';
 import {
     installToolchain,
     InstallProgress,
@@ -44,6 +44,10 @@ export function registerInstallCommand(
                 outputChannel.appendLine(
                     `Toolchain v${result.version} installed at ${result.infsPath}`,
                 );
+                vscode.commands.executeCommand(
+                    'setContext', 'inference.toolchainInstalled', true,
+                );
+                vscode.commands.executeCommand('inference.runDoctor');
                 notifyInstallSuccess(result.version, result.doctorWarnings);
             } catch (err) {
                 const message =
@@ -59,7 +63,7 @@ export function registerInstallCommand(
 
 /** Run the installation with a VS Code progress notification. */
 function installWithProgress(
-    platform: import('../toolchain/platform').PlatformInfo,
+    platform: PlatformInfo,
     outputChannel: vscode.OutputChannel,
 ): Promise<InstallResult> {
     return vscode.window.withProgress(

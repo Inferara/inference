@@ -149,4 +149,46 @@ describe('parseDoctorOutput', () => {
             'All checks passed. The toolchain is ready to use.',
         );
     });
+
+    it('handles CRLF line endings', () => {
+        const stdout = [
+            'Checking Inference toolchain installation...',
+            '',
+            '  [OK] infs binary: Found at /usr/local/bin/infs',
+            '  [WARN] libLLVM: Not found',
+            '',
+            'Some warnings found.',
+        ].join('\r\n');
+
+        const result = parseDoctorOutput(stdout);
+
+        assert.strictEqual(result.checks.length, 2);
+        assert.strictEqual(result.checks[0].status, 'ok');
+        assert.strictEqual(result.checks[0].name, 'infs binary');
+        assert.strictEqual(result.checks[1].status, 'warn');
+        assert.strictEqual(result.hasWarnings, true);
+        assert.strictEqual(result.summary, 'Some warnings found.');
+    });
+
+    it('handles mixed LF and CRLF', () => {
+        const stdout =
+            '  [OK] Platform: Detected linux-x64\r\n' +
+            '  [FAIL] inf-llc: Not found\n' +
+            'Checks failed.\n';
+
+        const result = parseDoctorOutput(stdout);
+
+        assert.strictEqual(result.checks.length, 2);
+        assert.strictEqual(result.checks[0].status, 'ok');
+        assert.strictEqual(result.checks[1].status, 'fail');
+        assert.strictEqual(result.hasErrors, true);
+    });
+
+    it('handles output with only whitespace lines', () => {
+        const result = parseDoctorOutput('   \n  \n\n');
+
+        assert.strictEqual(result.checks.length, 0);
+        assert.strictEqual(result.hasErrors, false);
+        assert.strictEqual(result.hasWarnings, false);
+    });
 });

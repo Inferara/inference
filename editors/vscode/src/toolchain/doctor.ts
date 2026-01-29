@@ -37,7 +37,7 @@ const CHECK_PATTERN = /^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)/;
  */
 export function parseDoctorOutput(stdout: string): DoctorResult {
     const checks: DoctorCheck[] = [];
-    const lines = stdout.split('\n');
+    const lines = stdout.split(/\r?\n/);
 
     for (const line of lines) {
         const match = line.match(CHECK_PATTERN);
@@ -77,7 +77,8 @@ export async function runDoctor(
     try {
         const result = await exec(infsPath, ['doctor']);
         return parseDoctorOutput(result.stdout);
-    } catch {
+    } catch (err) {
+        console.error('infs doctor failed:', err);
         return null;
     }
 }

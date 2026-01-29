@@ -12,7 +12,10 @@ export function inferenceHome(): string {
 /** Check whether a file exists and is executable (or just exists on Windows). */
 export function isExecutable(filePath: string): boolean {
     try {
-        fs.accessSync(filePath, fs.constants.X_OK);
+        const mode = process.platform === 'win32'
+            ? fs.constants.F_OK
+            : fs.constants.X_OK;
+        fs.accessSync(filePath, mode);
         return true;
     } catch {
         return false;

@@ -42,7 +42,9 @@ export async function fetchVersions(
     infsPath: string,
 ): Promise<VersionInfo[] | null> {
     try {
-        const result = await exec(infsPath, ['versions', '--json']);
+        const result = await exec(infsPath, ['versions', '--json'], {
+            timeoutMs: 30_000,
+        });
         if (result.exitCode !== 0) {
             return null;
         }
@@ -60,7 +62,9 @@ export async function getCurrentVersion(
     infsPath: string,
 ): Promise<string | null> {
     try {
-        const result = await exec(infsPath, ['version']);
+        const result = await exec(infsPath, ['version'], {
+            timeoutMs: 10_000,
+        });
         if (result.exitCode !== 0) {
             return null;
         }
@@ -95,7 +99,9 @@ export async function installAndSetDefault(
         return { success: false, installedButNotDefault: false, error: detail };
     }
 
-    const defaultResult = await exec(infsPath, ['default', version]);
+    const defaultResult = await exec(infsPath, ['default', version], {
+        timeoutMs: 30_000,
+    });
     if (defaultResult.exitCode !== 0) {
         const detail = defaultResult.stderr || defaultResult.stdout;
         return { success: false, installedButNotDefault: true, error: detail };

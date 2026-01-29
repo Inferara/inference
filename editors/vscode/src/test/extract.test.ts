@@ -77,8 +77,35 @@ describe('extractArchive', () => {
         });
     });
 
+    describe('.tgz extraction', () => {
+        let tgzPath: string;
+
+        before(() => {
+            const sourceDir = path.join(tmpDir, 'tgz-source');
+            fs.mkdirSync(sourceDir, { recursive: true });
+            fs.writeFileSync(
+                path.join(sourceDir, 'tgz-file.txt'),
+                'hello from tgz',
+            );
+
+            tgzPath = path.join(tmpDir, 'test-archive.tgz');
+            execSync(`tar -czf "${tgzPath}" -C "${sourceDir}" .`);
+        });
+
+        it('extracts a .tgz archive', async () => {
+            const destDir = path.join(tmpDir, 'tgz-dest');
+            await extractArchive({ archivePath: tgzPath, destDir });
+
+            const content = fs.readFileSync(
+                path.join(destDir, 'tgz-file.txt'),
+                'utf-8',
+            );
+            assert.strictEqual(content, 'hello from tgz');
+        });
+    });
+
     describe('unsupported format', () => {
-        it('throws for unsupported archive extension', async () => {
+        it('throws for .rar extension', async () => {
             const fakePath = path.join(tmpDir, 'archive.rar');
             fs.writeFileSync(fakePath, 'fake');
 
@@ -92,6 +119,59 @@ describe('extractArchive', () => {
                     return true;
                 },
             );
+        });
+
+        it('throws for .7z extension', async () => {
+            const fakePath = path.join(tmpDir, 'archive.7z');
+            fs.writeFileSync(fakePath, 'fake');
+
+            await assert.rejects(
+                extractArchive({
+                    archivePath: fakePath,
+                    destDir: path.join(tmpDir, '7z-dest'),
+                }),
+                (err: Error) => {
+                    assert.ok(err.message.includes('Unsupported archive format'));
+                    return true;
+                },
+            );
+        });
+
+        it('includes filename in error message', async () => {
+            const fakePath = path.join(tmpDir, 'my-file.bz2');
+            fs.writeFileSync(fakePath, 'fake');
+
+            await assert.rejects(
+                extractArchive({
+                    archivePath: fakePath,
+                    destDir: path.join(tmpDir, 'bz2-dest'),
+                }),
+                (err: Error) => {
+                    assert.ok(err.message.includes('my-file.bz2'));
+                    return true;
+                },
+            );
+        });
+    });
+
+    describe('destination directory creation', () => {
+        let tarPath: string;
+
+        before(() => {
+            const sourceDir = path.join(tmpDir, 'dest-test-source');
+            fs.mkdirSync(sourceDir, { recursive: true });
+            fs.writeFileSync(path.join(sourceDir, 'f.txt'), 'data');
+            tarPath = path.join(tmpDir, 'dest-test.tar.gz');
+            execSync(`tar -czf "${tarPath}" -C "${sourceDir}" .`);
+        });
+
+        it('creates deeply nested destination directories', async () => {
+            const destDir = path.join(tmpDir, 'a', 'b', 'c', 'd');
+            assert.ok(!fs.existsSync(destDir));
+
+            await extractArchive({ archivePath: tarPath, destDir });
+
+            assert.ok(fs.existsSync(path.join(destDir, 'f.txt')));
         });
     });
 });

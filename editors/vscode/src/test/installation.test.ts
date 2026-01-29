@@ -333,4 +333,99 @@ describe('findLatestRelease', () => {
             'https://releases.example.com/v1.0.0/infs-linux-x64.tar.gz',
         );
     });
+
+    it('prefers stable release over unstable pre-release with higher version', () => {
+        const manifest = makeManifest([
+            {
+                version: '1.0.0',
+                stable: true,
+                files: [
+                    {
+                        url: 'https://example.com/infs-linux-x64.tar.gz',
+                        sha256: 'stable-hash',
+                    },
+                ],
+            },
+            {
+                version: '2.0.0-alpha.1',
+                stable: false,
+                files: [
+                    {
+                        url: 'https://example.com/infs-linux-x64.tar.gz',
+                        sha256: 'alpha-hash',
+                    },
+                ],
+            },
+        ]);
+
+        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        assert.ok(result !== null);
+        assert.strictEqual(result.release.version, '1.0.0');
+    });
+
+    it('returns null when releases have files but none match platform', () => {
+        const manifest = makeManifest([
+            {
+                version: '1.0.0',
+                stable: true,
+                files: [
+                    {
+                        url: 'https://example.com/infs-macos-arm64.tar.gz',
+                        sha256: 'mac-hash',
+                    },
+                    {
+                        url: 'https://example.com/infs-windows-x64.zip',
+                        sha256: 'win-hash',
+                    },
+                ],
+            },
+        ]);
+
+        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        assert.strictEqual(result, null);
+    });
+
+    it('skips releases with empty files array', () => {
+        const manifest = makeManifest([
+            {
+                version: '2.0.0',
+                stable: true,
+                files: [],
+            },
+            {
+                version: '1.0.0',
+                stable: true,
+                files: [
+                    {
+                        url: 'https://example.com/infs-linux-x64.tar.gz',
+                        sha256: 'fallback-hash',
+                    },
+                ],
+            },
+        ]);
+
+        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        assert.ok(result !== null);
+        assert.strictEqual(result.release.version, '1.0.0');
+        assert.strictEqual(result.sha256, 'fallback-hash');
+    });
+});
+
+describe('manifest helper edge cases', () => {
+    it('toolFromUrl returns empty string for URL with no path segments', () => {
+        assert.strictEqual(toolFromUrl('https://example.com/'), '');
+    });
+
+    it('toolFromUrl handles URL with no dashes in filename', () => {
+        assert.strictEqual(toolFromUrl('https://example.com/singlename.tar.gz'), 'singlename.tar.gz');
+    });
+
+    it('osFromUrl returns empty string for URL with only tool name', () => {
+        assert.strictEqual(osFromUrl('https://example.com/infs.tar.gz'), '');
+    });
+
+    it('platformOs returns empty for unrecognized platform', () => {
+        assert.strictEqual(platformOs({ id: 'linux-arm64' }), '');
+        assert.strictEqual(platformOs({ id: '' }), '');
+    });
 });

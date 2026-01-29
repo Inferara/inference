@@ -63,12 +63,17 @@ describe('detection helpers', () => {
     describe('isExecutable', () => {
         let tmpDir: string;
         let execFile: string;
+        let nonExecFile: string;
 
         before(() => {
             tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'infs-test-'));
             execFile = path.join(tmpDir, 'test-bin');
             fs.writeFileSync(execFile, '#!/bin/sh\n');
             fs.chmodSync(execFile, 0o755);
+
+            nonExecFile = path.join(tmpDir, 'test-noexec');
+            fs.writeFileSync(nonExecFile, 'not executable\n');
+            fs.chmodSync(nonExecFile, 0o644);
         });
 
         after(() => {
@@ -81,6 +86,20 @@ describe('detection helpers', () => {
 
         it('returns false for a nonexistent file', () => {
             assert.strictEqual(isExecutable('/nonexistent/path/xyz'), false);
+        });
+
+        it('returns false for a non-executable file on Unix', () => {
+            if (process.platform === 'win32') {
+                return;
+            }
+            assert.strictEqual(isExecutable(nonExecFile), false);
+        });
+
+        it('returns true for a directory (X_OK is set on dirs)', () => {
+            if (process.platform === 'win32') {
+                return;
+            }
+            assert.strictEqual(isExecutable(tmpDir), true);
         });
     });
 
@@ -110,6 +129,20 @@ describe('detection helpers', () => {
             process.env['PATH'] = originalPath;
             const result = findInPath('nonexistent-binary-xyz-456');
             assert.strictEqual(result, null);
+        });
+
+        it('returns null when PATH is empty', () => {
+            process.env['PATH'] = '';
+            const result = findInPath('test-infs-bin');
+            assert.strictEqual(result, null);
+        });
+
+        it('handles PATH with multiple directories', () => {
+            const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'infs-path2-'));
+            process.env['PATH'] = otherDir + ':' + tmpDir + ':' + (originalPath || '');
+            const result = findInPath('test-infs-bin');
+            assert.strictEqual(result, path.join(tmpDir, 'test-infs-bin'));
+            fs.rmSync(otherDir, { recursive: true });
         });
     });
 });

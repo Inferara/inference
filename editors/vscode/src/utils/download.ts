@@ -22,6 +22,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_REDIRECTS = 5;
 
 const SOCKET_TIMEOUT_MS = 15_000;
+const MAX_JSON_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 /**
  * Perform an HTTPS GET request following redirects.
@@ -88,7 +89,16 @@ export function fetchJson<T>(url: string): Promise<T> {
         followRedirects(url, MAX_REDIRECTS).then(
             (res) => {
                 const chunks: Buffer[] = [];
-                res.on('data', (chunk: Buffer) => chunks.push(chunk));
+                let totalBytes = 0;
+                res.on('data', (chunk: Buffer) => {
+                    totalBytes += chunk.length;
+                    if (totalBytes > MAX_JSON_RESPONSE_BYTES) {
+                        res.destroy();
+                        reject(new Error(`Response too large (>${MAX_JSON_RESPONSE_BYTES} bytes) from ${url}`));
+                        return;
+                    }
+                    chunks.push(chunk);
+                });
                 res.on('end', () => {
                     try {
                         const text = Buffer.concat(chunks).toString('utf-8');
@@ -127,6 +137,14 @@ export function downloadFile(
     const partialPath = options.destPath + '.partial';
 
     return new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = <T extends unknown[]>(fn: (...args: T) => void, ...args: T) => {
+            if (!settled) {
+                settled = true;
+                fn(...args);
+            }
+        };
+
         followRedirects(url, MAX_REDIRECTS).then(
             (res) => {
                 const totalStr = res.headers['content-length'];
@@ -150,13 +168,36 @@ export function downloadFile(
                     }
                 };
 
+                // No-data timeout: if no bytes arrive for `timeout` ms, abort
+                let dataTimer: ReturnType<typeof setTimeout> | undefined;
+                const clearDataTimer = () => {
+                    if (dataTimer) {
+                        clearTimeout(dataTimer);
+                        dataTimer = undefined;
+                    }
+                };
+                const resetTimer = () => {
+                    clearDataTimer();
+                    dataTimer = setTimeout(() => {
+                        res.destroy();
+                        ws.destroy();
+                        cleanup();
+                        settle(reject, new Error(`Download timed out for ${url}`));
+                    }, timeout);
+                };
+                resetTimer();
+                res.on('data', resetTimer);
+                res.on('end', clearDataTimer);
+
                 ws.on('finish', () => {
+                    clearDataTimer();
                     try {
                         fs.renameSync(partialPath, options.destPath);
-                        resolve();
+                        settle(resolve);
                     } catch (err) {
                         cleanup();
-                        reject(
+                        settle(
+                            reject,
                             new Error(
                                 `Failed to save download to ${options.destPath}: ${err instanceof Error ? err.message : err}`,
                             ),
@@ -165,8 +206,11 @@ export function downloadFile(
                 });
 
                 ws.on('error', (err) => {
+                    clearDataTimer();
+                    res.destroy();
                     cleanup();
-                    reject(
+                    settle(
+                        reject,
                         new Error(
                             `Failed to write download: ${err.message}`,
                         ),
@@ -174,37 +218,18 @@ export function downloadFile(
                 });
 
                 res.on('error', (err) => {
+                    clearDataTimer();
                     ws.destroy();
                     cleanup();
-                    reject(
+                    settle(
+                        reject,
                         new Error(
                             `Download stream error from ${url}: ${err.message}`,
                         ),
                     );
                 });
-
-                // No-data timeout: if no bytes arrive for `timeout` ms, abort
-                let dataTimer: ReturnType<typeof setTimeout> | undefined;
-                const resetTimer = () => {
-                    if (dataTimer) {
-                        clearTimeout(dataTimer);
-                    }
-                    dataTimer = setTimeout(() => {
-                        res.destroy();
-                        ws.destroy();
-                        cleanup();
-                        reject(new Error(`Download timed out for ${url}`));
-                    }, timeout);
-                };
-                resetTimer();
-                res.on('data', resetTimer);
-                res.on('end', () => {
-                    if (dataTimer) {
-                        clearTimeout(dataTimer);
-                    }
-                });
             },
-            (err) => reject(err),
+            (err) => settle(reject, err),
         );
     });
 }

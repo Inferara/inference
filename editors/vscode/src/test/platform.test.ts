@@ -48,4 +48,39 @@ describe('platform detection', () => {
         // depending on the platform. We just verify it doesn't throw.
         assert.ok(result === null || typeof result.id === 'string');
     });
+
+    it('returns null for win32-arm64', () => {
+        assert.strictEqual(detectPlatform('win32', 'arm64'), null);
+    });
+
+    it('windows platform has .exe binary name', () => {
+        const result = detectPlatform('win32', 'x64');
+        assert.ok(result !== null);
+        assert.strictEqual(result.binaryName, 'infs.exe');
+    });
+
+    it('linux platform has .tar.gz extension', () => {
+        const result = detectPlatform('linux', 'x64');
+        assert.ok(result !== null);
+        assert.strictEqual(result.archiveExtension, '.tar.gz');
+    });
+
+    it('macos platform has .tar.gz extension', () => {
+        const result = detectPlatform('darwin', 'arm64');
+        assert.ok(result !== null);
+        assert.strictEqual(result.archiveExtension, '.tar.gz');
+    });
+
+    it('windows platform has .zip extension', () => {
+        const result = detectPlatform('win32', 'x64');
+        assert.ok(result !== null);
+        assert.strictEqual(result.archiveExtension, '.zip');
+    });
+
+    it('linux and macos have "infs" as binary name', () => {
+        const linux = detectPlatform('linux', 'x64');
+        const macos = detectPlatform('darwin', 'arm64');
+        assert.ok(linux !== null && linux.binaryName === 'infs');
+        assert.ok(macos !== null && macos.binaryName === 'infs');
+    });
 });

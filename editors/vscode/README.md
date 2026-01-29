@@ -48,7 +48,7 @@ A guided setup walkthrough is available via **Get Started: Open Walkthrough...**
 
 1. Open VS Code
 2. Press `Ctrl+P` to open Quick Open
-3. Type `ext install inferara.inference`
+3. Type `ext install inference-lang.inference`
 4. Press Enter
 
 ### From VSIX

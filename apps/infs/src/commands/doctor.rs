@@ -33,10 +33,7 @@ use crate::toolchain::doctor::{DoctorCheckStatus, run_all_checks};
 /// Executes the doctor command.
 ///
 /// Runs all health checks and displays the results.
-///
-/// # Errors
-///
-/// Returns an error if critical checks fail to execute (not if they report failures).
+/// Returns an error when checks report failures so the caller gets a non-zero exit code.
 #[allow(clippy::unnecessary_wraps, clippy::unused_async)]
 pub async fn execute() -> Result<()> {
     println!("Checking Inference toolchain installation...");
@@ -75,6 +72,7 @@ pub async fn execute() -> Result<()> {
 
     if has_errors {
         println!("Some checks failed. Run 'infs install' to install the toolchain.");
+        anyhow::bail!("Doctor checks failed");
     } else if has_warnings {
         println!("Some warnings were found. The toolchain may work but could have issues.");
     } else {

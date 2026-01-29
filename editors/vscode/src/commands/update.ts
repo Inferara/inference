@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import { detectInfs } from '../toolchain/detection';
-import { fetchVersions, getCurrentVersion, installAndSetDefault } from '../toolchain/versions';
+import { fetchVersions, getCurrentVersion } from '../toolchain/versions';
 import { compareSemver } from '../utils/semver';
 import { getSettings } from '../config/settings';
+import { performVersionChange } from './versionChange';
 
 /** Guard against concurrent update operations. */
 let updating = false;
@@ -60,6 +61,9 @@ export async function checkForUpdates(
     infsPath: string,
     outputChannel: vscode.OutputChannel,
 ): Promise<void> {
+    if (updating) {
+        return;
+    }
     const settings = getSettings();
     if (!settings.checkForUpdates) {
         return;
@@ -67,7 +71,12 @@ export async function checkForUpdates(
     if (settings.channel === 'none') {
         return;
     }
-    await checkForUpdatesImpl(infsPath, outputChannel, false);
+    updating = true;
+    try {
+        await checkForUpdatesImpl(infsPath, outputChannel, false);
+    } finally {
+        updating = false;
+    }
 }
 
 async function checkForUpdatesImpl(
@@ -147,7 +156,7 @@ async function checkForUpdatesImpl(
     );
 
     if (action === 'Update') {
-        await performUpdate(infsPath, latest.version, outputChannel);
+        await performVersionChange(infsPath, latest.version, outputChannel, 'Updating to');
     } else if (action === 'Release Notes') {
         vscode.env.openExternal(
             vscode.Uri.parse(
@@ -155,58 +164,4 @@ async function checkForUpdatesImpl(
             ),
         );
     }
-}
-
-async function performUpdate(
-    infsPath: string,
-    version: string,
-    outputChannel: vscode.OutputChannel,
-): Promise<void> {
-    await vscode.window.withProgress(
-        {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Inference Toolchain',
-            cancellable: false,
-        },
-        async (progress) => {
-            progress.report({ message: `Updating to v${version}...` });
-            outputChannel.appendLine(`Updating to toolchain v${version}...`);
-
-            const result = await installAndSetDefault(infsPath, version);
-
-            if (result.success) {
-                outputChannel.appendLine(`Updated to toolchain v${version}.`);
-                vscode.window
-                    .showInformationMessage(
-                        `Inference toolchain updated to v${version}.`,
-                        'Show Output',
-                    )
-                    .then((action) => {
-                        if (action === 'Show Output') {
-                            outputChannel.show();
-                        }
-                    });
-                return;
-            }
-
-            outputChannel.appendLine(`Update failed: ${result.error}`);
-
-            if (result.installedButNotDefault) {
-                vscode.window
-                    .showWarningMessage(
-                        `Inference: v${version} was installed but could not be set as default. Run \`infs default ${version}\` manually.`,
-                        'Show Output',
-                    )
-                    .then((action) => {
-                        if (action === 'Show Output') {
-                            outputChannel.show();
-                        }
-                    });
-            } else {
-                vscode.window.showErrorMessage(
-                    `Inference: Failed to install v${version}: ${result.error}`,
-                );
-            }
-        },
-    );
 }

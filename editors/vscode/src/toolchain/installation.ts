@@ -61,6 +61,21 @@ export async function installToolchain(
 
     const manifest = await fetchJson<ReleaseEntry[]>(MANIFEST_URL);
 
+    if (!Array.isArray(manifest)) {
+        throw new Error('Invalid release manifest: expected an array.');
+    }
+    for (const entry of manifest) {
+        if (
+            typeof entry?.version !== 'string' ||
+            typeof entry?.stable !== 'boolean' ||
+            !Array.isArray(entry?.files)
+        ) {
+            throw new Error(
+                `Invalid release manifest entry: ${JSON.stringify(entry)?.slice(0, 200)}`,
+            );
+        }
+    }
+
     const match = findLatestRelease(manifest, platform, channel);
     if (!match) {
         throw new Error(
@@ -80,7 +95,8 @@ export async function installToolchain(
     fs.mkdirSync(destDir, { recursive: true });
 
     const archiveName = `infs-${platform.id}${platform.archiveExtension}`;
-    const archivePath = path.join(os.tmpdir(), archiveName);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'infs-'));
+    const archivePath = path.join(tmpDir, archiveName);
 
     try {
         await downloadFile(fileUrl, {
@@ -110,7 +126,7 @@ export async function installToolchain(
         await extractArchive({ archivePath, destDir });
     } finally {
         try {
-            fs.unlinkSync(archivePath);
+            fs.rmSync(tmpDir, { recursive: true, force: true });
         } catch {
             // best-effort cleanup
         }
@@ -149,6 +165,12 @@ export async function installToolchain(
         });
         if (doctorResult.exitCode !== 0) {
             doctorWarnings = true;
+        } else {
+            const { parseDoctorOutput } = await import('./doctor');
+            const parsed = parseDoctorOutput(doctorResult.stdout);
+            if (parsed.hasErrors || parsed.hasWarnings) {
+                doctorWarnings = true;
+            }
         }
     } catch {
         doctorWarnings = true;

@@ -47,14 +47,21 @@ async function extractTarGz(
     }
 }
 
+/** Escape a string for use inside a PowerShell single-quoted literal. */
+function escapePowerShellSingleQuote(value: string): string {
+    return value.replace(/'/g, "''");
+}
+
 async function extractZip(
     archivePath: string,
     destDir: string,
 ): Promise<void> {
+    const safePath = escapePowerShellSingleQuote(archivePath);
+    const safeDest = escapePowerShellSingleQuote(destDir);
     const result = await exec('powershell', [
         '-NoProfile',
         '-Command',
-        `Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force`,
+        `Expand-Archive -LiteralPath '${safePath}' -DestinationPath '${safeDest}' -Force`,
     ]);
     if (result.exitCode !== 0) {
         throw new Error(
@@ -65,15 +72,19 @@ async function extractZip(
 
 /** Set executable permissions on files in the directory (non-recursive, top level only). */
 function setExecutablePermissions(dir: string): void {
+    let entries: fs.Dirent[];
     try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-            if (entry.isFile()) {
-                const filePath = path.join(dir, entry.name);
-                fs.chmodSync(filePath, 0o755);
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return;
+    }
+    for (const entry of entries) {
+        if (entry.isFile()) {
+            try {
+                fs.chmodSync(path.join(dir, entry.name), 0o755);
+            } catch {
+                // best-effort per file
             }
         }
-    } catch {
-        // Best-effort: don't fail if chmod fails
     }
 }

@@ -25,6 +25,12 @@ describe('download', () => {
             } else if (req.url === '/redirect') {
                 res.writeHead(302, { Location: '/json' });
                 res.end();
+            } else if (req.url === '/redirect-chain-1') {
+                res.writeHead(302, { Location: '/redirect-chain-2' });
+                res.end();
+            } else if (req.url === '/redirect-chain-2') {
+                res.writeHead(302, { Location: '/json' });
+                res.end();
             } else if (req.url === '/binary') {
                 const data = Buffer.from('hello world binary content');
                 res.writeHead(200, {
@@ -41,6 +47,12 @@ describe('download', () => {
             } else if (req.url === '/invalid-json') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end('not valid json{{{');
+            } else if (req.url === '/empty-json') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end('');
+            } else if (req.url === '/json-array') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify([1, 2, 3]));
             } else {
                 res.writeHead(500);
                 res.end('Internal Server Error');
@@ -96,6 +108,38 @@ describe('download', () => {
                 fetchJson(`${baseUrl}/invalid-json`),
                 (err: Error) => {
                     assert.ok(err.message.includes('Failed to parse JSON'));
+                    return true;
+                },
+            );
+        });
+
+        it('follows multi-hop redirect chain', async () => {
+            const result = await fetchJson<{ name: string }>(
+                `${baseUrl}/redirect-chain-1`,
+            );
+            assert.strictEqual(result.name, 'inference');
+        });
+
+        it('rejects on empty response body', async () => {
+            await assert.rejects(
+                fetchJson(`${baseUrl}/empty-json`),
+                (err: Error) => {
+                    assert.ok(err.message.includes('Failed to parse JSON'));
+                    return true;
+                },
+            );
+        });
+
+        it('parses JSON arrays', async () => {
+            const result = await fetchJson<number[]>(`${baseUrl}/json-array`);
+            assert.deepStrictEqual(result, [1, 2, 3]);
+        });
+
+        it('rejects on server error (500)', async () => {
+            await assert.rejects(
+                fetchJson(`${baseUrl}/server-error`),
+                (err: Error) => {
+                    assert.ok(err.message.includes('500'));
                     return true;
                 },
             );
@@ -166,6 +210,32 @@ describe('download', () => {
         });
     });
 
+    describe('downloadFile edge cases', () => {
+        it('overwrites existing file at destPath', async () => {
+            const destPath = path.join(tmpDir, 'overwrite-test');
+            fs.writeFileSync(destPath, 'old content');
+            await downloadFile(`${baseUrl}/binary`, { destPath });
+            const content = fs.readFileSync(destPath, 'utf-8');
+            assert.strictEqual(content, 'hello world binary content');
+        });
+
+        it('rejects on server error', async () => {
+            const destPath = path.join(tmpDir, 'server-error-download');
+            await assert.rejects(
+                downloadFile(`${baseUrl}/server-error`, { destPath }),
+            );
+            assert.ok(!fs.existsSync(destPath));
+        });
+
+        it('follows redirects when downloading files', async () => {
+            const destPath = path.join(tmpDir, 'redirect-download');
+            await downloadFile(`${baseUrl}/redirect-chain-1`, { destPath });
+            assert.ok(fs.existsSync(destPath));
+            const content = fs.readFileSync(destPath, 'utf-8');
+            assert.ok(content.includes('inference'));
+        });
+    });
+
     describe('sha256File', () => {
         it('returns correct hex hash for a known file', async () => {
             const filePath = path.join(tmpDir, 'hash-test');
@@ -187,6 +257,38 @@ describe('download', () => {
                     return true;
                 },
             );
+        });
+
+        it('returns correct hash for empty file', async () => {
+            const filePath = path.join(tmpDir, 'empty-hash-test');
+            fs.writeFileSync(filePath, '');
+            const hash = await sha256File(filePath);
+            assert.strictEqual(
+                hash,
+                'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+            );
+        });
+
+        it('returns consistent hash for same content', async () => {
+            const path1 = path.join(tmpDir, 'hash-consistent-1');
+            const path2 = path.join(tmpDir, 'hash-consistent-2');
+            fs.writeFileSync(path1, 'same content');
+            fs.writeFileSync(path2, 'same content');
+
+            const hash1 = await sha256File(path1);
+            const hash2 = await sha256File(path2);
+            assert.strictEqual(hash1, hash2);
+        });
+
+        it('returns different hashes for different content', async () => {
+            const path1 = path.join(tmpDir, 'hash-diff-1');
+            const path2 = path.join(tmpDir, 'hash-diff-2');
+            fs.writeFileSync(path1, 'content A');
+            fs.writeFileSync(path2, 'content B');
+
+            const hash1 = await sha256File(path1);
+            const hash2 = await sha256File(path2);
+            assert.notStrictEqual(hash1, hash2);
         });
     });
 });

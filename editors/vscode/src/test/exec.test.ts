@@ -37,4 +37,40 @@ describe('exec', () => {
             },
         );
     });
+
+    it('respects custom timeout', async () => {
+        const start = Date.now();
+        const result = await exec('node', ['-e', 'setTimeout(() => {}, 10000)'], {
+            timeoutMs: 500,
+        });
+        const elapsed = Date.now() - start;
+        assert.ok(elapsed < 5000, `Expected fast timeout, took ${elapsed}ms`);
+        assert.notStrictEqual(result.exitCode, 0);
+    });
+
+    it('respects cwd option', async () => {
+        const result = await exec('pwd', [], { cwd: '/tmp' });
+        assert.strictEqual(result.exitCode, 0);
+        assert.ok(
+            result.stdout.trim().startsWith('/tmp'),
+            `Expected /tmp, got ${result.stdout.trim()}`,
+        );
+    });
+
+    it('captures both stdout and stderr from single command', async () => {
+        const result = await exec('node', [
+            '-e',
+            'process.stdout.write("out"); process.stderr.write("err"); process.exit(0)',
+        ]);
+        assert.strictEqual(result.exitCode, 0);
+        assert.strictEqual(result.stdout, 'out');
+        assert.strictEqual(result.stderr, 'err');
+    });
+
+    it('handles empty output', async () => {
+        const result = await exec('node', ['-e', 'process.exit(0)']);
+        assert.strictEqual(result.exitCode, 0);
+        assert.strictEqual(result.stdout, '');
+        assert.strictEqual(result.stderr, '');
+    });
 });
