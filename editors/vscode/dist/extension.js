@@ -1177,6 +1177,7 @@ async function checkToolchain(statusBarItem) {
       `Unsupported platform: ${process.platform}-${process.arch}`
     );
     updateStatusBar(statusBarItem, null);
+    vscode7.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
     vscode7.window.showWarningMessage(
       `Inference: unsupported platform (${process.platform}-${process.arch}).`,
       "Download Page"
@@ -1196,6 +1197,7 @@ async function checkToolchain(statusBarItem) {
   if (!infsPath) {
     outputChannel.appendLine("infs binary not found.");
     updateStatusBar(statusBarItem, null);
+    vscode7.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
     const settings = getSettings();
     if (settings.autoInstall) {
       notifyMissing();
@@ -1206,9 +1208,11 @@ async function checkToolchain(statusBarItem) {
   const versionOk = await checkInfsVersion(infsPath);
   if (!versionOk) {
     updateStatusBar(statusBarItem, null);
+    vscode7.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
     return;
   }
   outputChannel.appendLine("Toolchain detection complete.");
+  vscode7.commands.executeCommand("setContext", "inference.toolchainInstalled", true);
   const doctorResult = await runDoctor(infsPath);
   updateStatusBar(statusBarItem, doctorResult);
   checkForUpdates(infsPath, outputChannel).catch(

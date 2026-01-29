@@ -105,7 +105,67 @@
           "description": "Check for toolchain updates on activation."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "inference.gettingStarted",
+        "title": "Get Started with Inference",
+        "description": "Set up the Inference toolchain and build your first verified program.",
+        "featuredFor": [
+          "**/*.inf"
+        ],
+        "steps": [
+          {
+            "id": "inference.walkthrough.install",
+            "title": "Install the Toolchain",
+            "description": "The Inference toolchain provides the compiler, verifier, and project tools.\n\n[Install Toolchain](command:inference.installToolchain)\n\nAlternatively, [download manually](https://github.com/Inferara/inference/releases) or [configure a custom path](command:workbench.action.openSettings?%5B%22inference.path%22%5D).",
+            "media": {
+              "image": "icons/inference.png",
+              "altText": "Inference logo"
+            },
+            "completionEvents": [
+              "onCommand:inference.installToolchain"
+            ]
+          },
+          {
+            "id": "inference.walkthrough.verify",
+            "title": "Verify Your Installation",
+            "description": "Run the built-in doctor to check that all toolchain components are working correctly.\n\n[Run Doctor](command:inference.runDoctor)\n\nThe status bar at the bottom of VS Code shows toolchain health at a glance.",
+            "media": {
+              "image": "icons/inference.png",
+              "altText": "Inference logo"
+            },
+            "completionEvents": [
+              "onCommand:inference.runDoctor"
+            ]
+          },
+          {
+            "id": "inference.walkthrough.createProject",
+            "title": "Create a Project",
+            "description": "Create a new `.inf` file to start writing Inference code. The extension provides syntax highlighting, bracket matching, and code folding.\n\n[Create New File](command:workbench.action.files.newUntitledFile)",
+            "media": {
+              "image": "icons/inference.png",
+              "altText": "Inference logo"
+            },
+            "completionEvents": [
+              "onLanguage:inference"
+            ]
+          },
+          {
+            "id": "inference.walkthrough.build",
+            "title": "Build Your Program",
+            "description": "Use the integrated terminal to compile your Inference source file:\n\n```\ninfs build main.inf --parse --codegen -o\n```\n\nThis produces a WebAssembly `.wasm` file. Learn more in the [Inference Book](https://github.com/Inferara/book).",
+            "media": {
+              "image": "icons/inference.png",
+              "altText": "Inference logo"
+            },
+            "completionEvents": [
+              "stepSelected"
+            ]
+          }
+        ]
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",

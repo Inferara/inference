@@ -28,6 +28,20 @@ Full syntax highlighting support for Inference language constructs:
 - Automatically activates for `.inf` files
 - Custom file icon for Inference source files
 
+### Toolchain Management
+
+The extension integrates with the `infs` CLI to provide one-button toolchain installation and management. On activation, it automatically detects your toolchain by checking the `inference.path` setting, system `PATH`, and `~/.inference/bin/infs` (respecting `INFERENCE_HOME`).
+
+Available commands (open Command Palette with `Ctrl+Shift+P`):
+
+- **Inference: Install Toolchain** -- download and install `infs` for your platform
+- **Inference: Update Toolchain** -- check for and install updates
+- **Inference: Select Toolchain Version** -- switch between installed versions
+- **Inference: Run Doctor** -- diagnose toolchain issues
+- **Inference: Show Output** -- open the Inference log channel
+
+A guided setup walkthrough is available via **Get Started: Open Walkthrough...** > **Get Started with Inference**.
+
 ## Installation
 
 ### From VS Code Marketplace
@@ -86,6 +100,10 @@ Learn more:
 - [Inference Repository](https://github.com/Inferara/inference)
 - [Language Specification](https://github.com/Inferara/inference-language-spec)
 - [Inference Book](https://github.com/Inferara/book)
+
+## Privacy
+
+This extension does not collect telemetry, usage data, or any personal information. All toolchain operations communicate only with `github.com/Inferara/inference/releases` and `inference-lang.org/releases.json`.
 
 ## Contributing
 
