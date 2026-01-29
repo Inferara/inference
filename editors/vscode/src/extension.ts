@@ -4,9 +4,10 @@ import { detectInfs } from './toolchain/detection';
 import { getSettings } from './config/settings';
 import { exec } from './utils/exec';
 import { compareSemver } from './utils/semver';
+import { registerInstallCommand } from './commands/install';
 
 /** Minimum infs CLI version the extension can work with. */
-const MIN_INFS_VERSION = '0.1.0';
+const MIN_INFS_VERSION = '0.0.1-beta.1';
 
 const outputChannel = vscode.window.createOutputChannel('Inference');
 
@@ -19,9 +20,10 @@ export function activate(context: vscode.ExtensionContext) {
         }),
     );
 
-    // Stub commands for phases 2-4 (registered so VS Code doesn't warn about missing handlers)
+    context.subscriptions.push(registerInstallCommand(outputChannel));
+
+    // Registered so VS Code doesn't warn about missing handlers
     for (const cmd of [
-        'inference.installToolchain',
         'inference.updateToolchain',
         'inference.selectVersion',
         'inference.runDoctor',

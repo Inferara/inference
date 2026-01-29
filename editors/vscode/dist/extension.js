@@ -34,7 +34,7 @@ __export(extension_exports, {
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode2 = __toESM(require("vscode"));
+var vscode3 = __toESM(require("vscode"));
 
 // src/toolchain/platform.ts
 var os = __toESM(require("os"));
@@ -157,25 +157,498 @@ function compareSemver(a, b) {
   return 0;
 }
 
+// src/commands/install.ts
+var vscode2 = __toESM(require("vscode"));
+
+// src/toolchain/installation.ts
+var fs4 = __toESM(require("fs"));
+var os3 = __toESM(require("os"));
+var path3 = __toESM(require("path"));
+
+// src/utils/download.ts
+var https = __toESM(require("https"));
+var http = __toESM(require("http"));
+var fs2 = __toESM(require("fs"));
+var crypto = __toESM(require("crypto"));
+var DEFAULT_TIMEOUT_MS2 = 15e3;
+var MAX_REDIRECTS = 5;
+var SOCKET_TIMEOUT_MS = 15e3;
+function followRedirects(url, remaining) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const requester = parsed.protocol === "https:" ? https : http;
+    const req = requester.get(url, (res) => {
+      const status = res.statusCode ?? 0;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        if (remaining <= 0) {
+          res.resume();
+          reject(new Error(`Too many redirects fetching ${url}`));
+          return;
+        }
+        const target = new URL(res.headers.location, url).href;
+        const targetProtocol = new URL(target).protocol;
+        if (parsed.protocol === "https:" && targetProtocol === "http:") {
+          res.resume();
+          reject(
+            new Error(
+              `Refusing HTTPS-to-HTTP redirect: ${url} -> ${target}`
+            )
+          );
+          return;
+        }
+        res.resume();
+        followRedirects(target, remaining - 1).then(resolve, reject);
+        return;
+      }
+      if (status < 200 || status >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${status} fetching ${url}`));
+        return;
+      }
+      resolve(res);
+    });
+    req.setTimeout(SOCKET_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Connection timed out for ${url}`));
+    });
+    req.on(
+      "error",
+      (err) => reject(new Error(`Network error fetching ${url}: ${err.message}`))
+    );
+  });
+}
+function fetchJson(url) {
+  return new Promise((resolve, reject) => {
+    followRedirects(url, MAX_REDIRECTS).then(
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          try {
+            const text = Buffer.concat(chunks).toString("utf-8");
+            resolve(JSON.parse(text));
+          } catch (err) {
+            reject(
+              new Error(
+                `Failed to parse JSON from ${url}: ${err instanceof Error ? err.message : err}`
+              )
+            );
+          }
+        });
+        res.on(
+          "error",
+          (err) => reject(
+            new Error(
+              `Error reading response from ${url}: ${err.message}`
+            )
+          )
+        );
+      },
+      (err) => reject(err)
+    );
+  });
+}
+function downloadFile(url, options) {
+  const timeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS2;
+  const partialPath = options.destPath + ".partial";
+  return new Promise((resolve, reject) => {
+    followRedirects(url, MAX_REDIRECTS).then(
+      (res) => {
+        const totalStr = res.headers["content-length"];
+        const total = totalStr ? parseInt(totalStr, 10) : void 0;
+        let received = 0;
+        const ws = fs2.createWriteStream(partialPath);
+        res.on("data", (chunk) => {
+          received += chunk.length;
+          options.onProgress?.(received, total);
+        });
+        res.pipe(ws);
+        const cleanup = () => {
+          try {
+            fs2.unlinkSync(partialPath);
+          } catch {
+          }
+        };
+        ws.on("finish", () => {
+          try {
+            fs2.renameSync(partialPath, options.destPath);
+            resolve();
+          } catch (err) {
+            cleanup();
+            reject(
+              new Error(
+                `Failed to save download to ${options.destPath}: ${err instanceof Error ? err.message : err}`
+              )
+            );
+          }
+        });
+        ws.on("error", (err) => {
+          cleanup();
+          reject(
+            new Error(
+              `Failed to write download: ${err.message}`
+            )
+          );
+        });
+        res.on("error", (err) => {
+          ws.destroy();
+          cleanup();
+          reject(
+            new Error(
+              `Download stream error from ${url}: ${err.message}`
+            )
+          );
+        });
+        let dataTimer;
+        const resetTimer = () => {
+          if (dataTimer) {
+            clearTimeout(dataTimer);
+          }
+          dataTimer = setTimeout(() => {
+            res.destroy();
+            ws.destroy();
+            cleanup();
+            reject(new Error(`Download timed out for ${url}`));
+          }, timeout);
+        };
+        resetTimer();
+        res.on("data", resetTimer);
+        res.on("end", () => {
+          if (dataTimer) {
+            clearTimeout(dataTimer);
+          }
+        });
+      },
+      (err) => reject(err)
+    );
+  });
+}
+function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs2.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on(
+      "error",
+      (err) => reject(
+        new Error(
+          `Failed to compute SHA-256 for ${filePath}: ${err.message}`
+        )
+      )
+    );
+  });
+}
+
+// src/utils/extract.ts
+var fs3 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+async function extractArchive(options) {
+  fs3.mkdirSync(options.destDir, { recursive: true });
+  if (options.archivePath.endsWith(".tar.gz") || options.archivePath.endsWith(".tgz")) {
+    await extractTarGz(options.archivePath, options.destDir);
+  } else if (options.archivePath.endsWith(".zip")) {
+    await extractZip(options.archivePath, options.destDir);
+  } else {
+    throw new Error(
+      `Unsupported archive format: ${path2.basename(options.archivePath)}`
+    );
+  }
+  if (process.platform !== "win32") {
+    setExecutablePermissions(options.destDir);
+  }
+}
+async function extractTarGz(archivePath, destDir) {
+  const result = await exec("tar", ["-xzf", archivePath, "-C", destDir]);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `tar extraction failed (exit ${result.exitCode}): ${result.stderr}`
+    );
+  }
+}
+async function extractZip(archivePath, destDir) {
+  const result = await exec("powershell", [
+    "-NoProfile",
+    "-Command",
+    `Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force`
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `zip extraction failed (exit ${result.exitCode}): ${result.stderr}`
+    );
+  }
+}
+function setExecutablePermissions(dir) {
+  try {
+    const entries = fs3.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        const filePath = path2.join(dir, entry.name);
+        fs3.chmodSync(filePath, 493);
+      }
+    }
+  } catch {
+  }
+}
+
+// src/toolchain/manifest.ts
+function toolFromUrl(url) {
+  const filename = url.split("/").pop() ?? "";
+  return filename.split("-")[0] ?? "";
+}
+function osFromUrl(url) {
+  const filename = url.split("/").pop() ?? "";
+  const parts = filename.split("-");
+  return parts.length > 1 ? parts[1] : "";
+}
+function platformOs(platform2) {
+  if (platform2.id === "linux-x64") {
+    return "linux";
+  }
+  if (platform2.id === "macos-arm64") {
+    return "macos";
+  }
+  if (platform2.id === "windows-x64") {
+    return "windows";
+  }
+  return "";
+}
+function findLatestRelease(manifest, platform2, channel) {
+  const candidates = channel === "stable" ? manifest.filter((e) => e.stable) : manifest;
+  if (candidates.length === 0) {
+    return null;
+  }
+  const sorted = [...candidates].sort(
+    (a, b) => compareSemver(b.version, a.version)
+  );
+  const os4 = platformOs(platform2);
+  for (const release of sorted) {
+    const file = release.files.find(
+      (f) => toolFromUrl(f.url) === "infs" && osFromUrl(f.url) === os4
+    );
+    if (file) {
+      return { release, fileUrl: file.url, sha256: file.sha256 };
+    }
+  }
+  return null;
+}
+
+// src/toolchain/installation.ts
+var MANIFEST_URL = "https://inference-lang.org/releases.json";
+async function installToolchain(platform2, onProgress) {
+  const settings = getSettings();
+  const channel = settings.channel === "stable" || settings.channel === "latest" ? settings.channel : "stable";
+  onProgress?.({
+    stage: "fetching-manifest",
+    message: "Fetching release manifest..."
+  });
+  const manifest = await fetchJson(MANIFEST_URL);
+  const match = findLatestRelease(manifest, platform2, channel);
+  if (!match) {
+    throw new Error(
+      `No compatible infs release found for ${platform2.id} in the ${channel} channel.`
+    );
+  }
+  const { release, fileUrl, sha256 } = match;
+  const version = release.version;
+  onProgress?.({
+    stage: "downloading",
+    message: `Downloading infs v${version}...`
+  });
+  const destDir = path3.join(inferenceHome(), "bin");
+  fs4.mkdirSync(destDir, { recursive: true });
+  const archiveName = `infs-${platform2.id}${platform2.archiveExtension}`;
+  const archivePath = path3.join(os3.tmpdir(), archiveName);
+  try {
+    await downloadFile(fileUrl, {
+      destPath: archivePath,
+      onProgress: (received, total) => {
+        onProgress?.({
+          stage: "downloading",
+          message: `Downloading infs v${version}...`,
+          bytesReceived: received,
+          bytesTotal: total
+        });
+      }
+    });
+    const actualHash = await sha256File(archivePath);
+    if (actualHash !== sha256) {
+      throw new Error(
+        `SHA-256 verification failed for infs v${version}. Expected ${sha256}, got ${actualHash}.`
+      );
+    }
+    onProgress?.({
+      stage: "extracting",
+      message: "Extracting archive..."
+    });
+    await extractArchive({ archivePath, destDir });
+  } finally {
+    try {
+      fs4.unlinkSync(archivePath);
+    } catch {
+    }
+  }
+  const infsPath = path3.join(destDir, platform2.binaryName);
+  if (!fs4.existsSync(infsPath)) {
+    throw new Error(
+      `infs binary not found at ${infsPath} after extraction.`
+    );
+  }
+  onProgress?.({
+    stage: "installing",
+    message: "Running infs install..."
+  });
+  const installResult = await exec(infsPath, ["install"], {
+    timeoutMs: 12e4
+  });
+  if (installResult.exitCode !== 0) {
+    throw new Error(
+      `infs install failed (exit ${installResult.exitCode}): ${installResult.stderr || installResult.stdout}`
+    );
+  }
+  onProgress?.({
+    stage: "verifying",
+    message: "Verifying installation..."
+  });
+  let doctorWarnings = false;
+  try {
+    const doctorResult = await exec(infsPath, ["doctor"], {
+      timeoutMs: 3e4
+    });
+    if (doctorResult.exitCode !== 0) {
+      doctorWarnings = true;
+    }
+  } catch {
+    doctorWarnings = true;
+  }
+  return { infsPath, version, doctorWarnings };
+}
+
+// src/commands/install.ts
+var installing = false;
+function registerInstallCommand(outputChannel2) {
+  return vscode2.commands.registerCommand(
+    "inference.installToolchain",
+    async () => {
+      if (installing) {
+        vscode2.window.showInformationMessage(
+          "Inference toolchain installation is already in progress."
+        );
+        return;
+      }
+      const platform2 = detectPlatform();
+      if (!platform2) {
+        vscode2.window.showErrorMessage(
+          `Inference: unsupported platform (${process.platform}-${process.arch}).`
+        );
+        return;
+      }
+      installing = true;
+      try {
+        const result = await installWithProgress(
+          platform2,
+          outputChannel2
+        );
+        outputChannel2.appendLine(
+          `Toolchain v${result.version} installed at ${result.infsPath}`
+        );
+        notifyInstallSuccess(result.version, result.doctorWarnings);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        outputChannel2.appendLine(`Installation failed: ${message}`);
+        notifyInstallError(message);
+      } finally {
+        installing = false;
+      }
+    }
+  );
+}
+function installWithProgress(platform2, outputChannel2) {
+  return vscode2.window.withProgress(
+    {
+      location: vscode2.ProgressLocation.Notification,
+      title: "Inference Toolchain",
+      cancellable: false
+    },
+    async (progress) => {
+      const onProgress = (p) => {
+        outputChannel2.appendLine(p.message);
+        if (p.stage === "downloading" && p.bytesTotal) {
+          const pct = Math.round(
+            (p.bytesReceived ?? 0) / p.bytesTotal * 100
+          );
+          progress.report({ message: `${p.message} (${pct}%)` });
+        } else {
+          progress.report({ message: p.message });
+        }
+      };
+      return installToolchain(platform2, onProgress);
+    }
+  );
+}
+function notifyInstallSuccess(version, doctorWarnings) {
+  if (doctorWarnings) {
+    vscode2.window.showWarningMessage(
+      `Inference toolchain v${version} installed, but doctor reported issues. See output for details.`,
+      "Show Output"
+    ).then((action) => {
+      if (action === "Show Output") {
+        vscode2.commands.executeCommand("inference.showOutput");
+      }
+    });
+  } else {
+    vscode2.window.showInformationMessage(
+      `Inference toolchain v${version} installed successfully.`,
+      "Show Output"
+    ).then((action) => {
+      if (action === "Show Output") {
+        vscode2.commands.executeCommand("inference.showOutput");
+      }
+    });
+  }
+}
+function notifyInstallError(errorMessage) {
+  vscode2.window.showErrorMessage(
+    `Inference toolchain installation failed: ${errorMessage}`,
+    "Retry",
+    "Download Manually",
+    "Settings"
+  ).then((action) => {
+    if (action === "Retry") {
+      vscode2.commands.executeCommand("inference.installToolchain");
+    } else if (action === "Download Manually") {
+      vscode2.env.openExternal(
+        vscode2.Uri.parse(
+          "https://github.com/Inferara/inference/releases"
+        )
+      );
+    } else if (action === "Settings") {
+      vscode2.commands.executeCommand(
+        "workbench.action.openSettings",
+        "inference.path"
+      );
+    }
+  });
+}
+
 // src/extension.ts
 var MIN_INFS_VERSION = "0.1.0";
-var outputChannel = vscode2.window.createOutputChannel("Inference");
+var outputChannel = vscode3.window.createOutputChannel("Inference");
 function activate(context) {
   context.subscriptions.push(outputChannel);
   context.subscriptions.push(
-    vscode2.commands.registerCommand("inference.showOutput", () => {
+    vscode3.commands.registerCommand("inference.showOutput", () => {
       outputChannel.show();
     })
   );
+  context.subscriptions.push(registerInstallCommand(outputChannel));
   for (const cmd of [
-    "inference.installToolchain",
     "inference.updateToolchain",
     "inference.selectVersion",
     "inference.runDoctor"
   ]) {
     context.subscriptions.push(
-      vscode2.commands.registerCommand(cmd, () => {
-        vscode2.window.showInformationMessage(
+      vscode3.commands.registerCommand(cmd, () => {
+        vscode3.window.showInformationMessage(
           "This command will be available in a future update."
         );
       })
@@ -193,13 +666,13 @@ async function checkToolchain() {
     outputChannel.appendLine(
       `Unsupported platform: ${process.platform}-${process.arch}`
     );
-    vscode2.window.showWarningMessage(
+    vscode3.window.showWarningMessage(
       `Inference: unsupported platform (${process.platform}-${process.arch}).`,
       "Download Page"
     ).then((action) => {
       if (action === "Download Page") {
-        vscode2.env.openExternal(
-          vscode2.Uri.parse(
+        vscode3.env.openExternal(
+          vscode3.Uri.parse(
             "https://github.com/Inferara/inference/releases"
           )
         );
@@ -246,7 +719,7 @@ async function checkInfsVersion(infsPath) {
       outputChannel.appendLine(
         `infs version ${version} is below minimum ${MIN_INFS_VERSION}.`
       );
-      vscode2.window.showWarningMessage(
+      vscode3.window.showWarningMessage(
         `Inference: infs version ${version} is outdated (minimum: ${MIN_INFS_VERSION}). Please update.`,
         "Update"
       );
@@ -259,22 +732,22 @@ async function checkInfsVersion(infsPath) {
   }
 }
 function notifyMissing() {
-  vscode2.window.showInformationMessage(
+  vscode3.window.showInformationMessage(
     "Inference toolchain not found. Would you like to install it?",
     "Install",
     "Download Manually",
     "Configure Path"
   ).then((action) => {
     if (action === "Install") {
-      vscode2.commands.executeCommand("inference.installToolchain");
+      vscode3.commands.executeCommand("inference.installToolchain");
     } else if (action === "Download Manually") {
-      vscode2.env.openExternal(
-        vscode2.Uri.parse(
+      vscode3.env.openExternal(
+        vscode3.Uri.parse(
           "https://github.com/Inferara/inference/releases"
         )
       );
     } else if (action === "Configure Path") {
-      vscode2.commands.executeCommand(
+      vscode3.commands.executeCommand(
         "workbench.action.openSettings",
         "inference.path"
       );
