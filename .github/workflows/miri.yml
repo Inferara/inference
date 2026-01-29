@@ -1,0 +1,36 @@
+name: Miri Check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  miri:
+    name: Miri Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run Miri tests for logical crates
+        run: |
+          cargo miri test -p inference-ast
+          cargo miri test -p inference-type-checker
+          cargo miri test -p inf-wasmparser
+          cargo miri test -p wat-fmt
+          cargo miri test -p inf-wast
+          cargo miri test -p wasm-fmt
+        env:
+          # Miri can be slow, so we can disable isolation if needed
+          # MIRIFLAGS: "-Zmiri-disable-isolation"
+          # But for now, let's keep it safe.
+          RUST_BACKTRACE: 1
