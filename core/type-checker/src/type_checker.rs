@@ -597,8 +597,8 @@ impl TypeChecker {
                 let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
                 let right_expr = assign_statement.right.borrow();
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
-                    if let Some(target) = &target_type {
-                        ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
+                    if !target_type.is_error() {
+                        ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else {
                         self.errors.push(TypeCheckError::CannotInferUzumakiType {
                             location: uzumaki_rc.location,
@@ -606,12 +606,13 @@ impl TypeChecker {
                     }
                 } else {
                     let value_type = self.infer_expression(&right_expr, ctx);
-                    if let (Some(target), Some(val)) = (target_type, value_type)
-                        && target != val
+                    if !target_type.is_error()
+                        && !value_type.is_error()
+                        && target_type != value_type
                     {
                         self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target,
-                            found: val,
+                            expected: target_type,
+                            found: value_type,
                             context: TypeMismatchContext::Assignment,
                             location: assign_statement.location,
                         });
@@ -638,12 +639,14 @@ impl TypeChecker {
                         return_type.clone(),
                     );
                 } else {
-                    let value_type =
-                        self.infer_expression(&return_statement.expression.borrow(), ctx);
-                    if *return_type != value_type.clone().unwrap_or_default() {
+                    let val = self.infer_expression(&return_statement.expression.borrow(), ctx);
+                    // Note: return_type.is_error() is a defensive guard; declared return types
+                    // from TypeInfo::new() never produce Error, but this protects against
+                    // future changes.
+                    if !return_type.is_error() && !val.is_error() && *return_type != val {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
-                            found: value_type.unwrap_or_default(),
+                            found: val,
                             context: TypeMismatchContext::Return,
                             location: return_statement.location,
                         });
@@ -652,13 +655,11 @@ impl TypeChecker {
             }
             Statement::Loop(loop_statement) => {
                 if let Some(condition) = &*loop_statement.condition.borrow() {
-                    let condition_type = self.infer_expression(condition, ctx);
-                    if condition_type.is_none()
-                        || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                    {
+                    let cond_type = self.infer_expression(condition, ctx);
+                    if !cond_type.is_error() && !cond_type.is_bool() {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: TypeInfo::boolean(),
-                            found: condition_type.unwrap_or_default(),
+                            found: cond_type,
                             context: TypeMismatchContext::Condition,
                             location: loop_statement.location,
                         });
@@ -672,13 +673,11 @@ impl TypeChecker {
             }
             Statement::Break(_) => {}
             Statement::If(if_statement) => {
-                let condition_type = self.infer_expression(&if_statement.condition.borrow(), ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
+                let cond_type = self.infer_expression(&if_statement.condition.borrow(), ctx);
+                if !cond_type.is_error() && !cond_type.is_bool() {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
+                        found: cond_type,
                         context: TypeMismatchContext::Condition,
                         location: if_statement.location,
                     });
@@ -703,15 +702,22 @@ impl TypeChecker {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
-                        && init_type != TypeInfo::new(&variable_definition_statement.ty)
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target_type.clone(),
-                            found: init_type,
-                            context: TypeMismatchContext::VariableDefinition,
-                            location: variable_definition_statement.location,
-                        });
+                    } else {
+                        let init_type = self.infer_expression(&expr_ref, ctx);
+                        // Note: target_type.is_error() is a defensive guard; declared types
+                        // from TypeInfo::new() never produce Error, but this protects against
+                        // future changes.
+                        if !target_type.is_error()
+                            && !init_type.is_error()
+                            && init_type != TypeInfo::new(&variable_definition_statement.ty)
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: init_type,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location: variable_definition_statement.location,
+                            });
+                        }
                     }
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
@@ -743,14 +749,11 @@ impl TypeChecker {
                 }
             }
             Statement::Assert(assert_statement) => {
-                let condition_type =
-                    self.infer_expression(&assert_statement.expression.borrow(), ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
+                let cond_type = self.infer_expression(&assert_statement.expression.borrow(), ctx);
+                if !cond_type.is_error() && !cond_type.is_bool() {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
+                        found: cond_type,
                         context: TypeMismatchContext::Condition,
                         location: assert_statement.location,
                     });
@@ -776,53 +779,54 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_expression(
-        &mut self,
-        expression: &Expression,
-        ctx: &mut TypedContext,
-    ) -> Option<TypeInfo> {
+    fn infer_expression(&mut self, expression: &Expression, ctx: &mut TypedContext) -> TypeInfo {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
-                    Some(type_info.clone())
-                } else if let Some(array_type) =
-                    self.infer_expression(&array_index_access_expression.array.borrow(), ctx)
-                {
-                    if let Some(index_type) =
-                        self.infer_expression(&array_index_access_expression.index.borrow(), ctx)
-                        && !index_type.is_number()
-                    {
+                    type_info.clone()
+                } else {
+                    let array_type =
+                        self.infer_expression(&array_index_access_expression.array.borrow(), ctx);
+                    let index_type =
+                        self.infer_expression(&array_index_access_expression.index.borrow(), ctx);
+
+                    if !index_type.is_error() && !index_type.is_number() {
                         self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
                             found: index_type,
                             location: array_index_access_expression.location,
                         });
                     }
+
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
+                            let element_type = (**element_type).clone();
                             ctx.set_node_typeinfo(
                                 array_index_access_expression.id,
-                                (**element_type).clone(),
+                                element_type.clone(),
                             );
-                            Some((**element_type).clone())
+                            element_type
                         }
+                        TypeInfoKind::Error => array_type.clone(),
                         _ => {
                             self.errors.push(TypeCheckError::ExpectedArrayType {
                                 found: array_type,
                                 location: array_index_access_expression.location,
                             });
-                            None
+                            TypeInfo::error("Expected array type")
                         }
                     }
-                } else {
-                    None
                 }
             }
             Expression::MemberAccess(member_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(member_access_expression.id) {
-                    Some(type_info.clone())
-                } else if let Some(object_type) =
-                    self.infer_expression(&member_access_expression.expression.borrow(), ctx)
-                {
+                    type_info.clone()
+                } else {
+                    let object_type =
+                        self.infer_expression(&member_access_expression.expression.borrow(), ctx);
+                    if object_type.is_error() {
+                        ctx.set_node_typeinfo(member_access_expression.id, object_type.clone());
+                        return object_type;
+                    }
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -855,14 +859,14 @@ impl TypeChecker {
                                     member_access_expression.id,
                                     field_type.clone(),
                                 );
-                                Some(field_type)
+                                field_type
                             } else {
                                 self.errors.push(TypeCheckError::FieldNotFound {
                                     struct_name,
                                     field_name: field_name.clone(),
                                     location: member_access_expression.location,
                                 });
-                                None
+                                TypeInfo::error("Field not found")
                             }
                         } else {
                             self.errors.push(TypeCheckError::FieldNotFound {
@@ -870,62 +874,63 @@ impl TypeChecker {
                                 field_name: field_name.clone(),
                                 location: member_access_expression.location,
                             });
-                            None
+                            TypeInfo::error("Struct not found for field access")
                         }
                     } else {
                         self.errors.push(TypeCheckError::ExpectedStructType {
                             found: object_type,
                             location: member_access_expression.location,
                         });
-                        None
+                        TypeInfo::error("Expected struct type for member access")
                     }
-                } else {
-                    None
                 }
             }
             Expression::TypeMemberAccess(type_member_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(type_member_access_expression.id) {
-                    return Some(type_info.clone());
+                    return type_info.clone();
                 }
 
-                let inner_expr = type_member_access_expression.expression.borrow();
+                let enum_name = {
+                    let inner_expr = type_member_access_expression.expression.borrow();
 
-                // Extract enum name from the expression - handle Type enum properly
-                let enum_name = match &*inner_expr {
-                    Expression::Type(ty) => {
-                        // Type enum does NOT have a .name() method - must match variants
-                        match ty {
-                            Type::Custom(ident) => ident.name.clone(),
-                            _ => {
-                                // Simple, Array, Generic, Function, QualifiedName, Qualified are not valid for enum access
-                                self.errors.push(TypeCheckError::ExpectedEnumType {
-                                    found: TypeInfo::new(ty),
-                                    location: type_member_access_expression.location,
-                                });
-                                return None;
+                    // Extract enum name from the expression - handle Type enum properly
+                    match &*inner_expr {
+                        Expression::Type(ty) => {
+                            // Type enum does NOT have a .name() method - must match variants
+                            match ty {
+                                Type::Custom(ident) => ident.name.clone(),
+                                _ => {
+                                    // Simple, Array, Generic, Function, QualifiedName, Qualified are not valid for enum access
+                                    self.errors.push(TypeCheckError::ExpectedEnumType {
+                                        found: TypeInfo::new(ty),
+                                        location: type_member_access_expression.location,
+                                    });
+                                    return TypeInfo::error(
+                                        "Expected enum type for variant access",
+                                    );
+                                }
                             }
                         }
-                    }
-                    Expression::Identifier(id) => id.name.clone(),
-                    _ => {
-                        // For other expressions, try to infer the type
-                        drop(inner_expr); // Release borrow before mutable borrow
-                        if let Some(expr_type) = self.infer_expression(
-                            &type_member_access_expression.expression.borrow(),
-                            ctx,
-                        ) {
+                        Expression::Identifier(id) => id.name.clone(),
+                        _ => {
+                            // For other expressions, try to infer the type
+                            drop(inner_expr); // Release borrow before recursion
+                            let expr_type = self.infer_expression(
+                                &type_member_access_expression.expression.borrow(),
+                                ctx,
+                            );
+
                             match &expr_type.kind {
                                 TypeInfoKind::Enum(name) => name.clone(),
+                                TypeInfoKind::Error => return expr_type,
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
                                         location: type_member_access_expression.location,
                                     });
-                                    return None;
+                                    return TypeInfo::error("Expected enum type");
                                 }
                             }
-                        } else {
-                            return None;
                         }
                     }
                 };
@@ -935,8 +940,7 @@ impl TypeChecker {
                 // Look up the enum and validate variant
                 if let Some(enum_info) = self.symbol_table.lookup_enum(&enum_name) {
                     if enum_info.variants.contains(variant_name) {
-                        // Check enum visibility (variants inherit the enum's visibility,
-                        // unlike struct fields which have per-field visibility)
+                        // Check enum visibility (variants inherit the enum's visibility)
                         self.check_and_report_visibility(
                             &enum_info.visibility,
                             enum_info.definition_scope_id,
@@ -950,21 +954,21 @@ impl TypeChecker {
                             type_params: vec![],
                         };
                         ctx.set_node_typeinfo(type_member_access_expression.id, enum_type.clone());
-                        Some(enum_type)
+                        enum_type
                     } else {
                         self.errors.push(TypeCheckError::VariantNotFound {
                             enum_name,
                             variant_name: variant_name.clone(),
                             location: type_member_access_expression.location,
                         });
-                        None
+                        TypeInfo::error("Enum variant not found")
                     }
                 } else {
                     self.push_error_dedup(TypeCheckError::UndefinedEnum {
                         name: enum_name,
                         location: type_member_access_expression.location,
                     });
-                    None
+                    TypeInfo::error("Undefined enum")
                 }
             }
             Expression::FunctionCall(function_call_expression) => {
@@ -1065,7 +1069,7 @@ impl TypeChecker {
                                 function_call_expression.id,
                                 signature.return_type.clone(),
                             );
-                            return Some(signature.return_type.clone());
+                            return signature.return_type.clone();
                         }
                         // Not an enum and not a method - fall through to standard function handling
                     }
@@ -1077,112 +1081,111 @@ impl TypeChecker {
                     let receiver_type =
                         self.infer_expression(&member_access.expression.borrow(), ctx);
 
-                    if let Some(receiver_type) = receiver_type {
-                        let type_name = match &receiver_type.kind {
-                            TypeInfoKind::Struct(name) => Some(name.clone()),
-                            TypeInfoKind::Custom(name) => {
-                                if self.symbol_table.lookup_struct(name).is_some() {
-                                    Some(name.clone())
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        };
-
-                        if let Some(type_name) = type_name {
-                            let method_name = &member_access.name.name;
-                            if let Some(method_info) =
-                                self.symbol_table.lookup_method(&type_name, method_name)
-                            {
-                                // Check if this is an associated function being called as instance method
-                                if !method_info.is_instance_method() {
-                                    // Error: calling associated function with receiver
-                                    self.errors.push(
-                                        TypeCheckError::AssociatedFunctionCalledAsMethod {
-                                            type_name: type_name.clone(),
-                                            method_name: method_name.clone(),
-                                            location: member_access.location,
-                                        },
-                                    );
-                                    // Continue with type checking for better error recovery
-                                }
-
-                                // Check visibility of the method
-                                self.check_and_report_visibility(
-                                    &method_info.visibility,
-                                    method_info.scope_id,
-                                    &member_access.location,
-                                    VisibilityContext::Method {
-                                        type_name: type_name.clone(),
-                                        method_name: method_name.clone(),
-                                    },
-                                );
-
-                                let signature = &method_info.signature;
-                                let arg_count = function_call_expression
-                                    .arguments
-                                    .as_ref()
-                                    .map_or(0, Vec::len);
-
-                                if arg_count != signature.param_types.len() {
-                                    self.errors.push(TypeCheckError::ArgumentCountMismatch {
-                                        kind: "method",
-                                        name: format!("{}::{}", type_name, method_name),
-                                        expected: signature.param_types.len(),
-                                        found: arg_count,
-                                        location: function_call_expression.location,
-                                    });
-                                }
-
-                                if let Some(arguments) = &function_call_expression.arguments {
-                                    for arg in arguments {
-                                        self.infer_expression(&arg.1.borrow(), ctx);
-                                    }
-                                }
-
-                                ctx.set_node_typeinfo(
-                                    member_access.id,
-                                    TypeInfo {
-                                        kind: TypeInfoKind::Function(format!(
-                                            "{}::{}",
-                                            type_name, method_name
-                                        )),
-                                        type_params: vec![],
-                                    },
-                                );
-                                ctx.set_node_typeinfo(
-                                    function_call_expression.id,
-                                    signature.return_type.clone(),
-                                );
-                                return Some(signature.return_type.clone());
-                            }
-                            self.errors.push(TypeCheckError::MethodNotFound {
-                                type_name,
-                                method_name: method_name.clone(),
-                                location: member_access.location,
-                            });
-                            return None;
-                        }
-                        self.errors.push(TypeCheckError::MethodCallOnNonStruct {
-                            found: receiver_type,
-                            location: function_call_expression.location,
-                        });
-                        // Infer arguments even for non-struct receiver for better error recovery
+                    if receiver_type.is_error() {
+                        // Infer arguments even when receiver is error for better error recovery
                         if let Some(arguments) = &function_call_expression.arguments {
                             for arg in arguments {
                                 self.infer_expression(&arg.1.borrow(), ctx);
                             }
                         }
-                        return None;
+                        return receiver_type;
                     }
-                    // Receiver type inference failed; infer arguments for better error recovery
+                    let type_name = match &receiver_type.kind {
+                        TypeInfoKind::Struct(name) => Some(name.clone()),
+                        TypeInfoKind::Custom(name) => {
+                            if self.symbol_table.lookup_struct(name).is_some() {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(type_name) = type_name {
+                        let method_name = &member_access.name.name;
+                        if let Some(method_info) =
+                            self.symbol_table.lookup_method(&type_name, method_name)
+                        {
+                            // Check if this is an associated function being called as instance method
+                            if !method_info.is_instance_method() {
+                                // Error: calling associated function with receiver
+                                self.errors.push(
+                                    TypeCheckError::AssociatedFunctionCalledAsMethod {
+                                        type_name: type_name.clone(),
+                                        method_name: method_name.clone(),
+                                        location: member_access.location,
+                                    },
+                                );
+                            }
+
+                            // Check visibility of the method
+                            self.check_and_report_visibility(
+                                &method_info.visibility,
+                                method_info.scope_id,
+                                &member_access.location,
+                                VisibilityContext::Method {
+                                    type_name: type_name.clone(),
+                                    method_name: method_name.clone(),
+                                },
+                            );
+
+                            let signature = &method_info.signature;
+                            let arg_count = function_call_expression
+                                .arguments
+                                .as_ref()
+                                .map_or(0, Vec::len);
+
+                            if arg_count != signature.param_types.len() {
+                                self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                                    kind: "method",
+                                    name: format!("{}::{}", type_name, method_name),
+                                    expected: signature.param_types.len(),
+                                    found: arg_count,
+                                    location: function_call_expression.location,
+                                });
+                            }
+
+                            if let Some(arguments) = &function_call_expression.arguments {
+                                for arg in arguments {
+                                    self.infer_expression(&arg.1.borrow(), ctx);
+                                }
+                            }
+
+                            ctx.set_node_typeinfo(
+                                member_access.id,
+                                TypeInfo {
+                                    kind: TypeInfoKind::Function(format!(
+                                        "{}::{}",
+                                        type_name, method_name
+                                    )),
+                                    type_params: vec![],
+                                },
+                            );
+                            ctx.set_node_typeinfo(
+                                function_call_expression.id,
+                                signature.return_type.clone(),
+                            );
+                            return signature.return_type.clone();
+                        }
+                        self.errors.push(TypeCheckError::MethodNotFound {
+                            type_name,
+                            method_name: method_name.clone(),
+                            location: member_access.location,
+                        });
+                        return TypeInfo::error("Method not found");
+                    }
+                    self.errors.push(TypeCheckError::MethodCallOnNonStruct {
+                        found: receiver_type,
+                        location: function_call_expression.location,
+                    });
+                    // Infer arguments even for non-struct receiver for better error recovery
                     if let Some(arguments) = &function_call_expression.arguments {
                         for arg in arguments {
                             self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
-                    return None;
+                    return TypeInfo::error("Method call on non-struct");
                 }
 
                 let signature = if let Some(s) = self
@@ -1209,7 +1212,7 @@ impl TypeChecker {
                             self.infer_expression(&arg.1.borrow(), ctx);
                         }
                     }
-                    return None;
+                    return TypeInfo::error("Poisoned type from error");
                 };
                 if let Some(arguments) = &function_call_expression.arguments
                     && arguments.len() != signature.param_types.len()
@@ -1224,7 +1227,7 @@ impl TypeChecker {
                     for arg in arguments {
                         self.infer_expression(&arg.1.borrow(), ctx);
                     }
-                    return None;
+                    return TypeInfo::error("Poisoned type from error");
                 }
 
                 // Build substitution map for generic functions
@@ -1291,117 +1294,109 @@ impl TypeChecker {
                 }
 
                 ctx.set_node_typeinfo(function_call_expression.id, return_type.clone());
-                Some(return_type)
+                return_type
             }
             Expression::Struct(struct_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(struct_expression.id) {
-                    return Some(type_info.clone());
+                    return type_info.clone();
                 }
                 let struct_type = self.symbol_table.lookup_type(&struct_expression.name());
                 if let Some(struct_type) = struct_type {
                     ctx.set_node_typeinfo(struct_expression.id, struct_type.clone());
-                    return Some(struct_type);
+                    return struct_type;
                 }
                 self.push_error_dedup(TypeCheckError::UndefinedStruct {
                     name: struct_expression.name(),
                     location: struct_expression.location,
                 });
-                None
+                let error_type = TypeInfo::error("Undefined struct");
+                ctx.set_node_typeinfo(struct_expression.id, error_type.clone());
+                error_type
             }
             Expression::PrefixUnary(prefix_unary_expression) => {
                 match prefix_unary_expression.operator {
                     UnaryOperatorKind::Not => {
-                        let expression_type_op = self
+                        let expression_type = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_bool() {
-                                ctx.set_node_typeinfo(
-                                    prefix_unary_expression.id,
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::Not,
-                                expected_type: "booleans",
-                                found_type: expression_type,
-                                location: prefix_unary_expression.location,
-                            });
+                        if expression_type.is_bool() || expression_type.is_error() {
+                            ctx.set_node_typeinfo(
+                                prefix_unary_expression.id,
+                                expression_type.clone(),
+                            );
+                            return expression_type;
                         }
-                        None
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::Not,
+                            expected_type: "booleans",
+                            found_type: expression_type,
+                            location: prefix_unary_expression.location,
+                        });
+                        TypeInfo::error("Invalid unary operand")
                     }
                     UnaryOperatorKind::Neg => {
-                        let expression_type_op = self
+                        let expression_type = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_signed_integer() {
-                                ctx.set_node_typeinfo(
-                                    prefix_unary_expression.id,
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::Neg,
-                                expected_type: "signed integers (i8, i16, i32, i64)",
-                                found_type: expression_type,
-                                location: prefix_unary_expression.location,
-                            });
+                        if expression_type.is_signed_integer() || expression_type.is_error() {
+                            ctx.set_node_typeinfo(
+                                prefix_unary_expression.id,
+                                expression_type.clone(),
+                            );
+                            return expression_type;
                         }
-                        None
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::Neg,
+                            expected_type: "signed integers (i8, i16, i32, i64)",
+                            found_type: expression_type,
+                            location: prefix_unary_expression.location,
+                        });
+                        TypeInfo::error("Invalid unary operand")
                     }
                     UnaryOperatorKind::BitNot => {
-                        let expression_type_op = self
+                        let expression_type = self
                             .infer_expression(&prefix_unary_expression.expression.borrow(), ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_number() {
-                                ctx.set_node_typeinfo(
-                                    prefix_unary_expression.id,
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::BitNot,
-                                expected_type: "integers (i8, i16, i32, i64, u8, u16, u32, u64)",
-                                found_type: expression_type,
-                                location: prefix_unary_expression.location,
-                            });
+                        if expression_type.is_number() || expression_type.is_error() {
+                            ctx.set_node_typeinfo(
+                                prefix_unary_expression.id,
+                                expression_type.clone(),
+                            );
+                            return expression_type;
                         }
-                        None
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::BitNot,
+                            expected_type: "integers (i8, i16, i32, i64, u8, u16, u32, u64)",
+                            found_type: expression_type,
+                            location: prefix_unary_expression.location,
+                        });
+                        TypeInfo::error("Invalid unary operand")
                     }
                 }
             }
             Expression::Parenthesized(parenthesized_expression) => {
                 let inner_type =
                     self.infer_expression(&parenthesized_expression.expression.borrow(), ctx);
-                if let Some(ref type_info) = inner_type {
-                    ctx.set_node_typeinfo(parenthesized_expression.id, type_info.clone());
-                }
+                ctx.set_node_typeinfo(parenthesized_expression.id, inner_type.clone());
                 inner_type
             }
             Expression::Binary(binary_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(binary_expression.id) {
-                    return Some(type_info.clone());
+                    return type_info.clone();
                 }
                 let left_type = self.infer_expression(&binary_expression.left.borrow(), ctx);
                 let right_type = self.infer_expression(&binary_expression.right.borrow(), ctx);
-                if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
-                    if left_type != right_type {
-                        self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
-                            operator: binary_expression.operator.clone(),
-                            left: left_type.clone(),
-                            right: right_type.clone(),
-                            location: binary_expression.location,
-                        });
-                    }
-                    let res_type = match binary_expression.operator {
-                        OperatorKind::And | OperatorKind::Or => {
+
+                if !left_type.is_error() && !right_type.is_error() && left_type != right_type {
+                    self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
+                        operator: binary_expression.operator.clone(),
+                        left: left_type.clone(),
+                        right: right_type.clone(),
+                        location: binary_expression.location,
+                    });
+                }
+                let res_type = match binary_expression.operator {
+                    OperatorKind::And | OperatorKind::Or => {
+                        if !left_type.is_error() && !right_type.is_error() {
                             if left_type.is_bool() && right_type.is_bool() {
-                                TypeInfo {
-                                    kind: TypeInfoKind::Bool,
-                                    type_params: vec![],
-                                }
+                                TypeInfo::boolean()
                             } else {
                                 self.errors.push(TypeCheckError::InvalidBinaryOperand {
                                     operator: binary_expression.operator.clone(),
@@ -1410,30 +1405,50 @@ impl TypeChecker {
                                     found_types: (left_type, right_type),
                                     location: binary_expression.location,
                                 });
-                                return None;
+                                TypeInfo::error("Invalid binary operand")
+                            }
+                        } else {
+                            if left_type.is_error() {
+                                left_type
+                            } else {
+                                right_type
                             }
                         }
-                        OperatorKind::Eq
-                        | OperatorKind::Ne
-                        | OperatorKind::Lt
-                        | OperatorKind::Le
-                        | OperatorKind::Gt
-                        | OperatorKind::Ge => TypeInfo {
-                            kind: TypeInfoKind::Bool,
-                            type_params: vec![],
-                        },
-                        OperatorKind::Pow
-                        | OperatorKind::Add
-                        | OperatorKind::Sub
-                        | OperatorKind::Mul
-                        | OperatorKind::Div
-                        | OperatorKind::Mod
-                        | OperatorKind::BitAnd
-                        | OperatorKind::BitOr
-                        | OperatorKind::BitXor
-                        | OperatorKind::BitNot
-                        | OperatorKind::Shl
-                        | OperatorKind::Shr => {
+                    }
+                    OperatorKind::Eq
+                    | OperatorKind::Ne
+                    | OperatorKind::Lt
+                    | OperatorKind::Le
+                    | OperatorKind::Gt
+                    | OperatorKind::Ge => {
+                        // Propagate error types for consistency with other operators
+                        if left_type.is_error() {
+                            left_type.clone()
+                        } else if right_type.is_error() {
+                            right_type.clone()
+                        } else {
+                            TypeInfo::boolean()
+                        }
+                    }
+                    OperatorKind::Pow
+                    | OperatorKind::Add
+                    | OperatorKind::Sub
+                    | OperatorKind::Mul
+                    | OperatorKind::Div
+                    | OperatorKind::Mod
+                    | OperatorKind::BitAnd
+                    | OperatorKind::BitOr
+                    | OperatorKind::BitXor
+                    | OperatorKind::BitNot
+                    | OperatorKind::Shl
+                    | OperatorKind::Shr => {
+                        // Propagate error types symmetrically: 5 + unknown and unknown + 5
+                        // should both return Error type
+                        if left_type.is_error() {
+                            left_type.clone()
+                        } else if right_type.is_error() {
+                            right_type.clone()
+                        } else {
                             if !left_type.is_number() || !right_type.is_number() {
                                 self.errors.push(TypeCheckError::InvalidBinaryOperand {
                                     operator: binary_expression.operator.clone(),
@@ -1443,90 +1458,88 @@ impl TypeChecker {
                                     location: binary_expression.location,
                                 });
                             }
-                            if left_type != right_type {
-                                self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
-                                    operator: binary_expression.operator.clone(),
-                                    left: left_type.clone(),
-                                    right: right_type,
-                                    location: binary_expression.location,
-                                });
-                            }
                             left_type.clone()
                         }
-                    };
-                    ctx.set_node_typeinfo(binary_expression.id, res_type.clone());
-                    Some(res_type)
-                } else {
-                    None
-                }
+                    }
+                };
+                ctx.set_node_typeinfo(binary_expression.id, res_type.clone());
+                res_type
             }
             Expression::Literal(literal) => match literal {
                 Literal::Array(array_literal) => {
                     if let Some(type_info) = ctx.get_node_typeinfo(array_literal.id) {
-                        return Some(type_info);
+                        return type_info;
                     }
-                    if let Some(elements) = &array_literal.elements
-                        && let Some(element_type_info) =
-                            self.infer_expression(&elements[0].borrow(), ctx)
-                    {
-                        for element in &elements[1..] {
-                            let element_type = self.infer_expression(&element.borrow(), ctx);
-                            if let Some(element_type) = element_type
-                                && element_type != element_type_info
-                            {
-                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                    expected: element_type_info.clone(),
-                                    found: element_type,
-                                    location: array_literal.location,
-                                });
+                    if let Some(elements) = &array_literal.elements {
+                        if let Some(first) = elements.first() {
+                            let element_type_info = self.infer_expression(&first.borrow(), ctx);
+                            for element in &elements[1..] {
+                                let element_type = self.infer_expression(&element.borrow(), ctx);
+                                if !element_type.is_error()
+                                    && !element_type_info.is_error()
+                                    && element_type != element_type_info
+                                {
+                                    self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                        expected: element_type_info.clone(),
+                                        found: element_type,
+                                        location: array_literal.location,
+                                    });
+                                }
                             }
+                            let array_type = TypeInfo {
+                                kind: TypeInfoKind::Array(
+                                    Box::new(element_type_info),
+                                    elements.len() as u32,
+                                ),
+                                type_params: vec![],
+                            };
+                            ctx.set_node_typeinfo(array_literal.id, array_type.clone());
+                            return array_type;
                         }
-                        let array_type = TypeInfo {
-                            kind: TypeInfoKind::Array(
-                                Box::new(element_type_info),
-                                elements.len() as u32,
-                            ),
-                            type_params: vec![],
-                        };
-                        ctx.set_node_typeinfo(array_literal.id, array_type.clone());
-                        return Some(array_type);
                     }
-                    None
+                    let array_type = TypeInfo {
+                        kind: TypeInfoKind::Array(Box::new(TypeInfo::default()), 0),
+                        type_params: vec![],
+                    };
+                    ctx.set_node_typeinfo(array_literal.id, array_type.clone());
+                    array_type
                 }
                 Literal::Bool(_) => {
                     ctx.set_node_typeinfo(literal.id(), TypeInfo::boolean());
-                    Some(TypeInfo::boolean())
+                    TypeInfo::boolean()
                 }
                 Literal::String(sl) => {
                     ctx.set_node_typeinfo(sl.id, TypeInfo::string());
-                    Some(TypeInfo::string())
+                    TypeInfo::string()
                 }
                 Literal::Number(number_literal) => {
-                    if ctx.get_node_typeinfo(number_literal.id).is_some() {
-                        return ctx.get_node_typeinfo(number_literal.id);
+                    if let Some(ti) = ctx.get_node_typeinfo(number_literal.id) {
+                        return ti;
                     }
                     let res_type = TypeInfo {
                         kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     };
                     ctx.set_node_typeinfo(number_literal.id, res_type.clone());
-                    Some(res_type)
+                    res_type
                 }
                 Literal::Unit(_) => {
                     ctx.set_node_typeinfo(literal.id(), TypeInfo::default());
-                    Some(TypeInfo::default())
+                    TypeInfo::default()
                 }
             },
             Expression::Identifier(identifier) => {
                 if let Some(var_ty) = self.symbol_table.lookup_variable(&identifier.name) {
                     ctx.set_node_typeinfo(identifier.id, var_ty.clone());
-                    Some(var_ty)
+                    var_ty
                 } else {
                     self.push_error_dedup(TypeCheckError::UnknownIdentifier {
                         name: identifier.name.clone(),
                         location: identifier.location,
                     });
-                    None
+                    let error_type = TypeInfo::error("Undefined identifier");
+                    ctx.set_node_typeinfo(identifier.id, error_type.clone());
+                    error_type
                 }
             }
             Expression::Type(type_expr) => {
@@ -1535,9 +1548,21 @@ impl TypeChecker {
                 if let Type::Array(array_type) = type_expr {
                     self.infer_expression(&array_type.size.clone(), ctx);
                 }
-                Some(type_info)
+                type_info
             }
-            Expression::Uzumaki(uzumaki) => ctx.get_node_typeinfo(uzumaki.id),
+            Expression::Uzumaki(uzumaki) => {
+                if let Some(ti) = ctx.get_node_typeinfo(uzumaki.id) {
+                    ti
+                } else {
+                    // This path should be unreachable: Uzumaki types are always set
+                    // by the containing statement (VariableDefinition, Assign, Return).
+                    // If we reach here, it indicates a bug in the type checker.
+                    self.errors.push(TypeCheckError::CannotInferUzumakiType {
+                        location: uzumaki.location,
+                    });
+                    TypeInfo::error("Uzumaki type not inferred")
+                }
+            }
         }
     }
 
@@ -2043,7 +2068,7 @@ impl TypeChecker {
                 // Infer the argument type
                 let arg_type = self.infer_expression(&args[i].1.borrow(), ctx);
 
-                if let Some(arg_type) = arg_type {
+                if !arg_type.is_error() {
                     // Check for conflicting inference
                     if let Some(existing) = substitutions.get(type_param_name) {
                         if *existing != arg_type {

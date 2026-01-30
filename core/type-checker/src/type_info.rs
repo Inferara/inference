@@ -194,6 +194,12 @@ pub enum TypeInfoKind {
     Struct(String),
     Enum(String),
     Spec(String),
+    /// Represents a type error during type checking.
+    ///
+    /// All Error types are equal to each other, following rustc's TyKind::Error
+    /// pattern. This ensures that comparisons between error types don't produce
+    /// spurious type mismatch diagnostics.
+    Error,
 }
 
 impl Display for TypeInfoKind {
@@ -212,6 +218,7 @@ impl Display for TypeInfoKind {
             | TypeInfoKind::Qualified(ty)
             | TypeInfoKind::Function(ty) => write!(f, "{ty}"),
             TypeInfoKind::Generic(ty) => write!(f, "{ty}'"),
+            TypeInfoKind::Error => write!(f, "{{error}}"),
         }
     }
 }
@@ -303,6 +310,19 @@ impl TypeInfo {
     pub fn boolean() -> Self {
         Self {
             kind: TypeInfoKind::Bool,
+            type_params: vec![],
+        }
+    }
+
+    /// Creates an error type to represent a failed type lookup or inference.
+    ///
+    /// Error types are used to poison the type graph when an error occurs,
+    /// preventing cascading errors from being reported. All error types are
+    /// equal to each other.
+    #[must_use = "this returns a new TypeInfo, it does not modify anything"]
+    pub fn error(_msg: impl Into<String>) -> Self {
+        Self {
+            kind: TypeInfoKind::Error,
             type_params: vec![],
         }
     }
@@ -426,6 +446,16 @@ impl TypeInfo {
         matches!(self.kind, TypeInfoKind::Generic(_))
     }
 
+    /// Returns true if this is an error type.
+    ///
+    /// Error types are used to suppress cascading errors in the type checker.
+    /// When an expression has an error type, downstream operations should
+    /// propagate the error without reporting additional diagnostics.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn is_error(&self) -> bool {
+        matches!(self.kind, TypeInfoKind::Error)
+    }
+
     /// Returns true if this is a signed integer type (i8, i16, i32, i64).
     #[must_use = "this is a pure check with no side effects"]
     pub fn is_signed_integer(&self) -> bool {
@@ -469,7 +499,8 @@ impl TypeInfo {
             | TypeInfoKind::Function(_)
             | TypeInfoKind::Struct(_)
             | TypeInfoKind::Enum(_)
-            | TypeInfoKind::Spec(_) => self.clone(),
+            | TypeInfoKind::Spec(_)
+            | TypeInfoKind::Error => self.clone(),
         }
     }
 
@@ -490,7 +521,8 @@ impl TypeInfo {
             | TypeInfoKind::Function(_)
             | TypeInfoKind::Struct(_)
             | TypeInfoKind::Enum(_)
-            | TypeInfoKind::Spec(_) => false,
+            | TypeInfoKind::Spec(_)
+            | TypeInfoKind::Error => false,
         }
     }
 
