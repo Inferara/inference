@@ -1,21 +1,104 @@
-//! Type Information
+//! Type Information and Representation
 //!
-//! This module defines the representation of types used throughout the type checker.
+//! This module defines the type representation system used throughout the type checker
+//! for semantic analysis, type inference, and type checking.
 //!
-//! The Inference language supports:
-//! - Primitive types: bool, unit, i8-i64, u8-u64
-//! - Compound types: arrays, structs, enums, functions
-//! - Generic types: type parameters that can be substituted
+//! ## Type Categories
 //!
-//! Generic types use [`TypeInfoKind::Generic`] for unbound type parameters.
-//! The [`TypeInfo::substitute`] method replaces type parameters with concrete types.
+//! The Inference language type system includes:
+//!
+//! **Primitive Types**:
+//! - `unit` - The unit type (similar to void)
+//! - `bool` - Boolean type with values `true` and `false`
+//! - `string` - UTF-8 encoded strings (partial support)
+//! - Numeric types: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
+//!
+//! **Compound Types**:
+//! - Arrays: `[T; N]` with element type `T` and fixed size `N`
+//! - Structs: User-defined types with named fields
+//! - Enums: User-defined types with named variants (unit variants only currently)
+//! - Functions: Function types with parameter and return types
+//!
+//! **Generic Types**:
+//! - Type parameters: Unbound type variables that can be substituted
+//! - Generic arrays: `[T; N]` where `T` is a type parameter
+//! - Generic functions: Functions with type parameters
+//!
+//! ## Type Representation
+//!
+//! The type checker uses [`TypeInfo`] as its primary type representation:
+//!
+//! ```ignore
+//! pub struct TypeInfo {
+//!     pub kind: TypeInfoKind,      // The actual type
+//!     pub type_params: Vec<String>, // Generic type parameters (if any)
+//! }
+//! ```
+//!
+//! The [`TypeInfoKind`] enum discriminates between different type categories:
+//! - `Unit`, `Bool`, `String` - Primitive non-numeric types
+//! - `Number(NumberType)` - Numeric types with size and signedness
+//! - `Array(Box<TypeInfo>, u32)` - Arrays with element type and size
+//! - `Struct(String)`, `Enum(String)` - Named user-defined types
+//! - `Generic(String)` - Unbound type parameters
+//! - And more...
 //!
 //! ## Type Conversion from AST
 //!
 //! Primitive builtin types in the AST use `Type::Simple(SimpleTypeKind)`, a
-//! lightweight enum without heap allocation. The `TypeInfo::new()` method converts
-//! these to `TypeInfoKind` variants through direct pattern matching for efficient
+//! lightweight enum without heap allocation. The [`TypeInfo::new`] method converts
+//! these to [`TypeInfoKind`] variants through direct pattern matching for efficient
 //! type checking.
+//!
+//! The conversion process:
+//! 1. AST parser creates `Type::Simple(SimpleTypeKind::I32)` (stack-allocated enum)
+//! 2. Type checker calls `TypeInfo::new(&ast_type)`
+//! 3. Pattern match on `Type::Simple(kind)` calls `type_kind_from_simple_type_kind(kind)`
+//! 4. Returns `TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), type_params: [] }`
+//!
+//! This design provides zero-allocation type representation in the AST while enabling
+//! rich semantic information in the type checker.
+//!
+//! ## Generic Type Handling
+//!
+//! Generic types use [`TypeInfoKind::Generic`] for unbound type parameters:
+//!
+//! ```ignore
+//! // Generic function: fn identity<T>(x: T) -> T
+//! let param_type = TypeInfo {
+//!     kind: TypeInfoKind::Generic("T".to_string()),
+//!     type_params: vec![],
+//! };
+//! ```
+//!
+//! The [`TypeInfo::substitute`] method replaces type parameters with concrete types:
+//!
+//! ```ignore
+//! // Call: identity(42) where 42: i32
+//! let substitutions = hashmap! {
+//!     "T".to_string() => TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), ... }
+//! };
+//! let concrete_type = param_type.substitute(&substitutions);
+//! // Result: TypeInfo { kind: Number(I32), ... }
+//! ```
+//!
+//! ## Number Type Representation
+//!
+//! The [`NumberType`] enum provides a type-safe representation of numeric types:
+//!
+//! ```ignore
+//! pub enum NumberType {
+//!     I8, I16, I32, I64,  // Signed integers
+//!     U8, U16, U32, U64,  // Unsigned integers
+//! }
+//! ```
+//!
+//! Benefits:
+//! - Type-safe: only valid numeric types can exist
+//! - Efficient: enum discriminant comparison
+//! - Exhaustive: compiler enforces handling all cases
+//! - Introspectable: `ALL` constant for iteration
+//! - Queryable: `is_signed()` method for signedness checks
 
 use core::fmt;
 use std::{

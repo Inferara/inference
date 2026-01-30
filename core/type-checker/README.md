@@ -276,43 +276,42 @@ Test organization:
 
 ## Recent Changes
 
-### Issue #86 Enhancements
+### Core Type Checking System (Issues #54, #86)
 
-**Operator Support**:
-- **Division operator** (`/`) type checking for numeric types
-- **Unary negation operator** (`-`) type checking for signed integers (i8, i16, i32, i64)
-- **Bitwise NOT operator** (`~`) type checking for all integer types
-
-**Visibility Parsing**:
-- Comprehensive visibility support in type checker for functions, structs, enums, constants, and type aliases
-- Proper handling of `pub` modifiers throughout the symbol table and type checking phases
-- Visibility checking enforced during imports and symbol access
-
-**Implementation Improvements**:
-- Expression inference now uses immutable references for better performance
-- Atomic counter integration for deterministic node ID generation from AST
-
-### Issue #54 Initial Implementation
-
-**Core Type Checking System**:
-- Bidirectional type inference with synthesis and checking modes
-- Multi-phase type checking (directives → types → imports → functions → variables)
+**Multi-Phase Type Checking**:
+- Bidirectional type inference combining synthesis and checking modes
+- Five-phase analysis: directives → types → imports → functions → variables
 - Scope-aware symbol table with hierarchical scope management
 - Import system with registration and resolution phases
 - Generic type parameter inference and substitution
 
 **Type System Features**:
-- Full support for primitive types (bool, string, unit, i8-i64, u8-u64)
+- Full support for primitive types using efficient `SimpleTypeKind` enum representation
+- Primitive types (bool, unit, i8-i64, u8-u64) without heap allocation
 - Array types with fixed sizes and element type checking
 - Struct types with field visibility and member access validation
 - Enum types with variant access validation
 - Method resolution for instance methods and associated functions
 
+**Operator Support**:
+- Arithmetic operators: `+`, `-`, `*`, `/`, `%`, `**`
+- Comparison operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- Logical operators: `&&`, `||`, `!`
+- Bitwise operators: `&`, `|`, `^`, `<<`, `>>`, `~`
+- Unary operators: `-` (signed integers), `!` (boolean), `~` (all integers)
+
+**Visibility and Access Control**:
+- Comprehensive visibility support for functions, structs, enums, constants, and type aliases
+- Proper handling of `pub` modifiers throughout symbol table and type checking phases
+- Visibility checking enforced during imports and symbol access
+- Private-by-default with explicit `pub` for public items
+
 **Error Handling**:
-- Comprehensive error system with 29 distinct error variants
+- Comprehensive error system with detailed error variants
 - Error recovery to collect multiple errors before failing
 - Error deduplication to avoid repeated reports
 - Detailed error messages with context and location information
+- Precise source locations for all errors
 
 ## Implementation Details
 
@@ -391,15 +390,22 @@ Detailed documentation is available in the `docs/` directory:
 - [Language Specification](https://github.com/Inferara/inference-language-spec) - Inference language reference
 - [CONTRIBUTING.md](../../CONTRIBUTING.md) - Development guidelines
 
-## Future Work
+## Current Limitations and Future Work
 
-Current limitations and planned improvements:
+### Current Limitations
 
-- Multi-file support: Currently expects single source file
-- Trait system: Not yet implemented
-- Type inference for closures: Under development
-- Exhaustiveness checking for enums: Planned
-- Const generics: Future consideration
+- **Single-file only**: Multi-file support under development
+- **No higher-ranked types**: Polymorphism limited to function definitions
+- **No associated types**: Only concrete type parameters supported
+- **Limited const evaluation**: Array sizes must be literals
+- **No exhaustiveness checking**: Enum pattern matching completeness not verified
+
+### Planned Features
+
+- **Multi-file compilation**: Cross-file type checking and module system
+- **Type inference improvements**: Let-polymorphism for better local inference
+- **Const generics**: Array sizes as generic parameters
+- **Exhaustiveness checking**: Ensure all enum variants are handled in match expressions
 
 ## License
 

@@ -146,15 +146,16 @@ Run tests:
 cargo test
 ```
 
-Run the CLI:
+Run the CLI (either `infs` or `infc`):
 ```bash
+./target/debug/infs --help
 ./target/debug/infc --help
 ```
 
 Compile a sample file:
 ```bash
 echo 'fn main() -> i32 { return 42; }' > test.inf
-./target/debug/infc test.inf --parse --codegen -o
+./target/debug/infs build test.inf --parse --codegen -o
 ls -la out/
 ```
 

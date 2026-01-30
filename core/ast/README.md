@@ -41,6 +41,13 @@ for func in functions {
     println!("Function: {}", func.name.name);
 }
 
+// Find any node by ID
+if let Some(node) = arena.find_node(node_id) {
+    // All nodes have id() and location() methods
+    println!("Node ID: {}", node.id());
+    println!("Location: {}:{}", node.location().start_line, node.location().start_column);
+}
+
 // Find parent of a node
 if let Some(parent_id) = arena.find_parent_node(node_id) {
     let parent = arena.find_node(parent_id);
@@ -54,6 +61,8 @@ if let Some(source_text) = arena.get_node_source(node_id) {
 
 ## Architecture
 
+### Arena Storage
+
 The AST uses a three-tier storage system:
 
 1. **Node Storage** (`nodes: FxHashMap<u32, AstNode>`): Maps node IDs to actual node data
@@ -65,6 +74,15 @@ This design provides:
 - O(1) parent lookup
 - O(1) children list lookup (plus O(c) to access child nodes where c is the number of children)
 - O(d) source file lookup where d is tree depth (typically < 20 levels)
+
+### Node Type System
+
+Node types are defined using custom macros that ensure consistency:
+- `ast_node!` macro: Generates struct definitions with required `id` and `location` fields
+- `ast_enum!` macro: Generates enum wrappers with uniform `id()` and `location()` accessors
+- `@skip` annotation: Marks variants (like `SimpleTypeKind`) that are Copy types without ID/location
+
+This macro-based approach eliminates boilerplate and ensures all nodes follow the same conventions.
 
 ## Documentation
 
@@ -111,11 +129,35 @@ Test coverage includes:
 - Edge cases (root nodes, nonexistent IDs, deeply nested structures)
 - Performance characteristics
 
+## External Module Support
+
+The crate provides utilities for parsing and managing external modules:
+
+```rust
+use inference_ast::extern_prelude::{create_empty_prelude, parse_external_module};
+use std::path::Path;
+
+let mut prelude = create_empty_prelude();
+parse_external_module(Path::new("/path/to/stdlib"), "std", &mut prelude)?;
+
+// Access parsed module
+if let Some(parsed) = prelude.get("std") {
+    let functions = parsed.arena.functions();
+    // ... use stdlib functions for type checking
+}
+```
+
+See `src/extern_prelude.rs` for the complete API.
+
+**Note:** Multi-file parsing via `ParserContext` is a work in progress. Currently, the crate supports single-file compilation with external module resolution through `extern_prelude`.
+
 ## Dependencies
 
 - `rustc-hash`: Fast hash maps (FxHashMap) for node storage
 - `tree-sitter`: Parser integration for building AST from source
 - `tree-sitter-inference`: Grammar for the Inference language
+- `anyhow`: Error handling
+- `thiserror`: Structured error types
 
 ## Performance Characteristics
 
