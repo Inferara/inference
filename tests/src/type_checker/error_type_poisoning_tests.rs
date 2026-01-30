@@ -8,7 +8,7 @@
 //!
 //! The error poisoning feature is inspired by rustc's TyKind::Error model.
 
-
+#[cfg(test)]
 mod error_type_poisoning_tests {
     use crate::utils::build_ast;
     use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
@@ -53,7 +53,8 @@ mod error_type_poisoning_tests {
         #[test]
         fn test_error_type_display() {
             let error_type = TypeInfo::error("test message");
-            assert_eq!(error_type.to_string(), "{error: test message}");
+            // Error types now display without message (unit variant)
+            assert_eq!(error_type.to_string(), "{error}");
         }
 
         #[test]
@@ -87,17 +88,16 @@ mod error_type_poisoning_tests {
 
             if let Err(error) = result {
                 let error_msg = error.to_string();
+                let errors: Vec<&str> = error_msg.split("; ").collect();
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "Should produce exactly 1 error (undeclared variable), got: {:?}",
+                    errors
+                );
                 assert!(
                     error_msg.contains("unknown_var"),
                     "Should report undeclared variable: {}",
-                    error_msg
-                );
-                // Should NOT have type mismatch between i32 and {error}
-                let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
-                assert!(
-                    !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }
@@ -131,17 +131,16 @@ mod error_type_poisoning_tests {
 
             if let Err(error) = result {
                 let error_msg = error.to_string();
+                let errors: Vec<&str> = error_msg.split("; ").collect();
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "Should produce exactly 1 error (undefined function), got: {:?}",
+                    errors
+                );
                 assert!(
                     error_msg.contains("undefined_func"),
                     "Should report undefined function: {}",
-                    error_msg
-                );
-                // Should NOT have type mismatch between i32 and {error}
-                let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
-                assert!(
-                    !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }
@@ -156,13 +155,18 @@ mod error_type_poisoning_tests {
 
             if let Err(error) = result {
                 let error_msg = error.to_string();
+                let errors: Vec<&str> = error_msg.split("; ").collect();
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "Should produce exactly 1 error (undeclared variable), got: {:?}",
+                    errors
+                );
                 assert!(
                     error_msg.contains("unknown_var"),
                     "Should report undeclared variable: {}",
                     error_msg
                 );
-                // Should NOT report "expected numeric type" for the binary operation
-                // because the left operand is Error type
             }
         }
 
@@ -211,18 +215,16 @@ mod error_type_poisoning_tests {
 
             if let Err(error) = result {
                 let error_msg = error.to_string();
+                let errors: Vec<&str> = error_msg.split("; ").collect();
+                assert_eq!(
+                    errors.len(),
+                    1,
+                    "Should produce exactly 1 error (undeclared variable), got: {:?}",
+                    errors
+                );
                 assert!(
                     error_msg.contains("unknown_cond"),
                     "Should report undeclared variable: {}",
-                    error_msg
-                );
-                // Should NOT report "expected bool type" for the condition
-                // because the condition is Error type
-                let type_mismatch_unknown =
-                    error_msg.contains("type mismatch") && error_msg.contains("{error}");
-                assert!(
-                    !type_mismatch_unknown,
-                    "Should NOT report type mismatch with {{error}}: {}",
                     error_msg
                 );
             }
@@ -434,12 +436,14 @@ mod error_type_poisoning_tests {
 
         #[test]
         fn test_error_types_are_equal() {
-            let error1 = TypeInfo::error("same message");
-            let error2 = TypeInfo::error("same message");
-            assert_eq!(error1, error2);
-
+            // All error types are equal (unit variant without payload)
+            let error1 = TypeInfo::error("message one");
+            let error2 = TypeInfo::error("message two");
             let error3 = TypeInfo::error("different message");
-            assert_ne!(error1, error3);
+            // All Error types should be equal regardless of the message passed in
+            assert_eq!(error1, error2);
+            assert_eq!(error1, error3);
+            assert_eq!(error2, error3);
         }
 
         #[test]

@@ -606,7 +606,10 @@ impl TypeChecker {
                     }
                 } else {
                     let value_type = self.infer_expression(&right_expr, ctx);
-                    if !target_type.is_error() && !value_type.is_error() && target_type != value_type {
+                    if !target_type.is_error()
+                        && !value_type.is_error()
+                        && target_type != value_type
+                    {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: target_type,
                             found: value_type,
@@ -636,8 +639,10 @@ impl TypeChecker {
                         return_type.clone(),
                     );
                 } else {
-                    let val =
-                        self.infer_expression(&return_statement.expression.borrow(), ctx);
+                    let val = self.infer_expression(&return_statement.expression.borrow(), ctx);
+                    // Note: return_type.is_error() is a defensive guard; declared return types
+                    // from TypeInfo::new() never produce Error, but this protects against
+                    // future changes.
                     if !return_type.is_error() && !val.is_error() && *return_type != val {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: return_type.clone(),
@@ -669,7 +674,7 @@ impl TypeChecker {
             Statement::Break(_) => {}
             Statement::If(if_statement) => {
                 let cond_type = self.infer_expression(&if_statement.condition.borrow(), ctx);
-                if !cond_type.is_error()  && !cond_type.is_bool() {
+                if !cond_type.is_error() && !cond_type.is_bool() {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
                         found: cond_type,
@@ -699,6 +704,9 @@ impl TypeChecker {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else {
                         let init_type = self.infer_expression(&expr_ref, ctx);
+                        // Note: target_type.is_error() is a defensive guard; declared types
+                        // from TypeInfo::new() never produce Error, but this protects against
+                        // future changes.
                         if !target_type.is_error()
                             && !init_type.is_error()
                             && init_type != TypeInfo::new(&variable_definition_statement.ty)
@@ -741,8 +749,7 @@ impl TypeChecker {
                 }
             }
             Statement::Assert(assert_statement) => {
-                let cond_type =
-                    self.infer_expression(&assert_statement.expression.borrow(), ctx);
+                let cond_type = self.infer_expression(&assert_statement.expression.borrow(), ctx);
                 if !cond_type.is_error() && !cond_type.is_bool() {
                     self.errors.push(TypeCheckError::TypeMismatch {
                         expected: TypeInfo::boolean(),
@@ -772,18 +779,16 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_expression(
-        &mut self,
-        expression: &Expression,
-        ctx: &mut TypedContext,
-    ) -> TypeInfo {
+    fn infer_expression(&mut self, expression: &Expression, ctx: &mut TypedContext) -> TypeInfo {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
                 if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
                     type_info.clone()
                 } else {
-                    let array_type = self.infer_expression(&array_index_access_expression.array.borrow(), ctx);
-                    let index_type = self.infer_expression(&array_index_access_expression.index.borrow(), ctx);
+                    let array_type =
+                        self.infer_expression(&array_index_access_expression.array.borrow(), ctx);
+                    let index_type =
+                        self.infer_expression(&array_index_access_expression.index.borrow(), ctx);
 
                     if !index_type.is_error() && !index_type.is_number() {
                         self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
@@ -801,7 +806,7 @@ impl TypeChecker {
                             );
                             element_type
                         }
-                        TypeInfoKind::Error(_) => array_type.clone(),
+                        TypeInfoKind::Error => array_type.clone(),
                         _ => {
                             self.errors.push(TypeCheckError::ExpectedArrayType {
                                 found: array_type,
@@ -816,7 +821,8 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(member_access_expression.id) {
                     type_info.clone()
                 } else {
-                    let object_type = self.infer_expression(&member_access_expression.expression.borrow(), ctx);
+                    let object_type =
+                        self.infer_expression(&member_access_expression.expression.borrow(), ctx);
                     if object_type.is_error() {
                         ctx.set_node_typeinfo(member_access_expression.id, object_type.clone());
                         return object_type;
@@ -899,7 +905,9 @@ impl TypeChecker {
                                         found: TypeInfo::new(ty),
                                         location: type_member_access_expression.location,
                                     });
-                                    return TypeInfo::error("Expected enum type for variant access");
+                                    return TypeInfo::error(
+                                        "Expected enum type for variant access",
+                                    );
                                 }
                             }
                         }
@@ -914,7 +922,7 @@ impl TypeChecker {
 
                             match &expr_type.kind {
                                 TypeInfoKind::Enum(name) => name.clone(),
-                                TypeInfoKind::Error(_) => return expr_type,
+                                TypeInfoKind::Error => return expr_type,
                                 _ => {
                                     self.errors.push(TypeCheckError::ExpectedEnumType {
                                         found: expr_type,
@@ -1070,9 +1078,16 @@ impl TypeChecker {
 
                 if let Expression::MemberAccess(member_access) = &function_call_expression.function
                 {
-                    let receiver_type = self.infer_expression(&member_access.expression.borrow(), ctx);
+                    let receiver_type =
+                        self.infer_expression(&member_access.expression.borrow(), ctx);
 
                     if receiver_type.is_error() {
+                        // Infer arguments even when receiver is error for better error recovery
+                        if let Some(arguments) = &function_call_expression.arguments {
+                            for arg in arguments {
+                                self.infer_expression(&arg.1.borrow(), ctx);
+                            }
+                        }
                         return receiver_type;
                     }
                     let type_name = match &receiver_type.kind {
@@ -1405,7 +1420,16 @@ impl TypeChecker {
                     | OperatorKind::Lt
                     | OperatorKind::Le
                     | OperatorKind::Gt
-                    | OperatorKind::Ge => TypeInfo::boolean(),
+                    | OperatorKind::Ge => {
+                        // Propagate error types for consistency with other operators
+                        if left_type.is_error() {
+                            left_type.clone()
+                        } else if right_type.is_error() {
+                            right_type.clone()
+                        } else {
+                            TypeInfo::boolean()
+                        }
+                    }
                     OperatorKind::Pow
                     | OperatorKind::Add
                     | OperatorKind::Sub
@@ -1418,17 +1442,24 @@ impl TypeChecker {
                     | OperatorKind::BitNot
                     | OperatorKind::Shl
                     | OperatorKind::Shr => {
-                        if !left_type.is_error() && !right_type.is_error() && (!left_type.is_number() || !right_type.is_number()) {
-                            self.errors.push(TypeCheckError::InvalidBinaryOperand {
-                                operator: binary_expression.operator.clone(),
-                                expected_kind: "arithmetic",
-                                operand_desc: "non-number types",
-                                found_types: (left_type.clone(), right_type.clone()),
-                                location: binary_expression.location,
-                            });
+                        // Propagate error types symmetrically: 5 + unknown and unknown + 5
+                        // should both return Error type
+                        if left_type.is_error() {
+                            left_type.clone()
+                        } else if right_type.is_error() {
+                            right_type.clone()
+                        } else {
+                            if !left_type.is_number() || !right_type.is_number() {
+                                self.errors.push(TypeCheckError::InvalidBinaryOperand {
+                                    operator: binary_expression.operator.clone(),
+                                    expected_kind: "arithmetic",
+                                    operand_desc: "non-number types",
+                                    found_types: (left_type.clone(), right_type.clone()),
+                                    location: binary_expression.location,
+                                });
+                            }
+                            left_type.clone()
                         }
-                        // Removed duplicate BinaryOperandTypeMismatch check here
-                        left_type.clone()
                     }
                 };
                 ctx.set_node_typeinfo(binary_expression.id, res_type.clone());
@@ -1519,7 +1550,19 @@ impl TypeChecker {
                 }
                 type_info
             }
-            Expression::Uzumaki(uzumaki) => ctx.get_node_typeinfo(uzumaki.id).unwrap_or_else(|| TypeInfo::error("Uzumaki type not inferred")),
+            Expression::Uzumaki(uzumaki) => {
+                if let Some(ti) = ctx.get_node_typeinfo(uzumaki.id) {
+                    ti
+                } else {
+                    // This path should be unreachable: Uzumaki types are always set
+                    // by the containing statement (VariableDefinition, Assign, Return).
+                    // If we reach here, it indicates a bug in the type checker.
+                    self.errors.push(TypeCheckError::CannotInferUzumakiType {
+                        location: uzumaki.location,
+                    });
+                    TypeInfo::error("Uzumaki type not inferred")
+                }
+            }
         }
     }
 

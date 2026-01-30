@@ -399,7 +399,9 @@ pub enum TypeCheckError {
     ///
     /// This occurs when `Type::method()` syntax is used for a method that requires `self`.
     /// Use `instance.method()` instead.
-    #[error("{location}: instance method `{type_name}::{method_name}` requires a receiver, use `instance.{method_name}()` instead")]
+    #[error(
+        "{location}: instance method `{type_name}::{method_name}` requires a receiver, use `instance.{method_name}()` instead"
+    )]
     InstanceMethodCalledAsAssociated {
         type_name: String,
         method_name: String,
@@ -410,7 +412,9 @@ pub enum TypeCheckError {
     ///
     /// This occurs when `instance.function()` syntax is used for an associated function
     /// that doesn't take `self`. Use `Type::function()` instead.
-    #[error("{location}: associated function `{type_name}::{method_name}` cannot be called on an instance, use `{type_name}::{method_name}()` instead")]
+    #[error(
+        "{location}: associated function `{type_name}::{method_name}` cannot be called on an instance, use `{type_name}::{method_name}()` instead"
+    )]
     AssociatedFunctionCalledAsMethod {
         type_name: String,
         method_name: String,
