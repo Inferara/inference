@@ -54,7 +54,7 @@ export function registerUpdateCommand(
 
 /**
  * Check for toolchain updates on activation.
- * Respects the `inference.checkForUpdates` and `inference.channel` settings.
+ * Respects the `inference.checkForUpdates` setting.
  * This is a no-op if checks are disabled.
  */
 export async function checkForUpdates(
@@ -66,9 +66,6 @@ export async function checkForUpdates(
     }
     const settings = getSettings();
     if (!settings.checkForUpdates) {
-        return;
-    }
-    if (settings.channel === 'none') {
         return;
     }
     updating = true;
@@ -108,15 +105,8 @@ async function checkForUpdatesImpl(
         return;
     }
 
-    const settings = getSettings();
-    const channel =
-        settings.channel === 'stable' || settings.channel === 'latest'
-            ? settings.channel
-            : 'stable';
-
     const candidates = versions
-        .filter((v) => v.available_for_current)
-        .filter((v) => (channel === 'stable' ? v.stable : true));
+        .filter((v) => v.available_for_current);
 
     if (candidates.length === 0) {
         outputChannel.appendLine('Update check: no versions available for this platform.');

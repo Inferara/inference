@@ -59,16 +59,12 @@ export function platformOs(platform: ManifestPlatform): string {
 export function findLatestRelease(
     manifest: ReleaseEntry[],
     platform: ManifestPlatform,
-    channel: 'stable' | 'latest',
 ): { release: ReleaseEntry; fileUrl: string; sha256: string } | null {
-    const candidates =
-        channel === 'stable' ? manifest.filter((e) => e.stable) : manifest;
-
-    if (candidates.length === 0) {
+    if (manifest.length === 0) {
         return null;
     }
 
-    const sorted = [...candidates].sort((a, b) =>
+    const sorted = [...manifest].sort((a, b) =>
         compareSemver(b.version, a.version),
     );
 

@@ -3,7 +3,6 @@ import * as os from 'os';
 import * as path from 'path';
 import { PlatformInfo } from './platform';
 import { inferenceHome } from './detection';
-import { getSettings } from '../config/settings';
 import { fetchJson, downloadFile, sha256File } from '../utils/download';
 import { extractArchive } from '../utils/extract';
 import { exec } from '../utils/exec';
@@ -48,12 +47,6 @@ export async function installToolchain(
     platform: PlatformInfo,
     onProgress?: InstallProgressCallback,
 ): Promise<InstallResult> {
-    const settings = getSettings();
-    const channel =
-        settings.channel === 'stable' || settings.channel === 'latest'
-            ? settings.channel
-            : 'stable';
-
     onProgress?.({
         stage: 'fetching-manifest',
         message: 'Fetching release manifest...',
@@ -76,10 +69,10 @@ export async function installToolchain(
         }
     }
 
-    const match = findLatestRelease(manifest, platform, channel);
+    const match = findLatestRelease(manifest, platform);
     if (!match) {
         throw new Error(
-            `No compatible infs release found for ${platform.id} in the ${channel} channel.`,
+            `No compatible infs release found for ${platform.id}.`,
         );
     }
 

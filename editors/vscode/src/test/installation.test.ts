@@ -72,7 +72,7 @@ describe('manifest helpers', () => {
 
 describe('findLatestRelease', () => {
     it('returns null for empty manifest', () => {
-        const result = findLatestRelease([], linuxPlatform, 'stable');
+        const result = findLatestRelease([], linuxPlatform);
         assert.strictEqual(result, null);
     });
 
@@ -89,11 +89,11 @@ describe('findLatestRelease', () => {
                 ],
             },
         ]);
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.strictEqual(result, null);
     });
 
-    it('returns latest stable release for stable channel', () => {
+    it('returns latest release by semver regardless of stable flag', () => {
         const manifest = makeManifest([
             {
                 version: '1.0.0',
@@ -127,37 +127,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
-        assert.ok(result !== null);
-        assert.strictEqual(result.release.version, '1.5.0');
-        assert.strictEqual(result.sha256, 'hash150');
-    });
-
-    it('returns latest release (any) for latest channel', () => {
-        const manifest = makeManifest([
-            {
-                version: '1.0.0',
-                stable: true,
-                files: [
-                    {
-                        url: 'https://example.com/infs-linux-x64.tar.gz',
-                        sha256: 'hash100',
-                    },
-                ],
-            },
-            {
-                version: '2.0.0',
-                stable: false,
-                files: [
-                    {
-                        url: 'https://example.com/infs-linux-x64.tar.gz',
-                        sha256: 'hash200',
-                    },
-                ],
-            },
-        ]);
-
-        const result = findLatestRelease(manifest, linuxPlatform, 'latest');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.release.version, '2.0.0');
         assert.strictEqual(result.sha256, 'hash200');
@@ -181,7 +151,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.sha256, 'hash-infs');
         assert.ok(result.fileUrl.includes('infs-linux'));
@@ -231,7 +201,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.release.version, '1.10.0');
         assert.strictEqual(result.sha256, 'hash-1100');
@@ -251,7 +221,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.sha256, 'expected-sha256-value');
     });
@@ -270,7 +240,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, macosPlatform, 'stable');
+        const result = findLatestRelease(manifest, macosPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.sha256, 'mac-hash');
     });
@@ -289,12 +259,12 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, windowsPlatform, 'stable');
+        const result = findLatestRelease(manifest, windowsPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.sha256, 'win-hash');
     });
 
-    it('returns null when no stable releases exist for stable channel', () => {
+    it('returns pre-release when no stable releases exist', () => {
         const manifest = makeManifest([
             {
                 version: '2.0.0-beta',
@@ -308,8 +278,10 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
-        assert.strictEqual(result, null);
+        const result = findLatestRelease(manifest, linuxPlatform);
+        assert.ok(result !== null);
+        assert.strictEqual(result.release.version, '2.0.0-beta');
+        assert.strictEqual(result.sha256, 'beta-hash');
     });
 
     it('returns fileUrl from matched file', () => {
@@ -326,7 +298,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(
             result.fileUrl,
@@ -334,7 +306,7 @@ describe('findLatestRelease', () => {
         );
     });
 
-    it('prefers stable release over unstable pre-release with higher version', () => {
+    it('returns highest version regardless of stable flag', () => {
         const manifest = makeManifest([
             {
                 version: '1.0.0',
@@ -358,9 +330,9 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
-        assert.strictEqual(result.release.version, '1.0.0');
+        assert.strictEqual(result.release.version, '2.0.0-alpha.1');
     });
 
     it('returns null when releases have files but none match platform', () => {
@@ -381,7 +353,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.strictEqual(result, null);
     });
 
@@ -404,7 +376,7 @@ describe('findLatestRelease', () => {
             },
         ]);
 
-        const result = findLatestRelease(manifest, linuxPlatform, 'stable');
+        const result = findLatestRelease(manifest, linuxPlatform);
         assert.ok(result !== null);
         assert.strictEqual(result.release.version, '1.0.0');
         assert.strictEqual(result.sha256, 'fallback-hash');
