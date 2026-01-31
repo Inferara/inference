@@ -1,0 +1,11 @@
+[package]
+name = "inference-semantic-analysis"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+inference-ast.workspace = true
+inference-type-checker.workspace = true

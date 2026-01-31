@@ -32,6 +32,7 @@ inference-ast = { path = "./core/ast", version = "0.0.1" }
 inference-type-checker = { path = "./core/type-checker", version = "0.0.1" }
 inference-cli = { path = "./core/cli", version = "0.0.1" }
 inference-wasm-to-v-translator = { path = "./core/wasm-to-v", version = "0.0.1" }
+inference-semantic-analysis = { path = "./core/semantic-analysis", version = "0.0.1" }
 inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 
 # IDE support crates

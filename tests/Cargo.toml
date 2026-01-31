@@ -15,6 +15,7 @@ inference-ast.workspace = true
 inference-wasm-codegen.workspace = true
 inference-type-checker.workspace = true
 inference.workspace = true
+inference-semantic-analysis.workspace = true
 inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true

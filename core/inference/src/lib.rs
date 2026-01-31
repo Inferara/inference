@@ -485,19 +485,14 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 
 /// Performs semantic analysis on the typed AST.
 ///
-/// This function is currently a placeholder for future semantic analysis passes.
-/// Planned analyses include:
-/// - Dead code detection
-/// - Unused variable warnings
-/// - Unreachable code analysis
-/// - Control flow validation
-/// - Initialization checking
+/// This function runs semantic checks that are beyond the scope of type checking,
+/// such as detecting prohibited combined unary operators, and other
+/// scope-bounded language constraints.
 ///
-/// # Current Status
-///
-/// **Work in Progress**: This phase is under active development and currently
-/// returns `Ok(())` without performing any checks. Once implemented, it will
-/// provide additional semantic guarantees beyond type correctness.
+/// Diagnostics are reported with three severity levels:
+/// - `Error` — semantic violations that must be fixed
+/// - `Warning` — suspicious patterns that may indicate bugs
+/// - `Info` — informational notes about code style or usage
 ///
 /// # Examples
 ///
@@ -507,30 +502,20 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 /// let source = r#"fn main() { return 0; }"#;
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-///
-/// // Currently a no-op, but will perform semantic checks in the future
 /// analyze(&typed_context)?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
 /// # Errors
 ///
-/// Currently always returns `Ok(())`. Future implementations will return errors
-/// for semantic violations that are not type errors, such as:
-/// - Use of uninitialized variables
-/// - Unreachable code paths
-/// - Dead code that should be removed
-/// - Control flow violations (e.g., missing return statements)
-/// - Infinite loops without break conditions
-///
-/// # Parameters
-///
-/// - `typed_context`: The typed AST context from [`type_check`]
-pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
-    // todo!("Type analysis not yet implemented");
+/// Returns an error if any semantic diagnostic with `Error` severity is found.
+pub fn analyze(ctx: &TypedContext) -> anyhow::Result<()> {
+    let result = inference_semantic_analysis::analyze(ctx);
+    if result.has_errors() {
+        return Err(anyhow::anyhow!("{}", result.format_errors()));
+    }
     Ok(())
 }
-
 /// Generates WebAssembly binary format from the typed AST.
 ///
 /// This function compiles the typed AST into WebAssembly bytecode using LLVM
