@@ -123,6 +123,7 @@
 //! See `README.md` in this crate for comprehensive usage documentation.
 
 mod parser;
+pub(crate) mod toolchain;
 use clap::Parser;
 use inference::{analyze, codegen, parse, type_check, wasm_to_v};
 use parser::Cli;
