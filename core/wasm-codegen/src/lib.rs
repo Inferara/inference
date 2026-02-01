@@ -65,13 +65,18 @@
 use inference_type_checker::typed_context::TypedContext;
 use inkwell::{
     context::Context,
-    targets::{InitializationConfig, Target},
+    targets::{InitializationConfig, Target as LlvmTarget},
 };
 
 use crate::compiler::Compiler;
 
 mod compiler;
+pub mod output;
+pub mod target;
 mod utils;
+
+pub use output::CodegenOutput;
+pub use target::{CompilationMode, OptLevel, Target};
 
 /// Generates WebAssembly bytecode from a typed AST.
 ///
@@ -82,7 +87,7 @@ mod utils;
 ///
 /// Returns an error if code generation fails.
 pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
-    Target::initialize_webassembly(&InitializationConfig::default());
+    LlvmTarget::initialize_webassembly(&InitializationConfig::default());
     let context = Context::create();
     let compiler = Compiler::new(&context, "wasm_module");
 
