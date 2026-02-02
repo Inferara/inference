@@ -89,7 +89,7 @@
 
 //TODO: don't forget to remove
 #![allow(dead_code)]
-use crate::utils;
+use crate::target::{OptLevel, Target};
 use inference_ast::nodes::{
     BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type, Visibility,
 };
@@ -189,7 +189,7 @@ const UNIQUE_END_INTRINSIC: &str = "llvm.wasm.unique.end";
 ///
 /// // Create LLVM context and compiler
 /// let context = Context::create();
-/// let compiler = Compiler::new(&context, "wasm_module");
+/// let compiler = Compiler::new(&context, "output");
 ///
 /// // Visit function definitions from typed AST
 /// for func_def in typed_context.source_files()[0].function_definitions() {
@@ -946,38 +946,81 @@ impl<'ctx> Compiler<'ctx> {
             })
     }
 
-    /// Compiles the LLVM module to WebAssembly bytecode.
+    /// Returns whether a public `main()` function was compiled.
     ///
-    /// This method orchestrates the final compilation stages:
-    /// 1. Emit LLVM IR to a temporary file
-    /// 2. Invoke inf-llc to compile IR to WASM object file
-    /// 3. Invoke rust-lld to link object file into final WASM module
-    /// 4. Read the resulting WASM bytes
+    /// Used by the toolchain layer to decide whether to pass `--export=main` to the linker.
+    pub(crate) fn has_main(&self) -> bool {
+        *self.has_main.borrow()
+    }
+
+    /// Emits the LLVM module as IR text.
     ///
-    /// The actual compilation work is delegated to the `utils::compile_to_wasm` function,
-    /// which handles toolchain invocation and temporary file management.
+    /// Sets the target triple on the module before emission, then serializes the
+    /// module to LLVM IR text format via `module.print_to_string()`.
     ///
     /// # Parameters
     ///
-    /// - `output_fname` - Base filename for intermediate files (extension will be added)
-    /// - `optimization_level` - LLVM optimization level (0-3, higher is more optimized)
+    /// - `target` - Compilation target (determines the target triple set on the module)
     ///
     /// # Returns
     ///
-    /// WebAssembly bytecode as a byte vector
+    /// LLVM IR text as a `String`.
+    pub(crate) fn emit_ir(&self, target: Target) -> String {
+        let triple = inkwell::targets::TargetTriple::create(target.triple());
+        self.module.set_triple(&triple);
+        self.module.print_to_string().to_string()
+    }
+
+    /// Adds optimization barriers (`optnone` + `noinline`) to ALL functions in the module.
     ///
-    /// # Errors
+    /// Used in `proof` mode to prevent LLVM from optimizing any function, ensuring
+    /// 1:1 structural correspondence between source code and WASM output for Rocq
+    /// formalization. This is defense-in-depth on top of `-O0`.
     ///
-    /// Returns an error if:
-    /// - inf-llc or rust-lld executables are not found
-    /// - Compilation or linking fails
-    /// - File I/O operations fail
-    pub(crate) fn compile_to_wasm(
-        &self,
-        output_fname: &str,
-        optimization_level: u32,
-    ) -> anyhow::Result<Vec<u8>> {
-        let has_main = *self.has_main.borrow();
-        utils::compile_to_wasm(&self.module, output_fname, optimization_level, has_main)
+    /// Note: `optnone` requires `noinline` — the LLVM verifier enforces this.
+    pub(crate) fn add_proof_mode_barriers(&self) {
+        let mut func = self.module.get_first_function();
+        while let Some(f) = func {
+            // Only add barriers to functions with bodies (not declarations)
+            if f.count_basic_blocks() > 0 {
+                self.add_optimization_barriers(f);
+            }
+            func = f.get_next_function();
+        }
+    }
+
+    /// Adds size optimization IR attributes to all functions in the module.
+    ///
+    /// When `OptLevel` is `Os` or `Oz`, LLVM's size optimization is achieved through
+    /// IR function attributes rather than `llc` flags (since `llc` only accepts `-O0`
+    /// through `-O3`). This matches how Clang implements `-Os`/`-Oz`.
+    ///
+    /// - `optsize`: Prefer smaller code size over execution speed (for `Os` and `Oz`)
+    /// - `minsize`: Aggressively minimize code size (for `Oz` only)
+    pub(crate) fn add_size_optimization_attrs(&self, opt_level: OptLevel) {
+        if !opt_level.is_size_optimized() {
+            return;
+        }
+
+        let attr_kind_optsize = Attribute::get_named_enum_kind_id("optsize");
+        let optsize = self.context.create_enum_attribute(attr_kind_optsize, 0);
+
+        let minsize = if opt_level.is_min_size() {
+            let attr_kind_minsize = Attribute::get_named_enum_kind_id("minsize");
+            Some(self.context.create_enum_attribute(attr_kind_minsize, 0))
+        } else {
+            None
+        };
+
+        let mut func = self.module.get_first_function();
+        while let Some(f) = func {
+            if f.count_basic_blocks() > 0 {
+                f.add_attribute(AttributeLoc::Function, optsize);
+                if let Some(ms) = minsize {
+                    f.add_attribute(AttributeLoc::Function, ms);
+                }
+            }
+            func = f.get_next_function();
+        }
     }
 }

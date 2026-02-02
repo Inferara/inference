@@ -34,7 +34,7 @@ use crate::target::{CompilationMode, Target};
 ///     "define i32 @hello_world() { ret i32 42 }".to_string(),
 ///     Target::Wasm32,
 ///     CompilationMode::Compile,
-///     "wasm_module".to_string(),
+///     "output".to_string(),
 ///     false,
 /// );
 ///
@@ -42,7 +42,7 @@ use crate::target::{CompilationMode, Target};
 /// assert_eq!(output.target(), Target::Wasm32);
 /// assert_eq!(output.mode(), CompilationMode::Compile);
 /// assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
-/// assert_eq!(output.module_name(), "wasm_module");
+/// assert_eq!(output.module_name(), "output");
 /// assert!(!output.has_main());
 /// ```
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ pub struct CodegenOutput {
     /// Compilation mode controlling optimization level and spec-node handling.
     mode: CompilationMode,
 
-    /// LLVM module name (currently hardcoded as `"wasm_module"`).
+    /// LLVM module name (currently hardcoded as `"output"`).
     ///
     /// Stored here for future parameterization (e.g., deriving from source filename).
     module_name: String,
@@ -149,7 +149,7 @@ mod tests {
             "define i32 @test() { ret i32 42 }".to_string(),
             Target::Wasm32,
             CompilationMode::Compile,
-            "wasm_module".to_string(),
+            "output".to_string(),
             false,
         )
     }
@@ -159,7 +159,7 @@ mod tests {
             "define i32 @main() { ret i32 0 }".to_string(),
             Target::Wasm32,
             CompilationMode::Proof,
-            "wasm_module".to_string(),
+            "output".to_string(),
             true,
         )
     }
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn module_name_returns_module_name() {
         let output = sample_output();
-        assert_eq!(output.module_name(), "wasm_module");
+        assert_eq!(output.module_name(), "output");
     }
 
     #[test]

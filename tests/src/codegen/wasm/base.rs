@@ -14,9 +14,6 @@ mod base_codegen_tests {
         let expected = get_test_wasm_path(module_path!(), test_name);
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
-        // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
-        // std::fs::write(test_dir.join("actual.wasm"), &actual)
-        //     .unwrap_or_else(|e| panic!("Failed to write actual.wasm: {}", e));
         assert_wasms_modules_equivalence(&expected, &actual);
     }
 
@@ -30,9 +27,6 @@ mod base_codegen_tests {
         let expected = get_test_wasm_path(module_path!(), test_name);
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
-        // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
-        // std::fs::write(test_dir.join("actual-const.wasm"), &actual)
-        //     .unwrap_or_else(|e| panic!("Failed to write actual-const.wasm: {}", e));
         assert_wasms_modules_equivalence(&expected, &actual);
     }
 
@@ -87,9 +81,69 @@ mod base_codegen_tests {
         let expected = get_test_wasm_path(module_path!(), test_name);
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
-        // let test_dir = std::path::Path::new(&test_file_path).parent().unwrap();
-        // std::fs::write(test_dir.join("actual-nondet.wasm"), &actual)
-        //     .unwrap_or_else(|e| panic!("Failed to write actual-nondet.wasm: {}", e));
         assert_wasms_modules_equivalence(&expected, &actual);
+    }
+}
+
+/// Test data regeneration helpers.
+///
+/// These functions regenerate the expected `.wasm` test data files from the current
+/// compiler output. Run with `--ignored` flag to execute:
+///
+/// ```bash
+/// cargo test -p inference-tests codegen::wasm::base::regenerate -- --ignored
+/// ```
+///
+/// These are gated behind `#[ignore]` so they do not run during normal test execution.
+/// Use them when the codegen pipeline changes produce functionally correct but
+/// byte-different WASM output (e.g., after architecture refactoring).
+#[cfg(test)]
+mod regenerate {
+    use crate::utils::{get_test_data_path, wasm_codegen};
+
+    /// Base directory for codegen/wasm/base test data.
+    fn base_test_dir() -> std::path::PathBuf {
+        get_test_data_path().join("codegen").join("wasm").join("base")
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_trivial_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("trivial.inf"))
+            .expect("Failed to read trivial.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("trivial.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("const.inf"))
+            .expect("Failed to read const.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nondet_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("nondet.inf"))
+            .expect("Failed to read nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
     }
 }

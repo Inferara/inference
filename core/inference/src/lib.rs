@@ -21,11 +21,11 @@
 //! ```rust,no_run
 //! use inference::{parse, type_check, codegen};
 //!
-//! fn compile(source_code: &str) -> anyhow::Result<Vec<u8>> {
+//! fn compile(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let wasm_bytes = codegen(&typed_context)?;
-//!     Ok(wasm_bytes)
+//!     let codegen_output = codegen(&typed_context)?;
+//!     Ok(codegen_output)
 //! }
 //! ```
 //!
@@ -101,7 +101,7 @@
 //! let source = "fn factorial(n: i32) -> i32 { if n <= 1 { return 1; } else { return n * factorial(n - 1); } }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let wasm_bytes = codegen(&typed_context)?;
+//! let codegen_output = codegen(&typed_context)?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -118,13 +118,14 @@
 //! Translates WebAssembly binary to Rocq (Coq) verification code.
 //!
 //! ```rust,no_run
-//! use inference::{parse, type_check, codegen, wasm_to_v};
+//! use inference::{parse, type_check, codegen};
 //!
 //! let source = "fn is_even(n: i32) -> bool { return n % 2 == 0; }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let wasm_bytes = codegen(&typed_context)?;
-//! let rocq_code = wasm_to_v("MyModule", &wasm_bytes)?;
+//! let codegen_output = codegen(&typed_context)?;
+//! // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
+//! // then calls wasm_to_v("MyModule", &wasm_bytes)
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -179,7 +180,7 @@
 //! ```rust,no_run
 //! use inference::{parse, type_check, analyze, codegen};
 //!
-//! fn compile_to_wasm(source_code: &str) -> anyhow::Result<Vec<u8>> {
+//! fn compile_to_wasm(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     analyze(&typed_context)?;
@@ -192,11 +193,13 @@
 //! ```rust,no_run
 //! use inference::{parse, type_check, codegen, wasm_to_v};
 //!
-//! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<String> {
+//! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<()> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let wasm = codegen(&typed_context)?;
-//!     wasm_to_v(module_name, &wasm)
+//!     let _codegen_output = codegen(&typed_context)?;
+//!     // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
+//!     // then calls wasm_to_v(module_name, &wasm_bytes)
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -205,7 +208,7 @@
 //! ```rust,no_run
 //! use inference::{parse, type_check, codegen};
 //!
-//! fn compile_nondet_example() -> anyhow::Result<Vec<u8>> {
+//! fn compile_nondet_example() -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let source = r#"
 //!         pub fn verify_property() {
 //!             forall {
@@ -531,144 +534,34 @@ pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generates WebAssembly binary format from the typed AST.
+/// Generates LLVM IR from a typed AST for the default target (`Wasm32`) and
+/// default compilation mode (`Compile`).
 ///
-/// This function compiles the typed AST into WebAssembly bytecode using LLVM
-/// as an intermediate representation. The compilation pipeline:
+/// This is a convenience wrapper around [`inference_wasm_codegen::codegen`] that
+/// uses default settings. The returned [`CodegenOutput`] contains the LLVM IR text
+/// and metadata needed by the toolchain layer to compile the IR to WebAssembly.
 ///
-/// 1. Transforms AST nodes into LLVM IR
-/// 2. Applies LLVM optimization passes
-/// 3. Compiles LLVM IR to WebAssembly using `inf-llc`
-/// 4. Links the object files using `rust-lld`
-/// 5. Returns the final WASM binary
-///
-/// ## Non-Deterministic Extensions
-///
-/// Inference extends WebAssembly with custom instructions for non-deterministic
-/// computation. These are encoded using reserved opcodes and implemented as
-/// LLVM intrinsics:
-///
-/// | Instruction | Opcode      | Purpose |
-/// |-------------|-------------|---------|
-/// | `@` (uzumaki) | `0xfc 0x3c` | Non-deterministic value generation |
-/// | `forall`    | `0xfc 0x3a` | Universal quantification block |
-/// | `exists`    | `0xfc 0x3b` | Existential quantification block |
-/// | `assume`    | `0xfc 0x3d` | Precondition filtering |
-/// | `unique`    | `0xfc 0x3e` | Uniqueness constraint |
-///
-/// These extensions enable formal verification workflows by making
-/// non-deterministic choices explicit in the binary format.
-///
-/// # Examples
-///
-/// ## Basic Compilation
-///
-/// ```rust,no_run
-/// use inference::{parse, type_check, codegen};
-/// use std::fs;
-///
-/// let source = r#"
-///     fn factorial(n: i32) -> i32 {
-///         if n <= 1 {
-///             return 1;
-///         } else {
-///             return n * factorial(n - 1);
-///         }
-///     }
-/// "#;
-///
-/// let arena = parse(source)?;
-/// let typed_context = type_check(arena)?;
-/// let wasm_bytes = codegen(&typed_context)?;
-///
-/// fs::write("factorial.wasm", &wasm_bytes)?;
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-///
-/// ## Non-Deterministic Code Generation
-///
-/// ```rust,no_run
-/// use inference::{parse, type_check, codegen};
-///
-/// let source = r#"
-///     pub fn verify_addition() {
-///         forall {
-///             let a: i32 = @;
-///             let b: i32 = @;
-///             assume {
-///                 assert(a >= 0);
-///                 assert(b >= 0);
-///             }
-///             assert(a + b >= a);
-///             assert(a + b >= b);
-///         }
-///     }
-/// "#;
-///
-/// let arena = parse(source)?;
-/// let typed_context = type_check(arena)?;
-/// let wasm = codegen(&typed_context)?;
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-///
-/// ## Public Function Export
-///
-/// ```rust,no_run
-/// use inference::{parse, type_check, codegen};
-///
-/// let source = r#"
-///     pub fn add(x: i32, y: i32) -> i32 {
-///         return x + y;
-///     }
-/// "#;
-///
-/// let arena = parse(source)?;
-/// let typed_context = type_check(arena)?;
-/// let wasm = codegen(&typed_context)?;
-/// // The function "add" will be exported in the WASM module
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-///
-/// # Generated WASM Structure
-///
-/// The generated WebAssembly module includes:
-/// - **Type section**: Function signatures
-/// - **Import section**: External dependencies (if any)
-/// - **Function section**: Function declarations
-/// - **Memory section**: Linear memory allocation
-/// - **Export section**: Public API exports (functions marked `pub`)
-/// - **Code section**: Function bodies in WASM bytecode
+/// For target-specific or proof-mode compilation, call
+/// `inference_wasm_codegen::codegen()` directly with explicit `Target` and
+/// `CompilationMode` parameters.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - LLVM IR generation fails for any AST node
-/// - The LLVM optimization passes encounter invalid IR
-/// - The `inf-llc` compiler fails to generate object files
-/// - The `rust-lld` linker fails to produce a valid WASM binary
-/// - Required external binaries (`inf-llc`, `rust-lld`) are not found
 /// - Type information is missing or inconsistent in the [`TypedContext`]
 /// - More than one source file is present (multi-file not yet supported)
 ///
-/// # Dependencies
-///
-/// This function requires the following external binaries:
-/// - **inf-llc**: Modified LLVM compiler with Inference intrinsic support
-/// - **rust-lld**: WebAssembly linker from the Rust toolchain
-///
-/// These must be available in the `external/bin/{platform}/` directory relative to the
-/// binary location, where `{platform}` is `linux`, `macos`, or `windows`.
-/// See the repository README for download instructions.
-///
-/// # Platform Support
-///
-/// - Linux x86-64 (requires libLLVM.so in `external/lib/linux/`)
-/// - macOS Apple Silicon (M1/M2/M3)
-/// - Windows x86-64 (requires DLLs in `external/bin/windows/`)
-///
 /// [`TypedContext`]: inference_type_checker::typed_context::TypedContext
-pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
-    inference_wasm_codegen::codegen(typed_context)
+/// [`CodegenOutput`]: inference_wasm_codegen::CodegenOutput
+pub fn codegen(
+    typed_context: &TypedContext,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    inference_wasm_codegen::codegen(
+        typed_context,
+        inference_wasm_codegen::Target::default(),
+        inference_wasm_codegen::CompilationMode::default(),
+    )
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.
@@ -700,7 +593,7 @@ pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
 /// ## Basic Translation
 ///
 /// ```rust,no_run
-/// use inference::{parse, type_check, codegen, wasm_to_v};
+/// use inference::{parse, type_check, codegen};
 /// use std::fs;
 ///
 /// let source = r#"
@@ -711,17 +604,16 @@ pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let wasm_bytes = codegen(&typed_context)?;
-/// let rocq_code = wasm_to_v("EvenChecker", &wasm_bytes)?;
-///
-/// fs::write("even_checker.v", rocq_code)?;
+/// let codegen_output = codegen(&typed_context)?;
+/// // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
+/// // then calls wasm_to_v("EvenChecker", &wasm_bytes)
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
 /// ## Non-Deterministic Code Translation
 ///
 /// ```rust,no_run
-/// use inference::{parse, type_check, codegen, wasm_to_v};
+/// use inference::{parse, type_check, codegen};
 ///
 /// let source = r#"
 ///     pub fn verify_commutativity() {
@@ -735,8 +627,9 @@ pub fn codegen(typed_context: &TypedContext) -> anyhow::Result<Vec<u8>> {
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let wasm = codegen(&typed_context)?;
-/// let rocq = wasm_to_v("CommutativityProof", &wasm)?;
+/// let codegen_output = codegen(&typed_context)?;
+/// // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
+/// // then calls wasm_to_v("CommutativityProof", &wasm_bytes)
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///

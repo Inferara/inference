@@ -30,12 +30,205 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<Arena> {
     builder.build_ast()
 }
 
-pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
+/// Generates LLVM IR from source code using the default target (`Wasm32`) and mode (`Compile`).
+///
+/// This is a Tier 1 test helper that does not require external binaries.
+/// Returns the [`CodegenOutput`] containing IR and metadata.
+pub(crate) fn codegen_ir(source_code: &str) -> inference_wasm_codegen::CodegenOutput {
     let arena = build_ast(source_code.to_string());
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    inference_wasm_codegen::codegen(&typed_context).unwrap()
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        inference_wasm_codegen::Target::default(),
+        inference_wasm_codegen::CompilationMode::default(),
+    )
+    .unwrap()
+}
+
+/// Generates WebAssembly bytes from source code using the full two-stage pipeline.
+///
+/// This is a Tier 2 test helper that requires external binaries (`inf-llc`, `rust-lld`).
+/// It calls `codegen_ir()` to produce IR, then uses a local toolchain implementation
+/// to compile the IR to WASM bytes.
+///
+/// Note: Binary discovery logic is duplicated from `core/cli/src/toolchain/paths.rs`.
+/// This is acceptable duplication for test infrastructure. See master plan Decision #10.
+pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
+    let codegen_output = codegen_ir(source_code);
+    compile_ir_to_wasm_for_tests(&codegen_output)
+}
+
+/// Compiles a [`CodegenOutput`] to WASM bytes for test purposes.
+///
+/// This function duplicates the toolchain logic from `core/cli/src/toolchain/`
+/// to avoid test crates depending on the CLI binary. The path resolution logic
+/// mirrors `core/cli/src/toolchain/paths.rs`.
+fn compile_ir_to_wasm_for_tests(
+    output: &inference_wasm_codegen::CodegenOutput,
+) -> Vec<u8> {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+
+    // --- Binary discovery (mirrors core/cli/src/toolchain/paths.rs) ---
+    let find_bin = |bin_name: &str| -> PathBuf {
+        let bin_file_name = format!("{bin_name}{exe_suffix}");
+
+        if let Some(bin_dir) = option_env!("INF_WASM_CODEGEN_BIN_DIR") {
+            let candidate = PathBuf::from(bin_dir).join(&bin_file_name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+
+        let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+        let exe_dir = exe_path.parent().expect("Failed to get executable directory");
+
+        let candidates = [
+            exe_dir.join("bin").join(&bin_file_name),
+            exe_dir
+                .parent()
+                .map_or_else(
+                    || exe_dir.join("bin").join(&bin_file_name),
+                    |p| p.join("bin").join(&bin_file_name),
+                ),
+        ];
+
+        for path in &candidates {
+            if path.exists() {
+                return path.clone();
+            }
+        }
+
+        panic!(
+            "{bin_name} binary not found. Searched: {:?}",
+            candidates
+        );
+    };
+
+    // --- Platform env config (mirrors core/cli/src/toolchain/env.rs) ---
+    #[allow(unused_variables)]
+    let configure_env = |cmd: &mut Command| {
+        #[cfg(target_os = "linux")]
+        {
+            let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+            let exe_dir = exe_path.parent().expect("Failed to get executable directory");
+            let lib_candidates = [
+                exe_dir.join("lib"),
+                exe_dir
+                    .parent()
+                    .map_or_else(|| exe_dir.join("lib"), |p| p.join("lib")),
+            ];
+            for lib_path in &lib_candidates {
+                if lib_path.exists() {
+                    let lib_dir_str = lib_path.to_string_lossy();
+                    let ld_library_path =
+                        if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+                            format!("{lib_dir_str}:{existing}")
+                        } else {
+                            lib_dir_str.to_string()
+                        };
+                    cmd.env("LD_LIBRARY_PATH", ld_library_path);
+                    break;
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(llvm_prefix) = std::env::var("LLVM_SYS_211_PREFIX") {
+                let lib_dir = std::path::Path::new(&llvm_prefix).join("lib");
+                if lib_dir.exists() {
+                    let lib_dir_str = lib_dir.to_string_lossy();
+                    let dyld_library_path =
+                        if let Ok(existing) = std::env::var("DYLD_LIBRARY_PATH") {
+                            format!("{lib_dir_str}:{existing}")
+                        } else {
+                            lib_dir_str.to_string()
+                        };
+                    cmd.env("DYLD_LIBRARY_PATH", dyld_library_path);
+                }
+            }
+        }
+    };
+
+    let llc_path = find_bin("inf-llc");
+    let lld_path = find_bin("rust-lld");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+    let module_name = output.module_name();
+    let ir_path = temp_dir.path().join(module_name).with_extension("ll");
+    let obj_path = temp_dir.path().join(module_name).with_extension("o");
+    let wasm_path = temp_dir.path().join(module_name).with_extension("wasm");
+
+    // Write IR
+    output
+        .write_ir_to(&ir_path)
+        .expect("Failed to write IR file");
+
+    // Stage 1: inf-llc
+    let target = output.target();
+    let opt_level = target.default_opt_level(output.mode());
+
+    let mut llc_cmd = Command::new(&llc_path);
+    configure_env(&mut llc_cmd);
+    llc_cmd
+        .arg(format!("-mcpu={}", target.cpu()))
+        .arg("-filetype=obj")
+        .arg(opt_level.as_llc_flag())
+        .arg(&ir_path)
+        .arg("-o")
+        .arg(&obj_path);
+
+    let features = target.llc_features();
+    if !features.is_empty() {
+        llc_cmd.arg(format!("-mattr={features}"));
+    }
+
+    let llc_result = llc_cmd.output().expect("Failed to execute inf-llc");
+    assert!(
+        llc_result.status.success(),
+        "inf-llc failed: {}",
+        String::from_utf8_lossy(&llc_result.stderr)
+    );
+
+    // Stage 2: rust-lld
+    let mut lld_cmd = Command::new(&lld_path);
+    configure_env(&mut lld_cmd);
+    lld_cmd
+        .arg("-flavor")
+        .arg("wasm")
+        .arg(&obj_path)
+        .arg("--no-entry");
+
+    match target {
+        inference_wasm_codegen::Target::Wasm32 => {
+            if output.has_main() {
+                lld_cmd.arg("--export=main");
+            }
+        }
+        inference_wasm_codegen::Target::Soroban => {
+            lld_cmd
+                .arg("--export-dynamic")
+                .arg("--gc-sections")
+                .arg("-z")
+                .arg("stack-size=1048576")
+                .arg("--stack-first");
+        }
+    }
+
+    lld_cmd.arg("-o").arg(&wasm_path);
+
+    let lld_result = lld_cmd.output().expect("Failed to execute rust-lld");
+    assert!(
+        lld_result.status.success(),
+        "rust-lld failed: {}",
+        String::from_utf8_lossy(&lld_result.stderr)
+    );
+
+    std::fs::read(&wasm_path).expect("Failed to read compiled WASM")
 }
 
 /// Automatically resolves a test data file path based on the test's module path and name.

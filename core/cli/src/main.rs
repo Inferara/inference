@@ -248,34 +248,54 @@ fn main() {
             eprintln!("Internal error: type check phase did not produce typed context");
             process::exit(1);
         };
-        let wasm = match codegen(&tctx) {
-            Ok(w) => w,
+        let codegen_output = match codegen(&tctx) {
+            Ok(o) => o,
             Err(e) => {
                 eprintln!("Codegen failed: {e}");
                 process::exit(1);
             }
         };
-        println!("WASM generated");
+        println!("LLVM IR generated");
         let source_fname = args
             .path
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("module"))
             .to_str()
             .unwrap();
+
+        // Compile IR to WASM bytes if needed for output or V translation
+        let need_wasm_bytes = args.generate_wasm_output || args.generate_v_output;
+        let wasm = if need_wasm_bytes {
+            match toolchain::compile_ir_to_wasm(&codegen_output) {
+                Ok(bytes) => {
+                    println!("WASM generated");
+                    Some(bytes)
+                }
+                Err(e) => {
+                    eprintln!("WASM compilation failed: {e}");
+                    process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+
         if args.generate_wasm_output {
+            let wasm_bytes = wasm.as_ref().expect("WASM bytes should be available");
             let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
             if let Err(e) = fs::create_dir_all(&output_path) {
                 eprintln!("Failed to create output directory: {e}");
                 process::exit(1);
             }
-            if let Err(e) = fs::write(&wasm_file_path, &wasm) {
+            if let Err(e) = fs::write(&wasm_file_path, wasm_bytes) {
                 eprintln!("Failed to write WASM file: {e}");
                 process::exit(1);
             }
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            match wasm_to_v(source_fname, &wasm) {
+            let wasm_bytes = wasm.as_ref().expect("WASM bytes should be available");
+            match wasm_to_v(source_fname, wasm_bytes) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {
