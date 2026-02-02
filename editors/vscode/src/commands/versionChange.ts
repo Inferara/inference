@@ -31,6 +31,7 @@ export async function performVersionChange(
                 vscode.commands.executeCommand(
                     'setContext', 'inference.toolchainInstalled', true,
                 );
+                vscode.commands.executeCommand('inference.applyTerminalPath');
                 vscode.commands.executeCommand('inference.runDoctor');
                 vscode.window
                     .showInformationMessage(

@@ -26,9 +26,35 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "workspaceContains:**/*.inf"
+    "workspaceContains:**/*.inf",
+    "onView:inference.configView"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "inference",
+          "title": "Inference",
+          "icon": "icons/file_icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "inference": [
+        {          
+          "id": "inference.configView",          
+          "name": "Configuration",
+          "icon": "icons/file_icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "inference.configView",
+        "contents": "Inference toolchain is not installed.\n[Install Toolchain](command:inference.installToolchain)\n[Configure Path](command:workbench.action.openSettings?%5B%22inference.path%22%5D)",
+        "when": "!inference.toolchainInstalled"
+      }
+    ],
     "languages": [
       {
         "id": "inference",
@@ -74,14 +100,52 @@
       {
         "command": "inference.showOutput",
         "title": "Inference: Show Output"
+      },
+      {
+        "command": "inference.resetPathAcceptance",
+        "title": "Inference: Reset PATH Fallback Preference"
+      },
+      {
+        "command": "inference.refreshConfigView",
+        "title": "Inference: Refresh Configuration",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "inference.copyConfigValue",
+        "title": "Copy Value"
+      },
+      {
+        "command": "inference.revealConfigPath",
+        "title": "Reveal in File Explorer"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "inference.refreshConfigView",
+          "when": "view == inference.configView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "inference.copyConfigValue",
+          "when": "view == inference.configView && viewItem == inference.configPath",
+          "group": "inline"
+        },
+        {
+          "command": "inference.revealConfigPath",
+          "when": "view == inference.configView && viewItem == inference.configPath"
+        }
+      ]
+    },
     "configuration": {
       "title": "Inference",
       "properties": {
         "inference.path": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Path to infs binary. Leave empty for auto-detection."
         },
         "inference.autoInstall": {
@@ -164,13 +228,13 @@
     "test": "node --import tsx --test src/test/**/*.test.ts",
     "package": "vsce package",
     "publish": "vsce publish",
-    "test": "tsx --test test/grammar.test.ts test/language-config.test.ts"
+    "test syntax": "tsx --test test/grammar.test.ts test/language-config.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@types/node": "^25.2.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^2.22.0",
-    "esbuild": "^0.20.0",
+    "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.27.2",
     "tsx": "^4.7.0",
     "typescript": "^5.3.0",
     "vscode-oniguruma": "^2.0.1",

@@ -30,12 +30,26 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// src/toolchain/home.ts
+function inferenceHome() {
+  return process.env["INFERENCE_HOME"] || path.join(os2.homedir(), ".inference");
+}
+var os2, path;
+var init_home = __esm({
+  "src/toolchain/home.ts"() {
+    "use strict";
+    os2 = __toESM(require("os"));
+    path = __toESM(require("path"));
+  }
+});
+
 // src/utils/exec.ts
 function exec(command, args, options) {
   const timeout = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const child = cp.spawn(command, args, {
       cwd: options?.cwd,
+      env: options?.env ? { ...process.env, ...options.env } : void 0,
       stdio: ["ignore", "pipe", "pipe"],
       timeout
     });
@@ -98,18 +112,25 @@ function parseDoctorOutput(stdout) {
 }
 async function runDoctor(infsPath) {
   try {
-    const result = await exec(infsPath, ["doctor"]);
+    const binDir = path4.join(inferenceHome(), "bin");
+    const sep = process.platform === "win32" ? ";" : ":";
+    const augmentedPath = `${binDir}${sep}${process.env["PATH"] ?? ""}`;
+    const result = await exec(infsPath, ["doctor"], {
+      env: { PATH: augmentedPath }
+    });
     return parseDoctorOutput(result.stdout);
   } catch (err) {
     console.error("infs doctor failed:", err);
     return null;
   }
 }
-var STATUS_MAP, CHECK_PATTERN;
+var path4, STATUS_MAP, CHECK_PATTERN;
 var init_doctor = __esm({
   "src/toolchain/doctor.ts"() {
     "use strict";
+    path4 = __toESM(require("path"));
     init_exec();
+    init_home();
     STATUS_MAP = {
       OK: "ok",
       WARN: "warn",
@@ -123,10 +144,12 @@ var init_doctor = __esm({
 var extension_exports = {};
 __export(extension_exports, {
   activate: () => activate,
+  applyTerminalPath: () => applyTerminalPath,
   deactivate: () => deactivate
 });
 module.exports = __toCommonJS(extension_exports);
-var vscode8 = __toESM(require("vscode"));
+var vscode9 = __toESM(require("vscode"));
+var path6 = __toESM(require("path"));
 
 // src/toolchain/platform.ts
 var os = __toESM(require("os"));
@@ -150,8 +173,7 @@ function detectPlatform(osPlatform, osArch) {
 
 // src/toolchain/detection.ts
 var fs = __toESM(require("fs"));
-var path = __toESM(require("path"));
-var os2 = __toESM(require("os"));
+var path2 = __toESM(require("path"));
 
 // src/config/settings.ts
 var vscode = __toESM(require("vscode"));
@@ -165,9 +187,7 @@ function getSettings() {
 }
 
 // src/toolchain/detection.ts
-function inferenceHome() {
-  return process.env["INFERENCE_HOME"] || path.join(os2.homedir(), ".inference");
-}
+init_home();
 function isExecutable(filePath) {
   try {
     const mode = process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK;
@@ -182,7 +202,7 @@ function findInPath(binaryName) {
   const sep = process.platform === "win32" ? ";" : ":";
   const dirs = envPath.split(sep).filter(Boolean);
   for (const dir of dirs) {
-    const candidate = path.join(dir, binaryName);
+    const candidate = path2.join(dir, binaryName);
     if (isExecutable(candidate)) {
       return candidate;
     }
@@ -195,17 +215,17 @@ function detectInfs() {
   const settings = getSettings();
   if (settings.path) {
     if (isExecutable(settings.path)) {
-      return settings.path;
+      return { path: settings.path, source: "settings" };
     }
     return null;
   }
+  const managedPath = path2.join(inferenceHome(), "bin", binaryName);
+  if (isExecutable(managedPath)) {
+    return { path: managedPath, source: "managed" };
+  }
   const pathResult = findInPath(binaryName);
   if (pathResult) {
-    return pathResult;
-  }
-  const managedPath = path.join(inferenceHome(), "bin", binaryName);
-  if (isExecutable(managedPath)) {
-    return managedPath;
+    return { path: pathResult, source: "path" };
   }
   return null;
 }
@@ -270,12 +290,13 @@ function compareSemver(a, b) {
 }
 
 // src/commands/install.ts
-var vscode2 = __toESM(require("vscode"));
+var vscode3 = __toESM(require("vscode"));
 
 // src/toolchain/installation.ts
 var fs4 = __toESM(require("fs"));
 var os3 = __toESM(require("os"));
-var path3 = __toESM(require("path"));
+var path5 = __toESM(require("path"));
+init_home();
 
 // src/utils/download.ts
 var https = __toESM(require("https"));
@@ -477,7 +498,7 @@ function sha256File(filePath) {
 
 // src/utils/extract.ts
 var fs3 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var path3 = __toESM(require("path"));
 init_exec();
 async function extractArchive(options) {
   fs3.mkdirSync(options.destDir, { recursive: true });
@@ -487,7 +508,7 @@ async function extractArchive(options) {
     await extractZip(options.archivePath, options.destDir);
   } else {
     throw new Error(
-      `Unsupported archive format: ${path2.basename(options.archivePath)}`
+      `Unsupported archive format: ${path3.basename(options.archivePath)}`
     );
   }
   if (process.platform !== "win32") {
@@ -529,7 +550,7 @@ function setExecutablePermissions(dir) {
   for (const entry of entries) {
     if (entry.isFile()) {
       try {
-        fs3.chmodSync(path2.join(dir, entry.name), 493);
+        fs3.chmodSync(path3.join(dir, entry.name), 493);
       } catch {
       }
     }
@@ -581,13 +602,19 @@ function findLatestRelease(manifest, platform2) {
 }
 
 // src/toolchain/installation.ts
-var MANIFEST_URL = "https://inference-lang.org/releases.json";
+var DEFAULT_DIST_SERVER = "https://inference-lang.org";
+var RELEASES_PATH = "/releases.json";
+function manifestUrl() {
+  const server = process.env["INFS_DIST_SERVER"]?.trim();
+  const base = server && server.length > 0 ? server.replace(/\/+$/, "") : DEFAULT_DIST_SERVER;
+  return `${base}${RELEASES_PATH}`;
+}
 async function installToolchain(platform2, onProgress) {
   onProgress?.({
     stage: "fetching-manifest",
     message: "Fetching release manifest..."
   });
-  const manifest = await fetchJson(MANIFEST_URL);
+  const manifest = await fetchJson(manifestUrl());
   if (!Array.isArray(manifest)) {
     throw new Error("Invalid release manifest: expected an array.");
   }
@@ -610,11 +637,11 @@ async function installToolchain(platform2, onProgress) {
     stage: "downloading",
     message: `Downloading infs v${version}...`
   });
-  const destDir = path3.join(inferenceHome(), "bin");
+  const destDir = path5.join(inferenceHome(), "bin");
   fs4.mkdirSync(destDir, { recursive: true });
   const archiveName = `infs-${platform2.id}${platform2.archiveExtension}`;
-  const tmpDir = fs4.mkdtempSync(path3.join(os3.tmpdir(), "infs-"));
-  const archivePath = path3.join(tmpDir, archiveName);
+  const tmpDir = fs4.mkdtempSync(path5.join(os3.tmpdir(), "infs-"));
+  const archivePath = path5.join(tmpDir, archiveName);
   try {
     await downloadFile(fileUrl, {
       destPath: archivePath,
@@ -644,7 +671,7 @@ async function installToolchain(platform2, onProgress) {
     } catch {
     }
   }
-  const infsPath = path3.join(destDir, platform2.binaryName);
+  const infsPath = path5.join(destDir, platform2.binaryName);
   if (!fs4.existsSync(infsPath)) {
     throw new Error(
       `infs binary not found at ${infsPath} after extraction.`
@@ -654,8 +681,12 @@ async function installToolchain(platform2, onProgress) {
     stage: "installing",
     message: "Running infs install..."
   });
+  const binDir = path5.join(inferenceHome(), "bin");
+  const sep = process.platform === "win32" ? ";" : ":";
+  const augmentedPath = `${binDir}${sep}${process.env["PATH"] ?? ""}`;
   const installResult = await exec(infsPath, ["install"], {
-    timeoutMs: 12e4
+    timeoutMs: 12e4,
+    env: { PATH: augmentedPath }
   });
   if (installResult.exitCode !== 0) {
     throw new Error(
@@ -669,7 +700,8 @@ async function installToolchain(platform2, onProgress) {
   let doctorWarnings = false;
   try {
     const doctorResult = await exec(infsPath, ["doctor"], {
-      timeoutMs: 3e4
+      timeoutMs: 3e4,
+      env: { PATH: augmentedPath }
     });
     if (doctorResult.exitCode !== 0) {
       doctorWarnings = true;
@@ -687,20 +719,91 @@ async function installToolchain(platform2, onProgress) {
 }
 
 // src/commands/install.ts
+init_doctor();
+
+// src/ui/statusBar.ts
+var vscode2 = __toESM(require("vscode"));
+
+// src/ui/statusBarState.ts
+function determineStatusBarState(result) {
+  if (result === null) {
+    return {
+      icon: "dash",
+      label: "Inference",
+      tooltip: "Inference: Toolchain not found. Click to run doctor.",
+      background: "none"
+    };
+  }
+  if (result.hasErrors) {
+    return {
+      icon: "error",
+      label: "Inference",
+      tooltip: `Inference: ${result.summary || "Toolchain errors detected"}`,
+      background: "error"
+    };
+  }
+  if (result.hasWarnings) {
+    return {
+      icon: "warning",
+      label: "Inference",
+      tooltip: `Inference: ${result.summary || "Toolchain warnings detected"}`,
+      background: "warning"
+    };
+  }
+  return {
+    icon: "check",
+    label: "Inference",
+    tooltip: "Inference: Toolchain healthy",
+    background: "none"
+  };
+}
+
+// src/ui/statusBar.ts
+var ICON_MAP = {
+  loading: "$(loading~spin)",
+  dash: "$(dash)",
+  check: "$(check)",
+  warning: "$(warning)",
+  error: "$(error)"
+};
+var BACKGROUND_MAP = {
+  none: void 0,
+  warning: new vscode2.ThemeColor("statusBarItem.warningBackground"),
+  error: new vscode2.ThemeColor("statusBarItem.errorBackground")
+};
+function createStatusBar() {
+  const item = vscode2.window.createStatusBarItem(
+    vscode2.StatusBarAlignment.Left,
+    0
+  );
+  item.command = "inference.runDoctor";
+  item.text = "$(loading~spin) Inference";
+  item.tooltip = "Inference: Checking toolchain...";
+  item.show();
+  return item;
+}
+function updateStatusBar(item, result) {
+  const state = determineStatusBarState(result);
+  item.text = `${ICON_MAP[state.icon]} ${state.label}`;
+  item.tooltip = state.tooltip;
+  item.backgroundColor = BACKGROUND_MAP[state.background];
+}
+
+// src/commands/install.ts
 var installing = false;
-function registerInstallCommand(outputChannel2) {
-  return vscode2.commands.registerCommand(
+function registerInstallCommand(outputChannel2, statusBarItem) {
+  return vscode3.commands.registerCommand(
     "inference.installToolchain",
     async () => {
       if (installing) {
-        vscode2.window.showInformationMessage(
+        vscode3.window.showInformationMessage(
           "Inference toolchain installation is already in progress."
         );
         return;
       }
       const platform2 = detectPlatform();
       if (!platform2) {
-        vscode2.window.showErrorMessage(
+        vscode3.window.showErrorMessage(
           `Inference: unsupported platform (${process.platform}-${process.arch}).`
         );
         return;
@@ -714,12 +817,15 @@ function registerInstallCommand(outputChannel2) {
         outputChannel2.appendLine(
           `Toolchain v${result.version} installed at ${result.infsPath}`
         );
-        vscode2.commands.executeCommand(
+        vscode3.commands.executeCommand(
           "setContext",
           "inference.toolchainInstalled",
           true
         );
-        vscode2.commands.executeCommand("inference.runDoctor");
+        const doctorResult = await runDoctor(result.infsPath);
+        updateStatusBar(statusBarItem, doctorResult);
+        vscode3.commands.executeCommand("inference.refreshConfigView");
+        vscode3.commands.executeCommand("inference.applyTerminalPath");
         notifyInstallSuccess(result.version, result.doctorWarnings);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -732,9 +838,9 @@ function registerInstallCommand(outputChannel2) {
   );
 }
 function installWithProgress(platform2, outputChannel2) {
-  return vscode2.window.withProgress(
+  return vscode3.window.withProgress(
     {
-      location: vscode2.ProgressLocation.Notification,
+      location: vscode3.ProgressLocation.Notification,
       title: "Inference Toolchain",
       cancellable: false
     },
@@ -756,42 +862,37 @@ function installWithProgress(platform2, outputChannel2) {
 }
 function notifyInstallSuccess(version, doctorWarnings) {
   if (doctorWarnings) {
-    vscode2.window.showWarningMessage(
+    vscode3.window.showWarningMessage(
       `Inference toolchain v${version} installed, but doctor reported issues. See output for details.`,
       "Show Output"
     ).then((action) => {
       if (action === "Show Output") {
-        vscode2.commands.executeCommand("inference.showOutput");
+        vscode3.commands.executeCommand("inference.showOutput");
       }
     });
   } else {
-    vscode2.window.showInformationMessage(
-      `Inference toolchain v${version} installed successfully.`,
-      "Show Output"
-    ).then((action) => {
-      if (action === "Show Output") {
-        vscode2.commands.executeCommand("inference.showOutput");
-      }
-    });
+    vscode3.window.showInformationMessage(
+      `Inference toolchain v${version} installed successfully.`
+    );
   }
 }
 function notifyInstallError(errorMessage) {
-  vscode2.window.showErrorMessage(
+  vscode3.window.showErrorMessage(
     `Inference toolchain installation failed: ${errorMessage}`,
     "Retry",
     "Download Manually",
     "Settings"
   ).then((action) => {
     if (action === "Retry") {
-      vscode2.commands.executeCommand("inference.installToolchain");
+      vscode3.commands.executeCommand("inference.installToolchain");
     } else if (action === "Download Manually") {
-      vscode2.env.openExternal(
-        vscode2.Uri.parse(
+      vscode3.env.openExternal(
+        vscode3.Uri.parse(
           "https://github.com/Inferara/inference/releases"
         )
       );
     } else if (action === "Settings") {
-      vscode2.commands.executeCommand(
+      vscode3.commands.executeCommand(
         "workbench.action.openSettings",
         "inference.path"
       );
@@ -803,45 +904,25 @@ function notifyInstallError(errorMessage) {
 var vscode4 = __toESM(require("vscode"));
 init_doctor();
 
-// src/ui/statusBar.ts
-var vscode3 = __toESM(require("vscode"));
-function createStatusBar() {
-  const item = vscode3.window.createStatusBarItem(
-    vscode3.StatusBarAlignment.Left,
-    0
-  );
-  item.command = "inference.runDoctor";
-  item.text = "$(loading~spin) Inference";
-  item.tooltip = "Inference: Checking toolchain...";
-  item.show();
-  return item;
-}
-function updateStatusBar(item, result) {
-  if (result === null) {
-    item.text = "$(dash) Inference";
-    item.tooltip = "Inference: Toolchain not found. Click to run doctor.";
-    item.backgroundColor = void 0;
-    return;
+// src/toolchain/doctorFormat.ts
+var STATUS_TAGS = {
+  ok: "[OK]  ",
+  warn: "[WARN]",
+  fail: "[FAIL]"
+};
+function formatDoctorChecks(result) {
+  const lines = [];
+  lines.push("--- Doctor Report ---");
+  for (const check of result.checks) {
+    const tag = STATUS_TAGS[check.status] ?? `[${check.status.toUpperCase()}]`;
+    lines.push(`  ${tag} ${check.name}: ${check.message}`);
   }
-  if (result.hasErrors) {
-    item.text = "$(error) Inference";
-    item.tooltip = `Inference: ${result.summary || "Toolchain errors detected"}`;
-    item.backgroundColor = new vscode3.ThemeColor(
-      "statusBarItem.errorBackground"
-    );
-    return;
+  if (result.summary) {
+    lines.push("");
+    lines.push(result.summary);
   }
-  if (result.hasWarnings) {
-    item.text = "$(warning) Inference";
-    item.tooltip = `Inference: ${result.summary || "Toolchain warnings detected"}`;
-    item.backgroundColor = new vscode3.ThemeColor(
-      "statusBarItem.warningBackground"
-    );
-    return;
-  }
-  item.text = "$(check) Inference";
-  item.tooltip = "Inference: Toolchain healthy";
-  item.backgroundColor = void 0;
+  lines.push("---------------------");
+  return lines;
 }
 
 // src/commands/doctor.ts
@@ -853,8 +934,8 @@ function registerDoctorCommand(outputChannel2, statusBarItem) {
       if (running) {
         return;
       }
-      const infsPath = detectInfs();
-      if (!infsPath) {
+      const detection = detectInfs();
+      if (!detection) {
         outputChannel2.appendLine("Doctor: infs binary not found.");
         updateStatusBar(statusBarItem, null);
         vscode4.window.showWarningMessage(
@@ -872,9 +953,9 @@ function registerDoctorCommand(outputChannel2, statusBarItem) {
       running = true;
       try {
         outputChannel2.appendLine(
-          `Running infs doctor (${infsPath})...`
+          `Running infs doctor (${detection.path})...`
         );
-        const result = await runDoctor(infsPath);
+        const result = await runDoctor(detection.path);
         if (!result) {
           outputChannel2.appendLine(
             "Doctor: failed to execute infs doctor."
@@ -885,8 +966,11 @@ function registerDoctorCommand(outputChannel2, statusBarItem) {
           );
           return;
         }
-        formatDoctorOutput(outputChannel2, result);
+        for (const line of formatDoctorChecks(result)) {
+          outputChannel2.appendLine(line);
+        }
         updateStatusBar(statusBarItem, result);
+        vscode4.commands.executeCommand("inference.refreshConfigView");
         if (result.hasErrors) {
           vscode4.window.showErrorMessage(
             `Inference doctor: ${result.summary}`,
@@ -915,23 +999,6 @@ function registerDoctorCommand(outputChannel2, statusBarItem) {
       }
     }
   );
-}
-var STATUS_TAGS = {
-  ok: "[OK]  ",
-  warn: "[WARN]",
-  fail: "[FAIL]"
-};
-function formatDoctorOutput(outputChannel2, result) {
-  outputChannel2.appendLine("--- Doctor Report ---");
-  for (const check of result.checks) {
-    const tag = STATUS_TAGS[check.status] ?? `[${check.status.toUpperCase()}]`;
-    outputChannel2.appendLine(`  ${tag} ${check.name}: ${check.message}`);
-  }
-  if (result.summary) {
-    outputChannel2.appendLine("");
-    outputChannel2.appendLine(result.summary);
-  }
-  outputChannel2.appendLine("---------------------");
 }
 
 // src/commands/selectVersion.ts
@@ -998,6 +1065,32 @@ async function installAndSetDefault(infsPath, version) {
   return { success: true, installedButNotDefault: false };
 }
 
+// src/toolchain/versionPicker.ts
+function buildVersionPickItems(versions, currentVersion) {
+  const available = versions.filter((v) => v.available_for_current).sort((a, b) => compareSemver(b.version, a.version));
+  const items = available.map((v) => {
+    const tags = [];
+    if (v.version === currentVersion) {
+      tags.push("current");
+    }
+    if (v.stable) {
+      tags.push("stable");
+    }
+    return {
+      label: v.version,
+      description: tags.length > 0 ? `(${tags.join(", ")})` : void 0
+    };
+  });
+  if (currentVersion) {
+    const idx = items.findIndex((i) => i.label === currentVersion);
+    if (idx > 0) {
+      const [item] = items.splice(idx, 1);
+      items.unshift(item);
+    }
+  }
+  return items;
+}
+
 // src/commands/versionChange.ts
 var vscode5 = __toESM(require("vscode"));
 async function performVersionChange(infsPath, version, outputChannel2, actionVerb) {
@@ -1020,6 +1113,7 @@ async function performVersionChange(infsPath, version, outputChannel2, actionVer
           "inference.toolchainInstalled",
           true
         );
+        vscode5.commands.executeCommand("inference.applyTerminalPath");
         vscode5.commands.executeCommand("inference.runDoctor");
         vscode5.window.showInformationMessage(
           `Inference toolchain ${actionVerb.toLowerCase()} to v${version}.`,
@@ -1064,8 +1158,8 @@ function registerSelectVersionCommand(outputChannel2) {
         );
         return;
       }
-      const infsPath = detectInfs();
-      if (!infsPath) {
+      const detection = detectInfs();
+      if (!detection) {
         vscode6.window.showWarningMessage(
           "Inference toolchain not found. Install it first.",
           "Install"
@@ -1080,40 +1174,20 @@ function registerSelectVersionCommand(outputChannel2) {
       }
       selecting = true;
       try {
-        const versions = await fetchVersions(infsPath);
+        const versions = await fetchVersions(detection.path);
         if (!versions) {
           vscode6.window.showErrorMessage(
             "Inference: Failed to fetch available versions."
           );
           return;
         }
-        const currentVersion = await getCurrentVersion(infsPath);
-        const available = versions.filter((v) => v.available_for_current).sort((a, b) => compareSemver(b.version, a.version));
-        if (available.length === 0) {
+        const currentVersion = await getCurrentVersion(detection.path);
+        const items = buildVersionPickItems(versions, currentVersion);
+        if (items.length === 0) {
           vscode6.window.showInformationMessage(
             "No toolchain versions available for this platform."
           );
           return;
-        }
-        const items = available.map((v) => {
-          const tags = [];
-          if (v.version === currentVersion) {
-            tags.push("current");
-          }
-          if (v.stable) {
-            tags.push("stable");
-          }
-          return {
-            label: v.version,
-            description: tags.length > 0 ? `(${tags.join(", ")})` : void 0
-          };
-        });
-        if (currentVersion) {
-          const idx = items.findIndex((i) => i.label === currentVersion);
-          if (idx > 0) {
-            const [item] = items.splice(idx, 1);
-            items.unshift(item);
-          }
         }
         const picked = await vscode6.window.showQuickPick(items, {
           placeHolder: "Select toolchain version",
@@ -1129,7 +1203,7 @@ function registerSelectVersionCommand(outputChannel2) {
           );
           return;
         }
-        await performVersionChange(infsPath, selectedVersion, outputChannel2, "Switching to");
+        await performVersionChange(detection.path, selectedVersion, outputChannel2, "Switching to");
       } finally {
         selecting = false;
       }
@@ -1139,6 +1213,34 @@ function registerSelectVersionCommand(outputChannel2) {
 
 // src/commands/update.ts
 var vscode7 = __toESM(require("vscode"));
+
+// src/toolchain/updateCheck.ts
+function checkUpdateAvailable(currentVersion, versions) {
+  if (!currentVersion) {
+    return { status: "no-current-version" };
+  }
+  if (!versions) {
+    return { status: "no-versions" };
+  }
+  const candidates = versions.filter((v) => v.available_for_current);
+  if (candidates.length === 0) {
+    return { status: "no-versions" };
+  }
+  const sorted = [...candidates].sort(
+    (a, b) => compareSemver(b.version, a.version)
+  );
+  const latest = sorted[0];
+  if (compareSemver(currentVersion, latest.version) >= 0) {
+    return { status: "up-to-date", version: currentVersion };
+  }
+  return {
+    status: "update-available",
+    current: currentVersion,
+    latest: latest.version
+  };
+}
+
+// src/commands/update.ts
 var updating = false;
 function registerUpdateCommand(outputChannel2) {
   return vscode7.commands.registerCommand(
@@ -1150,8 +1252,8 @@ function registerUpdateCommand(outputChannel2) {
         );
         return;
       }
-      const infsPath = detectInfs();
-      if (!infsPath) {
+      const detection = detectInfs();
+      if (!detection) {
         vscode7.window.showWarningMessage(
           "Inference toolchain not found. Install it first.",
           "Install"
@@ -1166,7 +1268,7 @@ function registerUpdateCommand(outputChannel2) {
       }
       updating = true;
       try {
-        await checkForUpdatesImpl(infsPath, outputChannel2, true);
+        await checkForUpdatesImpl(detection.path, outputChannel2, true);
       } finally {
         updating = false;
       }
@@ -1210,90 +1312,370 @@ async function checkForUpdatesImpl(infsPath, outputChannel2, userInitiated) {
     }
     return;
   }
-  const candidates = versions.filter((v) => v.available_for_current);
-  if (candidates.length === 0) {
-    outputChannel2.appendLine("Update check: no versions available for this platform.");
-    if (userInitiated) {
-      vscode7.window.showInformationMessage(
-        "Inference: No toolchain versions available for this platform."
+  const result = checkUpdateAvailable(currentVersion, versions);
+  switch (result.status) {
+    case "no-current-version":
+      outputChannel2.appendLine("Update check: could not determine current version.");
+      if (userInitiated) {
+        vscode7.window.showErrorMessage(
+          "Inference: Could not determine the current toolchain version."
+        );
+      }
+      return;
+    case "no-versions":
+      outputChannel2.appendLine("Update check: no versions available for this platform.");
+      if (userInitiated) {
+        vscode7.window.showInformationMessage(
+          "Inference: No toolchain versions available for this platform."
+        );
+      }
+      return;
+    case "up-to-date":
+      outputChannel2.appendLine(
+        `Update check: toolchain is up to date (v${result.version}).`
       );
-    }
-    return;
-  }
-  const sorted = [...candidates].sort(
-    (a, b) => compareSemver(b.version, a.version)
-  );
-  const latest = sorted[0];
-  if (compareSemver(currentVersion, latest.version) >= 0) {
-    outputChannel2.appendLine(
-      `Update check: toolchain is up to date (v${currentVersion}).`
-    );
-    if (userInitiated) {
-      vscode7.window.showInformationMessage(
-        `Inference toolchain is up to date (v${currentVersion}).`
+      if (userInitiated) {
+        vscode7.window.showInformationMessage(
+          `Inference toolchain is up to date (v${result.version}).`
+        );
+      }
+      return;
+    case "update-available": {
+      outputChannel2.appendLine(
+        `Update check: v${result.latest} available (current: v${result.current}).`
       );
+      const action = await vscode7.window.showInformationMessage(
+        `Inference toolchain update available: v${result.latest} (current: v${result.current})`,
+        "Update",
+        "Release Notes"
+      );
+      if (action === "Update") {
+        await performVersionChange(infsPath, result.latest, outputChannel2, "Updating to");
+      } else if (action === "Release Notes") {
+        vscode7.env.openExternal(
+          vscode7.Uri.parse(
+            `https://github.com/Inferara/inference/releases/tag/v${result.latest}`
+          )
+        );
+      }
+      return;
     }
-    return;
-  }
-  outputChannel2.appendLine(
-    `Update check: v${latest.version} available (current: v${currentVersion}).`
-  );
-  const action = await vscode7.window.showInformationMessage(
-    `Inference toolchain update available: v${latest.version} (current: v${currentVersion})`,
-    "Update",
-    "Release Notes"
-  );
-  if (action === "Update") {
-    await performVersionChange(infsPath, latest.version, outputChannel2, "Updating to");
-  } else if (action === "Release Notes") {
-    vscode7.env.openExternal(
-      vscode7.Uri.parse(
-        `https://github.com/Inferara/inference/releases/tag/v${latest.version}`
-      )
-    );
   }
 }
+
+// src/ui/configTree.ts
+var vscode8 = __toESM(require("vscode"));
+init_home();
+init_exec();
+var ConfigItem = class extends vscode8.TreeItem {
+  constructor(label, kind, collapsible, groupId, settingKey, copyValue) {
+    super(label, collapsible);
+    this.kind = kind;
+    this.groupId = groupId;
+    this.settingKey = settingKey;
+    this.copyValue = copyValue;
+    if (kind === "group") {
+      this.iconPath = new vscode8.ThemeIcon(
+        groupId === "toolchain" ? "tools" : "gear"
+      );
+    }
+    if (settingKey) {
+      this.command = {
+        title: "Open Setting",
+        command: "workbench.action.openSettings",
+        arguments: [settingKey]
+      };
+    }
+    if (copyValue) {
+      this.contextValue = "inference.configPath";
+    }
+  }
+};
+var InferenceConfigProvider = class {
+  _onDidChangeTreeData = new vscode8.EventEmitter();
+  onDidChangeTreeData = this._onDidChangeTreeData.event;
+  detection = null;
+  version = null;
+  doctorResult = null;
+  refresh(detection, doctorResult) {
+    if (detection !== void 0) {
+      this.detection = detection;
+    }
+    if (doctorResult !== void 0) {
+      this.doctorResult = doctorResult;
+    }
+    this._onDidChangeTreeData.fire(void 0);
+  }
+  getTreeItem(element) {
+    return element;
+  }
+  async getChildren(element) {
+    if (!element) {
+      return [
+        new ConfigItem(
+          "Toolchain",
+          "group",
+          vscode8.TreeItemCollapsibleState.Expanded,
+          "toolchain"
+        ),
+        new ConfigItem(
+          "Settings",
+          "group",
+          vscode8.TreeItemCollapsibleState.Expanded,
+          "settings"
+        )
+      ];
+    }
+    if (element.groupId === "toolchain") {
+      return this.getToolchainChildren();
+    }
+    if (element.groupId === "settings") {
+      return this.getSettingsChildren();
+    }
+    return [];
+  }
+  async getToolchainChildren() {
+    const detection = this.detection ?? detectInfs();
+    const items = [];
+    if (!detection) {
+      const item = new ConfigItem(
+        "infs: not found",
+        "property",
+        vscode8.TreeItemCollapsibleState.None
+      );
+      item.iconPath = new vscode8.ThemeIcon("error");
+      item.command = {
+        title: "Install Toolchain",
+        command: "inference.installToolchain",
+        arguments: []
+      };
+      items.push(item);
+      return items;
+    }
+    const infsItem = new ConfigItem(
+      `infs: ${detection.path}  (${detection.source})`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None,
+      void 0,
+      void 0,
+      detection.path
+    );
+    infsItem.iconPath = new vscode8.ThemeIcon("file-binary");
+    items.push(infsItem);
+    const version = await this.resolveVersion(detection.path);
+    const versionItem = new ConfigItem(
+      `Version: ${version ?? "unknown"}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None
+    );
+    versionItem.iconPath = new vscode8.ThemeIcon("tag");
+    items.push(versionItem);
+    const home = inferenceHome();
+    const homeIsDefault = !process.env["INFERENCE_HOME"];
+    const homeItem = new ConfigItem(
+      `Home: ${home}  (${homeIsDefault ? "default" : "env"})`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None,
+      void 0,
+      void 0,
+      home
+    );
+    homeItem.iconPath = new vscode8.ThemeIcon("home");
+    items.push(homeItem);
+    const platform2 = detectPlatform();
+    const platformItem = new ConfigItem(
+      `Platform: ${platform2?.id ?? "unknown"}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None
+    );
+    platformItem.iconPath = new vscode8.ThemeIcon("device-desktop");
+    items.push(platformItem);
+    const status = this.doctorResult ? this.doctorResult.hasErrors ? "errors" : this.doctorResult.hasWarnings ? "warnings" : "healthy" : "unknown";
+    const statusIcon = this.doctorResult ? this.doctorResult.hasErrors ? "error" : this.doctorResult.hasWarnings ? "warning" : "pass" : "question";
+    const statusItem = new ConfigItem(
+      `Status: ${status}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None
+    );
+    statusItem.iconPath = new vscode8.ThemeIcon(statusIcon);
+    statusItem.command = {
+      title: "Run Doctor",
+      command: "inference.runDoctor",
+      arguments: []
+    };
+    items.push(statusItem);
+    return items;
+  }
+  getSettingsChildren() {
+    const settings = getSettings();
+    const pathItem = new ConfigItem(
+      `Path: ${settings.path || "(auto-detect)"}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None,
+      void 0,
+      "inference.path"
+    );
+    pathItem.iconPath = new vscode8.ThemeIcon("file-symlink-directory");
+    const autoInstallItem = new ConfigItem(
+      `Auto Install: ${settings.autoInstall ? "enabled" : "disabled"}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None,
+      void 0,
+      "inference.autoInstall"
+    );
+    autoInstallItem.iconPath = new vscode8.ThemeIcon("cloud-download");
+    const updateItem = new ConfigItem(
+      `Check for Updates: ${settings.checkForUpdates ? "enabled" : "disabled"}`,
+      "property",
+      vscode8.TreeItemCollapsibleState.None,
+      void 0,
+      "inference.checkForUpdates"
+    );
+    updateItem.iconPath = new vscode8.ThemeIcon("sync");
+    return [pathItem, autoInstallItem, updateItem];
+  }
+  async resolveVersion(infsPath) {
+    if (this.version) {
+      return this.version;
+    }
+    try {
+      const result = await exec(infsPath, ["version"]);
+      if (result.exitCode !== 0) {
+        return null;
+      }
+      const match = result.stdout.match(/^infs\s+(\S+)/);
+      if (match) {
+        this.version = match[1];
+        return this.version;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  dispose() {
+    this._onDidChangeTreeData.dispose();
+  }
+};
 
 // src/extension.ts
 init_doctor();
 var MIN_INFS_VERSION = "0.0.1-beta.1";
-var outputChannel = vscode8.window.createOutputChannel("Inference");
+var outputChannel = vscode9.window.createOutputChannel("Inference", { log: true });
 function activate(context) {
   context.subscriptions.push(outputChannel);
   const statusBarItem = createStatusBar();
   context.subscriptions.push(statusBarItem);
   context.subscriptions.push(
-    vscode8.commands.registerCommand("inference.showOutput", () => {
+    vscode9.commands.registerCommand("inference.showOutput", () => {
       outputChannel.show();
     })
   );
-  context.subscriptions.push(registerInstallCommand(outputChannel));
+  context.subscriptions.push(registerInstallCommand(outputChannel, statusBarItem));
   context.subscriptions.push(
     registerDoctorCommand(outputChannel, statusBarItem)
   );
   context.subscriptions.push(registerUpdateCommand(outputChannel));
   context.subscriptions.push(registerSelectVersionCommand(outputChannel));
-  checkToolchain(statusBarItem).catch(
-    (err) => outputChannel.appendLine(`Toolchain check failed: ${err}`)
+  const configProvider = new InferenceConfigProvider();
+  const configView = vscode9.window.createTreeView("inference.configView", {
+    treeDataProvider: configProvider
+  });
+  context.subscriptions.push(configView);
+  context.subscriptions.push(configProvider);
+  context.subscriptions.push(
+    vscode9.commands.registerCommand("inference.refreshConfigView", () => {
+      configProvider.refresh();
+    })
+  );
+  context.subscriptions.push(
+    vscode9.commands.registerCommand("inference.applyTerminalPath", () => {
+      applyTerminalPath(context);
+    })
+  );
+  context.subscriptions.push(
+    vscode9.commands.registerCommand(
+      "inference.copyConfigValue",
+      (item) => {
+        if (item.copyValue) {
+          vscode9.env.clipboard.writeText(item.copyValue);
+          vscode9.window.showInformationMessage(
+            `Copied: ${item.copyValue}`
+          );
+        }
+      }
+    )
+  );
+  context.subscriptions.push(
+    vscode9.commands.registerCommand(
+      "inference.revealConfigPath",
+      (item) => {
+        if (item.copyValue) {
+          vscode9.commands.executeCommand(
+            "revealFileInOS",
+            vscode9.Uri.file(item.copyValue)
+          );
+        }
+      }
+    )
+  );
+  context.subscriptions.push(
+    vscode9.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("inference")) {
+        configProvider.refresh();
+      }
+    })
+  );
+  context.subscriptions.push(
+    vscode9.commands.registerCommand("inference.resetPathAcceptance", () => {
+      const home = inferenceHome();
+      const stateKey = `${PATH_FALLBACK_KEY}:${home}`;
+      context.globalState.update(stateKey, void 0);
+      vscode9.window.showInformationMessage(
+        "Inference: PATH fallback preference has been reset."
+      );
+    })
+  );
+  applyTerminalPath(context);
+  checkToolchain(context, statusBarItem, configProvider).catch(
+    (err) => outputChannel.error(`Toolchain check failed: ${err}`)
   );
 }
 function deactivate() {
 }
-async function checkToolchain(statusBarItem) {
+function applyTerminalPath(context) {
+  const binDir = path6.join(inferenceHome(), "bin");
+  const sep = process.platform === "win32" ? ";" : ":";
+  const env4 = context.environmentVariableCollection;
+  env4.prepend("PATH", binDir + sep);
+  env4.description = "Adds the Inference toolchain to PATH";
+}
+var PATH_FALLBACK_KEY = "inference.acceptedPathFallback";
+async function checkToolchain(context, statusBarItem, configProvider) {
   const platform2 = detectPlatform();
+  const home = inferenceHome();
+  const homeIsDefault = !process.env["INFERENCE_HOME"];
+  const distServer = process.env["INFS_DIST_SERVER"];
+  outputChannel.info("Inference Activation");
   if (!platform2) {
-    outputChannel.appendLine(
-      `Unsupported platform: ${process.platform}-${process.arch}`
+    outputChannel.warn(
+      `Platform:         ${process.platform}-${process.arch} (unsupported)`
+    );
+    outputChannel.info(
+      `INFERENCE_HOME:   ${home} ${homeIsDefault ? "(default)" : "(env)"}`
+    );
+    outputChannel.info(
+      `INFS_DIST_SERVER: ${distServer ?? "(not set, using production)"}`
     );
     updateStatusBar(statusBarItem, null);
-    vscode8.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
-    vscode8.window.showWarningMessage(
+    vscode9.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
+    vscode9.window.showWarningMessage(
       `Inference: unsupported platform (${process.platform}-${process.arch}).`,
       "Download Page"
     ).then((action) => {
       if (action === "Download Page") {
-        vscode8.env.openExternal(
-          vscode8.Uri.parse(
+        vscode9.env.openExternal(
+          vscode9.Uri.parse(
             "https://github.com/Inferara/inference/releases"
           )
         );
@@ -1301,85 +1683,131 @@ async function checkToolchain(statusBarItem) {
     });
     return;
   }
-  outputChannel.appendLine(`Platform: ${platform2.id}`);
-  const infsPath = detectInfs();
-  if (!infsPath) {
-    outputChannel.appendLine("infs binary not found.");
+  outputChannel.info(`Platform:         ${platform2.id}`);
+  outputChannel.info(
+    `INFERENCE_HOME:   ${home} ${homeIsDefault ? "(default)" : "(env)"}`
+  );
+  outputChannel.info(
+    `INFS_DIST_SERVER: ${distServer ?? "(not set, using production)"}`
+  );
+  const detection = detectInfs();
+  if (!detection) {
+    outputChannel.error("infs binary:      not found");
+    outputChannel.error("Toolchain status: errors");
     updateStatusBar(statusBarItem, null);
-    vscode8.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
+    vscode9.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
     notifyMissing();
     return;
   }
-  outputChannel.appendLine(`infs found: ${infsPath}`);
-  const versionOk = await checkInfsVersion(infsPath);
+  outputChannel.info(
+    `infs binary:      ${detection.path} (${detection.source})`
+  );
+  if (!homeIsDefault && detection.source === "path") {
+    const stateKey = `${PATH_FALLBACK_KEY}:${home}`;
+    const accepted = context.globalState.get(stateKey);
+    if (accepted === "*") {
+      outputChannel.info(
+        `Note: Using PATH binary (notification permanently suppressed for this INFERENCE_HOME).`
+      );
+    } else if (accepted === detection.path) {
+      outputChannel.info(
+        `Note: Using PATH binary (previously accepted for this INFERENCE_HOME).`
+      );
+    } else {
+      outputChannel.warn(
+        `INFERENCE_HOME is set to ${home} but infs was not found there. Using binary from PATH instead.`
+      );
+      vscode9.window.showWarningMessage(
+        `Inference: infs binary not found in INFERENCE_HOME (${home}). Found via PATH instead.`,
+        "Install",
+        "Dismiss"
+      ).then((action) => {
+        if (action === "Install") {
+          vscode9.commands.executeCommand("inference.installToolchain");
+        } else {
+          context.globalState.update(stateKey, "*");
+        }
+      });
+    }
+  }
+  const versionOk = await checkInfsVersion(detection.path);
   if (!versionOk) {
+    outputChannel.error("Toolchain status: errors");
     updateStatusBar(statusBarItem, null);
-    vscode8.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
+    vscode9.commands.executeCommand("setContext", "inference.toolchainInstalled", false);
     return;
   }
-  outputChannel.appendLine("Toolchain detection complete.");
-  vscode8.commands.executeCommand("setContext", "inference.toolchainInstalled", true);
-  const doctorResult = await runDoctor(infsPath);
+  vscode9.commands.executeCommand("setContext", "inference.toolchainInstalled", true);
+  const doctorResult = await runDoctor(detection.path);
   updateStatusBar(statusBarItem, doctorResult);
-  checkForUpdates(infsPath, outputChannel).catch(
-    (err) => outputChannel.appendLine(`Update check failed: ${err}`)
+  configProvider.refresh(detection, doctorResult);
+  const status = doctorResult?.hasErrors ? "errors" : doctorResult?.hasWarnings ? "warnings" : "healthy";
+  if (doctorResult?.hasErrors) {
+    outputChannel.error(`Toolchain status: ${status}`);
+  } else if (doctorResult?.hasWarnings) {
+    outputChannel.warn(`Toolchain status: ${status}`);
+  } else {
+    outputChannel.info(`Toolchain status: ${status}`);
+  }
+  checkForUpdates(detection.path, outputChannel).catch(
+    (err) => outputChannel.error(`Update check failed: ${err}`)
   );
 }
 async function checkInfsVersion(infsPath) {
   try {
     const result = await exec(infsPath, ["version"]);
     if (result.exitCode !== 0) {
-      outputChannel.appendLine(
+      outputChannel.error(
         `infs version failed (exit ${result.exitCode}): ${result.stderr}`
       );
       return false;
     }
     const match = result.stdout.match(/^infs\s+(\S+)/);
     if (!match) {
-      outputChannel.appendLine(
+      outputChannel.error(
         `Could not parse infs version from: ${result.stdout.trim()}`
       );
       return false;
     }
     const version = match[1];
-    outputChannel.appendLine(`infs version: ${version}`);
+    outputChannel.info(`infs version: ${version}`);
     if (compareSemver(version, MIN_INFS_VERSION) < 0) {
-      outputChannel.appendLine(
+      outputChannel.warn(
         `infs version ${version} is below minimum ${MIN_INFS_VERSION}.`
       );
-      vscode8.window.showWarningMessage(
+      vscode9.window.showWarningMessage(
         `Inference: infs version ${version} is outdated (minimum: ${MIN_INFS_VERSION}). Please update.`,
         "Update"
       ).then((action) => {
         if (action === "Update") {
-          vscode8.commands.executeCommand("inference.updateToolchain");
+          vscode9.commands.executeCommand("inference.updateToolchain");
         }
       });
       return false;
     }
     return true;
   } catch (err) {
-    outputChannel.appendLine(`Failed to run infs version: ${err}`);
+    outputChannel.error(`Failed to run infs version: ${err}`);
     return false;
   }
 }
 function notifyMissing() {
-  vscode8.window.showInformationMessage(
+  vscode9.window.showInformationMessage(
     "Inference toolchain not found. Would you like to install it?",
     "Install",
     "Download Manually",
     "Configure Path"
   ).then((action) => {
     if (action === "Install") {
-      vscode8.commands.executeCommand("inference.installToolchain");
+      vscode9.commands.executeCommand("inference.installToolchain");
     } else if (action === "Download Manually") {
-      vscode8.env.openExternal(
-        vscode8.Uri.parse(
+      vscode9.env.openExternal(
+        vscode9.Uri.parse(
           "https://github.com/Inferara/inference/releases"
         )
       );
     } else if (action === "Configure Path") {
-      vscode8.commands.executeCommand(
+      vscode9.commands.executeCommand(
         "workbench.action.openSettings",
         "inference.path"
       );
@@ -1389,6 +1817,7 @@ function notifyMissing() {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   activate,
+  applyTerminalPath,
   deactivate
 });
 //# sourceMappingURL=extension.js.map

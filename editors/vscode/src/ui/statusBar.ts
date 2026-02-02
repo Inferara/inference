@@ -1,5 +1,20 @@
 import * as vscode from 'vscode';
 import { DoctorResult } from '../toolchain/doctor';
+import { determineStatusBarState, StatusBarIcon } from './statusBarState';
+
+const ICON_MAP: Record<StatusBarIcon, string> = {
+    loading: '$(loading~spin)',
+    dash: '$(dash)',
+    check: '$(check)',
+    warning: '$(warning)',
+    error: '$(error)',
+};
+
+const BACKGROUND_MAP: Record<string, vscode.ThemeColor | undefined> = {
+    none: undefined,
+    warning: new vscode.ThemeColor('statusBarItem.warningBackground'),
+    error: new vscode.ThemeColor('statusBarItem.errorBackground'),
+};
 
 /**
  * Create the Inference status bar item.
@@ -30,32 +45,8 @@ export function updateStatusBar(
     item: vscode.StatusBarItem,
     result: DoctorResult | null,
 ): void {
-    if (result === null) {
-        item.text = '$(dash) Inference';
-        item.tooltip = 'Inference: Toolchain not found. Click to run doctor.';
-        item.backgroundColor = undefined;
-        return;
-    }
-
-    if (result.hasErrors) {
-        item.text = '$(error) Inference';
-        item.tooltip = `Inference: ${result.summary || 'Toolchain errors detected'}`;
-        item.backgroundColor = new vscode.ThemeColor(
-            'statusBarItem.errorBackground',
-        );
-        return;
-    }
-
-    if (result.hasWarnings) {
-        item.text = '$(warning) Inference';
-        item.tooltip = `Inference: ${result.summary || 'Toolchain warnings detected'}`;
-        item.backgroundColor = new vscode.ThemeColor(
-            'statusBarItem.warningBackground',
-        );
-        return;
-    }
-
-    item.text = '$(check) Inference';
-    item.tooltip = 'Inference: Toolchain healthy';
-    item.backgroundColor = undefined;
+    const state = determineStatusBarState(result);
+    item.text = `${ICON_MAP[state.icon]} ${state.label}`;
+    item.tooltip = state.tooltip;
+    item.backgroundColor = BACKGROUND_MAP[state.background];
 }

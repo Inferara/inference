@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { detectInfs } from '../toolchain/detection';
 import { fetchVersions, getCurrentVersion } from '../toolchain/versions';
-import { compareSemver } from '../utils/semver';
+import { buildVersionPickItems } from '../toolchain/versionPicker';
 import { performVersionChange } from './versionChange';
 
 /** Guard against concurrent select operations. */
@@ -24,8 +24,8 @@ export function registerSelectVersionCommand(
                 return;
             }
 
-            const infsPath = detectInfs();
-            if (!infsPath) {
+            const detection = detectInfs();
+            if (!detection) {
                 vscode.window
                     .showWarningMessage(
                         'Inference toolchain not found. Install it first.',
@@ -43,7 +43,7 @@ export function registerSelectVersionCommand(
 
             selecting = true;
             try {
-                const versions = await fetchVersions(infsPath);
+                const versions = await fetchVersions(detection.path);
                 if (!versions) {
                     vscode.window.showErrorMessage(
                         'Inference: Failed to fetch available versions.',
@@ -51,40 +51,15 @@ export function registerSelectVersionCommand(
                     return;
                 }
 
-                const currentVersion = await getCurrentVersion(infsPath);
+                const currentVersion = await getCurrentVersion(detection.path);
 
-                // Filter to versions available for current platform and sort by semver descending
-                const available = versions
-                    .filter((v) => v.available_for_current)
-                    .sort((a, b) => compareSemver(b.version, a.version));
+                const items = buildVersionPickItems(versions, currentVersion);
 
-                if (available.length === 0) {
+                if (items.length === 0) {
                     vscode.window.showInformationMessage(
                         'No toolchain versions available for this platform.',
                     );
                     return;
-                }
-
-                const items: vscode.QuickPickItem[] = available.map((v) => {
-                    const tags: string[] = [];
-                    if (v.version === currentVersion) {
-                        tags.push('current');
-                    }
-                    if (v.stable) {
-                        tags.push('stable');
-                    }
-                    return {
-                        label: v.version,
-                        description: tags.length > 0 ? `(${tags.join(', ')})` : undefined,
-                    };
-                });
-
-                if (currentVersion) {
-                    const idx = items.findIndex((i) => i.label === currentVersion);
-                    if (idx > 0) {
-                        const [item] = items.splice(idx, 1);
-                        items.unshift(item);
-                    }
                 }
 
                 const picked = await vscode.window.showQuickPick(items, {
@@ -104,7 +79,7 @@ export function registerSelectVersionCommand(
                     return;
                 }
 
-                await performVersionChange(infsPath, selectedVersion, outputChannel, 'Switching to');
+                await performVersionChange(detection.path, selectedVersion, outputChannel, 'Switching to');
             } finally {
                 selecting = false;
             }

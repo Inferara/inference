@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { PlatformInfo } from './platform';
-import { inferenceHome } from './detection';
+import { inferenceHome } from './home';
 import { fetchJson, downloadFile, sha256File } from '../utils/download';
 import { extractArchive } from '../utils/extract';
 import { exec } from '../utils/exec';
@@ -36,7 +36,16 @@ export interface InstallResult {
     doctorWarnings: boolean;
 }
 
-export const MANIFEST_URL = 'https://inference-lang.org/releases.json';
+const DEFAULT_DIST_SERVER = 'https://inference-lang.org';
+const RELEASES_PATH = '/releases.json';
+
+function manifestUrl(): string {
+    const server = process.env['INFS_DIST_SERVER']?.trim();
+    const base = server && server.length > 0
+        ? server.replace(/\/+$/, '')
+        : DEFAULT_DIST_SERVER;
+    return `${base}${RELEASES_PATH}`;
+}
 
 /**
  * Run the full installation flow.
@@ -52,7 +61,7 @@ export async function installToolchain(
         message: 'Fetching release manifest...',
     });
 
-    const manifest = await fetchJson<ReleaseEntry[]>(MANIFEST_URL);
+    const manifest = await fetchJson<ReleaseEntry[]>(manifestUrl());
 
     if (!Array.isArray(manifest)) {
         throw new Error('Invalid release manifest: expected an array.');
@@ -137,8 +146,13 @@ export async function installToolchain(
         message: 'Running infs install...',
     });
 
+    const binDir = path.join(inferenceHome(), 'bin');
+    const sep = process.platform === 'win32' ? ';' : ':';
+    const augmentedPath = `${binDir}${sep}${process.env['PATH'] ?? ''}`;
+
     const installResult = await exec(infsPath, ['install'], {
         timeoutMs: 120_000,
+        env: { PATH: augmentedPath },
     });
     if (installResult.exitCode !== 0) {
         throw new Error(
@@ -155,6 +169,7 @@ export async function installToolchain(
     try {
         const doctorResult = await exec(infsPath, ['doctor'], {
             timeoutMs: 30_000,
+            env: { PATH: augmentedPath },
         });
         if (doctorResult.exitCode !== 0) {
             doctorWarnings = true;

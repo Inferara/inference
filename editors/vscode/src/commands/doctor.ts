@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { detectInfs } from '../toolchain/detection';
 import { runDoctor, DoctorResult } from '../toolchain/doctor';
+import { formatDoctorChecks } from '../toolchain/doctorFormat';
 import { updateStatusBar } from '../ui/statusBar';
 
 /** Guard against concurrent doctor runs. */
@@ -23,8 +24,8 @@ export function registerDoctorCommand(
                 return;
             }
 
-            const infsPath = detectInfs();
-            if (!infsPath) {
+            const detection = detectInfs();
+            if (!detection) {
                 outputChannel.appendLine('Doctor: infs binary not found.');
                 updateStatusBar(statusBarItem, null);
                 vscode.window
@@ -45,9 +46,9 @@ export function registerDoctorCommand(
             running = true;
             try {
                 outputChannel.appendLine(
-                    `Running infs doctor (${infsPath})...`,
+                    `Running infs doctor (${detection.path})...`,
                 );
-                const result = await runDoctor(infsPath);
+                const result = await runDoctor(detection.path);
 
                 if (!result) {
                     outputChannel.appendLine(
@@ -60,8 +61,11 @@ export function registerDoctorCommand(
                     return;
                 }
 
-                formatDoctorOutput(outputChannel, result);
+                for (const line of formatDoctorChecks(result)) {
+                    outputChannel.appendLine(line);
+                }
                 updateStatusBar(statusBarItem, result);
+                vscode.commands.executeCommand('inference.refreshConfigView');
 
                 if (result.hasErrors) {
                     vscode.window
@@ -97,24 +101,3 @@ export function registerDoctorCommand(
     );
 }
 
-const STATUS_TAGS: Record<string, string> = {
-    ok: '[OK]  ',
-    warn: '[WARN]',
-    fail: '[FAIL]',
-};
-
-function formatDoctorOutput(
-    outputChannel: vscode.OutputChannel,
-    result: DoctorResult,
-): void {
-    outputChannel.appendLine('--- Doctor Report ---');
-    for (const check of result.checks) {
-        const tag = STATUS_TAGS[check.status] ?? `[${check.status.toUpperCase()}]`;
-        outputChannel.appendLine(`  ${tag} ${check.name}: ${check.message}`);
-    }
-    if (result.summary) {
-        outputChannel.appendLine('');
-        outputChannel.appendLine(result.summary);
-    }
-    outputChannel.appendLine('---------------------');
-}

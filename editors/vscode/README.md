@@ -32,12 +32,28 @@ Full syntax highlighting support for Inference language constructs:
 
 The extension integrates with the `infs` CLI to provide one-button toolchain installation and management. On activation, it automatically detects your toolchain by checking the `inference.path` setting, system `PATH`, and `~/.inference/bin/infs` (respecting `INFERENCE_HOME`).
 
-Available commands (open Command Palette with `Ctrl+Shift+P`):
+#### Configuration Sidebar
+
+An Inference icon appears in the activity bar. Click it to open the Configuration view, which displays:
+
+- **Toolchain group**: Shows resolved `infs` binary path and detection source, toolchain version, `INFERENCE_HOME` directory, detected platform, and health status
+- **Settings group**: Displays current values for `inference.path`, `inference.autoInstall`, and `inference.checkForUpdates` settings
+
+Click any setting item to open VS Code settings filtered to that key. Click the status item to run doctor diagnostics. The view auto-refreshes when settings change or after install/update operations.
+
+#### Terminal Integration
+
+The extension automatically adds the Inference toolchain to `PATH` for all VS Code integrated terminals. After installing or updating the toolchain, `infs` and `infc` commands are immediately available in new terminals without restarting VS Code. Existing open terminals show a relaunch indicator—clicking it updates the terminal with the new `PATH`.
+
+#### Available Commands
+
+Open Command Palette with `Ctrl+Shift+P`:
 
 - **Inference: Install Toolchain** -- download and install `infs` for your platform
 - **Inference: Update Toolchain** -- check for and install updates
 - **Inference: Select Toolchain Version** -- switch between installed versions
 - **Inference: Run Doctor** -- diagnose toolchain issues
+- **Inference: Refresh Configuration** -- reload the Configuration sidebar view
 - **Inference: Show Output** -- open the Inference log channel
 
 A guided setup walkthrough is available via **Get Started: Open Walkthrough...** > **Get Started with Inference**.

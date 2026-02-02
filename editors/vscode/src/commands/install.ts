@@ -6,6 +6,8 @@ import {
     InstallProgressCallback,
     InstallResult,
 } from '../toolchain/installation';
+import { runDoctor } from '../toolchain/doctor';
+import { updateStatusBar } from '../ui/statusBar';
 
 /** Guard against concurrent install attempts. */
 let installing = false;
@@ -16,6 +18,7 @@ let installing = false;
  */
 export function registerInstallCommand(
     outputChannel: vscode.OutputChannel,
+    statusBarItem: vscode.StatusBarItem,
 ): vscode.Disposable {
     return vscode.commands.registerCommand(
         'inference.installToolchain',
@@ -47,7 +50,12 @@ export function registerInstallCommand(
                 vscode.commands.executeCommand(
                     'setContext', 'inference.toolchainInstalled', true,
                 );
-                vscode.commands.executeCommand('inference.runDoctor');
+
+                const doctorResult = await runDoctor(result.infsPath);
+                updateStatusBar(statusBarItem, doctorResult);
+                vscode.commands.executeCommand('inference.refreshConfigView');
+                vscode.commands.executeCommand('inference.applyTerminalPath');
+
                 notifyInstallSuccess(result.version, result.doctorWarnings);
             } catch (err) {
                 const message =
@@ -108,16 +116,9 @@ function notifyInstallSuccess(
                 }
             });
     } else {
-        vscode.window
-            .showInformationMessage(
-                `Inference toolchain v${version} installed successfully.`,
-                'Show Output',
-            )
-            .then((action) => {
-                if (action === 'Show Output') {
-                    vscode.commands.executeCommand('inference.showOutput');
-                }
-            });
+        vscode.window.showInformationMessage(
+            `Inference toolchain v${version} installed successfully.`,
+        );
     }
 }
 

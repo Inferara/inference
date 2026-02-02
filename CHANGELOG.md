@@ -63,6 +63,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add TextMate grammar with hierarchical scopes for non-deterministic keywords (`forall`, `exists`, `assume`, `unique`, `@`)
 - Add language configuration with bracket matching, comment toggling, and code folding
 - Publish extension to VS Code Marketplace: [inference-lang.inference](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
+- Add Configuration sidebar (TreeView) to VS Code extension with toolchain info and settings overview ([#116])
+  - Activity bar icon opens a Configuration view with Toolchain and Settings groups
+  - Displays resolved infs path, version, INFERENCE_HOME, platform, and health status
+  - Click settings items to open VS Code settings; click status to run doctor
+  - Right-click path items for "Copy Value" and "Reveal in File Explorer"
+  - Auto-refreshes on settings change, after install, and after doctor
+- Add automatic terminal PATH integration to VS Code extension ([#116])
+  - `infs` and `infc` are available in integrated terminals immediately after install or update
+  - Existing open terminals show a relaunch indicator when PATH changes
+  - PATH modification persists across VS Code sessions
 
 ### Breaking Changes
 
@@ -215,3 +225,4 @@ Initial tagged release.
 [#86]: https://github.com/Inferara/inference/pull/86
 [#94]: https://github.com/Inferara/inference/pull/94
 [#96]: https://github.com/Inferara/inference/pull/96
+[#116]: https://github.com/Inferara/inference/pull/116

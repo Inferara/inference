@@ -1,13 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { getSettings } from '../config/settings';
 import { detectPlatform } from './platform';
+import { inferenceHome } from './home';
 
-/** Resolve the INFERENCE_HOME directory (default: ~/.inference). */
-export function inferenceHome(): string {
-    return process.env['INFERENCE_HOME'] || path.join(os.homedir(), '.inference');
-}
+export { inferenceHome };
 
 /** Check whether a file exists and is executable (or just exists on Windows). */
 export function isExecutable(filePath: string): boolean {
@@ -39,36 +36,45 @@ export function findInPath(binaryName: string): string | null {
     return null;
 }
 
+/** Source where the infs binary was found. */
+export type InfsSource = 'settings' | 'managed' | 'path';
+
+/** Result of infs binary detection. */
+export interface InfsDetection {
+    path: string;
+    source: InfsSource;
+}
+
 /**
  * Detect infs binary location.
  *
  * Search order:
  * 1. Custom path from settings (inference.path)
- * 2. System PATH
- * 3. Default managed location (~/.inference/bin/infs)
+ * 2. Managed location (INFERENCE_HOME/bin/infs)
+ * 3. System PATH
  *
- * Returns the resolved absolute path or null if not found.
+ * Returns the resolved absolute path and source, or null if not found.
  */
-export function detectInfs(): string | null {
+export function detectInfs(): InfsDetection | null {
     const platform = detectPlatform();
     const binaryName = platform?.binaryName ?? 'infs';
 
     const settings = getSettings();
     if (settings.path) {
         if (isExecutable(settings.path)) {
-            return settings.path;
+            return { path: settings.path, source: 'settings' };
         }
         return null;
     }
 
-    const pathResult = findInPath(binaryName);
-    if (pathResult) {
-        return pathResult;
-    }
-
     const managedPath = path.join(inferenceHome(), 'bin', binaryName);
     if (isExecutable(managedPath)) {
-        return managedPath;
+        return { path: managedPath, source: 'managed' };
+    }
+
+    const pathResult = findInPath(binaryName);
+    if (pathResult) {
+        return { path: pathResult, source: 'path' };
     }
 
     return null;

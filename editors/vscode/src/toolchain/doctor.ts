@@ -1,4 +1,6 @@
+import * as path from 'path';
 import { exec } from '../utils/exec';
+import { inferenceHome } from './home';
 
 export type DoctorCheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -75,7 +77,13 @@ export async function runDoctor(
     infsPath: string,
 ): Promise<DoctorResult | null> {
     try {
-        const result = await exec(infsPath, ['doctor']);
+        const binDir = path.join(inferenceHome(), 'bin');
+        const sep = process.platform === 'win32' ? ';' : ':';
+        const augmentedPath = `${binDir}${sep}${process.env['PATH'] ?? ''}`;
+
+        const result = await exec(infsPath, ['doctor'], {
+            env: { PATH: augmentedPath },
+        });
         return parseDoctorOutput(result.stdout);
     } catch (err) {
         console.error('infs doctor failed:', err);

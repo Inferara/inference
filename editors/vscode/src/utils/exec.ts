@@ -18,12 +18,13 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export function exec(
     command: string,
     args: string[],
-    options?: { timeoutMs?: number; cwd?: string },
+    options?: { timeoutMs?: number; cwd?: string; env?: Record<string, string> },
 ): Promise<ExecResult> {
     const timeout = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
         const child = cp.spawn(command, args, {
             cwd: options?.cwd,
+            env: options?.env ? { ...process.env, ...options.env } : undefined,
             stdio: ['ignore', 'pipe', 'pipe'],
             timeout,
         });
