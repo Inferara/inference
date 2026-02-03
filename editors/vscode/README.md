@@ -10,7 +10,7 @@ Full syntax highlighting support for Inference language constructs:
 
 - **Keywords**: `fn`, `struct`, `enum`, `type`, `const`, `let`, `pub`, `mut`, `spec`, `external`
 - **Control Flow**: `if`, `else`, `loop`, `break`, `return`, `assert`
-- **Non-deterministic Constructs**: `forall`, `exists`, `assume`, `unique`, `@`
+- **Non-deterministic Constructs**: `forall`, `exists`, `assume`, `unique`, `@` (uzumaki)
 - **Primitive Types**: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `bool`
 - **Literals**: strings, numbers (decimal, hex, binary, octal), booleans
 - **Comments**: line (`//`), documentation (`///`), and block (`/* */`)
@@ -30,31 +30,66 @@ Full syntax highlighting support for Inference language constructs:
 
 ### Toolchain Management
 
-The extension integrates with the `infs` CLI to provide one-button toolchain installation and management. On activation, it automatically detects your toolchain by checking the `inference.path` setting, system `PATH`, and `~/.inference/bin/infs` (respecting `INFERENCE_HOME`).
+The extension provides comprehensive toolchain management through integration with the `infs` CLI. All operations are fully automated and require no manual configuration.
+
+#### Automatic Detection
+
+On activation, the extension automatically detects your toolchain using the following priority:
+
+1. Custom path from `inference.path` setting
+2. Managed installation in `INFERENCE_HOME/bin/infs` (respects `INFERENCE_HOME` environment variable)
+3. System `PATH`
+
+The detection result is displayed in the Configuration sidebar and logged to the Output channel.
 
 #### Configuration Sidebar
 
-An Inference icon appears in the activity bar. Click it to open the Configuration view, which displays:
+A dedicated Inference icon appears in the VS Code activity bar. Click it to open the Configuration view with real-time toolchain information:
 
-- **Toolchain group**: Shows resolved `infs` binary path and detection source, toolchain version, `INFERENCE_HOME` directory, detected platform, and health status
-- **Settings group**: Displays current values for `inference.path`, `inference.autoInstall`, and `inference.checkForUpdates` settings
+**Toolchain Group:**
+- Binary path and detection source (settings/managed/path)
+- Installed version number
+- `INFERENCE_HOME` directory location (default or custom)
+- Detected platform (e.g., `linux-x64`, `macos-arm64`, `windows-x64`)
+- Health status with diagnostic results
 
-Click any setting item to open VS Code settings filtered to that key. Click the status item to run doctor diagnostics. The view auto-refreshes when settings change or after install/update operations.
+**Settings Group:**
+- `inference.path` - Custom binary path (click to configure)
+- `inference.autoInstall` - Auto-install prompt behavior
+- `inference.checkForUpdates` - Automatic update checking
+
+**Interactive Actions:**
+- Click any path item to copy its value to clipboard
+- Right-click path items to reveal in file explorer
+- Click status to run doctor diagnostics
+- Use the refresh button in the title bar to reload
+
+The view automatically refreshes when settings change or after install/update operations.
 
 #### Terminal Integration
 
-The extension automatically adds the Inference toolchain to `PATH` for all VS Code integrated terminals. After installing or updating the toolchain, `infs` and `infc` commands are immediately available in new terminals without restarting VS Code. Existing open terminals show a relaunch indicator—clicking it updates the terminal with the new `PATH`.
+The extension automatically prepends `INFERENCE_HOME/bin` to `PATH` for all VS Code integrated terminals using the `EnvironmentVariableCollection` API:
+
+- New terminals immediately have `infs` and `infc` available
+- Existing terminals show a relaunch indicator when the toolchain changes
+- No VS Code restart required after installation or updates
+- Works across all supported platforms
+
+#### Status Bar
+
+The bottom-left status bar shows real-time toolchain health. Click the status bar item to run full diagnostics via `infs doctor`.
 
 #### Available Commands
 
-Open Command Palette with `Ctrl+Shift+P`:
+Open Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
-- **Inference: Install Toolchain** -- download and install `infs` for your platform
-- **Inference: Update Toolchain** -- check for and install updates
-- **Inference: Select Toolchain Version** -- switch between installed versions
-- **Inference: Run Doctor** -- diagnose toolchain issues
-- **Inference: Refresh Configuration** -- reload the Configuration sidebar view
-- **Inference: Show Output** -- open the Inference log channel
+- **Inference: Install Toolchain** - Download and install the latest `infs` release for your platform
+- **Inference: Update Toolchain** - Check for updates and install the latest version
+- **Inference: Select Toolchain Version** - Browse and switch between available versions
+- **Inference: Run Doctor** - Execute comprehensive health diagnostics
+- **Inference: Refresh Configuration** - Reload the Configuration sidebar view
+- **Inference: Show Output** - Open the Inference output log channel
+- **Inference: Reset PATH Fallback Preference** - Clear saved PATH fallback acceptance
 
 A guided setup walkthrough is available via **Get Started: Open Walkthrough...** > **Get Started with Inference**.
 
@@ -73,6 +108,29 @@ A guided setup walkthrough is available via **Get Started: Open Walkthrough...**
 2. In VS Code, press `Ctrl+Shift+P`
 3. Type "Install from VSIX" and select the command
 4. Choose the downloaded `.vsix` file
+
+## Configuration
+
+### Settings
+
+- **`inference.path`** (string, default: `""`) - Custom path to the `infs` binary. Leave empty for automatic detection. Scope: machine (not synced across devices).
+- **`inference.autoInstall`** (boolean, default: `true`) - Prompt to install toolchain if not found on activation.
+- **`inference.checkForUpdates`** (boolean, default: `true`) - Automatically check for toolchain updates on activation.
+
+### Environment Variables
+
+- **`INFERENCE_HOME`** - Override default toolchain directory (default: `~/.inference` on Unix, `%LOCALAPPDATA%\Inference` on Windows)
+- **`INFS_DIST_SERVER`** - Override distribution server URL (for development/testing)
+
+## Supported Platforms
+
+Automatic toolchain installation is supported on:
+
+- **Linux**: x86_64 (glibc)
+- **macOS**: ARM64 (Apple Silicon)
+- **Windows**: x86_64
+
+Other platforms can use the extension for syntax highlighting but must install the toolchain manually.
 
 ## Example
 
@@ -116,6 +174,21 @@ Learn more:
 - [Inference Repository](https://github.com/Inferara/inference)
 - [Language Specification](https://github.com/Inferara/inference-language-spec)
 - [Inference Book](https://github.com/Inferara/book)
+
+## Troubleshooting
+
+### Toolchain not detected
+
+1. Check the Output panel (View > Output > Select "Inference")
+2. Run **Inference: Run Doctor** to see detailed diagnostics
+3. Verify `inference.path` setting if using a custom location
+4. Try **Inference: Install Toolchain** to install automatically
+
+### Terminal commands not found
+
+1. Close all open terminals and open a new one (Terminal > New Terminal)
+2. The extension automatically adds `INFERENCE_HOME/bin` to `PATH`
+3. For external terminals, add the path to your shell profile manually
 
 ## Privacy
 

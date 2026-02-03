@@ -43,6 +43,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Now uses `symlink_metadata().is_ok()` to correctly detect and remove both valid and broken symlinks
   - Added `validate_symlinks()` to check for broken symlinks after uninstallation
   - Added `repair_symlinks()` to automatically fix broken symlinks by updating them to the default version or removing them
+- Change `infs doctor` to exit with non-zero status when checks fail ([#116])
+  - Previously always exited 0; now returns non-zero so callers can detect failures
+- Remove manifest caching from `infs` CLI ([#116])
+  - `fetch_manifest()` now always fetches from network
+  - Simplifies CLI code; VS Code extension manages its own fetching lifecycle
 
 ### Build
 
@@ -73,13 +78,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `infs` and `infc` are available in integrated terminals immediately after install or update
   - Existing open terminals show a relaunch indicator when PATH changes
   - PATH modification persists across VS Code sessions
-
-### Breaking Changes
-
-- ast: Remove `source` field from `Location` struct ([#69])
-
-  **Migration**: Use `arena.get_node_source(node_id)` to retrieve source text.
-  Source is now stored once in `SourceFile` rather than per-node.
+- Add toolchain management commands to VS Code extension ([#116])
+  - Install Toolchain: downloads, verifies (SHA-256), extracts, and runs `infs install`
+  - Update Toolchain: checks for newer versions and applies updates
+  - Select Version: switch between installed toolchain versions via QuickPick
+  - Run Doctor: executes `infs doctor` and displays results in output channel
+- Add Getting Started walkthrough to VS Code extension ([#116])
+  - Four-step guided setup: install toolchain, verify with doctor, create project, build
+- Add status bar integration showing toolchain health at a glance ([#116])
 
 ### Language
 
