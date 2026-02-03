@@ -301,14 +301,3 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 11.4 | HTTPS-to-HTTP redirect is blocked | If manifest/download redirects to HTTP, fails with "Refusing HTTPS-to-HTTP redirect: {url} -> {target}" **[A]** | |
 | 11.5 | JSON response size limit | Responses larger than 10 MB are rejected | |
 | 11.6 | Redirect chain limit | More than 5 redirects are rejected: "Too many redirects fetching {url}" | |
-
----
-
-## Sign-Off
-
-| Role | Name | Date | Verdict |
-|------|------|------|---------|
-| QA Tester | | | |
-| Developer | | | |
-
-**Notes:**
