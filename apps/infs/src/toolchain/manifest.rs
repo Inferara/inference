@@ -32,8 +32,6 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Platform;
 
@@ -313,100 +311,15 @@ pub fn sorted_versions(manifest: &Manifest) -> Vec<&VersionEntry> {
     versions
 }
 
-/// Cached manifest with timestamp.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CachedManifest {
-    manifest: Manifest,
-    timestamp: u64,
-}
-
-/// Returns the path to the manifest cache file.
-fn cache_path() -> Result<PathBuf> {
-    let root = if let Ok(home) = std::env::var(super::paths::INFERENCE_HOME_ENV) {
-        PathBuf::from(home)
-    } else {
-        #[cfg(windows)]
-        {
-            dirs::data_dir()
-                .context("Cannot determine AppData directory")?
-                .join("inference")
-        }
-        #[cfg(not(windows))]
-        {
-            dirs::home_dir()
-                .context("Cannot determine home directory")?
-                .join(".inference")
-        }
-    };
-    Ok(root.join("cache").join("manifest.json"))
-}
-
-/// Returns the current Unix timestamp.
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-/// Attempts to load the manifest from cache if valid.
-///
-/// If the cache file exists but cannot be parsed (e.g., old format),
-/// it will be deleted to allow a fresh fetch.
-fn load_from_cache() -> Option<Manifest> {
-    let cache_file = cache_path().ok()?;
-    let content = std::fs::read_to_string(&cache_file).ok()?;
-
-    let Ok(cached) = serde_json::from_str::<CachedManifest>(&content) else {
-        // Old format or corrupted cache - delete it
-        let _ = std::fs::remove_file(&cache_file);
-        return None;
-    };
-    Some(cached.manifest)
-}
-
-/// Saves the manifest to cache.
-fn save_to_cache(manifest: &Manifest) {
-    let Ok(cache_file) = cache_path() else {
-        return;
-    };
-
-    if let Some(parent) = cache_file.parent()
-        && std::fs::create_dir_all(parent).is_err()
-    {
-        return;
-    }
-
-    let cached = CachedManifest {
-        manifest: manifest.clone(),
-        timestamp: current_timestamp(),
-    };
-
-    let Ok(content) = serde_json::to_string_pretty(&cached) else {
-        return;
-    };
-
-    let _ = std::fs::write(cache_file, content);
-}
-
-/// Fetches the release manifest, using a local cache with 15-minute TTL.
-///
-/// The manifest is cached at `~/.inference/cache/manifest.json`. If the cache is valid,
-/// returns the cached manifest without making a network request. On cache miss or
-/// expiry, fetches from the static manifest URL and updates the cache.
+/// Fetches the release manifest from the distribution server.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - The manifest URL cannot be fetched (and no valid cache exists)
+/// - The manifest URL cannot be fetched
 /// - The response cannot be parsed as JSON
 pub async fn fetch_manifest() -> Result<Manifest> {
-    if let Some(manifest) = load_from_cache() {
-        return Ok(manifest);
-    }
-
-    let manifest = fetch_manifest_from_network().await?;
-    save_to_cache(&manifest);
-    Ok(manifest)
+    fetch_manifest_from_network().await
 }
 
 /// Returns the URL to the releases manifest.
@@ -741,23 +654,6 @@ mod tests {
         assert_eq!(versions[0].version, "0.2.0");
         assert_eq!(versions[1].version, "0.1.0");
         assert_eq!(versions[2].version, "invalid");
-    }
-
-    #[test]
-    fn cached_manifest_serializes_and_deserializes() {
-        let manifest: Manifest =
-            serde_json::from_str(sample_manifest_json()).expect("Should parse manifest");
-
-        let cached = CachedManifest {
-            manifest: manifest.clone(),
-            timestamp: 1_000_000,
-        };
-
-        let json = serde_json::to_string(&cached).expect("Should serialize");
-        let deserialized: CachedManifest = serde_json::from_str(&json).expect("Should deserialize");
-
-        assert_eq!(deserialized.timestamp, 1_000_000);
-        assert_eq!(deserialized.manifest.len(), manifest.len());
     }
 
     #[test]
