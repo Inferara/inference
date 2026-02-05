@@ -557,10 +557,13 @@ pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
 pub fn codegen(
     typed_context: &TypedContext,
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(
         typed_context,
-        inference_wasm_codegen::Target::default(),
-        inference_wasm_codegen::CompilationMode::default(),
+        target,
+        mode,
+        target.default_opt_level(mode),
     )
 }
 

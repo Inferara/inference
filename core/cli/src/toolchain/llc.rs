@@ -54,9 +54,8 @@ pub(crate) fn compile_ir_to_object(
         anyhow::anyhow!("Failed to write LLVM IR to {}: {e}", ir_path.display())
     })?;
 
-    // Determine optimization level from target and mode
     let target = output.target();
-    let opt_level = target.default_opt_level(output.mode());
+    let opt_level = output.opt_level();
 
     let mut cmd = Command::new(&llc_path);
     configure_llvm_env(&mut cmd)?;

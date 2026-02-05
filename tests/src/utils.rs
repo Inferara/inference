@@ -39,10 +39,13 @@ pub(crate) fn codegen_ir(source_code: &str) -> inference_wasm_codegen::CodegenOu
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(
         &typed_context,
-        inference_wasm_codegen::Target::default(),
-        inference_wasm_codegen::CompilationMode::default(),
+        target,
+        mode,
+        target.default_opt_level(mode),
     )
     .unwrap()
 }
@@ -170,7 +173,7 @@ fn compile_ir_to_wasm_for_tests(
 
     // Stage 1: inf-llc
     let target = output.target();
-    let opt_level = target.default_opt_level(output.mode());
+    let opt_level = output.opt_level();
 
     let mut llc_cmd = Command::new(&llc_path);
     configure_env(&mut llc_cmd);

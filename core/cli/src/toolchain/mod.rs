@@ -42,6 +42,9 @@ mod env;
 mod llc;
 mod lld;
 pub(super) mod paths;
+pub mod profile;
+
+pub use profile::BuildProfile;
 
 use inference_wasm_codegen::CodegenOutput;
 use tempfile::tempdir;

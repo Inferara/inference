@@ -125,8 +125,9 @@
 mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
-use inference::{analyze, codegen, parse, type_check, wasm_to_v};
+use inference::{analyze, parse, type_check, wasm_to_v};
 use parser::Cli;
+use toolchain::BuildProfile;
 use std::{
     fs,
     path::PathBuf,
@@ -248,7 +249,11 @@ fn main() {
             eprintln!("Internal error: type check phase did not produce typed context");
             process::exit(1);
         };
-        let codegen_output = match codegen(&tctx) {
+        let profile = BuildProfile::default();
+        let target = inference_wasm_codegen::Target::default();
+        let mode = inference_wasm_codegen::CompilationMode::default();
+        let opt_level = profile.resolve_opt_level(target, mode);
+        let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("Codegen failed: {e}");

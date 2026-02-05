@@ -11,10 +11,10 @@
 //! Typed AST (TypedContext)
 //!         |
 //!         v
-//!   codegen(tc, target, mode)
+//!   codegen(tc, target, mode, opt_level)
 //!         |
 //!         v
-//!   CodegenOutput { ir, target, mode, module_name, has_main }
+//!   CodegenOutput { ir, target, mode, opt_level, module_name, has_main }
 //!         |
 //!         v  (CLI / toolchain layer)
 //!   inf-llc -> rust-lld -> .wasm
@@ -81,7 +81,7 @@ pub use target::{CompilationMode, OptLevel, Target};
 ///
 /// - **`Proof` mode**: Adds `optnone`+`noinline` barriers on ALL functions (defense-in-depth
 ///   on top of `-O0`) to preserve 1:1 structural correspondence with source code.
-/// - **`Compile` mode**: Applies target-default optimization. When `OptLevel` is `Os`/`Oz`,
+/// - **`Compile` mode**: Uses the provided `opt_level`. When `OptLevel` is `Os`/`Oz`,
 ///   adds `optsize`/`minsize` IR function attributes (since `llc` does not accept `-Os`/`-Oz`).
 ///
 /// # Errors
@@ -94,6 +94,7 @@ pub fn codegen(
     typed_context: &TypedContext,
     target: Target,
     mode: CompilationMode,
+    opt_level: OptLevel,
 ) -> anyhow::Result<CodegenOutput> {
     // Validate: proof mode requires Wasm32 target
     if mode == CompilationMode::Proof && target != Target::Wasm32 {
@@ -135,8 +136,6 @@ pub fn codegen(
     }
 
     // Apply mode-specific IR attributes
-    let opt_level = target.default_opt_level(mode);
-
     if mode == CompilationMode::Proof {
         // Proof mode: add optnone+noinline barriers on ALL functions
         // This is defense-in-depth on top of -O0
@@ -154,6 +153,7 @@ pub fn codegen(
         ir,
         target,
         mode,
+        opt_level,
         module_name.to_string(),
         has_main,
     ))

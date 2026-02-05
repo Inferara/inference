@@ -17,7 +17,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::target::{CompilationMode, Target};
+use crate::target::{CompilationMode, OptLevel, Target};
 
 /// Output of the LLVM IR code generation phase.
 ///
@@ -28,12 +28,13 @@ use crate::target::{CompilationMode, Target};
 /// # Examples
 ///
 /// ```
-/// use inference_wasm_codegen::{CodegenOutput, Target, CompilationMode};
+/// use inference_wasm_codegen::{CodegenOutput, Target, CompilationMode, OptLevel};
 ///
 /// let output = CodegenOutput::new(
 ///     "define i32 @hello_world() { ret i32 42 }".to_string(),
 ///     Target::Wasm32,
 ///     CompilationMode::Compile,
+///     OptLevel::O3,
 ///     "output".to_string(),
 ///     false,
 /// );
@@ -41,6 +42,7 @@ use crate::target::{CompilationMode, Target};
 /// assert!(!output.ir().is_empty());
 /// assert_eq!(output.target(), Target::Wasm32);
 /// assert_eq!(output.mode(), CompilationMode::Compile);
+/// assert_eq!(output.opt_level(), OptLevel::O3);
 /// assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
 /// assert_eq!(output.module_name(), "output");
 /// assert!(!output.has_main());
@@ -55,6 +57,12 @@ pub struct CodegenOutput {
 
     /// Compilation mode controlling optimization level and spec-node handling.
     mode: CompilationMode,
+
+    /// Optimization level used for this compilation.
+    ///
+    /// Determined by the [`BuildProfile`] in the toolchain layer. Stored here so
+    /// that `inf-llc` can read it directly from the output without recomputing.
+    opt_level: OptLevel,
 
     /// LLVM module name (currently hardcoded as `"output"`).
     ///
@@ -75,6 +83,7 @@ impl CodegenOutput {
         ir: String,
         target: Target,
         mode: CompilationMode,
+        opt_level: OptLevel,
         module_name: String,
         has_main: bool,
     ) -> Self {
@@ -82,6 +91,7 @@ impl CodegenOutput {
             ir,
             target,
             mode,
+            opt_level,
             module_name,
             has_main,
         }
@@ -103,6 +113,12 @@ impl CodegenOutput {
     #[must_use]
     pub fn mode(&self) -> CompilationMode {
         self.mode
+    }
+
+    /// Returns the optimization level used for this compilation.
+    #[must_use]
+    pub fn opt_level(&self) -> OptLevel {
+        self.opt_level
     }
 
     /// Returns the LLVM target triple string for this output.
@@ -149,6 +165,7 @@ mod tests {
             "define i32 @test() { ret i32 42 }".to_string(),
             Target::Wasm32,
             CompilationMode::Compile,
+            OptLevel::O3,
             "output".to_string(),
             false,
         )
@@ -159,6 +176,7 @@ mod tests {
             "define i32 @main() { ret i32 0 }".to_string(),
             Target::Wasm32,
             CompilationMode::Proof,
+            OptLevel::O0,
             "output".to_string(),
             true,
         )
@@ -180,6 +198,12 @@ mod tests {
     fn mode_returns_mode() {
         let output = sample_output();
         assert_eq!(output.mode(), CompilationMode::Compile);
+    }
+
+    #[test]
+    fn opt_level_returns_opt_level() {
+        let output = sample_output();
+        assert_eq!(output.opt_level(), OptLevel::O3);
     }
 
     #[test]
@@ -212,6 +236,7 @@ mod tests {
             String::new(),
             Target::Soroban,
             CompilationMode::Compile,
+            OptLevel::Oz,
             "soroban_module".to_string(),
             false,
         );
