@@ -2,6 +2,7 @@
 mod base_codegen_tests {
     use crate::utils::{
         assert_wasms_modules_equivalence, get_test_file_path, get_test_wasm_path, wasm_codegen,
+        wasm_codegen_with_target,
     };
 
     #[test]
@@ -82,6 +83,24 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn soroban_produces_valid_wasm() {
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let wasm_bytes =
+            wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
+        // Validate with inf_wasmparser (superset of standard wasmparser).
+        // Soroban WASM should be valid standard WASM without custom opcodes.
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Soroban WASM is invalid: {e}"));
+        // Verify the binary is non-empty and starts with the WASM magic number
+        assert!(wasm_bytes.len() > 8, "Soroban WASM should be non-trivial");
+        assert_eq!(
+            &wasm_bytes[0..4],
+            b"\0asm",
+            "Soroban output should start with WASM magic number"
+        );
     }
 }
 

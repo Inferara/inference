@@ -79,6 +79,25 @@ pub(crate) fn codegen_with_target_mode(
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
 }
 
+/// Generates WebAssembly bytes from source code for a specific target using the full pipeline.
+///
+/// This is a Tier 2 test helper that requires external binaries (`inf-llc`, `rust-lld`).
+/// Uses the specified target with default compilation mode (`Compile`).
+pub(crate) fn wasm_codegen_with_target(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+) -> Vec<u8> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    let opt_level = target.default_opt_level(mode);
+    let codegen_output =
+        inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level).unwrap();
+    compile_ir_to_wasm_for_tests(&codegen_output)
+}
+
 /// Generates WebAssembly bytes from source code using the full two-stage pipeline.
 ///
 /// This is a Tier 2 test helper that requires external binaries (`inf-llc`, `rust-lld`).

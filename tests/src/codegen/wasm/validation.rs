@@ -167,6 +167,92 @@ mod codegen_validation_tests {
         );
     }
 
+    // --- Compile mode non-det tests ---
+
+    #[test]
+    fn compile_mode_with_nondet_compiles_functions_and_preserves_intrinsics() {
+        // In compile mode, regular functions with non-det operations are compiled.
+        // Non-det functions receive optnone+noinline to prevent LLVM from optimizing
+        // away the custom 0xfc intrinsic calls. Regular (non-non-det) functions do NOT
+        // receive these barriers. Spec definitions (top-level `spec { }` blocks) are
+        // excluded from codegen because traverse_t_ast_with_compiler() only iterates
+        // function_definitions().
+        let source = r#"
+            pub fn with_uzumaki() -> i32 { return @; }
+            pub fn regular() -> i32 { return 42; }
+        "#;
+        let output = codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile)
+            .unwrap();
+        let ir = output.ir();
+
+        // Non-det intrinsics should be present (uzumaki is in a regular function)
+        assert!(
+            ir.contains("llvm.wasm.uzumaki.i32"),
+            "Compile mode IR should contain uzumaki intrinsic for non-det function.\nIR:\n{}",
+            ir
+        );
+
+        // Both functions should be defined
+        assert!(
+            ir.contains("@with_uzumaki("),
+            "Compile mode IR should contain with_uzumaki function.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("@regular("),
+            "Compile mode IR should contain regular function.\nIR:\n{}",
+            ir
+        );
+
+        // Non-det function has optnone (preserves intrinsic calls from optimization)
+        let uzumaki_has_optnone = function_has_attribute(ir, "with_uzumaki", "optnone");
+        assert!(
+            uzumaki_has_optnone,
+            "with_uzumaki() SHOULD have optnone to preserve intrinsic calls.\nIR:\n{}",
+            ir
+        );
+
+        // Regular function does NOT have optnone
+        let regular_has_optnone = function_has_attribute(ir, "regular", "optnone");
+        assert!(
+            !regular_has_optnone,
+            "regular() should NOT have optnone in compile mode.\nIR:\n{}",
+            ir
+        );
+    }
+
+    // --- Proof mode intrinsic tests ---
+
+    #[test]
+    fn proof_mode_ir_contains_expected_intrinsic_calls() {
+        // In proof mode, non-det functions produce IR with the expected LLVM intrinsics.
+        let source = r#"
+            pub fn with_uzumaki() -> i32 { return @; }
+            pub fn with_forall() { forall { const a: i32 = 42; } }
+        "#;
+        let output = codegen_ir_with_mode(source, CompilationMode::Proof);
+        let ir = output.ir();
+
+        // Uzumaki intrinsic should be declared
+        assert!(
+            ir.contains("llvm.wasm.uzumaki.i32"),
+            "Proof mode IR should contain uzumaki intrinsic.\nIR:\n{}",
+            ir
+        );
+
+        // Forall block intrinsics should be declared
+        assert!(
+            ir.contains("llvm.wasm.forall.start"),
+            "Proof mode IR should contain forall.start intrinsic.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("llvm.wasm.forall.end"),
+            "Proof mode IR should contain forall.end intrinsic.\nIR:\n{}",
+            ir
+        );
+    }
+
     // --- has_main detection tests ---
 
     #[test]
