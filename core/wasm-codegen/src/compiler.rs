@@ -971,24 +971,6 @@ impl<'ctx> Compiler<'ctx> {
         self.module.print_to_string().to_string()
     }
 
-    /// Adds optimization barriers (`optnone` + `noinline`) to ALL functions in the module.
-    ///
-    /// Used in `proof` mode to prevent LLVM from optimizing any function, ensuring
-    /// 1:1 structural correspondence between source code and WASM output for Rocq
-    /// formalization. This is defense-in-depth on top of `-O0`.
-    ///
-    /// Note: `optnone` requires `noinline` — the LLVM verifier enforces this.
-    pub(crate) fn add_proof_mode_barriers(&self) {
-        let mut func = self.module.get_first_function();
-        while let Some(f) = func {
-            // Only add barriers to functions with bodies (not declarations)
-            if f.count_basic_blocks() > 0 {
-                self.add_optimization_barriers(f);
-            }
-            func = f.get_next_function();
-        }
-    }
-
     /// Adds size optimization IR attributes to all functions in the module.
     ///
     /// When `OptLevel` is `Os` or `Oz`, LLVM's size optimization is achieved through

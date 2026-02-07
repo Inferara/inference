@@ -190,6 +190,8 @@ impl Arena {
         .collect()
     }
 
+    // BUG(reproducibility): Same non-deterministic iteration issue as `list_nodes_cmp`.
+    // See comment on `list_nodes_cmp` for details and required fix.
     pub fn filter_nodes<T: Fn(&AstNode) -> bool>(&self, fn_predicate: T) -> Vec<AstNode> {
         self.nodes
             .values()
@@ -214,6 +216,22 @@ impl Arena {
             .unwrap_or_default()
     }
 
+    // BUG(reproducibility): This method iterates over `FxHashMap`, whose iteration
+    // order is non-deterministic. Any caller that collects results into a Vec and
+    // processes them sequentially (e.g., `source_files()`, `functions()`,
+    // `list_type_definitions()`) will produce output in unpredictable order.
+    //
+    // This directly affects WASM output determinism: the codegen pipeline calls
+    // `typed_context.source_files()` → `source_file.function_definitions()` →
+    // `compiler.visit_function_definition()`, so function emission order in the
+    // WASM binary depends on HashMap iteration order.
+    //
+    // FIX REQUIRED: Either sort results by node ID before returning, use `IndexMap`
+    // to preserve insertion order, or use `BTreeMap` for guaranteed sorted iteration.
+    // Node IDs are assigned sequentially by the parser, so sorting by ID restores
+    // the source-order determinism needed for reproducible builds.
+    //
+    // See also: `filter_nodes()` which has the same issue.
     fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
     where
         F: Fn(&AstNode) -> Option<T> + Clone + 'a,

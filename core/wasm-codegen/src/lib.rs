@@ -38,8 +38,10 @@
 //!
 //! - **`Compile`** mode: Produces optimized production binaries. Spec nodes are stripped.
 //!   The target's default optimization level applies (`-O3` for Wasm32, `-Oz` for Soroban).
-//! - **`Proof`** mode: Produces literal, unoptimized WASM for Rocq formalization.
-//!   All functions receive `optnone`+`noinline` barriers. Always uses `Wasm32` target.
+//! - **`Proof`** mode: Produces WASM for Rocq formalization. All code is emitted.
+//!   Spec functions (with `non_det_operations`) receive per-function `optnone`+`noinline`
+//!   barriers for structural correspondence. Execution functions use the target's release
+//!   optimization (same as Compile mode). Always uses `Wasm32` target (Decision #32).
 //!
 //! # Module Organization
 //!
@@ -79,8 +81,10 @@ pub use target::{CompilationMode, OptLevel, Target};
 ///
 /// # Compilation Mode Behavior
 ///
-/// - **`Proof` mode**: Adds `optnone`+`noinline` barriers on ALL functions (defense-in-depth
-///   on top of `-O0`) to preserve 1:1 structural correspondence with source code.
+/// - **`Proof` mode**: Spec functions (those with `non_det_operations`) receive per-function
+///   `optnone`+`noinline` barriers during IR generation to preserve 1:1 structural
+///   correspondence with source code. Execution functions use the target's release
+///   optimization (same as Compile mode) so Rocq proofs cover the deployed code.
 /// - **`Compile` mode**: Uses the provided `opt_level`. When `OptLevel` is `Os`/`Oz`,
 ///   adds `optsize`/`minsize` IR function attributes (since `llc` does not accept `-Os`/`-Oz`).
 ///
@@ -96,8 +100,8 @@ pub fn codegen(
     mode: CompilationMode,
     opt_level: OptLevel,
 ) -> anyhow::Result<CodegenOutput> {
-    // Validate: proof mode requires Wasm32 target
-    if mode == CompilationMode::Proof && target != Target::Wasm32 {
+    // Validate: proof mode requires a target that supports it (Decision #30)
+    if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         return Err(anyhow::anyhow!(
             "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc intrinsics \
              that only inf-llc handles; the {target:?} target cannot process these."
@@ -135,15 +139,12 @@ pub fn codegen(
         traverse_t_ast_with_compiler(typed_context, &compiler);
     }
 
-    // Apply mode-specific IR attributes
-    if mode == CompilationMode::Proof {
-        // Proof mode: add optnone+noinline barriers on ALL functions
-        // This is defense-in-depth on top of -O0
-        compiler.add_proof_mode_barriers();
-    } else {
-        // Compile mode: add size optimization attributes if applicable
-        compiler.add_size_optimization_attrs(opt_level);
-    }
+    // Apply size optimization IR attributes if applicable.
+    // This is called for both Compile and Proof modes because execution functions
+    // in Proof mode use the same optimization as Compile mode (Decision #32).
+    // Spec functions are protected by per-function optnone+noinline barriers
+    // applied during visit_function_definition() when is_non_det() is true.
+    compiler.add_size_optimization_attrs(opt_level);
 
     // Emit IR and build output
     let ir = compiler.emit_ir(target);

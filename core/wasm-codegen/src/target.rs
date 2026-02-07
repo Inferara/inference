@@ -90,11 +90,14 @@ pub enum CompilationMode {
     #[default]
     Compile,
 
-    /// Produces literal, unoptimized WASM for formal verification.
+    /// Produces WASM for formal verification via Rocq translation.
     ///
-    /// All code (including non-deterministic intrinsics) is emitted with `-O0` and
-    /// per-function `optnone`+`noinline` barriers as defense-in-depth. The output
-    /// feeds into the `wasm_to_v` Rocq translation for formal verification.
+    /// All code (including spec functions with non-deterministic intrinsics) is
+    /// emitted into the WASM module. Spec functions receive per-function
+    /// `optnone`+`noinline` barriers to preserve 1:1 structural correspondence
+    /// with the source code for Rocq readability. Execution functions are compiled
+    /// at the target's default release optimization (same as `Compile` mode) so
+    /// that Rocq proofs cover the actual deployed code (Decision #32).
     ///
     /// The target is always `Wasm32` — custom intrinsics require strict MVP and `inf-llc`.
     Proof,
@@ -255,16 +258,38 @@ impl Target {
         }
     }
 
+    /// Returns whether this target supports proof mode.
+    ///
+    /// Only `Wasm32` supports proof mode because it uses `inf-llc` with custom
+    /// 0xfc intrinsic support for non-deterministic operations. Other targets
+    /// (e.g., `Soroban`) cannot process these custom instructions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use inference_wasm_codegen::Target;
+    ///
+    /// assert!(Target::Wasm32.supports_proof_mode());
+    /// assert!(!Target::Soroban.supports_proof_mode());
+    /// ```
+    #[must_use]
+    pub fn supports_proof_mode(&self) -> bool {
+        matches!(self, Self::Wasm32)
+    }
+
     /// Returns the default optimization level for the given compilation mode.
     ///
-    /// | Target | Compile | Proof |
-    /// |--------|---------|-------|
-    /// | Wasm32 | O3      | O0    |
-    /// | Soroban| Oz      | O0    |
+    /// | Target  | Compile | Proof |
+    /// |---------|---------|-------|
+    /// | Wasm32  | O3      | O3    |
+    /// | Soroban | Oz      | Oz    |
     ///
-    /// In `proof` mode, `-O0` is always used to preserve 1:1 structural correspondence
-    /// with the source code. In `compile` mode, the optimization level depends on the
-    /// target: `O3` for general-purpose WASM, `Oz` for Soroban (64 KB size limit).
+    /// Both modes use the same target-appropriate optimization level. In `proof`
+    /// mode, spec functions (those containing `non_det_operations`) are protected
+    /// by per-function `optnone`+`noinline` barriers applied during IR generation
+    /// (see `compiler.rs`), so they remain unoptimized regardless of the module-level
+    /// optimization. Execution functions are compiled at the target's release
+    /// optimization so that Rocq proofs cover the actual deployed code (Decision #32).
     ///
     /// # Examples
     ///
@@ -272,18 +297,19 @@ impl Target {
     /// use inference_wasm_codegen::{Target, CompilationMode, OptLevel};
     ///
     /// assert_eq!(Target::Wasm32.default_opt_level(CompilationMode::Compile), OptLevel::O3);
-    /// assert_eq!(Target::Wasm32.default_opt_level(CompilationMode::Proof), OptLevel::O0);
+    /// assert_eq!(Target::Wasm32.default_opt_level(CompilationMode::Proof), OptLevel::O3);
     /// assert_eq!(Target::Soroban.default_opt_level(CompilationMode::Compile), OptLevel::Oz);
-    /// assert_eq!(Target::Soroban.default_opt_level(CompilationMode::Proof), OptLevel::O0);
+    /// assert_eq!(Target::Soroban.default_opt_level(CompilationMode::Proof), OptLevel::Oz);
     /// ```
     #[must_use]
     pub fn default_opt_level(&self, mode: CompilationMode) -> OptLevel {
-        match mode {
-            CompilationMode::Proof => OptLevel::O0,
-            CompilationMode::Compile => match self {
-                Self::Wasm32 => OptLevel::O3,
-                Self::Soroban => OptLevel::Oz,
-            },
+        // Both Compile and Proof modes use the same target-appropriate optimization.
+        // In Proof mode, spec functions are protected by per-function optnone+noinline
+        // barriers (Decision #32), so they remain at O0 regardless.
+        let _ = mode;
+        match self {
+            Self::Wasm32 => OptLevel::O3,
+            Self::Soroban => OptLevel::Oz,
         }
     }
 }
@@ -341,10 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn wasm32_proof_mode_uses_o0() {
+    fn wasm32_proof_mode_uses_o3() {
+        // Decision #32: Proof mode uses the same optimization as Compile mode.
+        // Spec functions are protected by per-function optnone+noinline barriers.
         assert_eq!(
             Target::Wasm32.default_opt_level(CompilationMode::Proof),
-            OptLevel::O0
+            OptLevel::O3
         );
     }
 
@@ -357,11 +385,22 @@ mod tests {
     }
 
     #[test]
-    fn soroban_proof_mode_uses_o0() {
+    fn soroban_proof_mode_uses_oz() {
+        // Decision #32: Proof mode uses the same optimization as Compile mode.
         assert_eq!(
             Target::Soroban.default_opt_level(CompilationMode::Proof),
-            OptLevel::O0
+            OptLevel::Oz
         );
+    }
+
+    #[test]
+    fn wasm32_supports_proof_mode() {
+        assert!(Target::Wasm32.supports_proof_mode());
+    }
+
+    #[test]
+    fn soroban_does_not_support_proof_mode() {
+        assert!(!Target::Soroban.supports_proof_mode());
     }
 
     #[test]

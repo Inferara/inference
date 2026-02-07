@@ -172,11 +172,12 @@ mod tests {
     }
 
     fn sample_output_with_main() -> CodegenOutput {
+        // Decision #32: Proof mode uses the target's release optimization (O3 for Wasm32).
         CodegenOutput::new(
             "define i32 @main() { ret i32 0 }".to_string(),
             Target::Wasm32,
             CompilationMode::Proof,
-            OptLevel::O0,
+            OptLevel::O3,
             "output".to_string(),
             true,
         )

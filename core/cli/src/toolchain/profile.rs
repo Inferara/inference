@@ -8,11 +8,13 @@
 //!
 //! | Profile | Wasm32 Compile | Soroban Compile | Proof (any target) |
 //! |---------|----------------|-----------------|---------------------|
-//! | Debug   | O0             | O0              | O0                  |
-//! | Release | O3             | Oz              | O0                  |
+//! | Debug   | O0             | O0              | O3 / Oz             |
+//! | Release | O3             | Oz              | O3 / Oz             |
 //!
 //! `Release` is the default, matching the current behavior where Wasm32 Compile
-//! uses `-O3`.
+//! uses `-O3`. In Proof mode, build profiles are ignored -- execution functions
+//! always use the target's release optimization, and spec functions are protected
+//! by per-function `optnone`+`noinline` barriers (Decision #32).
 
 use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
@@ -21,8 +23,9 @@ use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 /// `Release` is the default, matching the existing behavior. `Debug` disables
 /// optimization for faster builds and easier debugging.
 ///
-/// In Proof mode, the profile is ignored — optimization is always `O0` to
-/// preserve 1:1 structural correspondence for Rocq formalization.
+/// In Proof mode, the profile is ignored -- the target's release optimization
+/// is always used for execution functions, while spec functions are protected
+/// by per-function `optnone`+`noinline` barriers (Decision #32).
 ///
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BuildProfile {
@@ -40,13 +43,17 @@ pub enum BuildProfile {
 impl BuildProfile {
     /// Resolves the optimization level for the given target and mode.
     ///
-    /// In Proof mode, always returns `O0` regardless of profile — structural
-    /// fidelity for Rocq formalization takes precedence over optimization.
+    /// In Proof mode, returns the target's release optimization regardless of
+    /// profile. Spec functions are protected by per-function `optnone`+`noinline`
+    /// barriers, so they remain unoptimized. Execution functions use the target's
+    /// release optimization so Rocq proofs cover the deployed code (Decision #32).
     ///
     #[must_use]
     pub fn resolve_opt_level(self, target: Target, mode: CompilationMode) -> OptLevel {
         match mode {
-            CompilationMode::Proof => OptLevel::O0,
+            // Decision #32: Proof mode uses the target's release optimization.
+            // Spec functions are protected by per-function optnone+noinline barriers.
+            CompilationMode::Proof => target.default_opt_level(mode),
             CompilationMode::Compile => match self {
                 Self::Debug => OptLevel::O0,
                 Self::Release => match target {
@@ -86,18 +93,20 @@ mod tests {
     }
 
     #[test]
-    fn release_wasm32_proof_is_o0() {
+    fn release_wasm32_proof_is_o3() {
+        // Decision #32: Proof mode uses target's release optimization.
         assert_eq!(
             BuildProfile::Release.resolve_opt_level(Target::Wasm32, CompilationMode::Proof),
-            OptLevel::O0,
+            OptLevel::O3,
         );
     }
 
     #[test]
-    fn release_soroban_proof_is_o0() {
+    fn release_soroban_proof_is_oz() {
+        // Decision #32: Proof mode uses target's release optimization.
         assert_eq!(
             BuildProfile::Release.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
-            OptLevel::O0,
+            OptLevel::Oz,
         );
     }
 
@@ -120,18 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn debug_wasm32_proof_is_o0() {
+    fn debug_wasm32_proof_is_o3() {
+        // Decision #32: Proof mode ignores profile, uses target's release optimization.
         assert_eq!(
             BuildProfile::Debug.resolve_opt_level(Target::Wasm32, CompilationMode::Proof),
-            OptLevel::O0,
+            OptLevel::O3,
         );
     }
 
     #[test]
-    fn debug_soroban_proof_is_o0() {
+    fn debug_soroban_proof_is_oz() {
+        // Decision #32: Proof mode ignores profile, uses target's release optimization.
         assert_eq!(
             BuildProfile::Debug.resolve_opt_level(Target::Soroban, CompilationMode::Proof),
-            OptLevel::O0,
+            OptLevel::Oz,
         );
     }
 }

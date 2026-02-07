@@ -4,24 +4,52 @@
 
 **`non_det_operations`** = { `spec`, `uzumaki`, `forall_block`, `assume_block`, `exists_block`, `unique_block` }
 
+`compile` mode produces a `.wasm` binary (executable or library). `proof` mode produces a `.v` Rocq file (via `wasm_to_v`). Non-deterministic operations can only appear inside `spec` blocks. In compile mode, `spec` nodes are stripped (they have no runtime meaning). In proof mode, all code including `spec` blocks is emitted.
+
 | Option | Mode | Profile | Has `non_det_operations` | Behavior |
 |--------|------|---------|--------------------------|----------|
 | 1 | `compile` | `debug`   | no  | Compile with the chosen `Target` skipping optimizations |
 | 2 | `compile` | `release` | no  | Compile with the chosen `Target` and its default optimization |
 | 3 | `compile` | `debug`   | yes | Exclude `spec` nodes from codegen, then compile as `Option 1` |
 | 4 | `compile` | `release` | yes | Exclude `spec` nodes from codegen, then compile as `Option 2` |
-| 5 | `proof`   | `debug`   | no  | Compile all code without optimizations for formalization |
-| 6 | `proof`   | `release` | no  | Same as `Option 2` |
-| 7 | `proof`   | `debug`   | yes | Same as `Option 5` |
-| 8 | `proof`   | `release` | yes | Compile executable code as with `Option 2` and `spec` was with `Option 5` |
+| 5 | `proof`   | *(fixed)* | no  | Identical to `Option 2` — no spec code to preserve, output matches compile mode release |
+| 6 | `proof`   | *(fixed)* | yes | Spec functions: `optnone`+`noinline` (`-O0`). Execution functions: target's default release optimization (same as `Option 2`). All code emitted. |
 
-**`compile` mode**: Produces optimized production binaries. Non-det `spec` nodes are stripped from codegen since they have no runtime meaning.
+**`compile` mode**: Produces production binaries. Debug/release profiles control optimization. Non-det `spec` nodes are stripped from codegen since they have no runtime meaning. The output can be the verification target — the artifact whose behavior is proven correct by Rocq proofs.
 
-**`proof` mode**: Produces literal, unoptimized WASM that preserves 1:1 structural correspondence with the `spec` source code. This output feeds into the `wasm_to_v` Rocq translation for formal verification. All code (including non-det intrinsics) is emitted with `-O0` and per-function `optnone`+`noinline` barriers as defense-in-depth. The target is always `Wasm32` (custom intrinsics require strict MVP and `inf-llc`).
+**`proof` mode**: Emits all code (including spec functions with non-det intrinsics) into a single WASM module for `wasm_to_v` Rocq translation. Only spec functions (those containing `non_det_operations`) receive `optnone`+`noinline` barriers to preserve 1:1 structural correspondence with the source code — this ensures Rocq readability. Execution functions are compiled at the target's default release optimization, identical to compile mode release, so that Rocq proofs cover the actual deployed code. If the source has no `non_det_operations`, proof mode output is identical to compile mode release output (`Option 5` = `Option 2`). The target is always `Wasm32` (custom intrinsics require strict MVP). Build profiles (`debug`/`release`) do not apply to proof mode — execution always uses release optimization, spec always uses `O0` + barriers.
+
+| Property | Value | Rationale |
+|----------|-------|-----------|
+| Spec function optimization | `-O0` + `optnone` + `noinline` | 1:1 structural correspondence for Rocq translation |
+| Execution function optimization | Target's default release (e.g., `-O3` for Wasm32) | Proofs must cover the actual deployed code, not a differently-compiled variant |
+| Target | Wasm32 only | Custom 0xfc intrinsics required |
+| Name section | Always emitted | Rocq identifiers require function/local names |
+| DWARF | Never | Not useful for formal verification |
+| wasm-opt | Never on spec functions | Would destroy structural correspondence of specs |
+| Code inclusion | All (spec + executable) | Spec code defines properties; execution code is the verification target |
+| No non_det output | Identical to compile mode release | Nothing to formalize structurally |
+| Determinism | Bitwise reproducible | Same source must produce same `.v` file |
+
+## Verification Scenario: External Module Linking
+
+Inference verifies the **final artifact** — the deployed WASM module. This module can be:
+1. Produced by `infc` from `.inf` source code (compile mode, spec stripped)
+2. A WASM module built elsewhere (e.g., a Rust cryptographic library compiled to WASM)
+
+In the linking scenario, a user:
+1. Compiles their library to WASM (e.g., `my_crypto.wasm` from Rust)
+2. Writes an `.inf` specification that imports external functions from the module
+3. Writes `spec` blocks with assertions: `assert(my_crypto_function(input) == 0)`
+4. `infc` in proof mode links the external module with the compiled spec into a unified WASM module
+5. The unified module is translated to Rocq (`.v`) by `wasm_to_v`
+6. The user writes Rocq proofs establishing properties about the external function's behavior
+
+The external artifact remains as-is (potentially fully optimized). The `spec` code requires structural identity for Rocq readability. Execution code — whether from Inference source or external modules — is compiled at the target's default release optimization so that Rocq proofs cover the actual deployed artifact. Only spec functions receive `optnone`+`noinline` barriers; execution functions are optimized normally.
 
 ## Targets
 
-Compilation target and optimization settings can be overridden in `Inference.toml`.
+Target parameters (triple, CPU, features, linker flags) are **locked per target variant** and cannot be overridden in `Inference.toml`. The only user-facing configuration is target selection and build profile (debug/release) for compile mode.
 
 ### Target::Wasm32 (default)
 
@@ -35,7 +63,8 @@ General-purpose WASM target using custom `inf-llc` with Inference intrinsic supp
 | inf-llc flags | `-mcpu=mvp -filetype=obj` |
 | rust-lld flags | `-flavor wasm --no-entry [--export=main]` |
 | Optimization (compile) | `-O3` |
-| Optimization (proof) | `-O0` |
+| Optimization (proof, execution functions) | `-O3` (same as compile release) |
+| Optimization (proof, spec functions) | `-O0` + `optnone` + `noinline` |
 | Purpose | Verification and general WASM execution |
 
 ### Stellar Soroban
