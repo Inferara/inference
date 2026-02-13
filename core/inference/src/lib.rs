@@ -563,7 +563,7 @@ pub fn codegen(
         typed_context,
         target,
         mode,
-        target.default_opt_level(mode),
+        target.default_opt_level(),
     )
 }
 

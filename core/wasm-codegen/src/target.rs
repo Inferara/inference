@@ -17,8 +17,10 @@
 //! The [`CompilationMode`] enum controls optimization and spec-node handling:
 //! - [`CompilationMode::Compile`] — Produces optimized production binaries. Spec nodes are
 //!   stripped from codegen since they have no runtime meaning.
-//! - [`CompilationMode::Proof`] — Produces literal, unoptimized WASM that preserves 1:1
-//!   structural correspondence with the source code for Rocq formalization.
+//! - [`CompilationMode::Proof`] — Produces WASM for formal verification. Spec functions
+//!   (containing non-deterministic operations) are compiled at `-O0` with `optnone`+`noinline`
+//!   barriers to preserve 1:1 structural correspondence for Rocq formalization.
+//!   Execution functions use the target's release optimization.
 //!
 //! # Optimization Level
 //!
@@ -277,14 +279,14 @@ impl Target {
         matches!(self, Self::Wasm32)
     }
 
-    /// Returns the default optimization level for the given compilation mode.
+    /// Returns the default optimization level for this target.
     ///
-    /// | Target  | Compile | Proof |
-    /// |---------|---------|-------|
-    /// | Wasm32  | O3      | O3    |
-    /// | Soroban | Oz      | Oz    |
+    /// | Target  | OptLevel |
+    /// |---------|----------|
+    /// | Wasm32  | O3       |
+    /// | Soroban | Oz       |
     ///
-    /// Both modes use the same target-appropriate optimization level. In `proof`
+    /// The optimization level is target-specific and mode-independent. In `proof`
     /// mode, spec functions (those containing `non_det_operations`) are protected
     /// by per-function `optnone`+`noinline` barriers applied during IR generation
     /// (see `compiler.rs`), so they remain unoptimized regardless of the module-level
@@ -294,19 +296,13 @@ impl Target {
     /// # Examples
     ///
     /// ```
-    /// use inference_wasm_codegen::{Target, CompilationMode, OptLevel};
+    /// use inference_wasm_codegen::{Target, OptLevel};
     ///
-    /// assert_eq!(Target::Wasm32.default_opt_level(CompilationMode::Compile), OptLevel::O3);
-    /// assert_eq!(Target::Wasm32.default_opt_level(CompilationMode::Proof), OptLevel::O3);
-    /// assert_eq!(Target::Soroban.default_opt_level(CompilationMode::Compile), OptLevel::Oz);
-    /// assert_eq!(Target::Soroban.default_opt_level(CompilationMode::Proof), OptLevel::Oz);
+    /// assert_eq!(Target::Wasm32.default_opt_level(), OptLevel::O3);
+    /// assert_eq!(Target::Soroban.default_opt_level(), OptLevel::Oz);
     /// ```
     #[must_use]
-    pub fn default_opt_level(&self, mode: CompilationMode) -> OptLevel {
-        // Both Compile and Proof modes use the same target-appropriate optimization.
-        // In Proof mode, spec functions are protected by per-function optnone+noinline
-        // barriers (Decision #32), so they remain at O0 regardless.
-        let _ = mode;
+    pub fn default_opt_level(&self) -> OptLevel {
         match self {
             Self::Wasm32 => OptLevel::O3,
             Self::Soroban => OptLevel::Oz,
@@ -359,38 +355,13 @@ mod tests {
     }
 
     #[test]
-    fn wasm32_compile_mode_uses_o3() {
-        assert_eq!(
-            Target::Wasm32.default_opt_level(CompilationMode::Compile),
-            OptLevel::O3
-        );
+    fn wasm32_default_opt_level_is_o3() {
+        assert_eq!(Target::Wasm32.default_opt_level(), OptLevel::O3);
     }
 
     #[test]
-    fn wasm32_proof_mode_uses_o3() {
-        // Decision #32: Proof mode uses the same optimization as Compile mode.
-        // Spec functions are protected by per-function optnone+noinline barriers.
-        assert_eq!(
-            Target::Wasm32.default_opt_level(CompilationMode::Proof),
-            OptLevel::O3
-        );
-    }
-
-    #[test]
-    fn soroban_compile_mode_uses_oz() {
-        assert_eq!(
-            Target::Soroban.default_opt_level(CompilationMode::Compile),
-            OptLevel::Oz
-        );
-    }
-
-    #[test]
-    fn soroban_proof_mode_uses_oz() {
-        // Decision #32: Proof mode uses the same optimization as Compile mode.
-        assert_eq!(
-            Target::Soroban.default_opt_level(CompilationMode::Proof),
-            OptLevel::Oz
-        );
+    fn soroban_default_opt_level_is_oz() {
+        assert_eq!(Target::Soroban.default_opt_level(), OptLevel::Oz);
     }
 
     #[test]

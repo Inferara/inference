@@ -53,7 +53,7 @@ impl BuildProfile {
         match mode {
             // Decision #32: Proof mode uses the target's release optimization.
             // Spec functions are protected by per-function optnone+noinline barriers.
-            CompilationMode::Proof => target.default_opt_level(mode),
+            CompilationMode::Proof => target.default_opt_level(),
             CompilationMode::Compile => match self {
                 Self::Debug => OptLevel::O0,
                 Self::Release => match target {

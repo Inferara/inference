@@ -50,16 +50,10 @@ cargo run -p infs -- build path/to/file.inf --parse
 
 The compiler supports two modes that control optimization and verification behavior:
 
-| Mode | Has non-det operations | Behavior |
-|------|------------------------|----------|
-| `compile` | no | Compile with the chosen target and its default optimization |
-| `compile` | yes | Exclude `spec` nodes from codegen, compile remaining code normally |
-| `proof` | yes | Compile all code strictly without LLVM optimizations for formalization |
-| `proof` | no | Same as above — all code unoptimized for formalization |
+1. **`compile`** produces optimized production binaries. Non-deterministic `spec` nodes are stripped since they have no runtime meaning.
+2. **`proof`** produces WASM for formal verification. Spec functions (containing non-deterministic operations) are compiled unoptimized to preserve structural correspondence with the source code for Rocq formalization. Execution functions use the target's release optimization so that proofs cover the actual deployed code.
 
-**`compile`** produces optimized production binaries. Non-deterministic `spec` nodes are stripped since they have no runtime meaning.
-
-**`proof`** produces literal, unoptimized WASM that preserves structural correspondence with the source code for Rocq formal verification.
+Read more about [compilation modes in the book](./book/compilation_targets.md).
 
 ### Output Flags
 

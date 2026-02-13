@@ -45,7 +45,7 @@ pub(crate) fn codegen_ir(source_code: &str) -> inference_wasm_codegen::CodegenOu
         &typed_context,
         target,
         mode,
-        target.default_opt_level(mode),
+        target.default_opt_level(),
     )
     .unwrap()
 }
@@ -75,7 +75,7 @@ pub(crate) fn codegen_with_target_mode(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    let opt_level = target.default_opt_level(mode);
+    let opt_level = target.default_opt_level();
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
 }
 
@@ -92,7 +92,7 @@ pub(crate) fn wasm_codegen_with_target(
         .unwrap()
         .typed_context();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    let opt_level = target.default_opt_level(mode);
+    let opt_level = target.default_opt_level();
     let codegen_output =
         inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level).unwrap();
     compile_ir_to_wasm_for_tests(&codegen_output)
