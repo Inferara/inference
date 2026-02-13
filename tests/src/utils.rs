@@ -79,6 +79,23 @@ pub(crate) fn codegen_with_target_mode(
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
 }
 
+/// Generates LLVM IR from source code with explicit target, mode, and optimization level.
+///
+/// This is a Tier 1 test helper that does not require external binaries.
+/// Returns `Result` to allow testing error cases and specific opt_level configurations.
+pub(crate) fn codegen_with_full_config(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+    opt_level: inference_wasm_codegen::OptLevel,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+}
+
 /// Generates WebAssembly bytes from source code for a specific target using the full pipeline.
 ///
 /// This is a Tier 2 test helper that requires external binaries (`inf-llc`, `rust-lld`).

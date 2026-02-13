@@ -10,8 +10,10 @@
 
 #[cfg(test)]
 mod codegen_validation_tests {
-    use crate::utils::{codegen_ir, codegen_ir_with_mode, codegen_with_target_mode};
-    use inference_wasm_codegen::{CompilationMode, Target};
+    use crate::utils::{
+        codegen_ir, codegen_ir_with_mode, codegen_with_full_config, codegen_with_target_mode,
+    };
+    use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
     // --- IR content tests ---
 
@@ -272,6 +274,187 @@ mod codegen_validation_tests {
         assert!(
             !output.has_main(),
             "has_main should be false when no main function exists"
+        );
+    }
+
+    // --- Size optimization attribute tests (compiler.rs coverage) ---
+
+    #[test]
+    fn codegen_with_o0_skips_size_attrs() {
+        // O0 is not size-optimized, so neither optsize nor minsize should appear
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::O0,
+        )
+        .unwrap();
+        let ir = output.ir();
+        assert!(
+            !ir.contains("optsize"),
+            "O0 should NOT add optsize attribute.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("minsize"),
+            "O0 should NOT add minsize attribute.\nIR:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn codegen_with_o3_skips_size_attrs() {
+        // O3 is not size-optimized, so neither optsize nor minsize should appear
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::O3,
+        )
+        .unwrap();
+        let ir = output.ir();
+        assert!(
+            !ir.contains("optsize"),
+            "O3 should NOT add optsize attribute.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("minsize"),
+            "O3 should NOT add minsize attribute.\nIR:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn codegen_with_os_adds_optsize_only() {
+        // Os adds optsize but NOT minsize
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::Os,
+        )
+        .unwrap();
+        let ir = output.ir();
+        assert!(
+            ir.contains("optsize"),
+            "Os should add optsize attribute.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            !ir.contains("minsize"),
+            "Os should NOT add minsize attribute.\nIR:\n{}",
+            ir
+        );
+    }
+
+    #[test]
+    fn codegen_with_oz_adds_optsize_and_minsize() {
+        // Oz adds both optsize and minsize
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::Oz,
+        )
+        .unwrap();
+        let ir = output.ir();
+        assert!(
+            ir.contains("optsize"),
+            "Oz should add optsize attribute.\nIR:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("minsize"),
+            "Oz should add minsize attribute.\nIR:\n{}",
+            ir
+        );
+    }
+
+    // --- CodegenOutput metadata tests ---
+
+    #[test]
+    fn codegen_output_has_correct_metadata() {
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Wasm32,
+            CompilationMode::Compile,
+            OptLevel::O3,
+        )
+        .unwrap();
+
+        assert_eq!(output.target(), Target::Wasm32);
+        assert_eq!(output.mode(), CompilationMode::Compile);
+        assert_eq!(output.opt_level(), OptLevel::O3);
+        assert_eq!(output.module_name(), "output");
+        assert!(!output.has_main());
+        assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
+    }
+
+    #[test]
+    fn codegen_soroban_compile_succeeds() {
+        // Happy path: Soroban compile mode with no non-det operations
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile)
+            .unwrap();
+
+        assert_eq!(output.target(), Target::Soroban);
+        assert_eq!(output.mode(), CompilationMode::Compile);
+        assert_eq!(output.opt_level(), OptLevel::Oz);
+        assert!(!output.ir().is_empty());
+        assert!(output.ir().contains("define i32 @hello_world()"));
+    }
+
+    #[test]
+    fn codegen_proof_wasm32_succeeds() {
+        // Happy path: Proof mode with Wasm32 target
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output =
+            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Proof).unwrap();
+
+        assert_eq!(output.target(), Target::Wasm32);
+        assert_eq!(output.mode(), CompilationMode::Proof);
+        assert_eq!(output.opt_level(), OptLevel::O3);
+        assert!(!output.ir().is_empty());
+    }
+
+    // --- emit_ir target triple test ---
+
+    #[test]
+    fn emit_ir_contains_target_triple() {
+        // Verify that emit_ir sets the target triple on the module
+        let source = "pub fn hello_world() -> i32 { return 42; }";
+        let output = codegen_with_full_config(
+            source,
+            Target::Soroban,
+            CompilationMode::Compile,
+            OptLevel::Oz,
+        )
+        .unwrap();
+        assert!(
+            output
+                .ir()
+                .contains("target triple = \"wasm32-unknown-unknown\""),
+            "Soroban IR should also contain the wasm32-unknown-unknown target triple.\nIR:\n{}",
+            output.ir()
+        );
+    }
+
+    // --- has_main detection edge cases ---
+
+    #[test]
+    fn has_main_false_for_private_main() {
+        // fn main() (without pub) should NOT set has_main
+        let source = "fn main() -> i32 { return 0; }";
+        let output = codegen_ir(source);
+        assert!(
+            !output.has_main(),
+            "has_main should be false for private fn main()"
         );
     }
 
