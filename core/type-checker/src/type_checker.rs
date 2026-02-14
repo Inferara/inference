@@ -2000,7 +2000,7 @@ impl TypeChecker {
                 return true;
             }
             if let Some(scope) = self.symbol_table.get_scope(current) {
-                if let Some(parent) = &scope.borrow().parent {
+                if let Some(parent) = scope.borrow().parent.as_ref().and_then(|p| p.upgrade()) {
                     current = parent.borrow().id;
                 } else {
                     return false;

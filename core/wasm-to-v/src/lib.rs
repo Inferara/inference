@@ -171,6 +171,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_parse_test_data() {
         let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
 

@@ -20,7 +20,7 @@
 //! lightweight value-based representation without heap allocation.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use anyhow::bail;
 
@@ -32,6 +32,7 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub(crate) type ScopeRef = Rc<RefCell<Scope>>;
+pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FuncInfo {
@@ -254,7 +255,7 @@ pub(crate) struct Scope {
     pub(crate) full_path: String,
     #[allow(dead_code)]
     pub(crate) visibility: Visibility,
-    pub(crate) parent: Option<ScopeRef>,
+    pub(crate) parent: Option<WeakScopeRef>,
     pub(crate) children: Vec<ScopeRef>,
     pub(crate) symbols: FxHashMap<String, Symbol>,
     pub(crate) variables: FxHashMap<String, (u32, TypeInfo)>,
@@ -272,7 +273,7 @@ impl Scope {
         name: &str,
         full_path: String,
         visibility: Visibility,
-        parent: Option<ScopeRef>,
+        parent: Option<WeakScopeRef>,
     ) -> ScopeRef {
         Rc::new(RefCell::new(Self {
             id,
@@ -311,7 +312,7 @@ impl Scope {
         if let Some(symbol) = self.lookup_symbol_local(name) {
             return Some(symbol.clone());
         }
-        if let Some(parent) = &self.parent {
+        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
             return parent.borrow().lookup_symbol(name);
         }
         None
@@ -340,7 +341,7 @@ impl Scope {
         if let Some((_, ty)) = self.lookup_variable_local(name) {
             return Some(ty);
         }
-        if let Some(parent) = &self.parent {
+        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
             return parent.borrow().lookup_variable(name);
         }
         None
@@ -362,7 +363,7 @@ impl Scope {
         {
             return Some(method_info.clone());
         }
-        if let Some(parent) = &self.parent {
+        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
             return parent.borrow().lookup_method(type_name, method_name);
         }
         None
@@ -472,7 +473,7 @@ impl SymbolTable {
             None => name.to_string(),
         };
 
-        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.clone());
+        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.as_ref().map(Rc::downgrade));
 
         if let Some(current) = &parent {
             current.borrow_mut().add_child(Rc::clone(&new_scope));
@@ -485,7 +486,7 @@ impl SymbolTable {
 
     pub(crate) fn pop_scope(&mut self) {
         if let Some(current) = &self.current_scope {
-            let parent = current.borrow().parent.clone();
+            let parent = current.borrow().parent.as_ref().and_then(|p| p.upgrade());
             self.current_scope = parent;
         }
     }
@@ -1200,7 +1201,7 @@ mod tests {
             let child_id = table.push_scope();
             let child_scope = table.get_scope(child_id).unwrap();
             let parent_scope = table.get_scope(parent_id).unwrap();
-            let child_parent = child_scope.borrow().parent.clone();
+            let child_parent = child_scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
             assert!(
                 child_parent.is_some(),
                 "Anonymous child scope should have parent"
