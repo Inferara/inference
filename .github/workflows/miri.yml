@@ -1,0 +1,49 @@
+name: Miri Check
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri UB Detection
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust nightly with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-miri-
+
+      - name: Run Miri on core crates
+        run: |
+          cargo miri test -p inference-ast
+          cargo miri test -p inference-type-checker
+          cargo miri test -p inference-wasm-to-v-translator
+
+      # Core crates NOT tested under Miri:
+      #   - inference-wasm-codegen (inkwell / LLVM C FFI)
+      #   - inference (depends on wasm-codegen and tree-sitter C FFI)
+      #   - inference-cli (depends on inference)
