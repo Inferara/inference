@@ -1,0 +1,3 @@
+pub fn get_i64_uzumaki() -> i64 {
+    return @;
+}

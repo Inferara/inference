@@ -1,0 +1,7 @@
+fn private_helper() -> i32 {
+    return 1;
+}
+
+pub fn public_caller() -> i32 {
+    return 42;
+}

@@ -213,6 +213,70 @@ mod codegen_validation_tests {
         assert!(!output.wasm().is_empty());
     }
 
+    // --- i64 and bool coverage tests ---
+
+    #[test]
+    fn wasm_contains_i64_uzumaki_opcode() {
+        let source = "pub fn get_i64_uzumaki() -> i64 { return @; }";
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        assert!(
+            wasm_contains_bytes(wasm, &[0xfc, 0x32]),
+            "WASM should contain i64.uzumaki opcode (0xfc 0x32)"
+        );
+    }
+
+    #[test]
+    fn bool_literal_produces_valid_wasm() {
+        let source = r#"
+            pub fn get_true() -> bool { return true; }
+            pub fn get_false() -> bool { return false; }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        assert!(!wasm.is_empty(), "Bool literal WASM should be non-empty");
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Bool literal WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn private_function_not_exported() {
+        let source = r#"
+            fn private_helper() -> i32 { return 1; }
+            pub fn public_caller() -> i32 { return 42; }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        assert!(
+            wasm_contains_bytes(wasm, b"public_caller"),
+            "Public function should appear in WASM"
+        );
+        use wasmtime::{Engine, Module, Store};
+        let engine = Engine::default();
+        let module = Module::new(&engine, wasm)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+        assert!(
+            instance.get_func(&mut store, "public_caller").is_some(),
+            "public_caller should be exported"
+        );
+        assert!(
+            instance.get_func(&mut store, "private_helper").is_none(),
+            "private_helper should NOT be exported"
+        );
+    }
+
+    #[test]
+    fn i64_return_produces_valid_wasm() {
+        let source = "pub fn get_i64() -> i64 { return @; }";
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("i64 return WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

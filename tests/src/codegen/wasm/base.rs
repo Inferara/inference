@@ -77,6 +77,83 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn i64_uzumaki_test() {
+        let test_name = "i64_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn bool_literal_test() {
+        let test_name = "bool_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn mixed_visibility_test() {
+        let test_name = "mixed_visibility";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn bool_literal_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "bool_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let get_true_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_true")
+            .unwrap_or_else(|e| panic!("Failed to get 'get_true' function: {}", e));
+        let result = get_true_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'get_true' function: {}", e));
+        assert_eq!(result, 1, "Expected 'get_true' to return 1");
+
+        let get_false_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_false")
+            .unwrap_or_else(|e| panic!("Failed to get 'get_false' function: {}", e));
+        let result = get_false_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'get_false' function: {}", e));
+        assert_eq!(result, 0, "Expected 'get_false' to return 0");
+    }
+
+    #[test]
     fn soroban_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let wasm_bytes =
@@ -152,6 +229,47 @@ mod regenerate {
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_i64_uzumaki_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("i64_uzumaki.inf"))
+            .expect("Failed to read i64_uzumaki.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("i64_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_bool_literal_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("bool_literal.inf"))
+            .expect("Failed to read bool_literal.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("bool_literal.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_mixed_visibility_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("mixed_visibility.inf"))
+            .expect("Failed to read mixed_visibility.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("mixed_visibility.wasm");
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!("Regenerated: {} ({} bytes)", wasm_path.display(), actual.len());
