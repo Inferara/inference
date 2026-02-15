@@ -83,8 +83,9 @@ pub fn codegen(
 ) -> anyhow::Result<CodegenOutput> {
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         return Err(anyhow::anyhow!(
-            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc intrinsics \
-             that only inf-llc handles; the {target:?} target cannot process these."
+            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
+             non-deterministic instructions that only the Wasm32 target supports; \
+             the {target:?} target cannot process these."
         ));
     }
 

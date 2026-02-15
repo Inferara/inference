@@ -57,8 +57,7 @@
 //! # Variable Storage
 //!
 //! Constants and variables are stored as WASM locals using `local.set`/`local.get`.
-//! This eliminates the need for linear memory imports that the previous LLVM-based
-//! approach required.
+//! No linear memory imports are needed for the current feature set.
 
 #![allow(dead_code)]
 
@@ -92,8 +91,7 @@ const END_OPCODE: u8 = 0x0b;
 
 /// Direct WASM compiler for generating WebAssembly binary from typed AST.
 ///
-/// The compiler builds a complete WASM module in-process using `wasm-encoder`,
-/// eliminating the need for external tools (inf-llc, rust-lld). Each function
+/// The compiler builds a complete WASM module in-process using `wasm-encoder`. Each function
 /// definition from the AST is compiled into a WASM function body with proper
 /// type signatures, exports, and debug names.
 ///

@@ -8,7 +8,7 @@
 //! The translator serves as the final phase in the Inference verification pipeline:
 //!
 //! ```text
-//! Inference source → Typed AST → LLVM IR → WASM → Rocq (.v)
+//! Inference source → Typed AST → WASM → Rocq (.v)
 //!                                                   ↑
 //!                                            (this crate)
 //! ```
@@ -155,7 +155,7 @@
 //! ## See Also
 //!
 //! - [Crate README](../README.md) - Detailed documentation and examples
-//! - [WASM Codegen](../wasm-codegen/README.md) - LLVM IR to WASM compilation
+//! - [WASM Codegen](../wasm-codegen/README.md) - Direct WebAssembly code generation
 //! - [Inference Compiler](../inference/README.md) - Main compiler orchestration
 //! - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant
 //! - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard

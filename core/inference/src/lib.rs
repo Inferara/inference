@@ -10,7 +10,7 @@
 //! The Inference compiler implements a multi-phase compilation pipeline:
 //!
 //! ```text
-//! .inf source → tree-sitter → Typed AST → Type Check → LLVM IR → WASM → Rocq (.v)
+//! .inf source → tree-sitter → Typed AST → Type Check → WASM → Rocq (.v)
 //! ```
 //!
 //! Each phase is exposed as a standalone function in this crate, allowing flexible
@@ -105,8 +105,8 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! The code generator uses LLVM IR as an intermediate representation and supports
-//! custom intrinsics for non-deterministic instructions specific to Inference:
+//! The code generator produces WebAssembly binary directly via `wasm-encoder` and supports
+//! custom instructions for non-deterministic operations specific to Inference:
 //! - `@` (uzumaki) - Non-deterministic value generation (rvalue)
 //! - `forall { }` - Universal quantification blocks
 //! - `exists { }` - Existential quantification blocks
@@ -124,8 +124,8 @@
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
 //! let codegen_output = codegen(&typed_context)?;
-//! // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
-//! // then calls wasm_to_v("MyModule", &wasm_bytes)
+//! // WASM bytes are directly available from codegen output:
+//! // wasm_to_v("MyModule", &codegen_output.wasm().to_vec())
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -139,7 +139,7 @@
 //!
 //! - [`inference_ast`] - Arena-based AST construction and tree-sitter parsing
 //! - [`inference_type_checker`] - Bidirectional type checking with error recovery
-//! - [`inference_wasm_codegen`] - LLVM-based code generation
+//! - [`inference_wasm_codegen`] - Direct WebAssembly code generation via wasm-encoder
 //! - [`inference_wasm_to_v_translator`] - WASM to Rocq translation
 //!
 //! ```text
@@ -193,13 +193,12 @@
 //! ```rust,no_run
 //! use inference::{parse, type_check, codegen, wasm_to_v};
 //!
-//! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<()> {
+//! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<String> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let _codegen_output = codegen(&typed_context)?;
-//!     // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
-//!     // then calls wasm_to_v(module_name, &wasm_bytes)
-//!     Ok(())
+//!     let codegen_output = codegen(&typed_context)?;
+//!     let rocq_code = wasm_to_v(module_name, &codegen_output.wasm().to_vec())?;
+//!     Ok(rocq_code)
 //! }
 //! ```
 //!
@@ -234,8 +233,6 @@
 //!   The AST expects a single source file as input.
 //! - **Analyze phase**: The semantic analysis phase is work-in-progress and
 //!   currently returns `Ok(())` without performing any checks.
-//! - **External dependencies**: Code generation requires `inf-llc` and `rust-lld`
-//!   binaries in the `external/bin/` directory.
 //!
 //! ## CLI Tools
 //!
@@ -262,7 +259,7 @@
 //! - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 //! - [Inference Book](https://github.com/Inferara/book)
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
-//! - [LLVM Intrinsics for Non-deterministic Instructions](https://github.com/Inferara/llvm-project/pull/2)
+//! - [Non-deterministic Instruction Extensions](https://github.com/Inferara/llvm-project/pull/2)
 
 use inference_ast::{arena::Arena, builder::Builder};
 use inference_type_checker::typed_context::TypedContext;
@@ -534,12 +531,12 @@ pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Generates LLVM IR from a typed AST for the default target (`Wasm32`) and
-/// default compilation mode (`Compile`).
+/// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)
+/// and default compilation mode (`Compile`).
 ///
 /// This is a convenience wrapper around [`inference_wasm_codegen::codegen`] that
-/// uses default settings. The returned [`CodegenOutput`] contains the LLVM IR text
-/// and metadata needed by the toolchain layer to compile the IR to WebAssembly.
+/// uses default settings. The returned [`CodegenOutput`] contains the WASM binary
+/// bytes and compilation metadata.
 ///
 /// For target-specific or proof-mode compilation, call
 /// `inference_wasm_codegen::codegen()` directly with explicit `Target` and
@@ -548,7 +545,7 @@ pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error if:
-/// - LLVM IR generation fails for any AST node
+/// - WebAssembly generation fails for any AST node
 /// - Type information is missing or inconsistent in the [`TypedContext`]
 /// - More than one source file is present (multi-file not yet supported)
 ///
@@ -596,8 +593,7 @@ pub fn codegen(
 /// ## Basic Translation
 ///
 /// ```rust,no_run
-/// use inference::{parse, type_check, codegen};
-/// use std::fs;
+/// use inference::{parse, type_check, codegen, wasm_to_v};
 ///
 /// let source = r#"
 ///     fn is_even(n: i32) -> bool {
@@ -608,8 +604,7 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
-/// // then calls wasm_to_v("EvenChecker", &wasm_bytes)
+/// let rocq_code = wasm_to_v("EvenChecker", &codegen_output.wasm().to_vec())?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -631,8 +626,8 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// // The toolchain layer (CLI) converts CodegenOutput to WASM bytes,
-/// // then calls wasm_to_v("CommutativityProof", &wasm_bytes)
+/// // WASM bytes are directly available from codegen output:
+/// // wasm_to_v("CommutativityProof", &codegen_output.wasm().to_vec())
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///

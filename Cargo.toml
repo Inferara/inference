@@ -53,14 +53,13 @@ wat-fmt = { path = "./tools/wat-fmt", version = "0.0.9" }
 inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 
-tree-sitter = "0.26.2"
+tree-sitter = "0.26.5"
 tree-sitter-inference = "0.0.38"
-anyhow = "1.0.100"
+anyhow = "1.0.101"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 leb128 = "0.2.5"
 rustc-hash = "2.1.1"
-inkwell = { version = "0.8.0", features = ["llvm21-1"] }
 
 [profile.release]
 codegen-units = 1     # Better optimization (slower compile)
