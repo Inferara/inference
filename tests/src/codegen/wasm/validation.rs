@@ -96,18 +96,10 @@ mod codegen_validation_tests {
         // When source has no non_det_operations, proof mode output should use
         // the same optimization as compile mode (Decision #32).
         let source = "pub fn hello_world() -> i32 { return 42; }";
-        let compile_output = codegen_with_target_mode(
-            source,
-            Target::Wasm32,
-            CompilationMode::Compile,
-        )
-        .unwrap();
-        let proof_output = codegen_with_target_mode(
-            source,
-            Target::Wasm32,
-            CompilationMode::Proof,
-        )
-        .unwrap();
+        let compile_output =
+            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile).unwrap();
+        let proof_output =
+            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Proof).unwrap();
 
         // Both should use O3 optimization level
         assert_eq!(
@@ -123,7 +115,10 @@ mod codegen_validation_tests {
     fn codegen_rejects_proof_with_soroban() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let result = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Proof);
-        assert!(result.is_err(), "Proof mode with Soroban should be rejected");
+        assert!(
+            result.is_err(),
+            "Proof mode with Soroban should be rejected"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Proof mode requires Wasm32"),
@@ -154,8 +149,8 @@ mod codegen_validation_tests {
     fn soroban_ir_has_size_optimization_attrs() {
         // Soroban uses Oz which adds minsize+optsize IR attributes
         let source = "pub fn hello_world() -> i32 { return 42; }";
-        let output = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile)
-            .unwrap();
+        let output =
+            codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile).unwrap();
         let ir = output.ir();
         assert!(
             ir.contains("optsize"),
@@ -183,8 +178,8 @@ mod codegen_validation_tests {
             pub fn with_uzumaki() -> i32 { return @; }
             pub fn regular() -> i32 { return 42; }
         "#;
-        let output = codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile)
-            .unwrap();
+        let output =
+            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile).unwrap();
         let ir = output.ir();
 
         // Non-det intrinsics should be present (uzumaki is in a regular function)
@@ -400,8 +395,8 @@ mod codegen_validation_tests {
     fn codegen_soroban_compile_succeeds() {
         // Happy path: Soroban compile mode with no non-det operations
         let source = "pub fn hello_world() -> i32 { return 42; }";
-        let output = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile)
-            .unwrap();
+        let output =
+            codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile).unwrap();
 
         assert_eq!(output.target(), Target::Soroban);
         assert_eq!(output.mode(), CompilationMode::Compile);
