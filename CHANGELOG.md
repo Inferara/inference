@@ -9,27 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
-- Separate LLVM IR generation from external tool invocation ([#97])
-  - `codegen()` now returns `CodegenOutput` (LLVM IR + metadata) instead of WASM bytes
-  - New `CodegenOutput` struct carries IR text, target, mode, opt level, module name, and `has_main` flag
-  - New `Target` (Wasm32/Soroban), `CompilationMode` (Compile/Proof), and `OptLevel` (O0–O3/Os/Oz) enums in `wasm-codegen`
-  - Delete `utils.rs` from `wasm-codegen` (tool invocation moved to CLI toolchain layer)
-- Add size optimization IR attributes for Os/Oz levels ([#97])
-  - `optsize` attribute for Os and Oz, `minsize` for Oz only
-  - Matches Clang's implementation: `llc` receives `-O2` while IR attributes control size optimization
-- Add per-function optimization barriers for proof mode (Decision #32) ([#97])
-  - Spec functions (`is_non_det()`) receive `optnone` + `noinline` attributes
-  - Execution functions use target's release optimization (same as compile mode)
-- Add validation in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
+  - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
+  - Rewrite `compiler.rs` to generate WASM binary directly in-process
+  - Non-deterministic instructions emitted as custom opcodes via `Function::raw()` byte sequences
+  - Custom opcodes in 0xfc prefix space: uzumaki (0x31/0x32), forall (0x3a), exists (0x3b), assume (0x3c), unique (0x3d)
+  - Reactor model: all `pub` functions exported individually, no `_start` entry point
+- Add compilation architecture with `CodegenOutput` boundary ([#97], [#125])
+  - `codegen()` returns `CodegenOutput` (WASM bytes + metadata)
+  - `CodegenOutput` carries WASM binary, target, mode, opt level, module name, and `has_main` flag
+  - New `Target` (Wasm32/Soroban), `CompilationMode` (Compile/Proof), and `OptLevel` (O0–O3/Os/Oz) enums
+- Add per-function optimization strategy for proof mode (Decision #32) ([#97])
+  - Spec functions compiled unoptimized to preserve structural correspondence with source for Rocq translation
+  - Execution functions use target's release optimization so proofs cover actual deployed code
+  - `OptLevel` is currently metadata only; optimization passes planned for future
+- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
 
 ### CLI
 
-- Add toolchain module for external tool invocation ([#97])
-  - `llc.rs`: `inf-llc` invocation with target-aware flags (`-mcpu`, `-mattr`, optimization)
-  - `lld.rs`: `rust-lld` invocation with target-aware linker flags (Wasm32 vs Soroban)
-  - `paths.rs`: Binary discovery for `inf-llc` and `rust-lld`
-  - `env.rs`: Platform-specific environment configuration (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`)
-  - `profile.rs`: `BuildProfile` (Debug/Release) with `resolve_opt_level()`
+- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([#97])
+- Remove external toolchain dependencies: no `inf-llc`, `rust-lld`, or platform-specific library paths required ([#125])
 - Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([#97])
 
 ### Documentation
@@ -40,13 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- Add 20 new codegen and toolchain tests ([#97])
-  - 11 codegen validation tests (size attributes, metadata, target/mode combinations)
-  - 2 `inference::codegen()` wrapper tests
-  - 4 `inf-llc` argument-building unit tests
-  - 3 `rust-lld` argument-building unit tests
-- Add Tier 1 test helpers for codegen without external binaries ([#97])
-  - `codegen_ir()`, `codegen_ir_with_mode()`, `codegen_with_target_mode()`, `codegen_with_full_config()`
+- Add 28 codegen tests with three-tier verification architecture ([#97], [#125])
+  - Byte comparison tests against committed `.wasm` reference files
+  - `inf_wasmparser::validate()` validation on all generated output
+  - 2 Wasmtime execution tests verifying runtime behavior
+  - Validation tests for metadata, target/mode combinations, non-det opcode presence
+- Add codegen test helpers ([#97], [#125])
+  - `codegen_output()`, `codegen_output_with_mode()`, `codegen_with_target_mode()`, `codegen_with_full_config()`
+  - `wasm_codegen()`, `wasm_codegen_with_target()`, `assert_wasms_modules_equivalence()`
 - Expand `infs` test coverage from 282 to 429 tests (360 unit + 69 integration) ([#96])
   - Add TUI rendering tests using TestBackend for main_view, doctor_view, toolchain_view
   - Add integration tests for non-deterministic features (forall, exists, assume, unique, oracle)
@@ -271,3 +271,4 @@ Initial tagged release.
 [#96]: https://github.com/Inferara/inference/pull/96
 [#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
+[#125]: https://github.com/Inferara/inference/pull/125
