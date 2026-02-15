@@ -130,7 +130,7 @@ Execution: `wasmtime module.wasm`
 
 ### Reactor Model (Inference)
 
-Inference produces modules without an implicit entry point. Functions marked `pub` are exported and callable individually:
+Inference produces reactor-style modules where all `pub` functions are exported and callable individually:
 
 ```text
 pub fn main() → exported as "main"
@@ -145,6 +145,8 @@ Execution: `wasmtime --invoke main module.wasm`
 - **Flexibility** - Multiple entry points; caller chooses which function to invoke
 - **Embedding** - Better suited for embedding in host applications
 - **Verification** - Functions are verified individually in formal verification
+
+> **Planned:** When a `pub fn main` is present, the compiler will also emit a `_start` entry point so that the module can be executed as a regular program (e.g., `wasmtime module.wasm` without `--invoke`). The `has_main` detection is already implemented.
 
 ## Usage
 
