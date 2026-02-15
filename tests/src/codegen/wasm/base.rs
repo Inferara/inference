@@ -33,7 +33,7 @@ mod base_codegen_tests {
 
     #[test]
     fn trivial_test_execution() {
-        use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store, TypedFunc};
+        use wasmtime::{Engine, Module, Store, TypedFunc};
 
         let test_name = "trivial";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -47,16 +47,7 @@ mod base_codegen_tests {
 
         let mut store = Store::new(&engine, ());
 
-        let mut linker = Linker::new(&engine);
-        let memory_type = MemoryType::new(1, None);
-        let memory = Memory::new(&mut store, memory_type)
-            .unwrap_or_else(|e| panic!("Failed to create memory: {}", e));
-        linker
-            .define(&mut store, "env", "__linear_memory", memory)
-            .unwrap_or_else(|e| panic!("Failed to define memory import: {}", e));
-
-        let instance = linker
-            .instantiate(&mut store, &module)
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
             .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
 
         let hello_world_func: TypedFunc<(), i32> = instance

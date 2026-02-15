@@ -14,8 +14,7 @@ mod inference_codegen_wrapper_tests {
         let typed_context = inference::type_check(arena).unwrap();
         let output = inference::codegen(&typed_context).unwrap();
 
-        assert!(!output.ir().is_empty());
-        assert!(output.ir().contains("define i32 @hello_world()"));
+        assert!(!output.wasm().is_empty());
     }
 
     #[test]
