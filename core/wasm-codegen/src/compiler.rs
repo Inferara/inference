@@ -1,14 +1,15 @@
-//! LLVM-based WebAssembly code generation.
+//! Direct WebAssembly code generation via wasm-encoder.
 //!
-//! This module implements the core compiler that translates Inference's typed AST into
-//! WebAssembly bytecode via LLVM IR. It handles standard WASM instructions as well as
-//! custom intrinsics for non-deterministic operations (uzumaki, forall, exists, assume, unique).
+//! This module implements the core compiler that translates Inference's typed AST
+//! directly into WebAssembly binary format using `wasm-encoder`. It handles standard
+//! WASM instructions as well as custom non-deterministic operations (uzumaki, forall,
+//! exists, assume, unique).
 //!
 //! # Prerequisites
 //!
 //! Before reading this documentation, you should be familiar with:
-//! - LLVM IR fundamentals (basic blocks, instructions, types)
-//! - WebAssembly module structure and execution model
+//! - WebAssembly binary format and module structure
+//! - WebAssembly execution model (stack machine, locals, structured control flow)
 //! - Inference language syntax and semantics (see language specification)
 //! - The concept of non-deterministic computation in formal verification
 //!
@@ -16,80 +17,55 @@
 //!
 //! The compiler operates in several stages:
 //!
-//! 1. **Function lowering** - Convert AST function definitions to LLVM function declarations
+//! 1. **Function lowering** - Convert AST function definitions to WASM function bodies
 //! 2. **Statement lowering** - Translate control flow and non-deterministic blocks
-//! 3. **Expression lowering** - Generate LLVM IR for expressions and literals
-//! 4. **Intrinsic injection** - Insert LLVM intrinsic calls for non-deterministic operations
-//! 5. **WASM emission** - Compile LLVM IR to WebAssembly object files via inf-llc
-//! 6. **Linking** - Link object files into final WASM module via rust-lld
+//! 3. **Expression lowering** - Generate WASM instructions for expressions and literals
+//! 4. **Non-det emission** - Emit custom 0xfc-prefixed instructions for non-deterministic ops
+//! 5. **Module assembly** - Combine all sections into a valid WASM binary
 //!
 //! # Type Mapping
 //!
-//! Inference types are mapped to LLVM types and ultimately to WebAssembly types:
+//! Inference types are mapped directly to WebAssembly types:
 //!
-//! | Inference Type | LLVM Type | WASM Type |
-//! |----------------|-----------|-----------|
-//! | `unit`         | void      | -         |
-//! | `bool`         | i1        | i32       |
-//! | `i8`, `u8`     | i8        | i32       |
-//! | `i16`, `u16`   | i16       | i32       |
-//! | `i32`, `u32`   | i32       | i32       |
-//! | `i64`, `u64`   | i64       | i64       |
+//! | Inference Type | WASM Type |
+//! |----------------|-----------|
+//! | `unit`         | (none)    |
+//! | `bool`         | i32       |
+//! | `i8`, `u8`     | i32       |
+//! | `i16`, `u16`   | i32       |
+//! | `i32`, `u32`   | i32       |
+//! | `i64`, `u64`   | i64       |
 //!
 //! Note: WebAssembly only supports i32, i64, f32, and f64 as value types. Smaller integer
 //! types use i32 with appropriate truncation/extension.
 //!
 //! # Non-Deterministic Operations
 //!
-//! The compiler emits LLVM intrinsic calls for non-deterministic operations. These intrinsics
-//! are recognized by inf-llc and compiled to custom WASM instructions with binary encoding
-//! in the 0xfc prefix space:
+//! The compiler emits custom WASM instructions with binary encoding in the 0xfc prefix
+//! space. Ground truth opcodes from `tools/inf-wasmparser/src/binary_reader.rs`:
 //!
-//! - `uzumaki()` - Non-deterministic value generation (0xfc 0x3a for i32, 0xfc 0x3c for i64)
-//! - `forall { ... }` - Universal quantification block (0xfc 0x3a start, 0xfc 0x3b end)
-//! - `exists { ... }` - Existential quantification block (0xfc 0x3c start, 0xfc 0x3d end)
-//! - `assume { ... }` - Assumption block for preconditions (0xfc 0x3e start, 0xfc 0x3f end)
-//! - `unique { ... }` - Uniqueness constraint block (0xfc 0x40 start, 0xfc 0x41 end)
+//! - `i32.uzumaki` - 0xfc 0x31 (standalone)
+//! - `i64.uzumaki` - 0xfc 0x32 (standalone)
+//! - `forall { ... }` - 0xfc 0x3a + blocktype(0x40) + body + end(0x0b)
+//! - `exists { ... }` - 0xfc 0x3b + blocktype(0x40) + body + end(0x0b)
+//! - `assume { ... }` - 0xfc 0x3c + blocktype(0x40) + body + end(0x0b)
+//! - `unique { ... }` - 0xfc 0x3d + blocktype(0x40) + body + end(0x0b)
 //!
-//! ## Example: Uzumaki Code Generation
+//! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
+//! regular `end` instruction (0x0b).
 //!
-//! Inference source:
-//! ```inference
-//! pub fn example() -> i32 {
-//!     return @;
-//! }
-//! ```
+//! # Variable Storage
 //!
-//! Generated LLVM IR:
-//! ```llvm
-//! define i32 @example() {
-//! entry:
-//!   %uz_i32 = call i32 @llvm.wasm.uzumaki.i32()
-//!   ret i32 %uz_i32
-//! }
-//! declare i32 @llvm.wasm.uzumaki.i32()
-//! ```
-//!
-//! Compiled WebAssembly (text format):
-//! ```wat
-//! (func $example (export "example") (result i32)
-//!   i32.uzumaki  ;; 0xfc 0x3a
-//! )
-//! ```
-//!
-//! See the [language spec](https://github.com/Inferara/inference-language-spec) for details
-//! on non-deterministic semantics and the [custom intrinsics PR](https://github.com/Inferara/llvm-project/pull/2)
-//! for LLVM implementation details.
-//!
-//! # Optimization Barriers
-//!
-//! Functions containing non-deterministic blocks receive `optnone` and `noinline` attributes
-//! to prevent LLVM from optimizing away the intrinsic calls, which would break formal
-//! verification guarantees.
+//! Constants and variables are stored as WASM locals using `local.set`/`local.get`.
+//! This eliminates the need for linear memory imports that the previous LLVM-based
+//! approach required.
 
-//TODO: don't forget to remove
 #![allow(dead_code)]
-use crate::target::{OptLevel, Target};
+
+use std::collections::HashMap;
+use std::iter::Peekable;
+use std::rc::Rc;
+
 use inference_ast::nodes::{
     BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type, Visibility,
 };
@@ -97,207 +73,90 @@ use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
     typed_context::TypedContext,
 };
-use inkwell::{
-    attributes::{Attribute, AttributeLoc},
-    builder::Builder,
-    context::Context,
-    module::Module,
-    types::BasicTypeEnum,
-    values::{FunctionValue, PointerValue},
+use wasm_encoder::{
+    CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+    NameMap, NameSection, IndirectNameMap, TypeSection, ValType,
 };
-use std::{cell::RefCell, collections::HashMap, iter::Peekable, rc::Rc};
 
-// ================================================================================================
-// LLVM Intrinsic Names for Non-Deterministic Operations
-// ================================================================================================
-//
-// These constants define the intrinsic function names that LLVM recognizes and inf-llc compiles
-// to custom WebAssembly instructions. Each intrinsic has a specific binary encoding in the WASM
-// 0xfc prefix instruction space.
-//
-// The intrinsics are paired (start/end) for block constructs, ensuring proper scoping in the
-// generated WebAssembly. The compiler calls these intrinsics when lowering non-deterministic
-// blocks from the Inference AST.
-//
-// Reference: https://github.com/Inferara/llvm-project/pull/2
+// Custom opcode constants for non-deterministic operations.
+// Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
+const OPCODE_PREFIX: u8 = 0xfc;
+const UZUMAKI_I32_OPCODE: u8 = 0x31;
+const UZUMAKI_I64_OPCODE: u8 = 0x32;
+const FORALL_OPCODE: u8 = 0x3a;
+const EXISTS_OPCODE: u8 = 0x3b;
+const ASSUME_OPCODE: u8 = 0x3c;
+const UNIQUE_OPCODE: u8 = 0x3d;
+const BLOCK_TYPE_VOID: u8 = 0x40;
+const END_OPCODE: u8 = 0x0b;
 
-/// LLVM intrinsic for non-deterministic i32 value generation.
-/// Compiles to WASM instruction 0xfc 0x3a.
-const UZUMAKI_I32_INTRINSIC: &str = "llvm.wasm.uzumaki.i32";
-
-/// LLVM intrinsic for non-deterministic i64 value generation.
-/// Compiles to WASM instruction 0xfc 0x3c.
-const UZUMAKI_I64_INTRINSIC: &str = "llvm.wasm.uzumaki.i64";
-
-/// LLVM intrinsic marking the start of a forall (universal quantification) block.
-/// Compiles to WASM instruction 0xfc 0x3a.
-const FORALL_START_INTRINSIC: &str = "llvm.wasm.forall.start";
-
-/// LLVM intrinsic marking the end of a forall block.
-/// Compiles to WASM instruction 0xfc 0x3b.
-const FORALL_END_INTRINSIC: &str = "llvm.wasm.forall.end";
-
-/// LLVM intrinsic marking the start of an exists (existential quantification) block.
-/// Compiles to WASM instruction 0xfc 0x3c.
-const EXISTS_START_INTRINSIC: &str = "llvm.wasm.exists.start";
-
-/// LLVM intrinsic marking the end of an exists block.
-/// Compiles to WASM instruction 0xfc 0x3d.
-const EXISTS_END_INTRINSIC: &str = "llvm.wasm.exists.end";
-
-/// LLVM intrinsic marking the start of an assume (precondition) block.
-/// Compiles to WASM instruction 0xfc 0x3e.
-const ASSUME_START_INTRINSIC: &str = "llvm.wasm.assume.start";
-
-/// LLVM intrinsic marking the end of an assume block.
-/// Compiles to WASM instruction 0xfc 0x3f.
-const ASSUME_END_INTRINSIC: &str = "llvm.wasm.assume.end";
-
-/// LLVM intrinsic marking the start of a unique (uniqueness constraint) block.
-/// Compiles to WASM instruction 0xfc 0x40.
-const UNIQUE_START_INTRINSIC: &str = "llvm.wasm.unique.start";
-
-/// LLVM intrinsic marking the end of a unique block.
-/// Compiles to WASM instruction 0xfc 0x41.
-const UNIQUE_END_INTRINSIC: &str = "llvm.wasm.unique.end";
-
-/// LLVM-based compiler for generating WebAssembly bytecode from typed AST.
+/// Direct WASM compiler for generating WebAssembly binary from typed AST.
 ///
-/// The compiler maintains LLVM context, module, and builder state throughout the
-/// compilation process. It uses Inkwell (Rust bindings for LLVM) to generate LLVM IR,
-/// which is then compiled to WebAssembly via external tools (inf-llc and rust-lld).
-///
-/// # Lifetime
-///
-/// The `'ctx` lifetime ties the compiler to the LLVM context. All LLVM values and types
-/// created during compilation share this lifetime.
+/// The compiler builds a complete WASM module in-process using `wasm-encoder`,
+/// eliminating the need for external tools (inf-llc, rust-lld). Each function
+/// definition from the AST is compiled into a WASM function body with proper
+/// type signatures, exports, and debug names.
 ///
 /// # Variable Storage
 ///
-/// Local variables and constants are stored in a `RefCell<HashMap>` mapping names to
-/// (pointer, type) pairs. This allows mutation during IR generation while maintaining
-/// Rust's borrowing rules through interior mutability.
+/// Local variables and constants are stored as WASM locals mapped by name to
+/// (`local_index`, `ValType`) pairs. Function bodies pre-scan for local declarations
+/// before emitting instructions, since WASM requires all locals to be declared
+/// at the start of a function body.
 ///
 /// # Internal Usage Example
 ///
 /// ```ignore
-/// use inkwell::context::Context;
-/// use inkwell::targets::{InitializationConfig, Target};
+/// let mut compiler = Compiler::new("output");
 ///
-/// // Initialize WebAssembly target
-/// Target::initialize_webassembly(&InitializationConfig::default());
-///
-/// // Create LLVM context and compiler
-/// let context = Context::create();
-/// let compiler = Compiler::new(&context, "output");
-///
-/// // Visit function definitions from typed AST
 /// for func_def in typed_context.source_files()[0].function_definitions() {
 ///     compiler.visit_function_definition(&func_def, &typed_context);
 /// }
 ///
-/// // Compile to WebAssembly
-/// let wasm_bytes = compiler.compile_to_wasm("output.wasm", 3)?;
+/// let wasm_bytes = compiler.finish();
 /// ```
-pub(crate) struct Compiler<'ctx> {
-    /// LLVM context for creating types and values.
-    context: &'ctx Context,
-
-    /// LLVM module containing all generated functions and globals.
-    module: Module<'ctx>,
-
-    /// LLVM instruction builder for emitting IR.
-    builder: Builder<'ctx>,
-
-    /// Variable storage mapping names to stack-allocated pointers and their types.
-    ///
-    /// Each variable is stored as an alloca (stack allocation) in the LLVM IR entry block.
-    /// The `HashMap` maps variable names to tuples of (pointer to variable, LLVM type).
-    ///
-    /// This design enables:
-    /// - SSA (Static Single Assignment) form in LLVM IR through load/store operations
-    /// - Type-safe variable access during expression lowering
-    /// - Proper variable scoping (though current implementation uses a flat namespace)
-    ///
-    /// The `RefCell` provides interior mutability, allowing the compiler to add variables
-    /// during IR generation while maintaining Rust's borrowing rules.
-    variables: RefCell<HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>>,
-
-    /// Tracks whether a `main` function was compiled.
-    ///
-    /// Used to conditionally export `main` during linking. When true, the linker receives
-    /// the `--export=main` flag, which creates a wrapper that provides argc/argv compatibility
-    /// for command-line style execution.
-    ///
-    /// Note: Only public `main` functions are tracked. Private `main` functions are compiled
-    /// but not exported from the WebAssembly module.
-    has_main: RefCell<bool>,
+pub(crate) struct Compiler {
+    types: Vec<(Vec<ValType>, Vec<ValType>)>,
+    functions: Vec<u32>,
+    exports: Vec<(String, ExportKind, u32)>,
+    bodies: Vec<Function>,
+    func_names: Vec<(u32, String)>,
+    local_names: Vec<(u32, Vec<(u32, String)>)>,
+    func_idx: u32,
+    has_main: bool,
+    module_name: String,
 }
 
-impl<'ctx> Compiler<'ctx> {
-    /// Creates a new compiler instance with an empty LLVM module.
+impl Compiler {
+    /// Creates a new compiler instance for building a WASM module.
     ///
     /// # Parameters
     ///
-    /// - `context` - LLVM context for creating types and values
-    /// - `module_name` - Name for the generated LLVM module (typically `wasm_module`)
-    pub(crate) fn new(context: &'ctx Context, module_name: &str) -> Self {
-        let module = context.create_module(module_name);
-        let builder = context.create_builder();
-
+    /// - `module_name` - Name for the generated WASM module (used in the name section)
+    pub(crate) fn new(module_name: &str) -> Self {
         Self {
-            context,
-            module,
-            builder,
-            variables: RefCell::new(HashMap::new()),
-            has_main: RefCell::new(false), //TODO: revisit
+            types: Vec::new(),
+            functions: Vec::new(),
+            exports: Vec::new(),
+            bodies: Vec::new(),
+            func_names: Vec::new(),
+            local_names: Vec::new(),
+            func_idx: 0,
+            has_main: false,
+            module_name: module_name.to_string(),
         }
     }
 
-    /// Adds optimization barriers to a function to prevent LLVM from optimizing away
-    /// non-deterministic intrinsic calls.
-    ///
-    /// This applies the `optnone` and `noinline` attributes, which are critical for
-    /// preserving the semantics of non-deterministic blocks. Without these barriers,
-    /// LLVM might inline or eliminate intrinsic calls, breaking formal verification.
-    ///
-    /// # Parameters
-    ///
-    /// - `function` - LLVM function value to annotate with barrier attributes
-    fn add_optimization_barriers(&self, function: FunctionValue<'ctx>) {
-        let attr_kind_optnone = Attribute::get_named_enum_kind_id("optnone");
-        let attr_kind_noinline = Attribute::get_named_enum_kind_id("noinline");
-
-        let optnone = self.context.create_enum_attribute(attr_kind_optnone, 0);
-        let noinline = self.context.create_enum_attribute(attr_kind_noinline, 0);
-
-        function.add_attribute(AttributeLoc::Function, optnone);
-        function.add_attribute(AttributeLoc::Function, noinline);
-    }
-
-    /// Translates an AST function definition to LLVM IR.
+    /// Translates an AST function definition to a WASM function body.
     ///
     /// This is the main entry point for function compilation. It performs several steps:
     ///
-    /// 1. **Type mapping** - Maps the return type from `Type::Simple(SimpleTypeKind)` to
-    ///    corresponding LLVM types (void, bool, i8, i16, i32, i64)
-    /// 2. **Function creation** - Declares the function in the LLVM module with the
-    ///    appropriate signature
-    /// 3. **Export annotation** - Adds `wasm-export-name` attribute to make the function
-    ///    accessible from WebAssembly
-    /// 4. **Optimization barriers** - If the function contains non-deterministic blocks,
-    ///    applies `optnone` and `noinline` attributes to prevent optimization
-    /// 5. **Body lowering** - Recursively lowers the function body statements to LLVM IR
-    /// 6. **Return handling** - Inserts implicit void return for functions without explicit
-    ///    return statements
-    ///
-    /// # Type Safety Improvement
-    ///
-    /// Prior to the introduction of `SimpleTypeKind`, this method used string-based type
-    /// matching (`simple_type.name.to_lowercase().as_str()`), which was error-prone and
-    /// lacked compile-time verification. The refactoring to use `SimpleTypeKind` enum
-    /// provides type-safe pattern matching and ensures all primitive types are explicitly
-    /// handled.
+    /// 1. **Type mapping** - Maps the return type to a WASM `ValType`
+    /// 2. **Type registration** - Registers the function signature in the type section
+    /// 3. **Export annotation** - Marks public functions for WASM export
+    /// 4. **Local pre-scan** - Scans the function body to determine locals before emission
+    /// 5. **Body lowering** - Recursively lowers the function body statements to WASM
+    /// 6. **Return handling** - Inserts implicit `end` for function body termination
     ///
     /// # Parameters
     ///
@@ -308,30 +167,26 @@ impl<'ctx> Compiler<'ctx> {
     ///
     /// This method will panic if it encounters unsupported type constructs (arrays,
     /// generics, function types, qualified names, custom types) in return positions,
-    /// as these are not yet implemented. The `todo!()` markers indicate planned future
-    /// support.
+    /// as these are not yet implemented.
     pub(crate) fn visit_function_definition(
-        &self,
+        &mut self,
         function_definition: &Rc<FunctionDefinition>,
         ctx: &TypedContext,
     ) {
         let fn_name = function_definition.name();
-        let fn_type = match &function_definition.returns {
+        let results: Vec<ValType> = match &function_definition.returns {
             Some(ret_type) => match ret_type {
-                Type::Simple(SimpleTypeKind::Unit) => self.context.void_type().fn_type(&[], false),
-                Type::Simple(SimpleTypeKind::Bool) => self.context.bool_type().fn_type(&[], false),
-                Type::Simple(SimpleTypeKind::I8 | SimpleTypeKind::U8) => {
-                    self.context.i8_type().fn_type(&[], false)
-                }
-                Type::Simple(SimpleTypeKind::I16 | SimpleTypeKind::U16) => {
-                    self.context.i16_type().fn_type(&[], false)
-                }
-                Type::Simple(SimpleTypeKind::I32 | SimpleTypeKind::U32) => {
-                    self.context.i32_type().fn_type(&[], false)
-                }
-                Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => {
-                    self.context.i64_type().fn_type(&[], false)
-                }
+                Type::Simple(SimpleTypeKind::Unit) => vec![],
+                Type::Simple(
+                    SimpleTypeKind::Bool
+                    | SimpleTypeKind::I8
+                    | SimpleTypeKind::U8
+                    | SimpleTypeKind::I16
+                    | SimpleTypeKind::U16
+                    | SimpleTypeKind::I32
+                    | SimpleTypeKind::U32,
+                ) => vec![ValType::I32],
+                Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => vec![ValType::I64],
                 Type::Array(_array_type) => todo!(),
                 Type::Generic(_generic_type) => todo!(),
                 Type::Function(_function_type) => todo!(),
@@ -339,88 +194,145 @@ impl<'ctx> Compiler<'ctx> {
                 Type::Qualified(_type_qualified_name) => todo!(),
                 Type::Custom(_identifier) => todo!(),
             },
-            None => self.context.void_type().fn_type(&[], false),
+            None => vec![],
         };
-        let function = self.module.add_function(fn_name.as_str(), fn_type, None);
 
-        // Only export public functions. Skip "main" - LLD handles its export specially
-        // to avoid duplicate export errors from the entry point wrapper.
+        let params: Vec<ValType> = vec![];
+        #[allow(clippy::cast_possible_truncation)]
+        let type_idx = self.types.len() as u32;
+        self.types.push((params, results));
+        self.functions.push(type_idx);
+
         let is_main = fn_name == "main";
         let should_export = function_definition.visibility == Visibility::Public && !is_main;
         if should_export {
-            let export_name_attr = self
-                .context
-                .create_string_attribute("wasm-export-name", fn_name.as_str());
-            function.add_attribute(AttributeLoc::Function, export_name_attr);
+            self.exports
+                .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
         if is_main && function_definition.visibility == Visibility::Public {
-            *self.has_main.borrow_mut() = true;
+            self.has_main = true;
+            self.exports
+                .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if function_definition.is_non_det() {
-            self.add_optimization_barriers(function);
-        }
-        let entry = self.context.append_basic_block(function, "entry");
-        self.builder.position_at_end(entry);
+
+        let mut locals_map: HashMap<String, (u32, ValType)> = HashMap::new();
+        let mut local_idx: u32 = 0;
+        Self::pre_scan_locals(
+            &function_definition.body,
+            ctx,
+            &mut locals_map,
+            &mut local_idx,
+        );
+
+        let local_declarations: Vec<(u32, ValType)> = {
+            let mut sorted_locals: Vec<(u32, ValType)> = locals_map.values().copied().collect();
+            sorted_locals.sort_by_key(|(idx, _)| *idx);
+            sorted_locals
+                .into_iter()
+                .map(|(_, vt)| (1, vt))
+                .collect()
+        };
+
+        let mut func = Function::new(local_declarations);
+
         self.lower_statement(
             std::iter::once(Statement::Block(function_definition.body.clone())).peekable(),
             &mut vec![function_definition.body.clone()],
             ctx,
+            &mut func,
+            &locals_map,
         );
-        if function_definition.is_void() {
-            self.builder.build_return(None).unwrap();
+
+        func.instruction(&Instruction::End);
+
+        self.func_names
+            .push((self.func_idx, fn_name.clone()));
+        let local_name_entries: Vec<(u32, String)> = {
+            let mut entries: Vec<(u32, String)> = locals_map
+                .iter()
+                .map(|(name, (idx, _))| (*idx, name.clone()))
+                .collect();
+            entries.sort_by_key(|(idx, _)| *idx);
+            entries
+        };
+        if !local_name_entries.is_empty() {
+            self.local_names
+                .push((self.func_idx, local_name_entries));
+        }
+
+        self.bodies.push(func);
+        self.func_idx += 1;
+    }
+
+    /// Pre-scans the function body to discover all local variable declarations.
+    ///
+    /// WASM requires all locals to be declared at the start of a function body.
+    /// This method traverses the AST to find all `ConstantDefinition` statements
+    /// and registers them as locals before instruction emission begins.
+    fn pre_scan_locals(
+        block: &BlockType,
+        ctx: &TypedContext,
+        locals_map: &mut HashMap<String, (u32, ValType)>,
+        local_idx: &mut u32,
+    ) {
+        for stmt in block.statements() {
+            match &stmt {
+                Statement::ConstantDefinition(constant_definition) => {
+                    let val_type = match ctx
+                        .get_node_typeinfo(constant_definition.id)
+                        .expect("Constant definition must have a type info")
+                        .kind
+                    {
+                        TypeInfoKind::Number(NumberType::I64) => ValType::I64,
+                        _ => ValType::I32,
+                    };
+                    locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    *local_idx += 1;
+                }
+                Statement::Block(inner_block) => {
+                    Self::pre_scan_locals(inner_block, ctx, locals_map, local_idx);
+                }
+                _ => {}
+            }
         }
     }
 
-    /// Recursively lowers AST statements to LLVM IR instructions.
+    /// Recursively lowers AST statements to WASM instructions.
     ///
     /// This method handles all statement types including control flow, blocks, and
     /// non-deterministic constructs. It maintains a stack of parent blocks to track
-    /// nesting context, which is needed for semantic analysis and code generation.
+    /// nesting context.
     ///
     /// # Statement Types
     ///
     /// - **Block types** (regular, forall, exists, assume, unique) - Recursively lower
-    ///   nested statements with appropriate intrinsic calls
-    /// - **Expression statements** - Evaluate expressions and handle side effects
-    /// - **Return statements** - Generate LLVM return instructions
-    /// - **Constant definitions** - Allocate stack storage and initialize values
+    ///   nested statements with appropriate custom instruction encoding
+    /// - **Expression statements** - Evaluate expressions
+    /// - **Return statements** - Generate WASM return instructions
+    /// - **Constant definitions** - Initialize locals with values
     ///
     /// # Non-Deterministic Blocks
     ///
     /// For non-deterministic block types (forall, exists, assume, unique), this method:
-    /// 1. Emits the start intrinsic call
+    /// 1. Emits the custom 0xfc opcode with block type (0x40 for void)
     /// 2. Recursively lowers nested statements
-    /// 3. Emits the end intrinsic call
-    ///
-    /// The intrinsic pairs ensure proper scoping in the generated WASM and are preserved
-    /// by optimization barriers.
-    ///
-    /// # Parent Block Stack
-    ///
-    /// The `parent_blocks_stack` parameter tracks the nesting of blocks during traversal.
-    /// This is used to:
-    /// - Determine if we're inside a non-deterministic block (for special handling)
-    /// - Check if the current block is void-returning
-    /// - Implement proper scoping semantics (future work)
-    ///
-    /// Example stack during nested block compilation:
-    /// ```text
-    /// [BlockType::Forall, BlockType::Block, BlockType::Exists]
-    ///  ^                   ^                 ^
-    ///  outermost            middle            innermost (current)
-    /// ```
+    /// 3. Emits the end instruction (0x0b)
     ///
     /// # Parameters
     ///
     /// - `statements_iterator` - Iterator over statements to lower
     /// - `parent_blocks_stack` - Stack tracking enclosing block contexts
     /// - `ctx` - Typed context for type information lookup
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
     #[allow(clippy::too_many_lines)]
     fn lower_statement<I: Iterator<Item = Statement>>(
         &self,
         mut statements_iterator: Peekable<I>,
         parent_blocks_stack: &mut Vec<BlockType>,
         ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &HashMap<String, (u32, ValType)>,
     ) {
         let statement = statements_iterator.next().unwrap();
         match statement {
@@ -432,111 +344,91 @@ impl<'ctx> Compiler<'ctx> {
                             std::iter::once(stmt).peekable(),
                             parent_blocks_stack,
                             ctx,
+                            func,
+                            locals_map,
                         );
                     }
                     parent_blocks_stack.pop();
                 }
                 BlockType::Forall(forall_block) => {
-                    let forall_start = self.forall_start_intrinsic();
-                    self.builder
-                        .build_call(forall_start, &[], "")
-                        .expect("Failed to build forall intrinsic call");
+                    self.emit_nondet_block_start(func, FORALL_OPCODE);
                     parent_blocks_stack.push(BlockType::Forall(forall_block.clone()));
                     for stmt in forall_block.statements.clone() {
                         self.lower_statement(
                             std::iter::once(stmt).peekable(),
                             parent_blocks_stack,
                             ctx,
+                            func,
+                            locals_map,
                         );
                     }
-                    let forall_end = self.forall_end_intrinsic();
-                    self.builder
-                        .build_call(forall_end, &[], "")
-                        .expect("Failed to build forall end intrinsic call");
+                    self.emit_nondet_block_end(func);
                     parent_blocks_stack.pop();
                 }
                 BlockType::Assume(assume_block) => {
-                    let assume_start = self.assume_start_intrinsic();
-                    self.builder
-                        .build_call(assume_start, &[], "")
-                        .expect("Failed to build assume intrinsic call");
+                    self.emit_nondet_block_start(func, ASSUME_OPCODE);
                     parent_blocks_stack.push(BlockType::Assume(assume_block.clone()));
                     for stmt in assume_block.statements.clone() {
                         self.lower_statement(
                             std::iter::once(stmt).peekable(),
                             parent_blocks_stack,
                             ctx,
+                            func,
+                            locals_map,
                         );
                     }
-                    let assume_end = self.assume_end_intrinsic();
-                    self.builder
-                        .build_call(assume_end, &[], "")
-                        .expect("Failed to build assume end intrinsic call");
+                    self.emit_nondet_block_end(func);
                     parent_blocks_stack.pop();
                 }
                 BlockType::Exists(exists_block) => {
-                    let exists_start = self.exists_start_intrinsic();
-                    self.builder
-                        .build_call(exists_start, &[], "")
-                        .expect("Failed to build exists intrinsic call");
+                    self.emit_nondet_block_start(func, EXISTS_OPCODE);
                     parent_blocks_stack.push(BlockType::Exists(exists_block.clone()));
                     for stmt in exists_block.statements.clone() {
                         self.lower_statement(
                             std::iter::once(stmt).peekable(),
                             parent_blocks_stack,
                             ctx,
+                            func,
+                            locals_map,
                         );
                     }
-                    let exists_end = self.exists_end_intrinsic();
-                    self.builder
-                        .build_call(exists_end, &[], "")
-                        .expect("Failed to build exists end intrinsic call");
+                    self.emit_nondet_block_end(func);
                     parent_blocks_stack.pop();
                 }
                 BlockType::Unique(unique_block) => {
-                    let unique_start = self.unique_start_intrinsic();
-                    self.builder
-                        .build_call(unique_start, &[], "")
-                        .expect("Failed to build unique intrinsic call");
+                    self.emit_nondet_block_start(func, UNIQUE_OPCODE);
                     parent_blocks_stack.push(BlockType::Unique(unique_block.clone()));
                     for stmt in unique_block.statements.clone() {
                         self.lower_statement(
                             std::iter::once(stmt).peekable(),
                             parent_blocks_stack,
                             ctx,
+                            func,
+                            locals_map,
                         );
                     }
-                    let unique_end = self.unique_end_intrinsic();
-                    self.builder
-                        .build_call(unique_end, &[], "")
-                        .expect("Failed to build unique end intrinsic call");
+                    self.emit_nondet_block_end(func);
                     parent_blocks_stack.pop();
                 }
             },
             Statement::Expression(expression) => {
-                let expr = self.lower_expression(&expression, ctx);
-                // FIXME: revisit this logic #45
-                //
-                // This handles the case where a non-deterministic void block ends with an
-                // expression statement. To prevent LLVM from optimizing away the expression
-                // (which might contain important intrinsic calls), we store it in a temporary
-                // stack variable.
-                //
-                // This is a workaround that ensures side effects are preserved. A better
-                // approach would be to explicitly model void expressions or use LLVM's
-                // volatile operations for intrinsic calls.
+                self.lower_expression(&expression, ctx, func, locals_map);
                 if statements_iterator.peek().is_none()
                     && parent_blocks_stack.first().unwrap().is_non_det()
                     && parent_blocks_stack.first().unwrap().is_void()
                 {
-                    let local = self.builder.build_alloca(expr.get_type(), "temp").unwrap();
-                    self.builder.build_store(local, expr).unwrap();
+                    func.instruction(&Instruction::Drop);
                 }
             }
             Statement::Assign(_assign_statement) => todo!(),
             Statement::Return(return_statement) => {
-                let ret = self.lower_expression(&return_statement.expression.borrow(), ctx);
-                self.builder.build_return(Some(&ret)).unwrap();
+                self.lower_expression(
+                    &return_statement.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                );
+                func.instruction(&Instruction::Return);
             }
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
@@ -547,25 +439,10 @@ impl<'ctx> Compiler<'ctx> {
                 // 2. Complex expression evaluation (beyond uzumaki and literals)
                 // 3. Proper variable scoping (currently uses flat namespace)
                 // 4. Mutable vs immutable variable semantics
-                //
-                // When re-enabled, this will follow the same pattern as constant definitions:
-                // - Allocate stack storage (alloca)
-                // - Lower the initialization expression
-                // - Store the value to the allocated pointer
-                // - Register in the variables HashMap for later loads
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
-                // Constant definitions are lowered by:
-                // 1. Looking up the type from TypedContext
-                // 2. Creating a stack allocation (alloca) for the constant
-                // 3. Lowering the literal value to an LLVM constant
-                // 4. Storing the constant to the allocated pointer
-                // 5. Registering in the variables HashMap for identifier resolution
-                //
-                // Currently only i32 number literals are fully implemented. Other types
-                // will follow the same pattern once expression lowering is expanded.
                 match ctx
                     .get_node_typeinfo(constant_definition.id)
                     .expect("Constant definition must have a type info")
@@ -579,22 +456,17 @@ impl<'ctx> Compiler<'ctx> {
                             NumberType::I8 => todo!(),
                             NumberType::I16 => todo!(),
                             NumberType::I32 => {
-                                let ctx_type = self.context.i32_type();
                                 match &constant_definition.value {
                                     Literal::Number(number_literal) => {
-                                        let val = ctx_type.const_int(
-                                            number_literal.value.parse::<u64>().unwrap_or(0),
-                                            false,
-                                        );
-                                        let local = self
-                                            .builder
-                                            .build_alloca(ctx_type, &constant_definition.name())
-                                            .unwrap();
-                                        self.builder.build_store(local, val).unwrap();
-                                        self.variables.borrow_mut().insert(
-                                            constant_definition.name(),
-                                            (local, ctx_type.into()),
-                                        );
+                                        let val = number_literal
+                                            .value
+                                            .parse::<i32>()
+                                            .unwrap_or(0);
+                                        func.instruction(&Instruction::I32Const(val));
+                                        let (local_idx, _) = locals_map
+                                            .get(&constant_definition.name())
+                                            .expect("Local not found in pre-scan");
+                                        func.instruction(&Instruction::LocalSet(*local_idx));
                                     }
                                     _ => panic!(
                                         "Constant value for i32 should be a number literal. Found: {:?}",
@@ -623,36 +495,31 @@ impl<'ctx> Compiler<'ctx> {
         }
     }
 
-    /// Lowers an AST expression to an LLVM integer value.
+    /// Lowers an AST expression to WASM instructions on the operand stack.
     ///
-    /// This method recursively evaluates expressions and produces LLVM IR that computes
-    /// the expression's value at runtime. Currently, the compiler only supports integer
-    /// expressions, hence the return type is `IntValue`.
+    /// This method recursively evaluates expressions and emits WASM instructions that
+    /// compute the expression's value at runtime. The result is left on the WASM
+    /// operand stack.
     ///
     /// # Supported Expressions
     ///
     /// - **Literals** - Compile-time constants (numbers, booleans)
     /// - **Identifiers** - Load values from local variables
-    /// - **Uzumaki** - Non-deterministic value generation via intrinsics
-    ///
-    /// # Type Context
-    ///
-    /// The `TypedContext` is used to query type information for expressions, particularly
-    /// for uzumaki expressions which can produce different integer types (i32, i64).
+    /// - **Uzumaki** - Non-deterministic value generation via custom opcodes
     ///
     /// # Parameters
     ///
     /// - `expression` - AST expression node to lower
     /// - `ctx` - Typed context for type lookups
-    ///
-    /// # Returns
-    ///
-    /// LLVM integer value representing the expression result
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
     fn lower_expression(
         &self,
         expression: &Expression,
         ctx: &TypedContext,
-    ) -> inkwell::values::IntValue<'ctx> {
+        func: &mut Function,
+        locals_map: &HashMap<String, (u32, ValType)>,
+    ) {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
             Expression::Binary(_binary_expression) => todo!(),
@@ -662,347 +529,158 @@ impl<'ctx> Compiler<'ctx> {
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
             Expression::Parenthesized(_parenthesized_expression) => todo!(),
-            Expression::Literal(literal) => self.lower_literal(literal),
+            Expression::Literal(literal) => self.lower_literal(literal, func),
             Expression::Identifier(identifier) => {
-                let (ptr, ty) = self
-                    .variables
-                    .borrow()
+                let (local_idx, _) = locals_map
                     .get(&identifier.name)
-                    .copied()
                     .expect("Variable not found");
-                self.builder
-                    .build_load(ty, ptr, &identifier.name)
-                    .unwrap()
-                    .into_int_value()
+                func.instruction(&Instruction::LocalGet(*local_idx));
             }
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(uzumaki_expression) => {
                 if ctx.is_node_i32(uzumaki_expression.id) {
-                    return self.lower_uzumaki_i32_expression();
+                    self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
+                    return;
                 }
                 if ctx.is_node_i64(uzumaki_expression.id) {
-                    return self.lower_uzumaki_i64_expression();
+                    self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
+                    return;
                 }
                 panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");
             }
         }
     }
 
-    /// Converts an AST literal to an LLVM constant integer value.
+    /// Converts an AST literal to WASM constant instructions.
     ///
-    /// Literals are compile-time constants that get embedded directly into the LLVM IR
-    /// as constant integers. This method handles the conversion from Inference's literal
-    /// representation to LLVM's constant values.
+    /// Literals are compile-time constants that get emitted as WASM const instructions
+    /// that push the value onto the operand stack.
     ///
     /// # Literal Types
     ///
-    /// - **Bool** - Converted to i32 (0 for false, 1 for true) per WASM convention
-    /// - **Number** - Parsed from string and converted to i32 constant
+    /// - **Bool** - Emitted as `i32.const` (0 for false, 1 for true) per WASM convention
+    /// - **Number** - Parsed from string and emitted as `i32.const`
     ///
     /// # Parameters
     ///
     /// - `literal` - AST literal node to convert
-    ///
-    /// # Returns
-    ///
-    /// LLVM constant integer value
-    fn lower_literal(&self, literal: &Literal) -> inkwell::values::IntValue<'ctx> {
+    /// - `func` - WASM function body being built
+    #[allow(clippy::unused_self)]
+    fn lower_literal(&self, literal: &Literal, func: &mut Function) {
         match literal {
             Literal::Array(_array_literal) => todo!(),
-            Literal::Bool(bool_literal) => self
-                .context
-                .i32_type()
-                .const_int(u64::from(bool_literal.value), false),
+            Literal::Bool(bool_literal) => {
+                func.instruction(&Instruction::I32Const(i32::from(bool_literal.value)));
+            }
             Literal::String(_string_literal) => todo!(),
-            Literal::Number(number_literal) => self
-                .context
-                .i32_type()
-                .const_int(number_literal.value.parse::<u64>().unwrap_or(0), false),
+            Literal::Number(number_literal) => {
+                let val = number_literal.value.parse::<i32>().unwrap_or(0);
+                func.instruction(&Instruction::I32Const(val));
+            }
             Literal::Unit(_unit_literal) => todo!(),
         }
     }
 
-    /// Generates LLVM IR for a 32-bit non-deterministic value (uzumaki expression).
+    /// Emits the start of a non-deterministic block.
     ///
-    /// Emits a call to the `llvm.wasm.uzumaki.i32` intrinsic, which compiles to the
-    /// custom WASM instruction 0xfc 0x3a. This instruction produces a non-deterministic
-    /// i32 value at runtime.
-    ///
-    /// # Returns
-    ///
-    /// LLVM integer value (i32) representing the non-deterministic result
-    fn lower_uzumaki_i32_expression(&self) -> inkwell::values::IntValue<'ctx> {
-        let uzumaki_i32_intr = self.uzumaki_i32_intrinsic();
-        let call = self
-            .builder
-            .build_call(uzumaki_i32_intr, &[], "uz_i32")
-            .expect("Failed to build uzumaki_i32_intrinsic call");
-        let call_kind = call.try_as_basic_value();
-        let basic = call_kind.unwrap_basic();
-        basic.into_int_value()
+    /// Writes the custom 0xfc prefix followed by the specific opcode and void block
+    /// type (0x40). The block body follows, terminated by `emit_nondet_block_end`.
+    #[allow(clippy::unused_self)]
+    fn emit_nondet_block_start(&self, func: &mut Function, opcode: u8) {
+        func.raw([OPCODE_PREFIX, opcode, BLOCK_TYPE_VOID]);
     }
 
-    /// Generates LLVM IR for a 64-bit non-deterministic value (uzumaki expression).
+    /// Emits the end of a non-deterministic block.
     ///
-    /// Emits a call to the `llvm.wasm.uzumaki.i64` intrinsic, which compiles to the
-    /// custom WASM instruction 0xfc 0x3c. This instruction produces a non-deterministic
-    /// i64 value at runtime.
-    ///
-    /// # Returns
-    ///
-    /// LLVM integer value (i64) representing the non-deterministic result
-    fn lower_uzumaki_i64_expression(&self) -> inkwell::values::IntValue<'ctx> {
-        let uzumaki_i64_intr = self.uzumaki_i64_intrinsic();
-        let call = self
-            .builder
-            .build_call(uzumaki_i64_intr, &[], "uz_i64")
-            .expect("Failed to build uzumaki_i64_intrinsic call");
-        let call_kind = call.try_as_basic_value();
-        let basic = call_kind.unwrap_basic();
-        basic.into_int_value()
+    /// Writes the standard WASM `end` instruction (0x0b) to close the block.
+    #[allow(clippy::unused_self)]
+    fn emit_nondet_block_end(&self, func: &mut Function) {
+        func.raw([END_OPCODE]);
     }
 
-    /// Retrieves or declares the i32 uzumaki intrinsic function.
+    /// Emits a uzumaki (non-deterministic value) instruction.
     ///
-    /// This method ensures the intrinsic function is declared in the LLVM module.
-    /// If already declared, returns the existing function; otherwise, declares it
-    /// with the signature `() -> i32`.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the uzumaki.i32 intrinsic
-    fn uzumaki_i32_intrinsic(&self) -> FunctionValue<'ctx> {
-        let i32_type = self.context.i32_type();
-        let fn_type = i32_type.fn_type(&[], false);
-        self.module
-            .get_function(UZUMAKI_I32_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(UZUMAKI_I32_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the i64 uzumaki intrinsic function.
-    ///
-    /// This method ensures the intrinsic function is declared in the LLVM module.
-    /// If already declared, returns the existing function; otherwise, declares it
-    /// with the signature `() -> i64`.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the uzumaki.i64 intrinsic
-    fn uzumaki_i64_intrinsic(&self) -> FunctionValue<'ctx> {
-        let i64_type = self.context.i64_type();
-        let fn_type = i64_type.fn_type(&[], false);
-        self.module
-            .get_function(UZUMAKI_I64_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(UZUMAKI_I64_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the forall start intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the beginning of a universal quantification block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the forall.start intrinsic
-    fn forall_start_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(FORALL_START_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(FORALL_START_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the forall end intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the end of a universal quantification block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the forall.end intrinsic
-    fn forall_end_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(FORALL_END_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(FORALL_END_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the exists start intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the beginning of an existential quantification block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the exists.start intrinsic
-    fn exists_start_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(EXISTS_START_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(EXISTS_START_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the exists end intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the end of an existential quantification block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the exists.end intrinsic
-    fn exists_end_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(EXISTS_END_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(EXISTS_END_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the assume start intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the beginning of an assumption block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the assume.start intrinsic
-    fn assume_start_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(ASSUME_START_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(ASSUME_START_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the assume end intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the end of an assumption block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the assume.end intrinsic
-    fn assume_end_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(ASSUME_END_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(ASSUME_END_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the unique start intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the beginning of a uniqueness constraint block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the unique.start intrinsic
-    fn unique_start_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(UNIQUE_START_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(UNIQUE_START_INTRINSIC, fn_type, None)
-            })
-    }
-
-    /// Retrieves or declares the unique end intrinsic function.
-    ///
-    /// This void-returning intrinsic marks the end of a uniqueness constraint block.
-    ///
-    /// # Returns
-    ///
-    /// LLVM function value for the unique.end intrinsic
-    fn unique_end_intrinsic(&self) -> FunctionValue<'ctx> {
-        let void_type = self.context.void_type();
-        let fn_type = void_type.fn_type(&[], false);
-        self.module
-            .get_function(UNIQUE_END_INTRINSIC)
-            .unwrap_or_else(|| {
-                self.module
-                    .add_function(UNIQUE_END_INTRINSIC, fn_type, None)
-            })
+    /// Writes the custom 0xfc prefix followed by the uzumaki opcode.
+    /// This is a standalone instruction (not a block) that produces a
+    /// non-deterministic value of the corresponding type on the stack.
+    #[allow(clippy::unused_self)]
+    fn emit_uzumaki(&self, func: &mut Function, opcode: u8) {
+        func.raw([OPCODE_PREFIX, opcode]);
     }
 
     /// Returns whether a public `main()` function was compiled.
-    ///
-    /// Used by the toolchain layer to decide whether to pass `--export=main` to the linker.
     pub(crate) fn has_main(&self) -> bool {
-        *self.has_main.borrow()
+        self.has_main
     }
 
-    /// Emits the LLVM module as IR text.
+    /// Assembles the complete WASM binary module from all accumulated sections.
     ///
-    /// Sets the target triple on the module before emission, then serializes the
-    /// module to LLVM IR text format via `module.print_to_string()`.
-    ///
-    /// # Parameters
-    ///
-    /// - `target` - Compilation target (determines the target triple set on the module)
+    /// Builds the following WASM sections in order:
+    /// 1. **Type section** - All function signatures
+    /// 2. **Function section** - Type index for each function
+    /// 3. **Export section** - Exported functions
+    /// 4. **Code section** - Function bodies
+    /// 5. **Name section** (custom) - Debug names for module, functions, and locals
     ///
     /// # Returns
     ///
-    /// LLVM IR text as a `String`.
-    pub(crate) fn emit_ir(&self, target: Target) -> String {
-        let triple = inkwell::targets::TargetTriple::create(target.triple());
-        self.module.set_triple(&triple);
-        self.module.print_to_string().to_string()
-    }
+    /// Complete WASM binary as `Vec<u8>`.
+    pub(crate) fn finish(&self) -> Vec<u8> {
+        let mut module = Module::new();
 
-    /// Adds size optimization IR attributes to all functions in the module.
-    ///
-    /// When `OptLevel` is `Os` or `Oz`, LLVM's size optimization is achieved through
-    /// IR function attributes rather than `llc` flags (since `llc` only accepts `-O0`
-    /// through `-O3`). This matches how Clang implements `-Os`/`-Oz`.
-    ///
-    /// - `optsize`: Prefer smaller code size over execution speed (for `Os` and `Oz`)
-    /// - `minsize`: Aggressively minimize code size (for `Oz` only)
-    pub(crate) fn add_size_optimization_attrs(&self, opt_level: OptLevel) {
-        if !opt_level.is_size_optimized() {
-            return;
+        let mut type_section = TypeSection::new();
+        for (params, results) in &self.types {
+            type_section
+                .ty()
+                .function(params.iter().copied(), results.iter().copied());
         }
+        module.section(&type_section);
 
-        let attr_kind_optsize = Attribute::get_named_enum_kind_id("optsize");
-        let optsize = self.context.create_enum_attribute(attr_kind_optsize, 0);
+        let mut function_section = FunctionSection::new();
+        for &type_idx in &self.functions {
+            function_section.function(type_idx);
+        }
+        module.section(&function_section);
 
-        let minsize = if opt_level.is_min_size() {
-            let attr_kind_minsize = Attribute::get_named_enum_kind_id("minsize");
-            Some(self.context.create_enum_attribute(attr_kind_minsize, 0))
-        } else {
-            None
-        };
-
-        let mut func = self.module.get_first_function();
-        while let Some(f) = func {
-            if f.count_basic_blocks() > 0 {
-                f.add_attribute(AttributeLoc::Function, optsize);
-                if let Some(ms) = minsize {
-                    f.add_attribute(AttributeLoc::Function, ms);
-                }
+        if !self.exports.is_empty() {
+            let mut export_section = ExportSection::new();
+            for (name, kind, idx) in &self.exports {
+                export_section.export(name, *kind, *idx);
             }
-            func = f.get_next_function();
+            module.section(&export_section);
         }
+
+        let mut code_section = CodeSection::new();
+        for body in &self.bodies {
+            code_section.function(body);
+        }
+        module.section(&code_section);
+
+        let mut name_section = NameSection::new();
+        name_section.module(&self.module_name);
+
+        if !self.func_names.is_empty() {
+            let mut func_name_map = NameMap::new();
+            for (idx, name) in &self.func_names {
+                func_name_map.append(*idx, name);
+            }
+            name_section.functions(&func_name_map);
+        }
+
+        if !self.local_names.is_empty() {
+            let mut indirect_map = IndirectNameMap::new();
+            for (func_idx, locals) in &self.local_names {
+                let mut local_map = NameMap::new();
+                for (local_idx, name) in locals {
+                    local_map.append(*local_idx, name);
+                }
+                indirect_map.append(*func_idx, &local_map);
+            }
+            name_section.locals(&indirect_map);
+        }
+
+        module.section(&name_section);
+
+        module.finish()
     }
 }

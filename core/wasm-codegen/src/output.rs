@@ -1,37 +1,32 @@
-//! Code generation output containing LLVM IR and compilation metadata.
+//! Code generation output containing WASM bytecode and compilation metadata.
 //!
 //! This module defines [`CodegenOutput`], the return type of the `codegen()` function.
-//! It carries the generated LLVM IR text along with metadata needed by the toolchain
-//! layer to invoke `inf-llc` and `rust-lld` with the correct flags.
+//! It carries the generated WASM binary along with metadata about the compilation.
 //!
 //! # Architecture
 //!
-//! The code generation pipeline is split into two stages:
+//! The code generation pipeline produces WASM bytecode directly in-process:
 //!
-//! 1. **IR Generation** (this crate) — produces `CodegenOutput` with LLVM IR and metadata
-//! 2. **Tool Invocation** (CLI layer) — reads `CodegenOutput` and invokes external tools
-//!
-//! This separation follows the Clang/rustc pattern where the codegen library returns IR
-//! and the driver/CLI layer handles subprocess management.
+//! 1. **WASM Generation** (this crate) -- produces `CodegenOutput` with WASM binary and metadata
+//! 2. **File Output** (CLI layer) -- reads `CodegenOutput` and writes the WASM file
 
 use std::io;
 use std::path::Path;
 
 use crate::target::{CompilationMode, OptLevel, Target};
 
-/// Output of the LLVM IR code generation phase.
+/// Output of the WebAssembly code generation phase.
 ///
-/// Contains the generated LLVM IR text and all metadata required by the toolchain
-/// layer to compile the IR into a WebAssembly binary with the correct target-specific
-/// flags.
+/// Contains the generated WASM binary and all metadata about the compilation.
 ///
 /// # Examples
 ///
 /// ```
 /// use inference_wasm_codegen::{CodegenOutput, Target, CompilationMode, OptLevel};
 ///
+/// let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d]; // WASM magic number
 /// let output = CodegenOutput::new(
-///     "define i32 @hello_world() { ret i32 42 }".to_string(),
+///     wasm_bytes,
 ///     Target::Wasm32,
 ///     CompilationMode::Compile,
 ///     OptLevel::O3,
@@ -39,48 +34,47 @@ use crate::target::{CompilationMode, OptLevel, Target};
 ///     false,
 /// );
 ///
-/// assert!(!output.ir().is_empty());
+/// assert!(!output.wasm().is_empty());
 /// assert_eq!(output.target(), Target::Wasm32);
 /// assert_eq!(output.mode(), CompilationMode::Compile);
 /// assert_eq!(output.opt_level(), OptLevel::O3);
-/// assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
 /// assert_eq!(output.module_name(), "output");
 /// assert!(!output.has_main());
 /// ```
 #[derive(Debug, Clone)]
 pub struct CodegenOutput {
-    /// LLVM IR text produced by the compiler.
-    ir: String,
+    /// WASM binary produced by the compiler.
+    wasm: Vec<u8>,
 
-    /// Compilation target that determines `inf-llc` and `rust-lld` flags.
+    /// Compilation target.
     target: Target,
 
-    /// Compilation mode controlling optimization level and spec-node handling.
+    /// Compilation mode controlling spec-node handling.
     mode: CompilationMode,
 
     /// Optimization level used for this compilation.
     ///
     /// Determined by the [`BuildProfile`] in the toolchain layer. Stored here so
-    /// that `inf-llc` can read it directly from the output without recomputing.
+    /// that downstream consumers can read it directly from the output.
     opt_level: OptLevel,
 
-    /// LLVM module name (currently hardcoded as `"output"`).
+    /// Module name (currently hardcoded as `"output"`).
     ///
     /// Stored here for future parameterization (e.g., deriving from source filename).
     module_name: String,
 
     /// Whether a public `main()` function was found during compilation.
     ///
-    /// When true, the linker should receive the `--export=main` flag. The compiler
-    /// discovers this during IR generation when it encounters a `pub fn main()`.
+    /// When true, the runtime can use `main` as an entry point. The compiler
+    /// discovers this during code generation when it encounters a `pub fn main()`.
     has_main: bool,
 }
 
 impl CodegenOutput {
-    /// Creates a new `CodegenOutput` with the given IR and metadata.
+    /// Creates a new `CodegenOutput` with the given WASM binary and metadata.
     #[must_use]
     pub fn new(
-        ir: String,
+        wasm: Vec<u8>,
         target: Target,
         mode: CompilationMode,
         opt_level: OptLevel,
@@ -88,7 +82,7 @@ impl CodegenOutput {
         has_main: bool,
     ) -> Self {
         Self {
-            ir,
+            wasm,
             target,
             mode,
             opt_level,
@@ -97,10 +91,10 @@ impl CodegenOutput {
         }
     }
 
-    /// Returns the LLVM IR text.
+    /// Returns the WASM binary bytes.
     #[must_use]
-    pub fn ir(&self) -> &str {
-        &self.ir
+    pub fn wasm(&self) -> &[u8] {
+        &self.wasm
     }
 
     /// Returns the compilation target.
@@ -121,38 +115,25 @@ impl CodegenOutput {
         self.opt_level
     }
 
-    /// Returns the LLVM target triple string for this output.
-    ///
-    /// Convenience method equivalent to `self.target().triple()`.
-    #[must_use]
-    pub fn target_triple(&self) -> &'static str {
-        self.target.triple()
-    }
-
-    /// Returns the LLVM module name.
+    /// Returns the module name.
     #[must_use]
     pub fn module_name(&self) -> &str {
         &self.module_name
     }
 
     /// Returns whether a public `main()` function was found.
-    ///
-    /// When true, the linker should use `--export=main` to export the main function.
     #[must_use]
     pub fn has_main(&self) -> bool {
         self.has_main
     }
 
-    /// Writes the LLVM IR to a file at the given path.
-    ///
-    /// This is a convenience method for the toolchain layer to write IR to a
-    /// temporary file before invoking `inf-llc`.
+    /// Writes the WASM binary to a file at the given path.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be created or written.
-    pub fn write_ir_to(&self, path: &Path) -> io::Result<()> {
-        std::fs::write(path, &self.ir)
+    pub fn write_wasm_to(&self, path: &Path) -> io::Result<()> {
+        std::fs::write(path, &self.wasm)
     }
 }
 
@@ -162,7 +143,7 @@ mod tests {
 
     fn sample_output() -> CodegenOutput {
         CodegenOutput::new(
-            "define i32 @test() { ret i32 42 }".to_string(),
+            vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
             Target::Wasm32,
             CompilationMode::Compile,
             OptLevel::O3,
@@ -172,9 +153,8 @@ mod tests {
     }
 
     fn sample_output_with_main() -> CodegenOutput {
-        // Decision #32: Proof mode uses the target's release optimization (O3 for Wasm32).
         CodegenOutput::new(
-            "define i32 @main() { ret i32 0 }".to_string(),
+            vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
             Target::Wasm32,
             CompilationMode::Proof,
             OptLevel::O3,
@@ -184,9 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn ir_returns_ir_text() {
+    fn wasm_returns_wasm_bytes() {
         let output = sample_output();
-        assert_eq!(output.ir(), "define i32 @test() { ret i32 42 }");
+        assert_eq!(
+            output.wasm(),
+            &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
@@ -208,12 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn target_triple_returns_correct_triple() {
-        let output = sample_output();
-        assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
-    }
-
-    #[test]
     fn module_name_returns_module_name() {
         let output = sample_output();
         assert_eq!(output.module_name(), "output");
@@ -232,27 +209,26 @@ mod tests {
     }
 
     #[test]
-    fn soroban_target_triple() {
+    fn soroban_output() {
         let output = CodegenOutput::new(
-            String::new(),
+            Vec::new(),
             Target::Soroban,
             CompilationMode::Compile,
             OptLevel::Oz,
             "soroban_module".to_string(),
             false,
         );
-        assert_eq!(output.target_triple(), "wasm32-unknown-unknown");
         assert_eq!(output.target(), Target::Soroban);
     }
 
     #[test]
-    fn write_ir_to_creates_file() {
+    fn write_wasm_to_creates_file() {
         let output = sample_output();
         let dir = std::env::temp_dir();
-        let path = dir.join("test_codegen_output_ir.ll");
-        output.write_ir_to(&path).expect("Failed to write IR");
-        let contents = std::fs::read_to_string(&path).expect("Failed to read IR");
-        assert_eq!(contents, output.ir());
+        let path = dir.join("test_codegen_output_wasm.wasm");
+        output.write_wasm_to(&path).expect("Failed to write WASM");
+        let contents = std::fs::read(&path).expect("Failed to read WASM");
+        assert_eq!(contents, output.wasm());
         std::fs::remove_file(&path).ok();
     }
 }
