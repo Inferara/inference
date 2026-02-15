@@ -42,8 +42,8 @@ jobs:
           cargo miri test -p inference-ast
           cargo miri test -p inference-type-checker
           cargo miri test -p inference-wasm-to-v-translator
+          cargo miri test -p inference-wasm-codegen
 
       # Core crates NOT tested under Miri:
-      #   - inference-wasm-codegen (inkwell / LLVM C FFI)
       #   - inference (depends on wasm-codegen and tree-sitter C FFI)
       #   - inference-cli (depends on inference)

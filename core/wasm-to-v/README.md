@@ -461,9 +461,7 @@ Tree-sitter AST
 Typed AST
     ↓ (type checking)
 Type-checked AST
-    ↓ (LLVM codegen)
-LLVM IR
-    ↓ (LLVM → WASM)
+    ↓ (wasm-encoder codegen)
 WebAssembly bytecode
     ↓ (this crate)
 Rocq formal verification code
@@ -587,7 +585,7 @@ The if-then-else structure is preserved with proper type annotations for the res
 
 ## Related Documentation
 
-- [WASM Codegen Documentation](../wasm-codegen/README.md) - LLVM IR to WASM compilation
+- [WASM Codegen Documentation](../wasm-codegen/README.md) - Direct WebAssembly code generation
 - [Language Specification](https://github.com/Inferara/inference-language-spec) - Inference language reference
 - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant
 - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard

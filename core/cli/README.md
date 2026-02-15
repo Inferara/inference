@@ -60,8 +60,7 @@ infc example.inf --analyze
 Emits WebAssembly binary.
 
 **What it does:**
-- Generates LLVM IR from typed AST
-- Compiles LLVM IR to WebAssembly
+- Generates WebAssembly binary directly from typed AST
 - Supports non-deterministic instructions (uzumaki `@`, forall, exists, assume, unique)
 - Optionally translates to Rocq (.v) format for formal verification
 
@@ -207,9 +206,9 @@ Parse error: unexpected token at line 5
 Type checking failed: undefined variable 'x'
 ```
 
-**Codegen errors**: LLVM compilation failures
+**Codegen errors**: WebAssembly generation failures
 ```
-Codegen failed: invalid LLVM IR
+Codegen failed: unsupported expression type
 ```
 
 **IO errors**: File not found, permission issues
@@ -328,11 +327,9 @@ Inference provides first-class support for non-deterministic programming pattern
 - **`assume`** - Assume statement (filters execution paths inside blocks)
 - **`unique`** - Unique block (exactly one computation path is reachable)
 
-### LLVM Intrinsics
+### WebAssembly Non-deterministic Instructions
 
-The compiler emits custom LLVM intrinsics for non-deterministic instructions. See:
-- [LLVM Non-deterministic Intrinsics PR](https://github.com/Inferara/llvm-project/pull/2)
-- `core/wasm-codegen/src/compiler.rs` documentation
+The compiler emits custom WebAssembly instructions in the 0xfc prefix space for non-deterministic constructs. See `core/wasm-codegen/src/compiler.rs` documentation.
 
 ## Contributing
 

@@ -7,7 +7,7 @@ Core orchestration crate for the Inference compiler pipeline.
 This crate provides the main entry points for compiling Inference source code through a multi-phase pipeline: parsing, type checking, semantic analysis, code generation, and optional translation to Rocq formal verification language.
 
 ```text
-.inf source → tree-sitter → Typed AST → Type Check → LLVM IR → WASM → Rocq (.v)
+.inf source → tree-sitter → Typed AST → Type Check → WASM → Rocq (.v)
 ```
 
 ## Quick Start
@@ -119,7 +119,7 @@ analyze(&typed_context)?; // Currently a no-op
 
 ### Phase 4: Code Generation
 
-The [`codegen`] function generates WebAssembly bytecode using LLVM IR:
+The [`codegen`] function generates WebAssembly bytecode directly via wasm-encoder:
 
 ```rust
 use inference::{parse, type_check, codegen};
@@ -132,15 +132,15 @@ let wasm_bytes = codegen(&typed_context)?;
 fs::write("output.wasm", &wasm_bytes)?;
 ```
 
-The code generator supports Inference's non-deterministic extensions via custom LLVM intrinsics:
+The code generator supports Inference's non-deterministic extensions via custom WebAssembly instructions in the `0xfc prefix space:
 
 | Construct | Opcode | Purpose |
 |-----------|--------|---------|
-| `@` (uzumaki) | `0xfc 0x3c` | Non-deterministic value generation |
+| `@` (uzumaki) | `0xfc 0x31` / `0xfc 0x32` | Non-deterministic value generation |
 | `forall { }` | `0xfc 0x3a` | Universal quantification block |
 | `exists { }` | `0xfc 0x3b` | Existential quantification block |
-| `assume { }` | `0xfc 0x3d` | Precondition filtering |
-| `unique { }` | `0xfc 0x3e` | Uniqueness constraint |
+| `assume { }` | `0xfc 0x3c` | Precondition filtering |
+| `unique { }` | `0xfc 0x3d` | Uniqueness constraint |
 
 #### Example: Non-Deterministic Code
 
@@ -193,17 +193,12 @@ This crate is a thin orchestration layer delegating to specialized crates:
 
 - **[`inference_ast`]** - Arena-based AST with tree-sitter parsing
 - **[`inference_type_checker`]** - Bidirectional type checking with error recovery
-- **[`inference_wasm_codegen`]** - LLVM-based WebAssembly code generation
+- **[`inference_wasm_codegen`]** - Direct WebAssembly code generation via wasm-encoder
 - **[`inference_wasm_to_v_translator`]** - WASM to Rocq translation
 
-## External Dependencies
+## Dependencies
 
-Code generation requires platform-specific binaries in the `external/bin/` directory:
-
-- **inf-llc** - LLVM compiler with Inference intrinsic support
-- **rust-lld** - WebAssembly linker
-
-See the [repository README](https://github.com/Inferara/inference) for download links.
+Code generation uses the `wasm-encoder` crate for direct WebAssembly binary emission. No external binaries or LLVM installation required.
 
 ## Platform Support
 
