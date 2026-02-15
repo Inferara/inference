@@ -26,8 +26,7 @@
 //!    - Reports type errors and semantic issues
 //!
 //! 3. **Codegen** (`--codegen`) – Emits WebAssembly binary
-//!    - Generates LLVM IR from typed AST
-//!    - Compiles LLVM IR to WebAssembly
+//!    - Generates WebAssembly binary from typed AST
 //!    - Supports non-deterministic instructions (uzumaki, forall, exists)
 //!    - Optionally translates to Rocq (.v) format for formal verification
 //!
@@ -58,7 +57,7 @@
 //!
 //! - **Parse errors**: Syntax errors, malformed AST nodes
 //! - **Type errors**: Type mismatches, undefined symbols
-//! - **Codegen errors**: LLVM compilation failures
+//! - **Codegen errors**: WebAssembly generation failures
 //! - **IO errors**: File not found, permission issues
 //!
 //! All errors cause the process to exit with code 1.
@@ -101,7 +100,7 @@
 //!
 //! The Inference ecosystem provides two CLI tools:
 //!
-//! - **`infc`** (this binary) - Standalone compiler for direct compilation
+//! - **`infc`** (this binary) - Standalone compiler
 //! - **`infs`** - Unified toolchain CLI with project management and toolchain installation
 //!
 //! See `apps/infs/README.md` for the full-featured toolchain interface.
@@ -127,12 +126,12 @@ pub(crate) mod toolchain;
 use clap::Parser;
 use inference::{analyze, parse, type_check, wasm_to_v};
 use parser::Cli;
-use toolchain::BuildProfile;
 use std::{
     fs,
     path::PathBuf,
     process::{self},
 };
+use toolchain::BuildProfile;
 
 /// Entry point for the Inference compiler CLI.
 ///
@@ -145,7 +144,7 @@ use std::{
 /// 3. **Execute compilation phases** in canonical order:
 ///    - Parse: Build typed AST from source using tree-sitter
 ///    - Analyze: Type check and semantic validation
-///    - Codegen: Generate LLVM IR and compile to WebAssembly
+///    - Codegen: Generate WebAssembly binary from typed AST
 /// 4. **Generate output files** (if requested):
 ///    - Write WASM binary with `-o` flag
 ///    - Write Rocq translation with `-v` flag
@@ -260,7 +259,7 @@ fn main() {
                 process::exit(1);
             }
         };
-        println!("LLVM IR generated");
+        println!("Codegen complete");
         let source_fname = args
             .path
             .file_stem()
@@ -268,25 +267,9 @@ fn main() {
             .to_str()
             .unwrap();
 
-        // Compile IR to WASM bytes if needed for output or V translation
-        let need_wasm_bytes = args.generate_wasm_output || args.generate_v_output;
-        let wasm = if need_wasm_bytes {
-            match toolchain::compile_ir_to_wasm(&codegen_output) {
-                Ok(bytes) => {
-                    println!("WASM generated");
-                    Some(bytes)
-                }
-                Err(e) => {
-                    eprintln!("WASM compilation failed: {e}");
-                    process::exit(1);
-                }
-            }
-        } else {
-            None
-        };
+        let wasm_bytes = codegen_output.wasm();
 
         if args.generate_wasm_output {
-            let wasm_bytes = wasm.as_ref().expect("WASM bytes should be available");
             let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
             if let Err(e) = fs::create_dir_all(&output_path) {
                 eprintln!("Failed to create output directory: {e}");
@@ -299,8 +282,7 @@ fn main() {
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            let wasm_bytes = wasm.as_ref().expect("WASM bytes should be available");
-            match wasm_to_v(source_fname, wasm_bytes) {
+            match wasm_to_v(source_fname, &wasm_bytes.to_vec()) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {

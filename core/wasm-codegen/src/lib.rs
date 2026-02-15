@@ -1,9 +1,8 @@
 //! WebAssembly code generation for the Inference compiler.
 //!
-//! This crate provides LLVM-based code generation from Inference's typed AST to LLVM IR.
-//! The generated IR is returned as a [`CodegenOutput`] struct, which carries the IR text
-//! along with metadata needed by the toolchain layer (in `core/cli`) to invoke `inf-llc`
-//! and `rust-lld` with the correct target-specific flags.
+//! This crate provides WebAssembly binary generation from Inference's typed AST
+//! using `wasm-encoder`. The generated WASM binary is returned as a [`CodegenOutput`]
+//! struct, which carries the binary bytes along with compilation metadata.
 //!
 //! # Architecture
 //!
@@ -14,16 +13,13 @@
 //!   codegen(tc, target, mode, opt_level)
 //!         |
 //!         v
-//!   CodegenOutput { ir, target, mode, opt_level, module_name, has_main }
-//!         |
-//!         v  (CLI / toolchain layer)
-//!   inf-llc -> rust-lld -> .wasm
+//!   CodegenOutput { wasm, target, mode, opt_level, module_name, has_main }
 //! ```
 //!
 //! # Non-Deterministic Extensions
 //!
-//! The compiler supports Inference's non-deterministic constructs through custom LLVM
-//! intrinsics that compile to WebAssembly instructions in the 0xfc prefix space:
+//! The compiler supports Inference's non-deterministic constructs through custom
+//! WebAssembly instructions in the 0xfc prefix space:
 //!
 //! - `uzumaki()` - Non-deterministic value generation
 //! - `forall { }` - Universal quantification blocks
@@ -36,26 +32,20 @@
 //!
 //! # Compilation Modes
 //!
-//! - **`Compile`** mode: Produces optimized production binaries. Spec nodes are stripped.
-//!   The target's default optimization level applies (`-O3` for Wasm32, `-Oz` for Soroban).
-//! - **`Proof`** mode: Produces WASM for Rocq formalization. All code is emitted.
-//!   Spec functions (with `non_det_operations`) receive per-function `optnone`+`noinline`
-//!   barriers for structural correspondence. Execution functions use the target's release
-//!   optimization (same as Compile mode). Always uses `Wasm32` target (Decision #32).
+//! - **`Compile`** mode: Produces production binaries. Spec nodes are stripped.
+//! - **`Proof`** mode: Produces WASM for Rocq formalization. All code is emitted,
+//!   including spec functions with non-deterministic instructions. Always uses
+//!   `Wasm32` target (Decision #32).
 //!
 //! # Module Organization
 //!
-//! - [`compiler`] - LLVM IR generation and intrinsic handling (private)
+//! - [`compiler`] - WASM binary generation via wasm-encoder (private)
 //! - [`output`] - `CodegenOutput` struct definition
 //! - [`target`] - `Target`, `CompilationMode`, and `OptLevel` enums
 
 #![warn(clippy::pedantic)]
 
 use inference_type_checker::typed_context::TypedContext;
-use inkwell::{
-    context::Context,
-    targets::{InitializationConfig, Target as LlvmTarget},
-};
 
 use crate::compiler::Compiler;
 
@@ -66,27 +56,18 @@ pub mod target;
 pub use output::CodegenOutput;
 pub use target::{CompilationMode, OptLevel, Target};
 
-/// Generates LLVM IR from a typed AST for the specified target and compilation mode.
+/// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
-/// This function performs LLVM IR generation and returns a [`CodegenOutput`] containing
-/// the IR text and metadata needed by the toolchain layer to compile the IR to WebAssembly.
+/// This function builds a complete WASM module in-process via `wasm-encoder` and returns
+/// a [`CodegenOutput`] containing the binary bytes and compilation metadata.
 ///
 /// # Validation
 ///
 /// - **`Proof` mode with non-`Wasm32` target**: Rejected. Proof mode emits custom 0xfc
-///   intrinsics that only `inf-llc` handles; other targets cannot process these.
+///   non-deterministic instructions that only the Wasm32 target supports.
 /// - **`Soroban` target with non-det operations (other than `spec`)**: Rejected. The
 ///   Soroban VM cannot execute custom 0xfc WebAssembly instructions. `spec` nodes are
 ///   safe because they are stripped in `compile` mode.
-///
-/// # Compilation Mode Behavior
-///
-/// - **`Proof` mode**: Spec functions (those with `non_det_operations`) receive per-function
-///   `optnone`+`noinline` barriers during IR generation to preserve 1:1 structural
-///   correspondence with source code. Execution functions use the target's release
-///   optimization (same as Compile mode) so Rocq proofs cover the deployed code.
-/// - **`Compile` mode**: Uses the provided `opt_level`. When `OptLevel` is `Os`/`Oz`,
-///   adds `optsize`/`minsize` IR function attributes (since `llc` does not accept `-Os`/`-Oz`).
 ///
 /// # Errors
 ///
@@ -100,15 +81,14 @@ pub fn codegen(
     mode: CompilationMode,
     opt_level: OptLevel,
 ) -> anyhow::Result<CodegenOutput> {
-    // Validate: proof mode requires a target that supports it (Decision #30)
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         return Err(anyhow::anyhow!(
-            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc intrinsics \
-             that only inf-llc handles; the {target:?} target cannot process these."
+            "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
+             non-deterministic instructions that only the Wasm32 target supports; \
+             the {target:?} target cannot process these."
         ));
     }
 
-    // Validate: Soroban target rejects non-det operations (other than spec)
     if target == Target::Soroban {
         for source_file in &typed_context.source_files() {
             for func_def in source_file.function_definitions() {
@@ -125,33 +105,22 @@ pub fn codegen(
         }
     }
 
-    LlvmTarget::initialize_webassembly(&InitializationConfig::default());
-    let context = Context::create();
     let module_name = "output";
-    let compiler = Compiler::new(&context, module_name);
+    let mut compiler = Compiler::new(module_name);
 
     if typed_context.source_files().len() > 1 {
         todo!("Multi-file support not yet implemented");
     }
 
-    // Traverse AST and generate LLVM IR for all function definitions
     if !typed_context.source_files().is_empty() {
-        traverse_t_ast_with_compiler(typed_context, &compiler);
+        traverse_t_ast_with_compiler(typed_context, &mut compiler);
     }
 
-    // Apply size optimization IR attributes if applicable.
-    // This is called for both Compile and Proof modes because execution functions
-    // in Proof mode use the same optimization as Compile mode (Decision #32).
-    // Spec functions are protected by per-function optnone+noinline barriers
-    // applied during visit_function_definition() when is_non_det() is true.
-    compiler.add_size_optimization_attrs(opt_level);
-
-    // Emit IR and build output
-    let ir = compiler.emit_ir(target);
+    let wasm = compiler.finish();
     let has_main = compiler.has_main();
 
     Ok(CodegenOutput::new(
-        ir,
+        wasm,
         target,
         mode,
         opt_level,
@@ -163,21 +132,21 @@ pub fn codegen(
 /// Traverses the typed AST and compiles all function definitions.
 ///
 /// This function iterates through all source files in the typed context and generates
-/// LLVM IR for each function definition. Currently, only function definitions at the
-/// module level are compiled; other top-level constructs (types, constants, etc.) are
-/// not yet supported.
+/// WASM bytecode for each function definition. Currently, only function definitions at
+/// the module level are compiled; other top-level constructs (types, constants, etc.)
+/// are not yet supported.
 ///
 /// # Parameters
 ///
 /// - `typed_context` - Typed AST with type information for all nodes
-/// - `compiler` - LLVM compiler instance for IR generation
+/// - `compiler` - WASM compiler instance for binary generation
 ///
 /// # Current Limitations
 ///
 /// - Only function definitions are compiled
 /// - Type definitions, constants, and other top-level items are ignored
 /// - Multi-file compilation is not fully tested (see `codegen` function)
-fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &Compiler) {
+fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
     for source_file in &typed_context.source_files() {
         for func_def in source_file.function_definitions() {
             compiler.visit_function_definition(&func_def, typed_context);

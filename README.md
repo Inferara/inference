@@ -86,7 +86,7 @@ infs --version
 Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 - **`infs`** - Full-featured toolchain CLI (recommended for all users)
-- **`infc`** - Standalone compiler CLI (for direct compilation)
+- **`infc`** - Standalone compiler CLI
 
 ### Release Artifacts
 
@@ -100,45 +100,23 @@ Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 ```
 <distribution-folder>/
-├── infs (or infc)          # The CLI binary
-├── bin/
-│   ├── inf-llc            # LLVM compiler with Inference intrinsics
-│   └── rust-lld           # WebAssembly linker
-└── lib/                   # (Linux only)
-    └── libLLVM.so.*       # LLVM shared library
+└── infs (or infc)          # The CLI binary
 ```
 
-**Notes:**
-- On Linux, the LLVM shared library must be in the `lib/` directory.
-- On Windows, all required DLL files should be placed in the `bin/` directory next to the executables.
-- The CLI binaries automatically locate dependencies relative to their own location.
-- No system LLVM installation is required for end users.
+The CLI binaries are self-contained and require no external dependencies.
 
 ## Building from Source
 
-To build Inference from source, you'll need the required binary dependencies for your platform.
+To build Inference from source:
 
 For detailed platform-specific setup instructions, see:
 - [Linux Development Setup](book/installation_linux.md)
 - [macOS Development Setup](book/installation_macos.md)
 - [Windows Development Setup](book/installation_windows.md)
 
-### Required Binaries
+### Dependencies
 
-Download the following files for your platform and place them in the specified directories:
-
-#### Linux
-- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip) → Extract to `external/bin/linux/`
-- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip) → Extract to `external/bin/linux/`
-- **libLLVM**: [Download](https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.0-nightly.zip) → Extract to `external/lib/linux/`
-
-#### macOS
-- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/inf-llc.zip) → Extract to `external/bin/macos/`
-- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/rust-lld.zip) → Extract to `external/bin/macos/`
-
-#### Windows
-- **inf-llc.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip) → Extract to `external/bin/windows/`
-- **rust-lld.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/rust-lld.zip) → Extract to `external/bin/windows/`
+No external binaries are required. The compiler generates WebAssembly directly via `wasm-encoder`.
 
 ### Build Steps
 
@@ -148,15 +126,7 @@ Download the following files for your platform and place them in the specified d
    cd inference
    ```
 
-2. Download and extract the required binaries for your platform (see links above)
-
-3. Make the binaries executable (Linux/macOS only):
-   ```bash
-   chmod +x external/bin/linux/inf-llc external/bin/linux/rust-lld    # Linux
-   chmod +x external/bin/macos/inf-llc external/bin/macos/rust-lld    # macOS
-   ```
-
-4. Build the project:
+2. Build the project:
    ```bash
    cargo build --release
    ```

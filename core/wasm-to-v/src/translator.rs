@@ -32,7 +32,7 @@
 //! The translator generates Rocq code as strings using helper functions for each
 //! WASM construct. This string-based approach prioritizes:
 //!
-//! - **Correctness**: Direct mapping from WASM semantics to Rocq types
+//! - **Correctness**: Mapping from WASM semantics to Rocq types
 //! - **Readability**: Well-formatted output with consistent indentation
 //! - **Debuggability**: Preserve names from WASM custom sections
 //! - **Simplicity**: Easy to understand and maintain translation logic

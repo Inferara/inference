@@ -49,40 +49,35 @@ The external artifact remains as-is (potentially fully optimized). The `spec` co
 
 ## Targets
 
-Target parameters (triple, CPU, features, linker flags) are **locked per target variant** and cannot be overridden in `Inference.toml`. The only user-facing configuration is target selection and build profile (debug/release) for compile mode.
+Target parameters are **locked per target variant** and cannot be overridden in `Inference.toml`. The only user-facing configuration is target selection and build profile (debug/release) for compile mode.
 
 ### Target::Wasm32 (default)
 
-General-purpose WASM target using custom `inf-llc` with Inference intrinsic support. Used in both `compile` and `proof` modes.
+General-purpose WASM target with custom non-deterministic instruction support for specs. Used in both `compile` and `proof` modes. WebAssembly is generated directly via `wasm-encoder`.
+Purpose: general WASM execution and verification of Inference code.
 
 | Setting | Value |
 |---------|-------|
-| LLVM triple | `wasm32-unknown-unknown` |
-| CPU | `mvp` |
-| LLVM features | (none) |
-| inf-llc flags | `-mcpu=mvp -filetype=obj` |
-| rust-lld flags | `-flavor wasm --no-entry [--export=main]` |
+| Target | `wasm32-unknown-unknown` |
+| WASM features | MVP baseline (no post-MVP features) |
 | Optimization (compile) | `-O3` |
 | Optimization (proof, execution functions) | `-O3` (same as compile release) |
-| Optimization (proof, spec functions) | `-O0` + `optnone` + `noinline` |
-| Purpose | Verification and general WASM execution |
+| Optimization (proof, spec functions) | `-O0` (unoptimized) |
 
 ### Stellar Soroban
 
 Produces Soroban-compatible WASM binaries matching the `wasm32v1-none` Rust target configuration.
 The target's default optimization applies (`-Oz` for Soroban, `-O3` for Wasm32).
+Purpose: deploy to Stellar network as Soroban smart contracts.
 
 | Setting | Value | Source |
 |---------|-------|--------|
-| LLVM triple | `wasm32-unknown-unknown` | Same LLVM backend as wasm32v1-none |
-| CPU | `mvp` | Pinned to WebAssembly 1.0 baseline |
-| LLVM features | `+mutable-globals,+sign-ext,+bulk-memory` | Soroban VM accepts these three post-MVP features |
-| inf-llc flags | `-mcpu=mvp -mattr=+mutable-globals,+sign-ext,+bulk-memory -filetype=obj` |
-| rust-lld flags | `-flavor wasm --no-entry --export-dynamic --gc-sections -z stack-size=1048576 --stack-first` |
-| Optimization | `OptLevel::Oz` → IR attributes `minsize`+`optsize` + `llc -O2` (size-aggressive, matching Soroban convention) |
-| Max binary size | 64 KB (Soroban network limit) |
-| Floats | Forbidden by Soroban VM — codegen must not emit float instructions |
-| Purpose | Deploy to Stellar network as Soroban smart contracts |
+| Target | `wasm32-unknown-unknown` | Same as `wasm32v1-none` |
+| WASM baseline | MVP | Pinned to WebAssembly 1.0 baseline |
+| WASM features | `+mutable-globals,+sign-ext,+bulk-memory` | Soroban VM accepts these three post-MVP features |
+| Optimization | `Oz` (size-aggressive, matching Soroban convention) |
+| Max binary size | 64 KB |
+| Floats | Forbidden — codegen must not emit float instructions |
 
 **Soroban VM WASM feature matrix** (from `rs-soroban-env` wasmi config):
 
@@ -99,7 +94,7 @@ The target's default optimization applies (`-Oz` for Soroban, `-O3` for Wasm32).
 | `extended-const` | Disabled | Security surface |
 | `SIMD` | Disabled | Not needed |
 
-**Soroban linker flags explained:**
+**Soroban target flags**
 - `--no-entry` — reactor model, no `_start` (same as Wasm32)
 - `--export-dynamic` — export all symbols with default visibility (Soroban host discovers exports by name)
 - `--gc-sections` — strip unreachable code (critical for 64KB limit)
@@ -108,34 +103,24 @@ The target's default optimization applies (`-Oz` for Soroban, `-O3` for Wasm32).
 
 # Appendix A: Optimization Levels
 
-| Optimization Level | Description | LL Attribute  |
-|--------------------|-------------| --------------|
-| `-O0` | No optimizations. The "Gold Standard" for using debuggers like LLDB or GDB. | `optnone` + `noinline` |
-| `-O1` | Some optimizations. Balanced compile time and code size. | None (default). |
-| `-O2` | Aggressive optimizations. Standard Release. | None (default). |
-| `-O3` | Maximum optimizations. May vectorize loops and inline aggressively. For High-Performance Computing. | None (default). |
-| `-Os` | Optimize for size. Similar to `-O2` but with additional size-reducing optimizations. For Mobile / Embedded | `optsize` |
-| `-Oz` | Optimize for minimum size. More aggressive size optimizations than `-Os`. For Size-Constrained Environments. | `minsize` + `optsize` |
+| Optimization Level | Description |
+|--------------------|-------------|
+| `-O0` | No optimizations. Used for spec functions to preserve structural correspondence. |
+| `-O1` | Some optimizations. Balanced compile time and code size. |
+| `-O2` | Aggressive optimizations. Standard release. |
+| `-O3` | Maximum optimizations. Default for Wasm32 target. |
+| `-Os` | Optimize for size. Similar to `-O2` with additional size reductions. |
+| `-Oz` | Optimize for minimum size. Default for Soroban target. |
 
-# Appendix B: LLVM Features
+# Appendix B: WebAssembly Features
 
-| LLVM Feature | Stage | Description |
-|--------------|-------| ------------|
-| `-mcpu=mvp`               | Compilation | Target WebAssembly 1.0 baseline without post-MVP features. |
-| `-mattr=+<feature>`       | Compilation | Machine Attributes. Enables `+` or disables `-` specific CPU features |
-| `mattr: sign-ext`        | Compilation | Enable Sign-Extension Operators. Enables instructions that make converting small signed integers (like 8-bit or 16-bit int) to larger ones much faster. |
-| `mattr: bulk-memory`     | Compilation | Enables instructions like `memory.copy` (like `memcpy`) and `memory.fill` (like `memset`). Without this, the compiler has to generate slow loops to copy data byte-by-byte. |
-| `mattr: mutable-globals` | Compilation | Allows the Wasm module to import/export global variables that can be changed (mutated). This is often required for setting up the "Stack Pointer" for managing memory manually or linking dynamic libraries. |
-| `mattr: multivalue`       | Compilation | Allows a Wasm function to return multiple values natively (e.g., returning two integers on the stack), and allows blocks/loops to have inputs. |
-| `mattr: reference-types`  | Compilation | Allows Wasm to hold "opaque" references to host objects (like a JavaScript object or a DOM node) using the `externref` type. It is essential for Garbage Collection integration. |
-| `mattr: tail-call`      | Compilation | Adds `return_call` instructions. If a function ends by calling another function, it reuses the current stack frame instead of creating a new one. |
-| `mattr: extended-const`  | Compilation | Standard Wasm global variables can only be initialized with simple constants (e.g., `5`). This feature allows basic math in initializers, like `global x = 5 + 3`. |
-| `mattr: simd128`         | Compilation | Single Instruction, Multiple Data. It allows the CPU to process 128 bits of data (e.g., four 32-bit integers) in a single clock cycle. |
-| `-filetype=obj`           | Compilation | Output an Object File. |
-| `-flavor wasm`            | Linking (lld) | Execute WebAssembly linking. |
-| `--no-entry`              | Linking (lld) | Do not expect a `main` (`_start`) function. Useful for libraries or modules that will be invoked by a host environment. |
-| `--export=main`           | Linking (lld) | Explicitly export the `main` function from the Wasm module. Necessary for standalone executables. |
-| `--export-dynamic`        | Linking (lld) | Instead of picking specific functions to export, this blindly exports every global symbol. |
-| `--gc-sections`           | Linking (lld) | This is Dead Code Elimination. |
-| `-z stack-size=<size>`    | Linking (lld) | Sets the size of the stack for the Wasm module. |
-| `--stack-first`           | Linking (lld) | Places the stack at the beginning of linear memory (before the Data/Heap). Usually, Wasm places static data (strings, globals) at the bottom (address `0`), and the stack starts after that, growing upwards (or downwards towards data). Stack-First Layout: Places the Stack at the very beginning of memory (starting near `0`) and the Data/Heap follows it. Since the stack grows downwards (towards address `0`), if the program overflows the stack, it hits address `0` and causes a Trap (crash) immediately. Without this, a stack overflow might silently overwrite static data (heap corruption). |
+| Feature | Description |
+|---------|-------------|
+| `sign-ext` | Sign-Extension Operators. Makes converting small signed integers (8-bit, 16-bit) to larger ones faster. |
+| `bulk-memory` | Bulk memory operations like `memory.copy` (memcpy) and `memory.fill` (memset). Without this, the compiler generates slow byte-by-byte loops. |
+| `mutable-globals` | Allows importing/exporting mutable global variables. Often required for the stack pointer. |
+| `multivalue` | Allows functions to return multiple values natively and blocks/loops to have inputs. |
+| `reference-types` | Allows holding opaque references to host objects using `externref`. Essential for GC integration. |
+| `tail-call` | Adds `return_call` instructions for tail call optimization. |
+| `extended-const` | Allows basic math expressions in global initializers. |
+| `simd128` | Single Instruction, Multiple Data. Processes 128 bits of data in a single operation. |

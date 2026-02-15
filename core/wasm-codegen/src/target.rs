@@ -1,39 +1,37 @@
 //! Compilation target and mode definitions for the Inference compiler.
 //!
 //! This module defines the target platform, compilation mode, and optimization level
-//! types used throughout the code generation pipeline. These types control how LLVM IR
-//! is generated and how external tools (`inf-llc`, `rust-lld`) are invoked.
+//! types used throughout the code generation pipeline. These types control how WASM
+//! bytecode is generated.
 //!
 //! # Target
 //!
 //! The [`Target`] enum specifies the WebAssembly target platform:
-//! - [`Target::Wasm32`] — General-purpose WASM using custom `inf-llc` with Inference intrinsic
-//!   support. Used for both verification (`proof` mode) and general execution (`compile` mode).
-//! - [`Target::Soroban`] — Stellar Soroban smart contract target for standard code without
-//!   non-deterministic instructions.
+//! - [`Target::Wasm32`] -- General-purpose WASM with Inference non-deterministic
+//!   instruction support. Used for both verification (`proof` mode) and general
+//!   execution (`compile` mode).
+//! - [`Target::Soroban`] -- Stellar Soroban smart contract target for standard code
+//!   without non-deterministic instructions.
 //!
 //! # Compilation Mode
 //!
-//! The [`CompilationMode`] enum controls optimization and spec-node handling:
-//! - [`CompilationMode::Compile`] — Produces optimized production binaries. Spec nodes are
+//! The [`CompilationMode`] enum controls spec-node handling:
+//! - [`CompilationMode::Compile`] -- Produces production binaries. Spec nodes are
 //!   stripped from codegen since they have no runtime meaning.
-//! - [`CompilationMode::Proof`] — Produces WASM for formal verification. Spec functions
-//!   (containing non-deterministic operations) are compiled at `-O0` with `optnone`+`noinline`
-//!   barriers to preserve 1:1 structural correspondence for Rocq formalization.
-//!   Execution functions use the target's release optimization.
+//! - [`CompilationMode::Proof`] -- Produces WASM for formal verification. Spec functions
+//!   (containing non-deterministic operations) are compiled to preserve 1:1 structural
+//!   correspondence for Rocq formalization. Execution functions use the target's release
+//!   optimization.
 //!
 //! # Optimization Level
 //!
-//! The [`OptLevel`] enum represents LLVM optimization levels. Since `llc` only accepts
-//! `-O0` through `-O3`, size optimization (`Os`/`Oz`) is achieved through IR function
-//! attributes (`optsize`/`minsize`) combined with `llc -O2`.
-
-#![allow(clippy::doc_markdown)]
+//! The [`OptLevel`] enum represents optimization levels. These are preserved for future
+//! integration with wasm-opt or similar post-processing tools.
 
 /// Compilation target for code generation.
 ///
-/// Both targets use the same LLVM triple (`wasm32-unknown-unknown`) and CPU (`mvp`),
-/// but differ in enabled WebAssembly features and linker flags.
+/// Both targets produce WebAssembly modules but differ in which WASM features and
+/// non-deterministic instructions are permitted.
 ///
 /// # Examples
 ///
@@ -42,16 +40,14 @@
 ///
 /// let target = Target::default();
 /// assert_eq!(target, Target::Wasm32);
-/// assert_eq!(target.triple(), "wasm32-unknown-unknown");
-/// assert_eq!(target.cpu(), "mvp");
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Target {
-    /// General-purpose WebAssembly target using strict MVP baseline.
+    /// General-purpose WebAssembly target with strict MVP baseline.
     ///
-    /// Uses custom `inf-llc` with Inference intrinsic support for non-deterministic
-    /// operations. No post-MVP features are enabled, ensuring compatibility with
-    /// the custom 0xfc prefix instruction space.
+    /// Supports Inference non-deterministic operations via custom 0xfc prefix
+    /// instructions. No post-MVP features are enabled, ensuring compatibility with
+    /// the custom instruction space.
     ///
     /// Used in both `compile` and `proof` modes.
     #[default]
@@ -59,20 +55,18 @@ pub enum Target {
 
     /// Stellar Soroban smart contract target.
     ///
-    /// Enables post-MVP features accepted by the Soroban VM (`+mutable-globals`,
-    /// `+sign-ext`, `+bulk-memory`). Produces size-optimized binaries to fit within
-    /// the 64 KB contract size limit.
+    /// Produces size-optimized binaries to fit within the 64 KB contract size limit.
     ///
-    /// Only supports `compile` mode — `proof` mode requires custom intrinsics that
+    /// Only supports `compile` mode -- `proof` mode requires custom intrinsics that
     /// are incompatible with the Soroban VM.
     Soroban,
 }
 
-/// Compilation mode controlling optimization and spec-node handling.
+/// Compilation mode controlling spec-node handling.
 ///
 /// The mode is orthogonal to the target: `compile` mode works with any target,
-/// while `proof` mode requires the `Wasm32` target (custom intrinsics need strict
-/// MVP and `inf-llc`).
+/// while `proof` mode requires the `Wasm32` target (custom non-deterministic
+/// instructions need the Wasm32 target).
 ///
 /// # Examples
 ///
@@ -87,29 +81,28 @@ pub enum CompilationMode {
     /// Produces optimized production binaries.
     ///
     /// Non-deterministic `spec` nodes are stripped from codegen since they have no
-    /// runtime meaning. The target's default optimization level applies (`-O3` for
-    /// `Wasm32`, `-Oz` for `Soroban`).
+    /// runtime meaning. The target's default optimization level applies.
     #[default]
     Compile,
 
     /// Produces WASM for formal verification via Rocq translation.
     ///
-    /// All code (including spec functions with non-deterministic intrinsics) is
-    /// emitted into the WASM module. Spec functions receive per-function
-    /// `optnone`+`noinline` barriers to preserve 1:1 structural correspondence
-    /// with the source code for Rocq readability. Execution functions are compiled
-    /// at the target's default release optimization (same as `Compile` mode) so
-    /// that Rocq proofs cover the actual deployed code (Decision #32).
+    /// All code (including spec functions with non-deterministic instructions) is
+    /// emitted into the WASM module. Spec functions preserve 1:1 structural
+    /// correspondence with the source code for Rocq readability. Execution functions
+    /// are compiled at the target's default release optimization so that Rocq proofs
+    /// cover the actual deployed code (Decision #32).
     ///
-    /// The target is always `Wasm32` — custom intrinsics require strict MVP and `inf-llc`.
+    /// The target is always `Wasm32` -- custom non-deterministic instructions require
+    /// the Wasm32 target.
     Proof,
 }
 
-/// Optimization level for LLVM compilation.
+/// Optimization level for compilation.
 ///
-/// Since `llc` only accepts `-O0` through `-O3`, size optimization (`Os`/`Oz`) is
-/// achieved by setting `optsize` and/or `minsize` IR function attributes, then
-/// invoking `llc -O2`. This matches how Clang implements `-Os`/`-Oz`.
+/// These levels are preserved for future integration with wasm-opt or similar
+/// post-processing tools. Currently, no optimization pass is applied during
+/// WASM emission.
 ///
 /// # Examples
 ///
@@ -117,7 +110,6 @@ pub enum CompilationMode {
 /// use inference_wasm_codegen::OptLevel;
 ///
 /// let level = OptLevel::Oz;
-/// assert_eq!(level.as_llc_flag(), "-O2");
 /// assert!(level.is_size_optimized());
 /// assert!(level.is_min_size());
 /// ```
@@ -132,41 +124,16 @@ pub enum OptLevel {
     O2,
     /// Aggressive optimization for performance.
     O3,
-    /// Optimize for size. Maps to `llc -O2` with `optsize` IR attribute.
+    /// Optimize for size.
     Os,
-    /// Aggressively optimize for size. Maps to `llc -O2` with `minsize`+`optsize` IR attributes.
+    /// Aggressively optimize for size.
     Oz,
 }
 
 impl OptLevel {
-    /// Returns the flag to pass to `inf-llc`.
+    /// Whether to optimize for smaller code size.
     ///
-    /// Since `llc` does not accept `-Os` or `-Oz`, those map to `-O2`. Size
-    /// optimization is achieved through IR function attributes instead.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use inference_wasm_codegen::OptLevel;
-    ///
-    /// assert_eq!(OptLevel::O0.as_llc_flag(), "-O0");
-    /// assert_eq!(OptLevel::O3.as_llc_flag(), "-O3");
-    /// assert_eq!(OptLevel::Os.as_llc_flag(), "-O2");
-    /// assert_eq!(OptLevel::Oz.as_llc_flag(), "-O2");
-    /// ```
-    #[must_use]
-    pub fn as_llc_flag(&self) -> &'static str {
-        match self {
-            Self::O0 => "-O0",
-            Self::O1 => "-O1",
-            Self::O2 | Self::Os | Self::Oz => "-O2",
-            Self::O3 => "-O3",
-        }
-    }
-
-    /// Whether to add the `optsize` IR function attribute.
-    ///
-    /// When true, LLVM will prefer smaller code size over execution speed.
+    /// When true, the compiler should prefer smaller code size over execution speed.
     /// This is set for both `Os` and `Oz` levels.
     ///
     /// # Examples
@@ -183,10 +150,10 @@ impl OptLevel {
         matches!(self, Self::Os | Self::Oz)
     }
 
-    /// Whether to add the `minsize` IR function attribute.
+    /// Whether to aggressively minimize code size.
     ///
-    /// When true, LLVM will aggressively minimize code size, even at the expense
-    /// of execution speed. This is only set for the `Oz` level.
+    /// When true, the compiler should aggressively minimize code size, even at the
+    /// expense of execution speed. This is only set for the `Oz` level.
     ///
     /// # Examples
     ///
@@ -203,68 +170,11 @@ impl OptLevel {
 }
 
 impl Target {
-    /// Returns the LLVM target triple.
-    ///
-    /// Both `Wasm32` and `Soroban` use the same LLVM backend triple.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use inference_wasm_codegen::Target;
-    ///
-    /// assert_eq!(Target::Wasm32.triple(), "wasm32-unknown-unknown");
-    /// assert_eq!(Target::Soroban.triple(), "wasm32-unknown-unknown");
-    /// ```
-    #[must_use]
-    pub fn triple(&self) -> &'static str {
-        // Both targets use the same LLVM backend
-        "wasm32-unknown-unknown"
-    }
-
-    /// Returns the CPU target for `inf-llc`.
-    ///
-    /// Both targets pin to the MVP baseline.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use inference_wasm_codegen::Target;
-    ///
-    /// assert_eq!(Target::Wasm32.cpu(), "mvp");
-    /// assert_eq!(Target::Soroban.cpu(), "mvp");
-    /// ```
-    #[must_use]
-    pub fn cpu(&self) -> &'static str {
-        // Both pin to MVP
-        "mvp"
-    }
-
-    /// Returns the LLVM feature flags for `inf-llc -mattr`.
-    ///
-    /// `Wasm32` uses strict MVP (no features), while `Soroban` enables the three
-    /// post-MVP features accepted by the Soroban VM.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use inference_wasm_codegen::Target;
-    ///
-    /// assert_eq!(Target::Wasm32.llc_features(), "");
-    /// assert_eq!(Target::Soroban.llc_features(), "+mutable-globals,+sign-ext,+bulk-memory");
-    /// ```
-    #[must_use]
-    pub fn llc_features(&self) -> &'static str {
-        match self {
-            Self::Wasm32 => "",
-            Self::Soroban => "+mutable-globals,+sign-ext,+bulk-memory",
-        }
-    }
-
     /// Returns whether this target supports proof mode.
     ///
-    /// Only `Wasm32` supports proof mode because it uses `inf-llc` with custom
-    /// 0xfc intrinsic support for non-deterministic operations. Other targets
-    /// (e.g., `Soroban`) cannot process these custom instructions.
+    /// Only `Wasm32` supports proof mode because it uses custom 0xfc non-deterministic
+    /// instructions for formal verification. Other targets (e.g., `Soroban`) cannot
+    /// process these custom instructions.
     ///
     /// # Examples
     ///
@@ -281,16 +191,14 @@ impl Target {
 
     /// Returns the default optimization level for this target.
     ///
-    /// | Target  | OptLevel |
+    /// | Target  | `OptLevel` |
     /// |---------|----------|
     /// | Wasm32  | O3       |
     /// | Soroban | Oz       |
     ///
     /// The optimization level is target-specific and mode-independent. In `proof`
-    /// mode, spec functions (those containing `non_det_operations`) are protected
-    /// by per-function `optnone`+`noinline` barriers applied during IR generation
-    /// (see `compiler.rs`), so they remain unoptimized regardless of the module-level
-    /// optimization. Execution functions are compiled at the target's release
+    /// mode, spec functions are emitted without optimization to preserve structural
+    /// correspondence. Execution functions are compiled at the target's release
     /// optimization so that Rocq proofs cover the actual deployed code (Decision #32).
     ///
     /// # Examples
@@ -330,31 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn target_triple_is_wasm32_for_both() {
-        assert_eq!(Target::Wasm32.triple(), "wasm32-unknown-unknown");
-        assert_eq!(Target::Soroban.triple(), "wasm32-unknown-unknown");
-    }
-
-    #[test]
-    fn target_cpu_is_mvp_for_both() {
-        assert_eq!(Target::Wasm32.cpu(), "mvp");
-        assert_eq!(Target::Soroban.cpu(), "mvp");
-    }
-
-    #[test]
-    fn wasm32_has_no_llc_features() {
-        assert_eq!(Target::Wasm32.llc_features(), "");
-    }
-
-    #[test]
-    fn soroban_has_expected_llc_features() {
-        assert_eq!(
-            Target::Soroban.llc_features(),
-            "+mutable-globals,+sign-ext,+bulk-memory"
-        );
-    }
-
-    #[test]
     fn wasm32_default_opt_level_is_o3() {
         assert_eq!(Target::Wasm32.default_opt_level(), OptLevel::O3);
     }
@@ -372,16 +255,6 @@ mod tests {
     #[test]
     fn soroban_does_not_support_proof_mode() {
         assert!(!Target::Soroban.supports_proof_mode());
-    }
-
-    #[test]
-    fn opt_level_llc_flags() {
-        assert_eq!(OptLevel::O0.as_llc_flag(), "-O0");
-        assert_eq!(OptLevel::O1.as_llc_flag(), "-O1");
-        assert_eq!(OptLevel::O2.as_llc_flag(), "-O2");
-        assert_eq!(OptLevel::O3.as_llc_flag(), "-O3");
-        assert_eq!(OptLevel::Os.as_llc_flag(), "-O2");
-        assert_eq!(OptLevel::Oz.as_llc_flag(), "-O2");
     }
 
     #[test]
