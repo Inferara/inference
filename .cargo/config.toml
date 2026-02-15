@@ -3,9 +3,3 @@ build-full = "build --workspace"
 test-full = "test --workspace"
 check-full = "check --workspace"
 clippy-w = "clippy --verbose -- -D warnings"
-
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-rustflags = [
-    "-C", "link-arg=-Wl,--allow-multiple-definition"
-]

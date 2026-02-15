@@ -222,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn write_wasm_to_creates_file() {
         let output = sample_output();
         let dir = std::env::temp_dir();
