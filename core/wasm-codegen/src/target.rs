@@ -102,7 +102,7 @@ pub enum CompilationMode {
 ///
 /// These levels are preserved for future integration with wasm-opt or similar
 /// post-processing tools. Currently, no optimization pass is applied during
-/// direct WASM emission.
+/// WASM emission.
 ///
 /// # Examples
 ///

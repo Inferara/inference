@@ -100,7 +100,7 @@
 //!
 //! The Inference ecosystem provides two CLI tools:
 //!
-//! - **`infc`** (this binary) - Standalone compiler for direct compilation
+//! - **`infc`** (this binary) - Standalone compiler
 //! - **`infs`** - Unified toolchain CLI with project management and toolchain installation
 //!
 //! See `apps/infs/README.md` for the full-featured toolchain interface.
@@ -126,12 +126,12 @@ pub(crate) mod toolchain;
 use clap::Parser;
 use inference::{analyze, parse, type_check, wasm_to_v};
 use parser::Cli;
-use toolchain::BuildProfile;
 use std::{
     fs,
     path::PathBuf,
     process::{self},
 };
+use toolchain::BuildProfile;
 
 /// Entry point for the Inference compiler CLI.
 ///

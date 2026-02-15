@@ -155,7 +155,7 @@
 //! ## See Also
 //!
 //! - [Crate README](../README.md) - Detailed documentation and examples
-//! - [WASM Codegen](../wasm-codegen/README.md) - Direct WebAssembly code generation
+//! - [WASM Codegen](../wasm-codegen/README.md) - WebAssembly code generation
 //! - [Inference Compiler](../inference/README.md) - Main compiler orchestration
 //! - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant
 //! - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard

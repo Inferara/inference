@@ -139,7 +139,7 @@
 //!
 //! - [`inference_ast`] - Arena-based AST construction and tree-sitter parsing
 //! - [`inference_type_checker`] - Bidirectional type checking with error recovery
-//! - [`inference_wasm_codegen`] - Direct WebAssembly code generation via wasm-encoder
+//! - [`inference_wasm_codegen`] - WebAssembly code generation via wasm-encoder
 //! - [`inference_wasm_to_v_translator`] - WASM to Rocq translation
 //!
 //! ```text
@@ -556,12 +556,7 @@ pub fn codegen(
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    inference_wasm_codegen::codegen(
-        typed_context,
-        target,
-        mode,
-        target.default_opt_level(),
-    )
+    inference_wasm_codegen::codegen(typed_context, target, mode, target.default_opt_level())
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.

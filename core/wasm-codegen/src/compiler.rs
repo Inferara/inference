@@ -1,7 +1,7 @@
-//! Direct WebAssembly code generation via wasm-encoder.
+//! WebAssembly code generation via wasm-encoder.
 //!
 //! This module implements the core compiler that translates Inference's typed AST
-//! directly into WebAssembly binary format using `wasm-encoder`. It handles standard
+//! into WebAssembly binary format using `wasm-encoder`. It handles standard
 //! WASM instructions as well as custom non-deterministic operations (uzumaki, forall,
 //! exists, assume, unique).
 //!
@@ -25,7 +25,7 @@
 //!
 //! # Type Mapping
 //!
-//! Inference types are mapped directly to WebAssembly types:
+//! Inference types are mapped to WebAssembly types:
 //!
 //! | Inference Type | WASM Type |
 //! |----------------|-----------|
@@ -53,15 +53,8 @@
 //!
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
-//!
-//! # Variable Storage
-//!
-//! Constants and variables are stored as WASM locals using `local.set`/`local.get`.
-//! No linear memory imports are needed for the current feature set.
 
-#![allow(dead_code)]
-
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::iter::Peekable;
 use std::rc::Rc;
 
@@ -73,8 +66,8 @@ use inference_type_checker::{
     typed_context::TypedContext,
 };
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
-    NameMap, NameSection, IndirectNameMap, TypeSection, ValType,
+    CodeSection, ExportKind, ExportSection, Function, FunctionSection, IndirectNameMap,
+    Instruction, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -89,7 +82,7 @@ const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
 
-/// Direct WASM compiler for generating WebAssembly binary from typed AST.
+/// WASM compiler for generating WebAssembly binary from typed AST.
 ///
 /// The compiler builds a complete WASM module in-process using `wasm-encoder`. Each function
 /// definition from the AST is compiled into a WASM function body with proper
@@ -213,7 +206,7 @@ impl Compiler {
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
 
-        let mut locals_map: HashMap<String, (u32, ValType)> = HashMap::new();
+        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
         let mut local_idx: u32 = 0;
         Self::pre_scan_locals(
             &function_definition.body,
@@ -225,10 +218,7 @@ impl Compiler {
         let local_declarations: Vec<(u32, ValType)> = {
             let mut sorted_locals: Vec<(u32, ValType)> = locals_map.values().copied().collect();
             sorted_locals.sort_by_key(|(idx, _)| *idx);
-            sorted_locals
-                .into_iter()
-                .map(|(_, vt)| (1, vt))
-                .collect()
+            sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
         let mut func = Function::new(local_declarations);
@@ -243,8 +233,7 @@ impl Compiler {
 
         func.instruction(&Instruction::End);
 
-        self.func_names
-            .push((self.func_idx, fn_name.clone()));
+        self.func_names.push((self.func_idx, fn_name.clone()));
         let local_name_entries: Vec<(u32, String)> = {
             let mut entries: Vec<(u32, String)> = locals_map
                 .iter()
@@ -254,8 +243,7 @@ impl Compiler {
             entries
         };
         if !local_name_entries.is_empty() {
-            self.local_names
-                .push((self.func_idx, local_name_entries));
+            self.local_names.push((self.func_idx, local_name_entries));
         }
 
         self.bodies.push(func);
@@ -270,7 +258,7 @@ impl Compiler {
     fn pre_scan_locals(
         block: &BlockType,
         ctx: &TypedContext,
-        locals_map: &mut HashMap<String, (u32, ValType)>,
+        locals_map: &mut FxHashMap<String, (u32, ValType)>,
         local_idx: &mut u32,
     ) {
         for stmt in block.statements() {
@@ -330,7 +318,7 @@ impl Compiler {
         parent_blocks_stack: &mut Vec<BlockType>,
         ctx: &TypedContext,
         func: &mut Function,
-        locals_map: &HashMap<String, (u32, ValType)>,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
     ) {
         let statement = statements_iterator.next().unwrap();
         match statement {
@@ -415,17 +403,17 @@ impl Compiler {
                     && parent_blocks_stack.first().unwrap().is_non_det()
                     && parent_blocks_stack.first().unwrap().is_void()
                 {
+                    //TODO: once FunctionCall is implemented (which could call a void function), or Unit literal,
+                    //the Drop would become a bug — it'd try to pop from an empty stack.
+                    //The proper fix would be to check whether the expression's type is non-void before emitting Drop,
+                    //rather than assuming all expressions produce a value.
+                    //Something like checking ctx.is_node_void(expression.id) (or equivalent).
                     func.instruction(&Instruction::Drop);
                 }
             }
             Statement::Assign(_assign_statement) => todo!(),
             Statement::Return(return_statement) => {
-                self.lower_expression(
-                    &return_statement.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                );
+                self.lower_expression(&return_statement.expression.borrow(), ctx, func, locals_map);
                 func.instruction(&Instruction::Return);
             }
             Statement::Loop(_loop_statement) => todo!(),
@@ -453,25 +441,20 @@ impl Compiler {
                         match number_type_kind_number_type {
                             NumberType::I8 => todo!(),
                             NumberType::I16 => todo!(),
-                            NumberType::I32 => {
-                                match &constant_definition.value {
-                                    Literal::Number(number_literal) => {
-                                        let val = number_literal
-                                            .value
-                                            .parse::<i32>()
-                                            .unwrap_or(0);
-                                        func.instruction(&Instruction::I32Const(val));
-                                        let (local_idx, _) = locals_map
-                                            .get(&constant_definition.name())
-                                            .expect("Local not found in pre-scan");
-                                        func.instruction(&Instruction::LocalSet(*local_idx));
-                                    }
-                                    _ => panic!(
-                                        "Constant value for i32 should be a number literal. Found: {:?}",
-                                        constant_definition.value
-                                    ),
+                            NumberType::I32 => match &constant_definition.value {
+                                Literal::Number(number_literal) => {
+                                    let val = number_literal.value.parse::<i32>().unwrap_or(0);
+                                    func.instruction(&Instruction::I32Const(val));
+                                    let (local_idx, _) = locals_map
+                                        .get(&constant_definition.name())
+                                        .expect("Local not found in pre-scan");
+                                    func.instruction(&Instruction::LocalSet(*local_idx));
                                 }
-                            }
+                                _ => panic!(
+                                    "Constant value for i32 should be a number literal. Found: {:?}",
+                                    constant_definition.value
+                                ),
+                            },
                             NumberType::I64 => todo!(),
                             NumberType::U8 => todo!(),
                             NumberType::U16 => todo!(),
@@ -516,7 +499,7 @@ impl Compiler {
         expression: &Expression,
         ctx: &TypedContext,
         func: &mut Function,
-        locals_map: &HashMap<String, (u32, ValType)>,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
     ) {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),

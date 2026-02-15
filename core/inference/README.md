@@ -193,12 +193,12 @@ This crate is a thin orchestration layer delegating to specialized crates:
 
 - **[`inference_ast`]** - Arena-based AST with tree-sitter parsing
 - **[`inference_type_checker`]** - Bidirectional type checking with error recovery
-- **[`inference_wasm_codegen`]** - Direct WebAssembly code generation via wasm-encoder
+- **[`inference_wasm_codegen`]** - WebAssembly code generation via wasm-encoder
 - **[`inference_wasm_to_v_translator`]** - WASM to Rocq translation
 
 ## Dependencies
 
-Code generation uses the `wasm-encoder` crate for direct WebAssembly binary emission. No external binaries or LLVM installation required.
+Code generation uses the `wasm-encoder` crate for WebAssembly binary emission. No external binaries or LLVM installation required.
 
 ## Platform Support
 

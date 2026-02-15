@@ -1,6 +1,6 @@
 # inference-wasm-codegen
 
-Direct WebAssembly code generation for the Inference compiler.
+WebAssembly code generation for the Inference compiler.
 
 ## Overview
 

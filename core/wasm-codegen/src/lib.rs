@@ -1,6 +1,6 @@
 //! WebAssembly code generation for the Inference compiler.
 //!
-//! This crate provides direct WebAssembly binary generation from Inference's typed AST
+//! This crate provides WebAssembly binary generation from Inference's typed AST
 //! using `wasm-encoder`. The generated WASM binary is returned as a [`CodegenOutput`]
 //! struct, which carries the binary bytes along with compilation metadata.
 //!
@@ -39,7 +39,7 @@
 //!
 //! # Module Organization
 //!
-//! - [`compiler`] - Direct WASM binary generation via wasm-encoder (private)
+//! - [`compiler`] - WASM binary generation via wasm-encoder (private)
 //! - [`output`] - `CodegenOutput` struct definition
 //! - [`target`] - `Target`, `CompilationMode`, and `OptLevel` enums
 

@@ -86,7 +86,7 @@ infs --version
 Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 - **`infs`** - Full-featured toolchain CLI (recommended for all users)
-- **`infc`** - Standalone compiler CLI (for direct compilation)
+- **`infc`** - Standalone compiler CLI
 
 ### Release Artifacts
 

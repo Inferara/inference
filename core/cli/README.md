@@ -10,7 +10,7 @@ The standalone compiler command-line interface for the Inference programming lan
 
 Two CLI tools are available in the Inference ecosystem:
 
-- **`infc`** (this crate) - Standalone compiler for direct compilation
+- **`infc`** (this crate) - Standalone compiler
 - **`infs`** - Unified toolchain CLI that wraps `infc` and provides additional features (project management, toolchain installation, TUI)
 
 For most users, `infs` is the recommended interface. Use `infc` directly when:

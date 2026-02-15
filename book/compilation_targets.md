@@ -49,11 +49,12 @@ The external artifact remains as-is (potentially fully optimized). The `spec` co
 
 ## Targets
 
-Target parameters (triple, CPU, features, linker flags) are **locked per target variant** and cannot be overridden in `Inference.toml`. The only user-facing configuration is target selection and build profile (debug/release) for compile mode.
+Target parameters are **locked per target variant** and cannot be overridden in `Inference.toml`. The only user-facing configuration is target selection and build profile (debug/release) for compile mode.
 
 ### Target::Wasm32 (default)
 
-General-purpose WASM target with custom non-deterministic instruction support. Used in both `compile` and `proof` modes. WebAssembly is generated directly via `wasm-encoder`.
+General-purpose WASM target with custom non-deterministic instruction support for specs. Used in both `compile` and `proof` modes. WebAssembly is generated directly via `wasm-encoder`.
+Purpose: general WASM execution and verification of Inference code.
 
 | Setting | Value |
 |---------|-------|
@@ -62,22 +63,21 @@ General-purpose WASM target with custom non-deterministic instruction support. U
 | Optimization (compile) | `-O3` |
 | Optimization (proof, execution functions) | `-O3` (same as compile release) |
 | Optimization (proof, spec functions) | `-O0` (unoptimized) |
-| Purpose | Verification and general WASM execution |
 
 ### Stellar Soroban
 
 Produces Soroban-compatible WASM binaries matching the `wasm32v1-none` Rust target configuration.
 The target's default optimization applies (`-Oz` for Soroban, `-O3` for Wasm32).
+Purpose: deploy to Stellar network as Soroban smart contracts.
 
 | Setting | Value | Source |
 |---------|-------|--------|
-| Target | `wasm32-unknown-unknown` | Same as wasm32v1-none |
+| Target | `wasm32-unknown-unknown` | Same as `wasm32v1-none` |
 | WASM baseline | MVP | Pinned to WebAssembly 1.0 baseline |
 | WASM features | `+mutable-globals,+sign-ext,+bulk-memory` | Soroban VM accepts these three post-MVP features |
 | Optimization | `Oz` (size-aggressive, matching Soroban convention) |
-| Max binary size | 64 KB (Soroban network limit) |
-| Floats | Forbidden by Soroban VM — codegen must not emit float instructions |
-| Purpose | Deploy to Stellar network as Soroban smart contracts |
+| Max binary size | 64 KB |
+| Floats | Forbidden — codegen must not emit float instructions |
 
 **Soroban VM WASM feature matrix** (from `rs-soroban-env` wasmi config):
 
@@ -94,7 +94,7 @@ The target's default optimization applies (`-Oz` for Soroban, `-O3` for Wasm32).
 | `extended-const` | Disabled | Security surface |
 | `SIMD` | Disabled | Not needed |
 
-**Soroban linker flags explained:**
+**Soroban target flags**
 - `--no-entry` — reactor model, no `_start` (same as Wasm32)
 - `--export-dynamic` — export all symbols with default visibility (Soroban host discovers exports by name)
 - `--gc-sections` — strip unreachable code (critical for 64KB limit)
