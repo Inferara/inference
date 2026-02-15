@@ -62,7 +62,6 @@ jobs:
         run: |
           cargo llvm-cov \
             --workspace \
-            --exclude inference-tests \
             --exclude inference-playground-server \
             --exclude wasm-fmt \
             --exclude wat-fmt \
