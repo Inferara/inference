@@ -891,7 +891,9 @@ mod tests {
         std::fs::create_dir_all(&toolchain_dir).unwrap();
         std::fs::create_dir_all(&paths.bin).unwrap();
 
-        let binary_name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, "");
+        let platform = crate::toolchain::Platform::detect().unwrap();
+        let ext = platform.executable_extension();
+        let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
         let source = toolchain_dir.join(&binary_name);
         std::fs::write(&source, b"fake binary").unwrap();
 
@@ -919,7 +921,9 @@ mod tests {
         std::fs::create_dir_all(&toolchain_dir).unwrap();
         std::fs::create_dir_all(&paths.bin).unwrap();
 
-        let binary_name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, "");
+        let platform = crate::toolchain::Platform::detect().unwrap();
+        let ext = platform.executable_extension();
+        let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
         let source = toolchain_dir.join(&binary_name);
         std::fs::write(&source, b"fake binary").unwrap();
 
