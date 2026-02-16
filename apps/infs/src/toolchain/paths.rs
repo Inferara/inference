@@ -864,4 +864,116 @@ mod tests {
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
+
+    #[test]
+    fn managed_binary_is_infc() {
+        assert_eq!(ToolchainPaths::MANAGED_BINARY, "infc");
+    }
+
+    #[test]
+    fn binary_path_returns_toolchain_root_path() {
+        let temp_dir = env::temp_dir().join("infs_test_binary_path");
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let path = paths.binary_path("0.1.0", "infc");
+        assert_eq!(
+            path,
+            temp_dir.join("toolchains").join("0.1.0").join("infc")
+        );
+    }
+
+    #[test]
+    fn update_symlinks_creates_symlink_for_managed_binary() {
+        let temp_dir = env::temp_dir().join("infs_test_update_symlinks");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let binary_name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, "");
+        let source = toolchain_dir.join(&binary_name);
+        std::fs::write(&source, b"fake binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        paths.update_symlinks("0.1.0").unwrap();
+
+        let symlink = paths.symlink_path(&binary_name);
+        assert!(symlink.exists(), "Symlink should exist after update_symlinks");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn remove_symlinks_removes_managed_binary_symlink() {
+        let temp_dir = env::temp_dir().join("infs_test_remove_symlinks");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let binary_name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, "");
+        let source = toolchain_dir.join(&binary_name);
+        std::fs::write(&source, b"fake binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        paths.update_symlinks("0.1.0").unwrap();
+        let symlink = paths.symlink_path(&binary_name);
+        assert!(symlink.exists(), "Symlink should exist before removal");
+
+        paths.remove_symlinks().unwrap();
+        assert!(
+            !symlink.exists(),
+            "Symlink should not exist after remove_symlinks"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn validate_symlinks_returns_empty_when_no_broken_links() {
+        let temp_dir = env::temp_dir().join("infs_test_validate_no_broken");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let broken = paths.validate_symlinks();
+        assert!(broken.is_empty());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_symlinks_detects_broken_symlink() {
+        let temp_dir = env::temp_dir().join("infs_test_validate_broken");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let binary_name = ToolchainPaths::MANAGED_BINARY;
+        let symlink_target = paths.symlink_path(binary_name);
+        let nonexistent = temp_dir.join("nonexistent_binary");
+        std::os::unix::fs::symlink(&nonexistent, &symlink_target).unwrap();
+
+        let broken = paths.validate_symlinks();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0], binary_name);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
 }

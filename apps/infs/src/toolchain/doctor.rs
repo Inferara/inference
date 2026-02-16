@@ -272,4 +272,66 @@ mod tests {
         assert!(!check.name.is_empty());
         assert!(!check.message.is_empty());
     }
+
+    #[test]
+    fn check_infc_returns_valid_doctor_check() {
+        let check = check_infc();
+        assert_eq!(check.name, "infc");
+        assert!(!check.message.is_empty());
+        // On dev machines, infc may or may not be available.
+        // We verify the check returns a valid status regardless of installation state.
+        assert!(
+            check.status == DoctorCheckStatus::Ok
+                || check.status == DoctorCheckStatus::Warning
+                || check.status == DoctorCheckStatus::Error
+        );
+    }
+
+    #[test]
+    fn check_infs_binary_returns_valid_doctor_check() {
+        let check = check_infs_binary();
+        assert!(!check.name.is_empty());
+        assert!(!check.message.is_empty());
+    }
+
+    #[test]
+    fn check_toolchain_directory_returns_valid_doctor_check() {
+        let check = check_toolchain_directory();
+        assert!(!check.name.is_empty());
+        assert!(!check.message.is_empty());
+    }
+
+    #[test]
+    fn check_default_toolchain_returns_valid_doctor_check() {
+        let check = check_default_toolchain();
+        assert!(!check.name.is_empty());
+        assert!(!check.message.is_empty());
+    }
+
+    #[test]
+    fn no_default_toolchain_message_with_no_versions() {
+        let temp_dir = std::env::temp_dir().join("infs_test_doctor_no_default");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        std::fs::create_dir_all(&paths.toolchains).unwrap();
+
+        let msg = no_default_toolchain_message(&paths);
+        assert!(msg.contains("infs install"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn no_default_toolchain_message_with_installed_versions() {
+        let temp_dir = std::env::temp_dir().join("infs_test_doctor_no_default_installed");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        std::fs::create_dir_all(paths.toolchain_dir("0.1.0")).unwrap();
+
+        let msg = no_default_toolchain_message(&paths);
+        assert!(msg.contains("infs default"));
+        assert!(msg.contains("0.1.0"));
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
 }
