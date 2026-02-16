@@ -14,7 +14,7 @@
 //!       .metadata.json        # Installation metadata (date, etc.)
 //!     0.2.0/
 //!       ...
-//!   bin/                      # Symlinks to default toolchain binaries
+//!   bin/                      # Symlink to default toolchain binary
 //!   downloads/                # Download cache
 //!   cache/                    # Cached data (manifest, etc.)
 //!   default                   # File containing default version string
@@ -258,7 +258,7 @@ pub struct ToolchainPaths {
     pub root: PathBuf,
     /// Directory containing installed toolchain versions.
     pub toolchains: PathBuf,
-    /// Directory for binary symlinks to the default toolchain.
+    /// Directory for binary symlink to the default toolchain.
     pub bin: PathBuf,
     /// Directory for cached downloads.
     pub downloads: PathBuf,

@@ -1,7 +1,7 @@
 //! PATH conflict detection module.
 //!
-//! This module provides functionality to detect when binaries in the user's PATH
-//! shadow the managed toolchain binaries. This helps users understand why the
+//! This module provides functionality to detect when a binary in the user's PATH
+//! shadows the managed toolchain binary. This helps users understand why the
 //! managed toolchain might not be used when they run commands.
 //!
 //! ## Usage

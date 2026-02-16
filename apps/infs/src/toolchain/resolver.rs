@@ -5,7 +5,7 @@
 //!
 //! 1. Explicit override via `INFC_PATH` environment variable
 //! 2. System PATH via `which::which("infc")`
-//! 3. Managed toolchain at `~/.inference/toolchains/VERSION/bin/infc`
+//! 3. Managed toolchain at `~/.inference/toolchains/VERSION/infc`
 //!
 //! ## Environment Variables
 //!
@@ -36,7 +36,7 @@ const INFC_PATH_ENV: &str = "INFC_PATH";
 /// 1. **`INFC_PATH` environment variable** - Explicit override for testing
 ///    or custom installations
 /// 2. **System PATH** - Uses `which::which("infc")` to find infc in PATH
-/// 3. **Managed toolchain** - Looks in `~/.inference/toolchains/VERSION/bin/infc`
+/// 3. **Managed toolchain** - Looks in `~/.inference/toolchains/VERSION/infc`
 ///    using the default toolchain version if set
 ///
 /// # Errors

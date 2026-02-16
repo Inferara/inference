@@ -12,7 +12,7 @@ use tar::Archive;
 ///
 /// Creates the destination directory if it does not exist.
 /// If all archive entries share a common root folder, it is automatically
-/// stripped during extraction (e.g., `toolchain-0.2.0/bin/infc` becomes `bin/infc`).
+/// stripped during extraction (e.g., `toolchain-0.2.0/infc` becomes `infc`).
 ///
 /// # Errors
 ///
@@ -187,7 +187,7 @@ pub fn extract_archive(archive_path: &Path, dest_dir: &Path) -> Result<()> {
 ///
 /// Creates the destination directory if it does not exist.
 /// If all archive entries share a common root folder, it is automatically
-/// stripped during extraction (e.g., `toolchain-0.2.0/bin/infc` becomes `bin/infc`).
+/// stripped during extraction (e.g., `toolchain-0.2.0/infc` becomes `infc`).
 ///
 /// # Errors
 ///

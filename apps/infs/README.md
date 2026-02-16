@@ -146,7 +146,7 @@ infs doctor
 
 **Automatic PATH Configuration:**
 
-On first install, `infs install` automatically adds the toolchain binaries to your system PATH:
+On first install, `infs install` automatically adds the toolchain binary to your system PATH:
 
 - **Unix (Linux/macOS)**: Modifies shell profile (`~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`)
 - **Windows**: Updates user PATH in registry (`HKCU\Environment\Path`)
@@ -167,7 +167,7 @@ source ~/.zshrc
 # Close and reopen terminal
 ```
 
-Manual PATH configuration is no longer required. The installed binaries will be available in new terminal sessions.
+Manual PATH configuration is no longer required. The installed binary will be available in new terminal sessions.
 
 ## Interactive TUI
 
@@ -238,7 +238,7 @@ When running `build`, `run` commands, `infs` locates the `infc` compiler using t
 |----------|--------|-------------|
 | 1 (highest) | `INFC_PATH` env var | Explicit path to a specific `infc` binary |
 | 2 | System PATH | Searches for `infc` in system PATH via `which` |
-| 3 (lowest) | Managed toolchain | Uses `~/.inference/toolchains/VERSION/bin/infc` |
+| 3 (lowest) | Managed toolchain | Uses `~/.inference/toolchains/VERSION/infc` |
 
 ### When to Use Each
 
