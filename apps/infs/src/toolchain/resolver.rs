@@ -81,7 +81,7 @@ pub fn find_infc() -> Result<PathBuf> {
             Platform::detect().context("Failed to detect platform while searching for infc")?;
         let ext = platform.executable_extension();
         let infc_name = format!("infc{ext}");
-        let infc_path = paths.toolchain_bin_dir(&version).join(&infc_name);
+        let infc_path = paths.binary_path(&version, &infc_name);
 
         if infc_path.exists() {
             return Ok(infc_path);

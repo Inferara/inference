@@ -16,10 +16,4 @@
 pub mod manifest;
 pub mod scaffold;
 
-#[allow(unused_imports)]
-pub use manifest::validate_project_name;
-#[allow(unused_imports)]
-pub use manifest::{Dependencies, Package};
-#[allow(unused_imports)]
-pub use scaffold::create_project_default;
 pub use scaffold::{create_project, init_project};

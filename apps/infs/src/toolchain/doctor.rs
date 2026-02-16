@@ -9,9 +9,7 @@
 //! - Platform detection
 //! - Toolchain directory existence
 //! - Default toolchain configuration
-//! - `inf-llc` binary presence
-//! - `rust-lld` binary presence
-//! - `libLLVM` shared library (Linux only)
+//! - `infc` compiler binary presence
 
 use super::{Platform, ToolchainPaths};
 
@@ -100,29 +98,13 @@ impl DoctorCheck {
 /// Runs all doctor checks and returns the results.
 ///
 /// This function aggregates all health checks into a single vector.
-/// On Linux, it additionally includes the `libLLVM` check.
-#[cfg(not(target_os = "linux"))]
 pub fn run_all_checks() -> Vec<DoctorCheck> {
     vec![
         check_infs_binary(),
         check_platform(),
         check_toolchain_directory(),
         check_default_toolchain(),
-        check_inf_llc(),
-        check_rust_lld(),
-    ]
-}
-
-#[cfg(target_os = "linux")]
-pub fn run_all_checks() -> Vec<DoctorCheck> {
-    vec![
-        check_infs_binary(),
-        check_platform(),
-        check_toolchain_directory(),
-        check_default_toolchain(),
-        check_inf_llc(),
-        check_rust_lld(),
-        check_libllvm(),
+        check_infc(),
     ]
 }
 
@@ -208,108 +190,45 @@ pub fn check_default_toolchain() -> DoctorCheck {
     }
 }
 
-/// Checks if the inf-llc binary is available.
+/// Checks if the infc compiler binary is available.
 #[must_use]
-pub fn check_inf_llc() -> DoctorCheck {
-    check_binary("inf-llc", "inf-llc")
-}
-
-/// Checks if the rust-lld binary is available.
-#[must_use]
-pub fn check_rust_lld() -> DoctorCheck {
-    check_binary("rust-lld", "rust-lld")
-}
-
-/// Checks if a binary is available in PATH or the toolchain bin directory.
-#[must_use]
-pub fn check_binary(name: &str, binary_name: &str) -> DoctorCheck {
+pub fn check_infc() -> DoctorCheck {
     let Ok(platform) = Platform::detect() else {
-        return DoctorCheck::error(name, "Cannot detect platform");
+        return DoctorCheck::error("infc", "Cannot detect platform");
     };
 
-    let binary_with_ext = format!("{binary_name}{}", platform.executable_extension());
+    let binary_with_ext = format!("infc{}", platform.executable_extension());
 
     if which::which(&binary_with_ext).is_ok() {
-        return DoctorCheck::ok(name, format!("Found {binary_with_ext} in PATH"));
+        return DoctorCheck::ok("infc", format!("Found {binary_with_ext} in PATH"));
     }
 
     let Ok(paths) = ToolchainPaths::new() else {
-        return DoctorCheck::error(name, "Cannot determine toolchain paths");
+        return DoctorCheck::error("infc", "Cannot determine toolchain paths");
     };
 
     let default_version = match paths.get_default_version() {
         Ok(Some(v)) => v,
         Ok(None) => {
-            return DoctorCheck::warning(name, no_default_toolchain_message(&paths));
+            return DoctorCheck::warning("infc", no_default_toolchain_message(&paths));
         }
         Err(_) => {
-            return DoctorCheck::error(name, "Cannot read default version");
+            return DoctorCheck::error("infc", "Cannot read default version");
         }
     };
 
     let binary_path = paths.binary_path(&default_version, &binary_with_ext);
     if binary_path.exists() {
-        DoctorCheck::ok(name, format!("Found at {}", binary_path.display()))
+        DoctorCheck::ok("infc", format!("Found at {}", binary_path.display()))
     } else {
         DoctorCheck::error(
-            name,
+            "infc",
             format!(
                 "Not found. Expected at {}. Run 'infs install' to install the toolchain.",
                 binary_path.display()
             ),
         )
     }
-}
-
-/// Checks if libLLVM is available (Linux only).
-#[cfg(target_os = "linux")]
-#[must_use]
-pub fn check_libllvm() -> DoctorCheck {
-    let Ok(paths) = ToolchainPaths::new() else {
-        return DoctorCheck::error("libLLVM", "Cannot determine toolchain paths");
-    };
-
-    let default_version = match paths.get_default_version() {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            return DoctorCheck::warning("libLLVM", no_default_toolchain_message(&paths));
-        }
-        Err(_) => {
-            return DoctorCheck::error("libLLVM", "Cannot read default version");
-        }
-    };
-
-    let lib_dir = paths.toolchain_dir(&default_version).join("lib");
-
-    if !lib_dir.exists() {
-        return DoctorCheck::warning(
-            "libLLVM",
-            format!("Library directory not found at {}", lib_dir.display()),
-        );
-    }
-
-    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
-        return DoctorCheck::warning(
-            "libLLVM",
-            format!("Cannot read library directory: {}", lib_dir.display()),
-        );
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("libLLVM") && name_str.contains(".so") {
-            return DoctorCheck::ok("libLLVM", format!("Found {}", entry.path().display()));
-        }
-    }
-
-    DoctorCheck::warning(
-        "libLLVM",
-        format!(
-            "Not found in {}. Some features may not work.",
-            lib_dir.display()
-        ),
-    )
 }
 
 #[cfg(test)]
@@ -343,12 +262,8 @@ mod tests {
     #[test]
     fn run_all_checks_returns_expected_count() {
         let checks = run_all_checks();
-        // Base checks: infs, platform, toolchain dir, default toolchain, inf-llc, rust-lld
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(checks.len(), 6);
-        // On Linux, libLLVM is also checked
-        #[cfg(target_os = "linux")]
-        assert_eq!(checks.len(), 7);
+        // Checks: infs, platform, toolchain dir, default toolchain, infc
+        assert_eq!(checks.len(), 5);
     }
 
     #[test]

@@ -151,10 +151,8 @@ On first install, `infs install` automatically adds the toolchain binaries to yo
 - **Unix (Linux/macOS)**: Modifies shell profile (`~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish`)
 - **Windows**: Updates user PATH in registry (`HKCU\Environment\Path`)
 
-The toolchain binaries are symlinked to `~/.inference/bin/` and made accessible system-wide:
+The toolchain binary is symlinked to `~/.inference/bin/` and made accessible system-wide:
 - `infc` - Inference compiler
-- `inf-llc` - LLVM backend
-- `rust-lld` - WebAssembly linker
 
 After installation completes, restart your terminal or run:
 

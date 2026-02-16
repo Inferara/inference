@@ -10,10 +10,7 @@
 //! ~/.inference/               # Root directory (or INFERENCE_HOME)
 //!   toolchains/               # Installed toolchain versions
 //!     0.1.0/                  # Version-specific installation
-//!       infc                  # Compiler binary (at root level)
-//!       bin/
-//!         inf-llc             # LLVM backend tools
-//!         rust-lld
+//!       infc                  # Compiler binary
 //!       .metadata.json        # Installation metadata (date, etc.)
 //!     0.2.0/
 //!       ...
@@ -23,9 +20,7 @@
 //!   default                   # File containing default version string
 //! ```
 //!
-//! Note: Binaries are searched first in the `bin/` subdirectory, then at the
-//! toolchain root. This supports both legacy layouts (all in `bin/`) and the
-//! current layout (`infc` at root, tools in `bin/`).
+//! Binaries are located at the toolchain root directory (e.g., `infc` at root).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -270,8 +265,8 @@ pub struct ToolchainPaths {
 }
 
 impl ToolchainPaths {
-    /// Names of binaries managed by the toolchain.
-    pub const MANAGED_BINARIES: [&'static str; 3] = ["infc", "inf-llc", "rust-lld"];
+    /// Name of the binary managed by the toolchain.
+    pub const MANAGED_BINARY: &str = "infc";
 
     /// Creates a new `ToolchainPaths` instance.
     ///
@@ -323,12 +318,6 @@ impl ToolchainPaths {
     #[must_use = "returns the path without side effects"]
     pub fn toolchain_dir(&self, version: &str) -> PathBuf {
         self.toolchains.join(version)
-    }
-
-    /// Returns the path to the bin directory within a specific toolchain version.
-    #[must_use = "returns the path without side effects"]
-    pub fn toolchain_bin_dir(&self, version: &str) -> PathBuf {
-        self.toolchain_dir(version).join("bin")
     }
 
     /// Returns the path to the file storing the default toolchain version.
@@ -479,23 +468,11 @@ impl ToolchainPaths {
 
     /// Returns the path to a specific binary within a toolchain version.
     ///
-    /// The binary is searched in two locations:
-    /// 1. First, check the `bin/` subdirectory (e.g., `~/.inference/toolchains/0.0.1/bin/inf-llc`)
-    /// 2. If not found, check the toolchain root directory (e.g., `~/.inference/toolchains/0.0.1/infc`)
-    /// 3. If neither exists, return the `bin/` path for consistent error messages
+    /// The binary is located at the toolchain root directory
+    /// (e.g., `~/.inference/toolchains/0.0.1/infc`).
     #[must_use = "returns the path without side effects"]
     pub fn binary_path(&self, version: &str, binary_name: &str) -> PathBuf {
-        let bin_path = self.toolchain_bin_dir(version).join(binary_name);
-        if bin_path.exists() {
-            return bin_path;
-        }
-
-        let root_path = self.toolchain_dir(version).join(binary_name);
-        if root_path.exists() {
-            return root_path;
-        }
-
-        bin_path
+        self.toolchain_dir(version).join(binary_name)
     }
 
     /// Returns the path to a symlinked binary in the global bin directory.
@@ -579,11 +556,11 @@ impl ToolchainPaths {
 
     /// Updates symlinks in the bin directory to point to the specified version.
     ///
-    /// Creates symlinks for `infc`, `inf-llc`, and `rust-lld` binaries.
+    /// Creates a symlink for the `infc` binary.
     ///
     /// # Errors
     ///
-    /// Returns an error if the symlinks cannot be created.
+    /// Returns an error if the symlink cannot be created.
     pub fn update_symlinks(&self, version: &str) -> Result<()> {
         let platform = crate::toolchain::Platform::detect()?;
         let ext = platform.executable_extension();
@@ -591,29 +568,25 @@ impl ToolchainPaths {
         std::fs::create_dir_all(&self.bin)
             .with_context(|| format!("Failed to create bin directory: {}", self.bin.display()))?;
 
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            self.create_symlink(version, &binary)?;
-        }
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        self.create_symlink(version, &binary)?;
 
         Ok(())
     }
 
-    /// Removes all symlinks from the bin directory.
+    /// Removes the symlink from the bin directory.
     ///
-    /// Removes symlinks for `infc`, `inf-llc`, and `rust-lld` binaries.
+    /// Removes the symlink for the `infc` binary.
     ///
     /// # Errors
     ///
-    /// Returns an error if the symlinks cannot be removed.
+    /// Returns an error if the symlink cannot be removed.
     pub fn remove_symlinks(&self) -> Result<()> {
         let platform = crate::toolchain::Platform::detect()?;
         let ext = platform.executable_extension();
 
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            self.remove_symlink(&binary)?;
-        }
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        self.remove_symlink(&binary)?;
 
         Ok(())
     }
@@ -629,14 +602,11 @@ impl ToolchainPaths {
         let ext = platform.executable_extension();
 
         let mut broken = Vec::new();
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            let symlink_path = self.symlink_path(&binary);
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        let symlink_path = self.symlink_path(&binary);
 
-            // Check if symlink exists (as a symlink, even if broken) but target does not
-            if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
-                broken.push(binary);
-            }
+        if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
+            broken.push(binary);
         }
         broken
     }

@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename environment variable and directory for consistency ([#96])
   - `INFS_HOME` → `INFERENCE_HOME`
   - `~/.infs` → `~/.inference`
-- Add `infc` symlink to installed toolchain alongside `inf-llc` and `rust-lld` ([#96])
+- Add `infc` symlink to installed toolchain ([#96])
 - Improve `infs install` to auto-set default toolchain when none is configured ([#96])
   - When installing an already-installed version without a default toolchain, `infs install` now automatically sets that version as default and updates symlinks
   - Provides graceful recovery if default toolchain file was manually removed

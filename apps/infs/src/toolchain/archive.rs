@@ -369,53 +369,21 @@ fn find_common_root_folder<R: std::io::Read + std::io::Seek>(
     }
 }
 
-/// Sets executable permissions on binary files within a toolchain directory (Unix only).
-///
-/// This function iterates over all files in the `bin` subdirectory of the given
-/// directory and sets the executable permission bits (0o755) on each file.
+/// Sets executable permissions on the `infc` binary within a toolchain directory (Unix only).
 ///
 /// On Windows, this function does nothing since executable permissions are not
 /// managed the same way.
 ///
 /// # Arguments
 ///
-/// * `dir` - The toolchain directory containing a `bin` subdirectory.
+/// * `dir` - The toolchain directory containing the `infc` binary at root.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The bin directory cannot be read
-/// - File metadata cannot be retrieved
-/// - Permissions cannot be set
-///
-/// # Example
-///
-/// ```ignore
-/// use crate::toolchain::set_executable_permissions;
-/// set_executable_permissions(Path::new("/path/to/toolchain"))?;
-/// ```
+/// Returns an error if file metadata cannot be retrieved or permissions cannot be set.
 #[cfg(unix)]
 pub fn set_executable_permissions(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-
-    let bin_dir = dir.join("bin");
-    if bin_dir.exists() {
-        let entries = std::fs::read_dir(&bin_dir)
-            .with_context(|| format!("Failed to read bin directory: {}", bin_dir.display()))?;
-
-        for entry in entries {
-            let entry = entry.with_context(|| "Failed to read directory entry")?;
-            let path = entry.path();
-            if path.is_file() {
-                let mut perms = std::fs::metadata(&path)
-                    .with_context(|| format!("Failed to get metadata: {}", path.display()))?
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&path, perms)
-                    .with_context(|| format!("Failed to set permissions: {}", path.display()))?;
-            }
-        }
-    }
 
     let infc_path = dir.join("infc");
     if infc_path.is_file() {
@@ -448,12 +416,12 @@ mod tests {
     /// Creates a temporary test directory with a unique name.
     fn temp_test_dir(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("infs_test_{}_{}", name, rand::random::<u64>()));
+            std::env::temp_dir().join(format!("infs_test_{}_{}", name, fastrand::u64(..)));
         std::fs::create_dir_all(&dir).expect("Should create temp dir");
         dir
     }
 
-    /// Creates a tar.gz archive with files nested under a root folder.
+    /// Creates a tar.gz archive with a single file nested under a root folder.
     fn create_tar_gz_with_root(archive_path: &Path, root_name: &str) {
         let file = std::fs::File::create(archive_path).expect("Should create file");
         let encoder = GzEncoder::new(file, Compression::default());
@@ -466,27 +434,15 @@ mod tests {
         builder
             .append_data(
                 &mut header,
-                format!("{root_name}/bin/infc"),
+                format!("{root_name}/infc"),
                 b"binary content".as_slice(),
-            )
-            .expect("Should append file");
-
-        let mut header = tar::Header::new_gnu();
-        header.set_size(15);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(
-                &mut header,
-                format!("{root_name}/lib/libLLVM.so"),
-                b"library content".as_slice(),
             )
             .expect("Should append file");
 
         builder.finish().expect("Should finish");
     }
 
-    /// Creates a tar.gz archive with files at the root level (no common folder).
+    /// Creates a tar.gz archive with a single file at the root level (no common folder).
     fn create_tar_gz_without_root(archive_path: &Path) {
         let file = std::fs::File::create(archive_path).expect("Should create file");
         let encoder = GzEncoder::new(file, Compression::default());
@@ -497,15 +453,7 @@ mod tests {
         header.set_mode(0o755);
         header.set_cksum();
         builder
-            .append_data(&mut header, "bin/infc", b"binary content".as_slice())
-            .expect("Should append file");
-
-        let mut header = tar::Header::new_gnu();
-        header.set_size(15);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "lib/libLLVM.so", b"library content".as_slice())
+            .append_data(&mut header, "infc", b"binary content".as_slice())
             .expect("Should append file");
 
         builder.finish().expect("Should finish");
@@ -521,8 +469,7 @@ mod tests {
 
         extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
 
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
         assert!(!dest_dir.join("root-folder").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -538,8 +485,7 @@ mod tests {
 
         extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
 
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -554,8 +500,7 @@ mod tests {
 
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -570,8 +515,7 @@ mod tests {
 
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -587,21 +531,16 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
 
             let options = zip::write::SimpleFileOptions::default();
-            zip.start_file("bin/infc", options)
+            zip.start_file("infc", options)
                 .expect("Should start file");
             zip.write_all(b"binary content").expect("Should write");
-
-            zip.start_file("lib/libLLVM.so", options)
-                .expect("Should start file");
-            zip.write_all(b"library content").expect("Should write");
 
             zip.finish().expect("Should finish");
         }
 
         extract_archive(&archive_path, &dest_dir).expect("Should extract");
 
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -618,13 +557,9 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
 
             let options = zip::write::SimpleFileOptions::default();
-            zip.start_file("root-folder/bin/infc", options)
+            zip.start_file("root-folder/infc", options)
                 .expect("Should start file");
             zip.write_all(b"binary content").expect("Should write");
-
-            zip.start_file("root-folder/lib/libLLVM.so", options)
-                .expect("Should start file");
-            zip.write_all(b"library content").expect("Should write");
 
             zip.finish().expect("Should finish");
         }
@@ -632,8 +567,7 @@ mod tests {
         extract_zip(&archive_path, &dest_dir).expect("Should extract");
 
         // Verify root folder was stripped
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
         assert!(!dest_dir.join("root-folder").exists());
 
         // Cleanup
@@ -652,13 +586,9 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
 
             let options = zip::write::SimpleFileOptions::default();
-            zip.start_file("bin/infc", options)
+            zip.start_file("infc", options)
                 .expect("Should start file");
             zip.write_all(b"binary content").expect("Should write");
-
-            zip.start_file("lib/libLLVM.so", options)
-                .expect("Should start file");
-            zip.write_all(b"library content").expect("Should write");
 
             zip.finish().expect("Should finish");
         }
@@ -666,8 +596,7 @@ mod tests {
         extract_zip(&archive_path, &dest_dir).expect("Should extract");
 
         // Verify structure is preserved
-        assert!(dest_dir.join("bin").join("infc").exists());
-        assert!(dest_dir.join("lib").join("libLLVM.so").exists());
+        assert!(dest_dir.join("infc").exists());
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -897,38 +826,6 @@ mod tests {
             .append_data(&mut header, "./infc", b"infc binary...".as_slice())
             .expect("Should append infc");
 
-        // Add ./bin/ directory
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Directory);
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "./bin/", std::io::empty())
-            .expect("Should append bin dir");
-
-        // Add ./bin/inf-llc
-        let mut header = tar::Header::new_gnu();
-        header.set_size(15);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "./bin/inf-llc", b"inf-llc binary.".as_slice())
-            .expect("Should append inf-llc");
-
-        // Add ./bin/rust-lld
-        let mut header = tar::Header::new_gnu();
-        header.set_size(16);
-        header.set_mode(0o755);
-        header.set_cksum();
-        builder
-            .append_data(
-                &mut header,
-                "./bin/rust-lld",
-                b"rust-lld binary.".as_slice(),
-            )
-            .expect("Should append rust-lld");
-
         builder.finish().expect("Should finish");
     }
 
@@ -943,18 +840,10 @@ mod tests {
 
         extract_tar_gz(&archive_path, &dest_dir).expect("Should extract");
 
-        // Verify all binaries are in expected locations
+        // Verify infc binary is in expected location
         assert!(
             dest_dir.join("infc").exists(),
             "infc should exist at toolchain root"
-        );
-        assert!(
-            dest_dir.join("bin").join("inf-llc").exists(),
-            "inf-llc should exist in bin/"
-        );
-        assert!(
-            dest_dir.join("bin").join("rust-lld").exists(),
-            "rust-lld should exist in bin/"
         );
 
         // Verify ./ directory was NOT created (it should be stripped)
@@ -1067,58 +956,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         #[test]
-        fn set_executable_permissions_sets_755_on_bin_files() {
-            let temp_dir = temp_test_dir("exec_perm_bin");
-            let bin_dir = temp_dir.join("bin");
-            std::fs::create_dir_all(&bin_dir).expect("Should create bin dir");
-
-            let file1 = bin_dir.join("infc");
-            let file2 = bin_dir.join("inf-llc");
-            std::fs::write(&file1, b"binary1").expect("Should write file1");
-            std::fs::write(&file2, b"binary2").expect("Should write file2");
-
-            // Set initial non-executable permissions
-            std::fs::set_permissions(&file1, std::fs::Permissions::from_mode(0o644))
-                .expect("Should set initial perms");
-            std::fs::set_permissions(&file2, std::fs::Permissions::from_mode(0o644))
-                .expect("Should set initial perms");
-
-            set_executable_permissions(&temp_dir).expect("Should set permissions");
-
-            let mode1 = std::fs::metadata(&file1)
-                .expect("Should get metadata")
-                .permissions()
-                .mode();
-            let mode2 = std::fs::metadata(&file2)
-                .expect("Should get metadata")
-                .permissions()
-                .mode();
-
-            assert_eq!(mode1 & 0o777, 0o755, "file1 should have 0o755 mode");
-            assert_eq!(mode2 & 0o777, 0o755, "file2 should have 0o755 mode");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
-        }
-
-        #[test]
-        fn set_executable_permissions_handles_missing_bin_dir() {
-            let temp_dir = temp_test_dir("exec_perm_no_bin");
-            // Do not create bin/ subdirectory
-
-            let result = set_executable_permissions(&temp_dir);
-
-            assert!(result.is_ok(), "Should succeed without bin/ directory");
-
-            let _ = std::fs::remove_dir_all(&temp_dir);
-        }
-
-        #[test]
         fn set_executable_permissions_sets_755_on_root_infc() {
             let temp_dir = temp_test_dir("exec_perm_root_infc");
             let infc_path = temp_dir.join("infc");
             std::fs::write(&infc_path, b"infc binary").expect("Should write infc");
 
-            // Set initial non-executable permissions
             std::fs::set_permissions(&infc_path, std::fs::Permissions::from_mode(0o644))
                 .expect("Should set initial perms");
 
@@ -1130,6 +972,17 @@ mod tests {
                 .mode();
 
             assert_eq!(mode & 0o777, 0o755, "infc should have 0o755 mode");
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        #[test]
+        fn set_executable_permissions_handles_missing_infc() {
+            let temp_dir = temp_test_dir("exec_perm_no_infc");
+
+            let result = set_executable_permissions(&temp_dir);
+
+            assert!(result.is_ok(), "Should succeed without infc binary");
 
             let _ = std::fs::remove_dir_all(&temp_dir);
         }
@@ -1164,10 +1017,6 @@ mod tests {
 
         // Verify nested archive was extracted
         assert!(dest_dir.join("infc").exists(), "infc should exist");
-        assert!(
-            dest_dir.join("bin").join("inf-llc").exists(),
-            "inf-llc should exist"
-        );
         // tar.gz should be cleaned up
         assert!(
             !dest_dir.join("infc-linux-x64.tar.gz").exists(),
@@ -1211,10 +1060,6 @@ mod tests {
 
         // Verify nested archive was extracted
         assert!(dest_dir.join("infc").exists(), "infc should exist");
-        assert!(
-            dest_dir.join("bin").join("inf-llc").exists(),
-            "inf-llc should exist"
-        );
         // Both tar.gz and sha256 should be cleaned up
         assert!(
             !dest_dir.join("infc-linux-x64.tar.gz").exists(),
