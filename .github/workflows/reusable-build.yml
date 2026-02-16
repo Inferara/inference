@@ -21,7 +21,7 @@ on:
 
 jobs:
   build:
-    name: Build and test infc
+    name: Build and test
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
@@ -154,7 +154,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path artifact-infc
           Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact-infc\
-          Copy-Item book\check_deps.ps1 artifact-infc\
 
       - name: Prepare infs Artifact Package (Windows)
         if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
