@@ -1,3 +1,5 @@
+![alt text](./assets/inference-logo-oulined-shaped-font.svg)
+
 [![Build](https://github.com/Inferara/inference/actions/workflows/build_main.yml/badge.svg?branch=main)](https://github.com/Inferara/inference/actions/workflows/build_main.yml)
 [![codecov](https://codecov.io/gh/Inferara/inference/branch/main/graph/badge.svg)](https://codecov.io/gh/Inferara/inference)
 
@@ -69,10 +71,10 @@ infs --version
 
 ### Exit Codes
 
-| Code | Meaning                         |
-|------|---------------------------------|
-| 0    | Success                         |
-| 1    | Usage / IO / Parse failure      |
+| Code | Meaning                    |
+| ---- | -------------------------- |
+| 0    | Success                    |
+| 1    | Usage / IO / Parse failure |
 
 ### Future Commands (Planned)
 
@@ -90,10 +92,10 @@ Prebuilt binaries are available for each release. Two CLI tools are distributed:
 
 ### Release Artifacts
 
-| Platform | infs | infc |
-|----------|------|------|
-| Linux x64 | `infs-linux-x64.tar.gz` | `infc-linux-x64.tar.gz` |
-| Windows x64 | `infs-windows-x64.zip` | `infc-windows-x64.zip` |
+| Platform    | infs                              | infc                              |
+| ----------- | --------------------------------- | --------------------------------- |
+| Linux x64   | `infs-linux-x64.tar.gz`           | `infc-linux-x64.tar.gz`           |
+| Windows x64 | `infs-windows-x64.zip`            | `infc-windows-x64.zip`            |
 | macOS ARM64 | `infs-macos-apple-silicon.tar.gz` | `infc-macos-apple-silicon.tar.gz` |
 
 ### Directory Structure
@@ -110,6 +112,7 @@ The CLI binaries are self-contained and require no external dependencies.
 To build Inference from source:
 
 For detailed platform-specific setup instructions, see:
+
 - [Linux Development Setup](book/installation_linux.md)
 - [macOS Development Setup](book/installation_macos.md)
 - [Windows Development Setup](book/installation_windows.md)
@@ -121,12 +124,14 @@ No external binaries are required. The compiler generates WebAssembly directly v
 ### Build Steps
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/Inferara/inference.git
    cd inference
    ```
 
 2. Build the project:
+
    ```bash
    cargo build --release
    ```
