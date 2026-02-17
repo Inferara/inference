@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove manifest caching from `infs` CLI ([#116])
   - `fetch_manifest()` now always fetches from network
   - Simplifies CLI code; VS Code extension manages its own fetching lifecycle
+- Remove LLVM toolchain management from `infs` CLI ([#126])
+  - Flatten toolchain layout: `infc` binary now at toolchain root (no more `bin/` subdirectory)
+  - Remove `inf-llc`, `rust-lld`, and `libLLVM` binary management
+  - Simplify doctor checks: single `infc` check replaces `inf-llc`, `rust-lld`, and `libLLVM` checks
+  - Remove platform-specific `#[cfg(target_os = "linux")]` branching in `run_all_checks()`
+  - Slim `InfsError` to single `ProcessExitCode` variant; all other errors use `anyhow::Result`
+  - Replace `rand` dependency with lighter-weight `fastrand`
+  - Remove dead code: unused error variants, `create_project_default()`, `available_versions()`, `selected_bg` theme field
 
 ### Build
 
@@ -272,3 +280,4 @@ Initial tagged release.
 [#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
+[#126]: https://github.com/Inferara/inference/pull/126

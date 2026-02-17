@@ -259,7 +259,6 @@
 //! - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 //! - [Inference Book](https://github.com/Inferara/book)
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
-//! - [Non-deterministic Instruction Extensions](https://github.com/Inferara/llvm-project/pull/2)
 
 use inference_ast::{arena::Arena, builder::Builder};
 use inference_type_checker::typed_context::TypedContext;
