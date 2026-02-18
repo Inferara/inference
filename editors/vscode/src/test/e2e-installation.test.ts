@@ -11,8 +11,6 @@ import { extractArchive } from '../utils/extract';
 import { exec } from '../utils/exec';
 import { parseDoctorOutput } from '../toolchain/doctor';
 import { findLatestRelease, type ReleaseEntry } from '../toolchain/manifest';
-import { detectPlatform } from '../toolchain/platform';
-
 /**
  * End-to-end installation tests.
  *
@@ -25,8 +23,6 @@ import { detectPlatform } from '../toolchain/platform';
  * `installToolchain()` in installation.ts, verifying the entire pipeline
  * works without needing the `vscode` module.
  */
-
-const platform = detectPlatform();
 
 // These e2e tests require a Unix platform (shell scripts as fake binaries).
 const isUnix = process.platform !== 'win32';
@@ -99,11 +95,8 @@ case "\$1" in
         echo "\${VERSION}" > "\${INFERENCE_HOME}/default"
 
         mkdir -p "\${INFERENCE_HOME}/bin"
-        for bin in infc inf-llc rust-lld; do
-            SOURCE="\${TOOLCHAIN_DIR}/bin/\${bin}"
-            if [ ! -f "\${SOURCE}" ]; then
-                SOURCE="\${TOOLCHAIN_DIR}/\${bin}"
-            fi
+        for bin in infc; do
+            SOURCE="\${TOOLCHAIN_DIR}/\${bin}"
             if [ -f "\${SOURCE}" ]; then
                 ln -sf "\${SOURCE}" "\${INFERENCE_HOME}/bin/\${bin}"
             fi
@@ -149,43 +142,15 @@ case "\$1" in
             HAS_WARN=1
         fi
 
-        # Check inf-llc
+        # Check infc
         DEFAULT_VERSION=\$(cat "\${INFERENCE_HOME}/default" 2>/dev/null || echo "")
         if [ -n "\${DEFAULT_VERSION}" ]; then
-            INF_LLC="\${INFERENCE_HOME}/toolchains/\${DEFAULT_VERSION}/bin/inf-llc"
-            if [ -f "\${INF_LLC}" ]; then
-                echo "  [OK] inf-llc: Found at \${INF_LLC}"
+            INFC="\${INFERENCE_HOME}/toolchains/\${DEFAULT_VERSION}/infc"
+            if [ -f "\${INFC}" ]; then
+                echo "  [OK] infc: Found at \${INFC}"
             else
-                echo "  [FAIL] inf-llc: Not found"
+                echo "  [FAIL] infc: Not found"
                 HAS_FAIL=1
-            fi
-        fi
-
-        # Check rust-lld
-        if [ -n "\${DEFAULT_VERSION}" ]; then
-            RUST_LLD="\${INFERENCE_HOME}/toolchains/\${DEFAULT_VERSION}/bin/rust-lld"
-            if [ -f "\${RUST_LLD}" ]; then
-                echo "  [OK] rust-lld: Found at \${RUST_LLD}"
-            else
-                echo "  [FAIL] rust-lld: Not found"
-                HAS_FAIL=1
-            fi
-        fi
-
-        # Check libLLVM (Linux only)
-        if [ -n "\${DEFAULT_VERSION}" ]; then
-            LIB_DIR="\${INFERENCE_HOME}/toolchains/\${DEFAULT_VERSION}/lib"
-            if [ -d "\${LIB_DIR}" ]; then
-                FOUND_LIB=\$(ls "\${LIB_DIR}"/libLLVM*.so* 2>/dev/null | head -1)
-                if [ -n "\${FOUND_LIB}" ]; then
-                    echo "  [OK] libLLVM: Found \${FOUND_LIB}"
-                else
-                    echo "  [WARN] libLLVM: Not found in \${LIB_DIR}"
-                    HAS_WARN=1
-                fi
-            else
-                echo "  [WARN] libLLVM: Library directory not found at \${LIB_DIR}"
-                HAS_WARN=1
             fi
         fi
 
@@ -215,30 +180,13 @@ esac
  *
  * Structure mirrors the real GitHub release:
  *   ./infc
- *   ./bin/inf-llc
- *   ./bin/rust-lld
- *   ./lib/libLLVM.so.21.1-rust-1.94.0-nightly
  */
-function buildFakeInfcArchive(archivePath: string, opts?: { skipLib?: boolean }): void {
+function buildFakeInfcArchive(archivePath: string): void {
     const sourceDir = archivePath + '-source';
-    fs.mkdirSync(path.join(sourceDir, 'bin'), { recursive: true });
+    fs.mkdirSync(sourceDir, { recursive: true });
 
     fs.writeFileSync(path.join(sourceDir, 'infc'), '#!/bin/sh\necho "infc 0.0.1-test"\n');
     fs.chmodSync(path.join(sourceDir, 'infc'), 0o755);
-
-    fs.writeFileSync(path.join(sourceDir, 'bin', 'inf-llc'), '#!/bin/sh\necho "inf-llc"\n');
-    fs.chmodSync(path.join(sourceDir, 'bin', 'inf-llc'), 0o755);
-
-    fs.writeFileSync(path.join(sourceDir, 'bin', 'rust-lld'), '#!/bin/sh\necho "rust-lld"\n');
-    fs.chmodSync(path.join(sourceDir, 'bin', 'rust-lld'), 0o755);
-
-    if (!opts?.skipLib) {
-        fs.mkdirSync(path.join(sourceDir, 'lib'), { recursive: true });
-        fs.writeFileSync(
-            path.join(sourceDir, 'lib', 'libLLVM.so.21.1-rust-1.94.0-nightly'),
-            'fake-llvm-lib',
-        );
-    }
 
     execSync(`tar -czf "${archivePath}" -C "${sourceDir}" .`);
     fs.rmSync(sourceDir, { recursive: true });
@@ -448,72 +396,39 @@ describe('e2e installation', { skip: !isUnix ? 'Unix-only tests' : undefined }, 
             const toolchainDir = path.join(home, 'toolchains', '0.0.1-test');
             assert.ok(fs.existsSync(toolchainDir), 'toolchain dir should exist');
             assert.ok(fs.existsSync(path.join(toolchainDir, 'infc')), 'infc should exist');
-            assert.ok(fs.existsSync(path.join(toolchainDir, 'bin', 'inf-llc')), 'inf-llc should exist');
-            assert.ok(fs.existsSync(path.join(toolchainDir, 'bin', 'rust-lld')), 'rust-lld should exist');
-        });
-
-        it('creates the lib directory with libLLVM', () => {
-            const libDir = path.join(home, 'toolchains', '0.0.1-test', 'lib');
-            assert.ok(fs.existsSync(libDir), 'lib/ directory should exist');
-            const files = fs.readdirSync(libDir);
-            const hasLlvm = files.some(
-                (f) => f.startsWith('libLLVM') && f.includes('.so'),
-            );
-            assert.ok(hasLlvm, `Expected libLLVM*.so in ${libDir}, found: ${files}`);
         });
 
         it('creates symlinks in bin directory', () => {
             const binDir = path.join(home, 'bin');
             assert.ok(fs.existsSync(path.join(binDir, 'infc')), 'infc symlink should exist');
-            assert.ok(fs.existsSync(path.join(binDir, 'inf-llc')), 'inf-llc symlink should exist');
-            assert.ok(fs.existsSync(path.join(binDir, 'rust-lld')), 'rust-lld symlink should exist');
         });
     });
 
-    describe('missing lib directory triggers doctor warning', () => {
+    describe('missing infc triggers doctor failure', () => {
         let parsed: ReturnType<typeof parseDoctorOutput>;
-        let doctorWarnings: boolean;
+        let doctorFailed: boolean;
 
         before(async () => {
-            const home = path.join(tmpDir, 'nolib-home');
+            const home = path.join(tmpDir, 'noinfc-home');
             const binDir = path.join(home, 'bin');
-            const version = '0.0.1-nolib';
+            const version = '0.0.1-noinfc';
             const toolchainDir = path.join(home, 'toolchains', version);
 
-            // Manually create toolchain structure WITHOUT lib/
-            fs.mkdirSync(path.join(toolchainDir, 'bin'), { recursive: true });
+            fs.mkdirSync(toolchainDir, { recursive: true });
             fs.mkdirSync(binDir, { recursive: true });
-
-            fs.writeFileSync(path.join(toolchainDir, 'infc'), '#!/bin/sh\necho infc\n');
-            fs.chmodSync(path.join(toolchainDir, 'infc'), 0o755);
-            fs.writeFileSync(path.join(toolchainDir, 'bin', 'inf-llc'), '#!/bin/sh\necho inf-llc\n');
-            fs.chmodSync(path.join(toolchainDir, 'bin', 'inf-llc'), 0o755);
-            fs.writeFileSync(path.join(toolchainDir, 'bin', 'rust-lld'), '#!/bin/sh\necho rust-lld\n');
-            fs.chmodSync(path.join(toolchainDir, 'bin', 'rust-lld'), 0o755);
 
             fs.writeFileSync(path.join(home, 'default'), version);
 
-            // Copy infs binary from a previously downloaded archive
             const manifest = await fetchJson<ReleaseEntry[]>(`${baseUrl}/releases.json`);
             const match = findLatestRelease(manifest, { id: 'linux-x64' });
             assert.ok(match);
-            const archiveTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'infs-nolib-'));
+            const archiveTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'infs-noinfc-'));
             const archivePath = path.join(archiveTmp, 'infs.tar.gz');
             try {
                 await downloadFile(match.fileUrl, { destPath: archivePath });
                 await extractArchive({ archivePath, destDir: binDir });
             } finally {
                 fs.rmSync(archiveTmp, { recursive: true, force: true });
-            }
-
-            // Create symlinks
-            for (const bin of ['infc', 'inf-llc', 'rust-lld']) {
-                const source = bin === 'infc'
-                    ? path.join(toolchainDir, bin)
-                    : path.join(toolchainDir, 'bin', bin);
-                const target = path.join(binDir, bin);
-                try { fs.unlinkSync(target); } catch { /* ignore */ }
-                fs.symlinkSync(source, target);
             }
 
             const infsPath = path.join(binDir, 'infs');
@@ -526,26 +441,26 @@ describe('e2e installation', { skip: !isUnix ? 'Unix-only tests' : undefined }, 
             });
 
             parsed = parseDoctorOutput(doctorResult.stdout);
-            doctorWarnings = doctorResult.exitCode !== 0 || parsed.hasErrors || parsed.hasWarnings;
+            doctorFailed = doctorResult.exitCode !== 0 || parsed.hasErrors;
         });
 
-        it('reports doctor warnings', () => {
-            assert.strictEqual(doctorWarnings, true);
+        it('reports doctor failure', () => {
+            assert.strictEqual(doctorFailed, true);
         });
 
-        it('libLLVM check reports warning', () => {
-            const libCheck = parsed.checks.find(
-                (c) => c.name === 'libLLVM',
+        it('infc check reports failure', () => {
+            const infcCheck = parsed.checks.find(
+                (c) => c.name === 'infc',
             );
-            assert.ok(libCheck, 'Should have a libLLVM check');
-            assert.strictEqual(libCheck.status, 'warn');
+            assert.ok(infcCheck, 'Should have an infc check');
+            assert.strictEqual(infcCheck.status, 'fail');
         });
 
-        it('non-lib checks still pass', () => {
-            const nonLibChecks = parsed.checks.filter(
-                (c) => c.name !== 'libLLVM',
+        it('non-infc checks still pass', () => {
+            const otherChecks = parsed.checks.filter(
+                (c) => c.name !== 'infc',
             );
-            for (const check of nonLibChecks) {
+            for (const check of otherChecks) {
                 assert.strictEqual(
                     check.status,
                     'ok',
@@ -754,24 +669,6 @@ describe('e2e installation', { skip: !isUnix ? 'Unix-only tests' : undefined }, 
 
         it('has infc at root level (not inside bin/)', () => {
             assert.ok(fs.existsSync(path.join(extractDir, 'infc')));
-        });
-
-        it('has inf-llc inside bin/', () => {
-            assert.ok(fs.existsSync(path.join(extractDir, 'bin', 'inf-llc')));
-        });
-
-        it('has rust-lld inside bin/', () => {
-            assert.ok(fs.existsSync(path.join(extractDir, 'bin', 'rust-lld')));
-        });
-
-        it('has lib/ directory with libLLVM', () => {
-            const libDir = path.join(extractDir, 'lib');
-            assert.ok(fs.existsSync(libDir));
-            const files = fs.readdirSync(libDir);
-            assert.ok(
-                files.some((f) => f.startsWith('libLLVM') && f.includes('.so')),
-                `Expected libLLVM*.so in lib/, found: ${files}`,
-            );
         });
 
         it('binaries have executable permissions', () => {

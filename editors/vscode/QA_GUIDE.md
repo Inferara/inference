@@ -1,8 +1,8 @@
 # Inference VS Code Extension -- Manual QA Guide
 
 **Version:** 0.0.3
-**Branch:** `116-integrate-infs-to-vscode-extension`
-**Date:** 2026-02-02
+**Branch:** `127-update-vscode-extension-after-removing-llvm`
+**Date:** 2026-02-18
 
 ---
 
@@ -46,7 +46,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 0.1 | `npm install` in `editors/vscode/` | Installs without errors |
 | 0.2 | `npm run build` | Builds `dist/extension.js` without errors |
 | 0.3 | `npm run build:prod` | Production build succeeds |
-| 0.4 | `npm test` | All 220 tests pass, 0 failures |
+| 0.4 | `npm test` | All 216 tests pass, 0 failures |
 | 0.5 | `npm run package` | Produces `inference-0.0.3.vsix` without errors |
 
 ---
