@@ -132,6 +132,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Getting Started walkthrough to VS Code extension ([#116])
   - Four-step guided setup: install toolchain, verify with doctor, create project, build
 - Add status bar integration showing toolchain health at a glance ([#116])
+- Update VS Code extension tests and QA docs after LLVM removal ([#127])
+  - Remove `inf-llc`, `rust-lld`, `libLLVM` references from e2e tests and doctor tests
+  - Update fake `infs` shell script to use flat toolchain layout (`TOOLCHAIN_DIR/infc`, no `bin/` subdirectory)
+  - Simplify `buildFakeInfcArchive()` to emit only `infc` binary
+  - Update doctor check expectations from 6 to 5 checks (single `infc` check replaces `inf-llc`, `rust-lld`, `libLLVM`)
+  - Change "missing lib directory triggers doctor warning" to "missing infc triggers doctor failure"
 
 ### Language
 
@@ -281,3 +287,4 @@ Initial tagged release.
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
 [#126]: https://github.com/Inferara/inference/pull/126
+[#127]: https://github.com/Inferara/inference/pull/127
