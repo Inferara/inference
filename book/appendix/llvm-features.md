@@ -1,4 +1,6 @@
-# Appendix B: LLVM Features
+# Appendix B: LLVM Features (Legacy)
+
+> **Note:** Starting from the version after v0.0.1-beta.3, the Inference compiler no longer uses LLVM. WebAssembly is generated directly via `wasm-encoder`. This appendix is preserved as a reference for users on older versions.
 
 | LLVM Feature | Stage | Description |
 |--------------|-------| ------------|

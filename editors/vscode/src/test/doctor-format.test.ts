@@ -23,7 +23,7 @@ describe('formatDoctorChecks (QA Section 4.2)', () => {
         const result = makeDoctorResult({
             checks: [
                 { name: 'infs binary', status: 'ok', message: 'Found at /usr/bin/infs' },
-                { name: 'libLLVM', status: 'warn', message: 'Not found' },
+                { name: 'infc', status: 'warn', message: 'Not found' },
                 { name: 'Default toolchain', status: 'fail', message: 'Not installed' },
             ],
             summary: 'Some checks failed.',
@@ -32,7 +32,7 @@ describe('formatDoctorChecks (QA Section 4.2)', () => {
         const lines = formatDoctorChecks(result);
 
         assert.ok(lines.some((l) => l.includes('[OK]') && l.includes('infs binary')));
-        assert.ok(lines.some((l) => l.includes('[WARN]') && l.includes('libLLVM')));
+        assert.ok(lines.some((l) => l.includes('[WARN]') && l.includes('infc')));
         assert.ok(lines.some((l) => l.includes('[FAIL]') && l.includes('Default toolchain')));
     });
 
