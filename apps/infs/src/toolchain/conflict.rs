@@ -1,7 +1,7 @@
 //! PATH conflict detection module.
 //!
-//! This module provides functionality to detect when binaries in the user's PATH
-//! shadow the managed toolchain binaries. This helps users understand why the
+//! This module provides functionality to detect when a binary in the user's PATH
+//! shadows the managed toolchain binary. This helps users understand why the
 //! managed toolchain might not be used when they run commands.
 //!
 //! ## Usage
@@ -33,10 +33,10 @@ pub struct PathConflict {
     pub expected: PathBuf,
 }
 
-/// Detects PATH conflicts for managed binaries.
+/// Detects PATH conflicts for the managed `infc` binary.
 ///
-/// Checks if any of the managed binaries (`infc`, `inf-llc`, `rust-lld`) are found
-/// in PATH at a location different from the managed bin directory.
+/// Checks if the managed binary is found in PATH at a location different
+/// from the managed bin directory.
 ///
 /// A conflict is reported when:
 /// 1. The binary is found in PATH
@@ -59,20 +59,18 @@ pub fn detect_path_conflicts(bin_dir: &Path) -> Vec<PathConflict> {
 
     let mut conflicts = Vec::new();
 
-    for name in ToolchainPaths::MANAGED_BINARIES {
-        let binary_with_ext = format!("{name}{ext}");
-        let expected = bin_dir.join(&binary_with_ext);
+    let binary_with_ext = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
+    let expected = bin_dir.join(&binary_with_ext);
 
-        if let Ok(found_path) = which::which(&binary_with_ext)
-            && found_path != expected
-            && expected.exists()
-        {
-            conflicts.push(PathConflict {
-                binary: binary_with_ext,
-                found: found_path,
-                expected,
-            });
-        }
+    if let Ok(found_path) = which::which(&binary_with_ext)
+        && found_path != expected
+        && expected.exists()
+    {
+        conflicts.push(PathConflict {
+            binary: binary_with_ext,
+            found: found_path,
+            expected,
+        });
     }
 
     conflicts
@@ -269,25 +267,18 @@ mod tests {
                 expected: PathBuf::from("/home/user/.inference/bin/infc"),
             },
             PathConflict {
-                binary: "inf-llc".to_string(),
-                found: PathBuf::from("/opt/bin/inf-llc"),
-                expected: PathBuf::from("/home/user/.inference/bin/inf-llc"),
-            },
-            PathConflict {
-                binary: "rust-lld".to_string(),
-                found: PathBuf::from("/another/path/rust-lld"),
-                expected: PathBuf::from("/home/user/.inference/bin/rust-lld"),
+                binary: "infs".to_string(),
+                found: PathBuf::from("/opt/bin/infs"),
+                expected: PathBuf::from("/home/user/.inference/bin/infs"),
             },
         ];
 
         let warning = format_conflict_warning(&conflicts);
 
         assert!(warning.contains("'infc' found at: /usr/local/bin/infc"));
-        assert!(warning.contains("'inf-llc' found at: /opt/bin/inf-llc"));
-        assert!(warning.contains("'rust-lld' found at: /another/path/rust-lld"));
+        assert!(warning.contains("'infs' found at: /opt/bin/infs"));
         assert!(warning.contains("Expected:        /home/user/.inference/bin/infc"));
-        assert!(warning.contains("Expected:        /home/user/.inference/bin/inf-llc"));
-        assert!(warning.contains("Expected:        /home/user/.inference/bin/rust-lld"));
+        assert!(warning.contains("Expected:        /home/user/.inference/bin/infs"));
     }
 
     #[test]
@@ -306,9 +297,9 @@ mod tests {
                 expected: PathBuf::from("/home/user/.inference/bin/infc"),
             },
             PathConflict {
-                binary: "inf-llc".to_string(),
-                found: PathBuf::from("/opt/bin/inf-llc"),
-                expected: PathBuf::from("/home/user/.inference/bin/inf-llc"),
+                binary: "infs".to_string(),
+                found: PathBuf::from("/opt/bin/infs"),
+                expected: PathBuf::from("/home/user/.inference/bin/infs"),
             },
         ];
 
@@ -322,7 +313,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("'inf-llc' resolves to /opt/bin/inf-llc"))
+                .any(|l| l.contains("'infs' resolves to /opt/bin/infs"))
         );
         assert!(
             lines
@@ -332,7 +323,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|l| l.contains("managed version is at /home/user/.inference/bin/inf-llc"))
+                .any(|l| l.contains("managed version is at /home/user/.inference/bin/infs"))
         );
         assert!(lines.iter().any(|l| l.contains("Fix:")));
     }

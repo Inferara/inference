@@ -179,7 +179,7 @@ mod tests {
             checks: vec![
                 DoctorCheck::ok("Platform", "linux x64"),
                 DoctorCheck::warning("Toolchain", "No default set"),
-                DoctorCheck::error("inf-llc", "Not found"),
+                DoctorCheck::error("infc", "Not found"),
             ],
             selected: 0,
             loaded: true,
@@ -219,9 +219,9 @@ mod tests {
         let theme = Theme::dark();
         let state = DoctorState {
             checks: vec![
-                DoctorCheck::error("inf-llc", "Not found"),
-                DoctorCheck::error("rust-lld", "Not found"),
                 DoctorCheck::error("infc", "Not found"),
+                DoctorCheck::error("Toolchain directory", "Not found"),
+                DoctorCheck::error("Default toolchain", "Not set"),
             ],
             selected: 2,
             loaded: true,

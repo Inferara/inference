@@ -124,16 +124,10 @@ async fn execute_update() -> Result<()> {
     if new_binary_path.exists() {
         replace_binary(&new_binary_path, platform)?;
     } else {
-        let bin_path = temp_dir.join("bin").join(&new_binary_name);
-        if bin_path.exists() {
-            replace_binary(&bin_path, platform)?;
-        } else {
-            bail!(
-                "infs binary not found in downloaded archive. Expected at {} or {}",
-                new_binary_path.display(),
-                bin_path.display()
-            );
-        }
+        bail!(
+            "infs binary not found in downloaded archive. Expected at {}",
+            new_binary_path.display()
+        );
     }
 
     std::fs::remove_file(&download_path).ok();

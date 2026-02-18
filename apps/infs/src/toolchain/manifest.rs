@@ -264,21 +264,6 @@ pub fn find_version<'a>(manifest: &'a Manifest, version: &str) -> Option<&'a Ver
     manifest.iter().find(|v| v.version == version)
 }
 
-/// Returns all available version strings from the manifest.
-///
-/// # Arguments
-///
-/// * `manifest` - The manifest to query
-///
-/// # Returns
-///
-/// A vector of version strings.
-#[must_use = "returns version list without side effects"]
-#[allow(dead_code)]
-pub fn available_versions(manifest: &Manifest) -> Vec<&str> {
-    manifest.iter().map(|v| v.version.as_str()).collect()
-}
-
 /// Returns versions sorted by semver (newest first).
 ///
 /// Versions that cannot be parsed as semver are sorted lexicographically
@@ -547,18 +532,6 @@ mod tests {
 
         let version = find_version(&manifest, "0.1.0").expect("Should find version");
         assert!(version.find_infc_artifact(Platform::WindowsX64).is_none());
-    }
-
-    #[test]
-    fn available_versions_returns_all() {
-        let manifest: Manifest =
-            serde_json::from_str(sample_manifest_json()).expect("Should parse manifest");
-
-        let versions = available_versions(&manifest);
-        assert_eq!(versions.len(), 3);
-        assert!(versions.contains(&"0.1.0"));
-        assert!(versions.contains(&"0.2.0"));
-        assert!(versions.contains(&"0.3.0-alpha"));
     }
 
     #[test]

@@ -1,3 +1,0 @@
-fn mistyped() -> i32 {
-    "not an integer"
-}

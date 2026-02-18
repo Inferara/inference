@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename environment variable and directory for consistency ([#96])
   - `INFS_HOME` → `INFERENCE_HOME`
   - `~/.infs` → `~/.inference`
-- Add `infc` symlink to installed toolchain alongside `inf-llc` and `rust-lld` ([#96])
+- Add `infc` symlink to installed toolchain ([#96])
 - Improve `infs install` to auto-set default toolchain when none is configured ([#96])
   - When installing an already-installed version without a default toolchain, `infs install` now automatically sets that version as default and updates symlinks
   - Provides graceful recovery if default toolchain file was manually removed
@@ -86,6 +86,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove manifest caching from `infs` CLI ([#116])
   - `fetch_manifest()` now always fetches from network
   - Simplifies CLI code; VS Code extension manages its own fetching lifecycle
+- Remove LLVM toolchain management from `infs` CLI ([#126])
+  - Flatten toolchain layout: `infc` binary now at toolchain root (no more `bin/` subdirectory)
+  - Remove `inf-llc`, `rust-lld`, and `libLLVM` binary management
+  - Simplify doctor checks: single `infc` check replaces `inf-llc`, `rust-lld`, and `libLLVM` checks
+  - Remove platform-specific `#[cfg(target_os = "linux")]` branching in `run_all_checks()`
+  - Slim `InfsError` to single `ProcessExitCode` variant; all other errors use `anyhow::Result`
+  - Replace `rand` dependency with lighter-weight `fastrand`
+  - Remove dead code: unused error variants, `create_project_default()`, `available_versions()`, `selected_bg` theme field
 
 ### Build
 
@@ -272,3 +280,4 @@ Initial tagged release.
 [#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
+[#126]: https://github.com/Inferara/inference/pull/126

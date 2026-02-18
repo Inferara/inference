@@ -52,7 +52,7 @@ fn render_toolchain_list(frame: &mut Frame, area: Rect, theme: &Theme, state: &T
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Install latest toolchain",
+                "Install toolchain",
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
         ]));
