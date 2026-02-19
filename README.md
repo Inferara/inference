@@ -1,7 +1,12 @@
 ![alt text](./assets/inference-logo-oulined-shaped-font.svg)
 
+<div align="center">
+   
 [![Build](https://github.com/Inferara/inference/actions/workflows/build_main.yml/badge.svg?branch=main)](https://github.com/Inferara/inference/actions/workflows/build_main.yml)
+[![Miri Check](https://github.com/Inferara/inference/actions/workflows/miri.yml/badge.svg)](https://github.com/Inferara/inference/actions/workflows/miri.yml)
 [![codecov](https://codecov.io/gh/Inferara/inference/branch/main/graph/badge.svg)](https://codecov.io/gh/Inferara/inference)
+
+</div>
 
 # 🌀 Inference Programming Language
 
