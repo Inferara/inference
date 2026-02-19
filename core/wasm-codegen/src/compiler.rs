@@ -560,25 +560,55 @@ impl Compiler {
                     .get_node_typeinfo(number_literal.id)
                     .expect("Number literal must have type info");
                 match type_info.kind {
-                    TypeInfoKind::Number(
-                        NumberType::I8
-                        | NumberType::I16
-                        | NumberType::I32
-                        | NumberType::U8
-                        | NumberType::U16
-                        | NumberType::U32,
-                    ) => {
-                        let val = number_literal.value.parse::<i32>().unwrap_or(0);
+                    TypeInfoKind::Number(NumberType::I8 | NumberType::I16 | NumberType::I32) => {
+                        let val = number_literal
+                            .value
+                            .parse::<i32>()
+                            .expect("Failed to parse signed 32-bit integer literal");
                         func.instruction(&Instruction::I32Const(val));
                     }
-                    TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
-                        let val = number_literal.value.parse::<i64>().unwrap_or(0);
+                    TypeInfoKind::Number(NumberType::U8) => {
+                        let val = i32::from(
+                            number_literal
+                                .value
+                                .parse::<u8>()
+                                .expect("Failed to parse unsigned 8-bit integer literal"),
+                        );
+                        func.instruction(&Instruction::I32Const(val));
+                    }
+                    TypeInfoKind::Number(NumberType::U16) => {
+                        let val = i32::from(
+                            number_literal
+                                .value
+                                .parse::<u16>()
+                                .expect("Failed to parse unsigned 16-bit integer literal"),
+                        );
+                        func.instruction(&Instruction::I32Const(val));
+                    }
+                    TypeInfoKind::Number(NumberType::U32) => {
+                        let val = number_literal
+                            .value
+                            .parse::<u32>()
+                            .expect("Failed to parse unsigned 32-bit integer literal")
+                            .cast_signed();
+                        func.instruction(&Instruction::I32Const(val));
+                    }
+                    TypeInfoKind::Number(NumberType::I64) => {
+                        let val = number_literal
+                            .value
+                            .parse::<i64>()
+                            .expect("Failed to parse signed 64-bit integer literal");
                         func.instruction(&Instruction::I64Const(val));
                     }
-                    _ => panic!(
-                        "Unsupported number literal type: {:?}",
-                        type_info.kind
-                    ),
+                    TypeInfoKind::Number(NumberType::U64) => {
+                        let val = number_literal
+                            .value
+                            .parse::<u64>()
+                            .expect("Failed to parse unsigned 64-bit integer literal")
+                            .cast_signed();
+                        func.instruction(&Instruction::I64Const(val));
+                    }
+                    _ => panic!("Unsupported number literal type: {:?}", type_info.kind),
                 }
             }
             Literal::Unit(_unit_literal) => todo!(),

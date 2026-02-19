@@ -125,7 +125,7 @@
 //! let typed_context = type_check(arena)?;
 //! let codegen_output = codegen(&typed_context)?;
 //! // WASM bytes are directly available from codegen output:
-//! // wasm_to_v("MyModule", &codegen_output.wasm().to_vec())
+//! // wasm_to_v("MyModule", codegen_output.wasm())
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -197,7 +197,7 @@
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     let codegen_output = codegen(&typed_context)?;
-//!     let rocq_code = wasm_to_v(module_name, &codegen_output.wasm().to_vec())?;
+//!     let rocq_code = wasm_to_v(module_name, codegen_output.wasm())?;
 //!     Ok(rocq_code)
 //! }
 //! ```
@@ -598,7 +598,7 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// let rocq_code = wasm_to_v("EvenChecker", &codegen_output.wasm().to_vec())?;
+/// let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -621,7 +621,7 @@ pub fn codegen(
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
 /// // WASM bytes are directly available from codegen output:
-/// // wasm_to_v("CommutativityProof", &codegen_output.wasm().to_vec())
+/// // wasm_to_v("CommutativityProof", codegen_output.wasm())
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///

@@ -221,17 +221,14 @@ impl Arena {
     ///
     /// Node IDs are assigned sequentially by the parser, so sorting by ID
     /// restores source-order determinism needed for reproducible builds.
-    fn list_nodes_cmp<T, F>(&self, cmp: F) -> impl Iterator<Item = T>
+    fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
     where
-        F: Fn(&AstNode) -> Option<T>,
+        F: Fn(&AstNode) -> Option<T> + 'a,
     {
-        let mut entries: Vec<_> = self.nodes.iter().collect();
-        entries.sort_unstable_by_key(|(id, _)| *id);
-        entries
-            .into_iter()
-            .filter_map(move |(_, node)| cmp(node))
-            .collect::<Vec<_>>()
-            .into_iter()
+        let mut ids: Vec<u32> = self.nodes.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(move |id| self.nodes.get(&id).and_then(&cmp))
     }
 }
 

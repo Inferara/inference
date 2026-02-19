@@ -369,6 +369,18 @@ mod codegen_validation_tests {
         );
     }
 
+    #[test]
+    fn nondet_void_block_trailing_expression_emits_drop() {
+        let source = r#"pub fn drop_test() { forall { const a: i32 = 42; a; } }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm).unwrap_or_else(|e| panic!("Drop-path WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x1a]),
+            "WASM should contain Drop opcode (0x1a) for trailing expression in non-det void block"
+        );
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.
