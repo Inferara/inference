@@ -72,32 +72,6 @@ pub fn create_project(name: &str, parent_path: Option<&Path>, init_git: bool) ->
     Ok(project_path)
 }
 
-/// Creates a new Inference project using the default structure.
-///
-/// This is a convenience function that calls [`create_project`].
-///
-/// # Arguments
-///
-/// * `name` - The project name (used for directory and manifest)
-/// * `parent_path` - Optional parent directory (defaults to current directory)
-/// * `init_git` - Whether to initialize a git repository
-///
-/// # Returns
-///
-/// The path to the created project directory.
-///
-/// # Errors
-///
-/// Returns an error if project creation fails.
-#[allow(dead_code)]
-pub fn create_project_default(
-    name: &str,
-    parent_path: Option<&Path>,
-    init_git: bool,
-) -> Result<PathBuf> {
-    create_project(name, parent_path, init_git)
-}
-
 /// Initializes an existing directory as an Inference project.
 ///
 /// This function creates manifest and optionally source files in an
@@ -341,7 +315,7 @@ mod tests {
     use std::fs;
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("infs_test_{}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("infs_test_{}", fastrand::u64(..)));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -383,19 +357,6 @@ mod tests {
         assert!(project_path.join("tests").join(".gitkeep").exists());
         assert!(project_path.join("proofs").join(".gitkeep").exists());
         assert!(project_path.join(".gitignore").exists());
-
-        cleanup(&parent);
-    }
-
-    #[test]
-    fn test_create_project_default() {
-        let parent = temp_dir();
-        let result = create_project_default("my_project_default", Some(&parent), false);
-
-        assert!(result.is_ok());
-        let project_path = result.unwrap();
-        assert!(project_path.exists());
-        assert!(project_path.join("Inference.toml").exists());
 
         cleanup(&parent);
     }

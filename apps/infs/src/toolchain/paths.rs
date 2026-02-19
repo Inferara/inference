@@ -10,22 +10,17 @@
 //! ~/.inference/               # Root directory (or INFERENCE_HOME)
 //!   toolchains/               # Installed toolchain versions
 //!     0.1.0/                  # Version-specific installation
-//!       infc                  # Compiler binary (at root level)
-//!       bin/
-//!         inf-llc             # LLVM backend tools
-//!         rust-lld
+//!       infc                  # Compiler binary
 //!       .metadata.json        # Installation metadata (date, etc.)
 //!     0.2.0/
 //!       ...
-//!   bin/                      # Symlinks to default toolchain binaries
+//!   bin/                      # Symlink to default toolchain binary
 //!   downloads/                # Download cache
 //!   cache/                    # Cached data (manifest, etc.)
 //!   default                   # File containing default version string
 //! ```
 //!
-//! Note: Binaries are searched first in the `bin/` subdirectory, then at the
-//! toolchain root. This supports both legacy layouts (all in `bin/`) and the
-//! current layout (`infc` at root, tools in `bin/`).
+//! Binaries are located at the toolchain root directory (e.g., `infc` at root).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -263,15 +258,15 @@ pub struct ToolchainPaths {
     pub root: PathBuf,
     /// Directory containing installed toolchain versions.
     pub toolchains: PathBuf,
-    /// Directory for binary symlinks to the default toolchain.
+    /// Directory for binary symlink to the default toolchain.
     pub bin: PathBuf,
     /// Directory for cached downloads.
     pub downloads: PathBuf,
 }
 
 impl ToolchainPaths {
-    /// Names of binaries managed by the toolchain.
-    pub const MANAGED_BINARIES: [&'static str; 3] = ["infc", "inf-llc", "rust-lld"];
+    /// Name of the binary managed by the toolchain.
+    pub const MANAGED_BINARY: &str = "infc";
 
     /// Creates a new `ToolchainPaths` instance.
     ///
@@ -323,12 +318,6 @@ impl ToolchainPaths {
     #[must_use = "returns the path without side effects"]
     pub fn toolchain_dir(&self, version: &str) -> PathBuf {
         self.toolchains.join(version)
-    }
-
-    /// Returns the path to the bin directory within a specific toolchain version.
-    #[must_use = "returns the path without side effects"]
-    pub fn toolchain_bin_dir(&self, version: &str) -> PathBuf {
-        self.toolchain_dir(version).join("bin")
     }
 
     /// Returns the path to the file storing the default toolchain version.
@@ -479,23 +468,11 @@ impl ToolchainPaths {
 
     /// Returns the path to a specific binary within a toolchain version.
     ///
-    /// The binary is searched in two locations:
-    /// 1. First, check the `bin/` subdirectory (e.g., `~/.inference/toolchains/0.0.1/bin/inf-llc`)
-    /// 2. If not found, check the toolchain root directory (e.g., `~/.inference/toolchains/0.0.1/infc`)
-    /// 3. If neither exists, return the `bin/` path for consistent error messages
+    /// The binary is located at the toolchain root directory
+    /// (e.g., `~/.inference/toolchains/0.0.1/infc`).
     #[must_use = "returns the path without side effects"]
     pub fn binary_path(&self, version: &str, binary_name: &str) -> PathBuf {
-        let bin_path = self.toolchain_bin_dir(version).join(binary_name);
-        if bin_path.exists() {
-            return bin_path;
-        }
-
-        let root_path = self.toolchain_dir(version).join(binary_name);
-        if root_path.exists() {
-            return root_path;
-        }
-
-        bin_path
+        self.toolchain_dir(version).join(binary_name)
     }
 
     /// Returns the path to a symlinked binary in the global bin directory.
@@ -579,11 +556,11 @@ impl ToolchainPaths {
 
     /// Updates symlinks in the bin directory to point to the specified version.
     ///
-    /// Creates symlinks for `infc`, `inf-llc`, and `rust-lld` binaries.
+    /// Creates a symlink for the `infc` binary.
     ///
     /// # Errors
     ///
-    /// Returns an error if the symlinks cannot be created.
+    /// Returns an error if the symlink cannot be created.
     pub fn update_symlinks(&self, version: &str) -> Result<()> {
         let platform = crate::toolchain::Platform::detect()?;
         let ext = platform.executable_extension();
@@ -591,29 +568,25 @@ impl ToolchainPaths {
         std::fs::create_dir_all(&self.bin)
             .with_context(|| format!("Failed to create bin directory: {}", self.bin.display()))?;
 
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            self.create_symlink(version, &binary)?;
-        }
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        self.create_symlink(version, &binary)?;
 
         Ok(())
     }
 
-    /// Removes all symlinks from the bin directory.
+    /// Removes the symlink from the bin directory.
     ///
-    /// Removes symlinks for `infc`, `inf-llc`, and `rust-lld` binaries.
+    /// Removes the symlink for the `infc` binary.
     ///
     /// # Errors
     ///
-    /// Returns an error if the symlinks cannot be removed.
+    /// Returns an error if the symlink cannot be removed.
     pub fn remove_symlinks(&self) -> Result<()> {
         let platform = crate::toolchain::Platform::detect()?;
         let ext = platform.executable_extension();
 
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            self.remove_symlink(&binary)?;
-        }
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        self.remove_symlink(&binary)?;
 
         Ok(())
     }
@@ -629,14 +602,11 @@ impl ToolchainPaths {
         let ext = platform.executable_extension();
 
         let mut broken = Vec::new();
-        for name in Self::MANAGED_BINARIES {
-            let binary = format!("{name}{ext}");
-            let symlink_path = self.symlink_path(&binary);
+        let binary = format!("{}{ext}", Self::MANAGED_BINARY);
+        let symlink_path = self.symlink_path(&binary);
 
-            // Check if symlink exists (as a symlink, even if broken) but target does not
-            if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
-                broken.push(binary);
-            }
+        if symlink_path.symlink_metadata().is_ok() && !symlink_path.exists() {
+            broken.push(binary);
         }
         broken
     }
@@ -894,4 +864,121 @@ mod tests {
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
+
+    #[test]
+    fn managed_binary_is_infc() {
+        assert_eq!(ToolchainPaths::MANAGED_BINARY, "infc");
+    }
+
+    #[test]
+    fn binary_path_returns_toolchain_root_path() {
+        let temp_dir = env::temp_dir().join("infs_test_binary_path");
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+        let path = paths.binary_path("0.1.0", "infc");
+        assert_eq!(
+            path,
+            temp_dir.join("toolchains").join("0.1.0").join("infc")
+        );
+    }
+
+    #[test]
+    fn update_symlinks_creates_symlink_for_managed_binary() {
+        let temp_dir = env::temp_dir().join("infs_test_update_symlinks");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let platform = crate::toolchain::Platform::detect().unwrap();
+        let ext = platform.executable_extension();
+        let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
+        let source = toolchain_dir.join(&binary_name);
+        std::fs::write(&source, b"fake binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        paths.update_symlinks("0.1.0").unwrap();
+
+        let symlink = paths.symlink_path(&binary_name);
+        assert!(symlink.exists(), "Symlink should exist after update_symlinks");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn remove_symlinks_removes_managed_binary_symlink() {
+        let temp_dir = env::temp_dir().join("infs_test_remove_symlinks");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let toolchain_dir = paths.toolchain_dir("0.1.0");
+        std::fs::create_dir_all(&toolchain_dir).unwrap();
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let platform = crate::toolchain::Platform::detect().unwrap();
+        let ext = platform.executable_extension();
+        let binary_name = format!("{}{ext}", ToolchainPaths::MANAGED_BINARY);
+        let source = toolchain_dir.join(&binary_name);
+        std::fs::write(&source, b"fake binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        paths.update_symlinks("0.1.0").unwrap();
+        let symlink = paths.symlink_path(&binary_name);
+        assert!(symlink.exists(), "Symlink should exist before removal");
+
+        paths.remove_symlinks().unwrap();
+        assert!(
+            !symlink.exists(),
+            "Symlink should not exist after remove_symlinks"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn validate_symlinks_returns_empty_when_no_broken_links() {
+        let temp_dir = env::temp_dir().join("infs_test_validate_no_broken");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let broken = paths.validate_symlinks();
+        assert!(broken.is_empty());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_symlinks_detects_broken_symlink() {
+        let temp_dir = env::temp_dir().join("infs_test_validate_broken");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        std::fs::create_dir_all(&paths.bin).unwrap();
+
+        let binary_name = ToolchainPaths::MANAGED_BINARY;
+        let symlink_target = paths.symlink_path(binary_name);
+        let nonexistent = temp_dir.join("nonexistent_binary");
+        std::os::unix::fs::symlink(&nonexistent, &symlink_target).unwrap();
+
+        let broken = paths.validate_symlinks();
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0], binary_name);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
 }

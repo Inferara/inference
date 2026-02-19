@@ -305,20 +305,6 @@ fn build_full_pipeline_with_v_output() {
 // Version and Help Tests
 // =============================================================================
 
-/// Verifies that the `version` subcommand displays the correct version information.
-///
-/// **Expected behavior**: Exit with code 0 and print the version string to stdout.
-#[test]
-fn version_command_shows_version() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.arg("version");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("infs"))
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
-}
-
 /// Verifies that the `--version` flag displays the correct version information.
 ///
 /// **Expected behavior**: Exit with code 0 and print the version string to stdout.
@@ -787,8 +773,7 @@ fn doctor_shows_all_checks() {
         .stdout(predicate::str::contains("Platform"))
         .stdout(predicate::str::contains("Toolchain directory"))
         .stdout(predicate::str::contains("Default toolchain"))
-        .stdout(predicate::str::contains("inf-llc"))
-        .stdout(predicate::str::contains("rust-lld"));
+        .stdout(predicate::str::contains("infc"));
 }
 
 /// Verifies that `infs doctor` shows the checking message.
@@ -1531,12 +1516,6 @@ fn build_fails_gracefully_on_syntax_error() {
 // =============================================================================
 // Helper Functions for QA Test Files
 // =============================================================================
-
-/// Returns the path to `type_error.inf` test file.
-#[allow(dead_code)]
-fn type_error_file() -> std::path::PathBuf {
-    example_file("type_error.inf")
-}
 
 /// Returns the path to `empty.inf` test file.
 fn empty_file() -> std::path::PathBuf {

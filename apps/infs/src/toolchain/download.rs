@@ -22,7 +22,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use rand::Rng;
 use tokio::io::AsyncWriteExt;
 
 /// Progress event emitted during downloads.
@@ -249,7 +248,7 @@ fn format_speed(speed: f64) -> String {
 fn calculate_retry_delay(attempt: u32) -> u64 {
     let base_delay = BASE_RETRY_DELAY_MS * 2u64.pow(attempt);
     let jitter_range = base_delay / 4;
-    let jitter = rand::rng().random_range(0..=jitter_range * 2);
+    let jitter = fastrand::u64(0..=jitter_range * 2);
     base_delay - jitter_range + jitter
 }
 

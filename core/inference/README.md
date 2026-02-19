@@ -48,7 +48,7 @@ The crate exposes five primary functions:
 | [`type_check`] | `Arena` | `TypedContext` | Type check and infer types |
 | [`analyze`] | `&TypedContext` | `()` | Semantic analysis (WIP) |
 | [`codegen`] | `&TypedContext` | `Vec<u8>` | Generate WebAssembly bytecode |
-| [`wasm_to_v`] | `&str`, `&Vec<u8>` | `String` | Translate WASM to Rocq |
+| [`wasm_to_v`] | `&str`, `&[u8]` | `String` | Translate WASM to Rocq |
 
 ## Compilation Pipeline
 

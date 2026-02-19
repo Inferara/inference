@@ -12,15 +12,14 @@ describe('parseDoctorOutput', () => {
             '  [OK] Platform: Detected linux-x64',
             '  [OK] Toolchain directory: Found at /home/user/.inference',
             '  [OK] Default toolchain: Set to 0.1.0',
-            '  [OK] inf-llc: Found inf-llc in PATH',
-            '  [OK] rust-lld: Found rust-lld in PATH',
+            '  [OK] infc: Found infc in PATH',
             '',
             'All checks passed. The toolchain is ready to use.',
         ].join('\n');
 
         const result = parseDoctorOutput(stdout);
 
-        assert.strictEqual(result.checks.length, 6);
+        assert.strictEqual(result.checks.length, 5);
         assert.strictEqual(result.hasErrors, false);
         assert.strictEqual(result.hasWarnings, false);
         assert.strictEqual(
@@ -45,7 +44,7 @@ describe('parseDoctorOutput', () => {
             '',
             '  [OK] infs binary: Found at /home/user/.inference/bin/infs',
             '  [OK] Platform: Detected linux-x64',
-            '  [WARN] libLLVM: Not found in /path. Some features may not work.',
+            '  [WARN] Default toolchain: No default toolchain set.',
             '',
             'Some warnings were found. The toolchain may work but could have issues.',
         ].join('\n');
@@ -56,7 +55,7 @@ describe('parseDoctorOutput', () => {
         assert.strictEqual(result.hasErrors, false);
         assert.strictEqual(result.hasWarnings, true);
         assert.strictEqual(result.checks[2].status, 'warn');
-        assert.strictEqual(result.checks[2].name, 'libLLVM');
+        assert.strictEqual(result.checks[2].name, 'Default toolchain');
         assert.strictEqual(
             result.summary,
             'Some warnings were found. The toolchain may work but could have issues.',
@@ -90,7 +89,7 @@ describe('parseDoctorOutput', () => {
             '',
             '  [OK] infs binary: Found at /usr/local/bin/infs',
             '  [WARN] Default toolchain: No default toolchain set.',
-            '  [FAIL] inf-llc: Not found.',
+            '  [FAIL] infc: Not found.',
             '',
             "Some checks failed. Run 'infs install' to install the toolchain.",
         ].join('\n');
@@ -155,7 +154,7 @@ describe('parseDoctorOutput', () => {
             'Checking Inference toolchain installation...',
             '',
             '  [OK] infs binary: Found at /usr/local/bin/infs',
-            '  [WARN] libLLVM: Not found',
+            '  [WARN] Default toolchain: No default set',
             '',
             'Some warnings found.',
         ].join('\r\n');
@@ -173,7 +172,7 @@ describe('parseDoctorOutput', () => {
     it('handles mixed LF and CRLF', () => {
         const stdout =
             '  [OK] Platform: Detected linux-x64\r\n' +
-            '  [FAIL] inf-llc: Not found\n' +
+            '  [FAIL] infc: Not found\n' +
             'Checks failed.\n';
 
         const result = parseDoctorOutput(stdout);

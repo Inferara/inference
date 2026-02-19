@@ -14,9 +14,7 @@
 //! - Platform detection
 //! - Toolchain directory existence
 //! - Default toolchain configuration
-//! - inf-llc binary presence
-//! - rust-lld binary presence
-//! - libLLVM shared library (Linux only)
+//! - infc compiler binary presence
 //!
 //! ## Output Format (Public Contract)
 //!

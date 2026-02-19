@@ -190,11 +190,12 @@ impl Arena {
         .collect()
     }
 
-    // BUG(reproducibility): Same non-deterministic iteration issue as `list_nodes_cmp`.
-    // See comment on `list_nodes_cmp` for details and required fix.
     pub fn filter_nodes<T: Fn(&AstNode) -> bool>(&self, fn_predicate: T) -> Vec<AstNode> {
-        self.nodes
-            .values()
+        let mut entries: Vec<_> = self.nodes.iter().collect();
+        entries.sort_unstable_by_key(|(id, _)| *id);
+        entries
+            .into_iter()
+            .map(|(_, node)| node)
             .filter(|node| fn_predicate(node))
             .cloned()
             .collect()
@@ -216,28 +217,83 @@ impl Arena {
             .unwrap_or_default()
     }
 
-    // BUG(reproducibility): This method iterates over `FxHashMap`, whose iteration
-    // order is non-deterministic. Any caller that collects results into a Vec and
-    // processes them sequentially (e.g., `source_files()`, `functions()`,
-    // `list_type_definitions()`) will produce output in unpredictable order.
-    //
-    // This directly affects WASM output determinism: the codegen pipeline calls
-    // `typed_context.source_files()` → `source_file.function_definitions()` →
-    // `compiler.visit_function_definition()`, so function emission order in the
-    // WASM binary depends on HashMap iteration order.
-    //
-    // FIX REQUIRED: Either sort results by node ID before returning, use `IndexMap`
-    // to preserve insertion order, or use `BTreeMap` for guaranteed sorted iteration.
-    // Node IDs are assigned sequentially by the parser, so sorting by ID restores
-    // the source-order determinism needed for reproducible builds.
-    //
-    // See also: `filter_nodes()` which has the same issue.
+    /// Iterates over all nodes sorted by node ID, applying a filter-map function.
+    ///
+    /// Node IDs are assigned sequentially by the parser, so sorting by ID
+    /// restores source-order determinism needed for reproducible builds.
     fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
     where
-        F: Fn(&AstNode) -> Option<T> + Clone + 'a,
-        T: Clone + 'static,
+        F: Fn(&AstNode) -> Option<T> + 'a,
     {
-        let cmp = cmp.clone();
-        self.nodes.iter().filter_map(move |(_, node)| cmp(node))
+        let mut ids: Vec<u32> = self.nodes.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(move |id| self.nodes.get(&id).and_then(&cmp))
+    }
+}
+
+#[cfg(test)]
+mod arena_tests {
+    use super::*;
+    use crate::nodes::{Expression, Literal, Location, NumberLiteral};
+
+    fn make_number_literal_node(id: u32) -> AstNode {
+        AstNode::Expression(Expression::Literal(Literal::Number(Rc::new(
+            NumberLiteral {
+                id,
+                location: Location::default(),
+                value: id.to_string(),
+            },
+        ))))
+    }
+
+    #[test]
+    fn filter_nodes_returns_ascending_node_id_order() {
+        let mut arena = Arena::default();
+        let ids: Vec<u32> = vec![50, 10, 40, 20, 30];
+        for &id in &ids {
+            let node = make_number_literal_node(id);
+            arena.add_node(node, u32::MAX);
+        }
+
+        let filtered = arena.filter_nodes(|_| true);
+
+        let result_ids: Vec<u32> = filtered.iter().map(AstNode::id).collect();
+        assert_eq!(result_ids, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn filter_nodes_preserves_order_with_predicate() {
+        let mut arena = Arena::default();
+        for id in [30, 10, 50, 20, 40] {
+            let node = make_number_literal_node(id);
+            arena.add_node(node, u32::MAX);
+        }
+
+        let filtered = arena.filter_nodes(|node| node.id() > 20);
+
+        let result_ids: Vec<u32> = filtered.iter().map(AstNode::id).collect();
+        assert_eq!(result_ids, vec![30, 40, 50]);
+    }
+
+    #[test]
+    fn list_nodes_cmp_returns_ascending_node_id_order() {
+        let mut arena = Arena::default();
+        for id in [30, 10, 50, 20, 40] {
+            let node = make_number_literal_node(id);
+            arena.add_node(node, u32::MAX);
+        }
+
+        let ids: Vec<u32> = arena
+            .list_nodes_cmp(|node| {
+                if let AstNode::Expression(Expression::Literal(Literal::Number(n))) = node {
+                    Some(n.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(ids, vec![10, 20, 30, 40, 50]);
     }
 }

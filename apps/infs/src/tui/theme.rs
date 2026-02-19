@@ -26,9 +26,6 @@ pub struct Theme {
     pub muted: Color,
     /// Color for primary text.
     pub text: Color,
-    /// Background color for selected items.
-    #[allow(dead_code)]
-    pub selected_bg: Color,
 }
 
 impl Default for Theme {
@@ -52,7 +49,6 @@ impl Theme {
             error: Color::Red,
             muted: Color::DarkGray,
             text: Color::White,
-            selected_bg: Color::DarkGray,
         }
     }
 
@@ -70,7 +66,6 @@ impl Theme {
             error: Color::Rgb(139, 0, 0),     // Dark red
             muted: Color::Gray,
             text: Color::Black,
-            selected_bg: Color::LightYellow,
         }
     }
 

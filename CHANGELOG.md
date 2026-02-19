@@ -35,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
-- Document FxHashMap non-deterministic iteration bug in `arena.rs` ([#97])
 
 ### Testing
 
@@ -63,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename environment variable and directory for consistency ([#96])
   - `INFS_HOME` → `INFERENCE_HOME`
   - `~/.infs` → `~/.inference`
-- Add `infc` symlink to installed toolchain alongside `inf-llc` and `rust-lld` ([#96])
+- Add `infc` symlink to installed toolchain ([#96])
 - Improve `infs install` to auto-set default toolchain when none is configured ([#96])
   - When installing an already-installed version without a default toolchain, `infs install` now automatically sets that version as default and updates symlinks
   - Provides graceful recovery if default toolchain file was manually removed
@@ -86,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove manifest caching from `infs` CLI ([#116])
   - `fetch_manifest()` now always fetches from network
   - Simplifies CLI code; VS Code extension manages its own fetching lifecycle
+- Remove LLVM toolchain management from `infs` CLI ([#126])
+  - Flatten toolchain layout: `infc` binary now at toolchain root (no more `bin/` subdirectory)
+  - Remove `inf-llc`, `rust-lld`, and `libLLVM` binary management
+  - Simplify doctor checks: single `infc` check replaces `inf-llc`, `rust-lld`, and `libLLVM` checks
+  - Remove platform-specific `#[cfg(target_os = "linux")]` branching in `run_all_checks()`
+  - Slim `InfsError` to single `ProcessExitCode` variant; all other errors use `anyhow::Result`
+  - Replace `rand` dependency with lighter-weight `fastrand`
+  - Remove dead code: unused error variants, `create_project_default()`, `available_versions()`, `selected_bg` theme field
 
 ### Build
 
@@ -124,6 +131,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Getting Started walkthrough to VS Code extension ([#116])
   - Four-step guided setup: install toolchain, verify with doctor, create project, build
 - Add status bar integration showing toolchain health at a glance ([#116])
+- Update VS Code extension tests and QA docs after LLVM removal ([#127])
+  - Remove `inf-llc`, `rust-lld`, `libLLVM` references from e2e tests and doctor tests
+  - Update fake `infs` shell script to use flat toolchain layout (`TOOLCHAIN_DIR/infc`, no `bin/` subdirectory)
+  - Simplify `buildFakeInfcArchive()` to emit only `infc` binary
+  - Update doctor check expectations from 6 to 5 checks (single `infc` check replaces `inf-llc`, `rust-lld`, `libLLVM`)
+  - Change "missing lib directory triggers doctor warning" to "missing infc triggers doctor failure"
 
 ### Language
 
@@ -204,6 +217,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
 
+### Fixed
+
+- Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
+- Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
+- Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
+- Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
+
 ---
 
 ## [0.0.1-alpha] - 2026-01-03
@@ -272,3 +292,5 @@ Initial tagged release.
 [#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
+[#126]: https://github.com/Inferara/inference/pull/126
+[#127]: https://github.com/Inferara/inference/pull/127

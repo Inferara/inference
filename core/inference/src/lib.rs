@@ -125,7 +125,7 @@
 //! let typed_context = type_check(arena)?;
 //! let codegen_output = codegen(&typed_context)?;
 //! // WASM bytes are directly available from codegen output:
-//! // wasm_to_v("MyModule", &codegen_output.wasm().to_vec())
+//! // wasm_to_v("MyModule", codegen_output.wasm())
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -197,7 +197,7 @@
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     let codegen_output = codegen(&typed_context)?;
-//!     let rocq_code = wasm_to_v(module_name, &codegen_output.wasm().to_vec())?;
+//!     let rocq_code = wasm_to_v(module_name, codegen_output.wasm())?;
 //!     Ok(rocq_code)
 //! }
 //! ```
@@ -259,7 +259,6 @@
 //! - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 //! - [Inference Book](https://github.com/Inferara/book)
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
-//! - [Non-deterministic Instruction Extensions](https://github.com/Inferara/llvm-project/pull/2)
 
 use inference_ast::{arena::Arena, builder::Builder};
 use inference_type_checker::typed_context::TypedContext;
@@ -599,7 +598,7 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// let rocq_code = wasm_to_v("EvenChecker", &codegen_output.wasm().to_vec())?;
+/// let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -622,7 +621,7 @@ pub fn codegen(
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
 /// // WASM bytes are directly available from codegen output:
-/// // wasm_to_v("CommutativityProof", &codegen_output.wasm().to_vec())
+/// // wasm_to_v("CommutativityProof", codegen_output.wasm())
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -692,9 +691,9 @@ pub fn codegen(
 /// - [WebAssembly Specification](https://webassembly.github.io/spec/)
 /// - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 /// - [`inference_wasm_to_v_translator`] for implementation details
-pub fn wasm_to_v(mod_name: &str, wasm: &Vec<u8>) -> anyhow::Result<String> {
+pub fn wasm_to_v(mod_name: &str, wasm: &[u8]) -> anyhow::Result<String> {
     if let Ok(v) =
-        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm.as_slice())
+        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm)
     {
         Ok(v)
     } else {

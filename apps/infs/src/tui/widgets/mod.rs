@@ -2,7 +2,6 @@
 //!
 //! This module provides reusable widget components for the TUI:
 //!
-//! - [`logo`] - Styled logo rendering with theme support
-//! - [`input_field`] - Advanced input field with cursor support
+//! - [`command_history`] - Command history display and navigation
 
 pub mod command_history;

@@ -84,7 +84,7 @@ COMPILER RESOLUTION:
     The infc compiler is located using the following priority order:
     1. INFC_PATH environment variable (explicit override)
     2. System PATH (via 'which infc')
-    3. Managed toolchain (~/.inference/toolchains/VERSION/bin/infc)
+    3. Managed toolchain (~/.inference/toolchains/VERSION/infc)
 
 ENVIRONMENT VARIABLES:
     INFS_NO_TUI             Disable interactive TUI
