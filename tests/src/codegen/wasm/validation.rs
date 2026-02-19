@@ -381,6 +381,60 @@ mod codegen_validation_tests {
         );
     }
 
+    // --- Unsigned integer literal tests (lower_literal U8/U16/U32/U64 arms) ---
+
+    #[test]
+    fn u8_literal_emits_i32const() {
+        let source = r#"pub fn u8_test() { const x: u8 = 255; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("u8 literal WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x41]),
+            "WASM should contain i32.const (0x41) for u8 literal"
+        );
+    }
+
+    #[test]
+    fn u16_literal_emits_i32const() {
+        let source = r#"pub fn u16_test() { const x: u16 = 60000; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("u16 literal WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x41]),
+            "WASM should contain i32.const (0x41) for u16 literal"
+        );
+    }
+
+    #[test]
+    fn u32_literal_emits_i32const() {
+        let source = r#"pub fn u32_test() { const x: u32 = 3000000000; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("u32 literal WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x41]),
+            "WASM should contain i32.const (0x41) for u32 literal"
+        );
+    }
+
+    #[test]
+    fn u64_literal_emits_i64const() {
+        let source = r#"pub fn u64_test() { const x: u64 = 9000000000000000000; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("u64 literal WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0x42]),
+            "WASM should contain i64.const (0x42) for u64 literal"
+        );
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

@@ -269,7 +269,7 @@ impl Compiler {
                         .expect("Constant definition must have a type info")
                         .kind
                     {
-                        TypeInfoKind::Number(NumberType::I64) => ValType::I64,
+                        TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
                         _ => ValType::I32,
                     };
                     locals_map.insert(constant_definition.name(), (*local_idx, val_type));
@@ -456,10 +456,80 @@ impl Compiler {
                                 ),
                             },
                             NumberType::I64 => todo!(),
-                            NumberType::U8 => todo!(),
-                            NumberType::U16 => todo!(),
-                            NumberType::U32 => todo!(),
-                            NumberType::U64 => todo!(),
+                            NumberType::U8 => match &constant_definition.value {
+                                Literal::Number(number_literal) => {
+                                    let val = i32::from(
+                                        number_literal
+                                            .value
+                                            .parse::<u8>()
+                                            .expect("Failed to parse unsigned 8-bit integer literal"),
+                                    );
+                                    func.instruction(&Instruction::I32Const(val));
+                                    let (local_idx, _) = locals_map
+                                        .get(&constant_definition.name())
+                                        .expect("Local not found in pre-scan");
+                                    func.instruction(&Instruction::LocalSet(*local_idx));
+                                }
+                                _ => panic!(
+                                    "Constant value for u8 should be a number literal. Found: {:?}",
+                                    constant_definition.value
+                                ),
+                            },
+                            NumberType::U16 => match &constant_definition.value {
+                                Literal::Number(number_literal) => {
+                                    let val = i32::from(
+                                        number_literal
+                                            .value
+                                            .parse::<u16>()
+                                            .expect("Failed to parse unsigned 16-bit integer literal"),
+                                    );
+                                    func.instruction(&Instruction::I32Const(val));
+                                    let (local_idx, _) = locals_map
+                                        .get(&constant_definition.name())
+                                        .expect("Local not found in pre-scan");
+                                    func.instruction(&Instruction::LocalSet(*local_idx));
+                                }
+                                _ => panic!(
+                                    "Constant value for u16 should be a number literal. Found: {:?}",
+                                    constant_definition.value
+                                ),
+                            },
+                            NumberType::U32 => match &constant_definition.value {
+                                Literal::Number(number_literal) => {
+                                    let val = number_literal
+                                        .value
+                                        .parse::<u32>()
+                                        .expect("Failed to parse unsigned 32-bit integer literal")
+                                        .cast_signed();
+                                    func.instruction(&Instruction::I32Const(val));
+                                    let (local_idx, _) = locals_map
+                                        .get(&constant_definition.name())
+                                        .expect("Local not found in pre-scan");
+                                    func.instruction(&Instruction::LocalSet(*local_idx));
+                                }
+                                _ => panic!(
+                                    "Constant value for u32 should be a number literal. Found: {:?}",
+                                    constant_definition.value
+                                ),
+                            },
+                            NumberType::U64 => match &constant_definition.value {
+                                Literal::Number(number_literal) => {
+                                    let val = number_literal
+                                        .value
+                                        .parse::<u64>()
+                                        .expect("Failed to parse unsigned 64-bit integer literal")
+                                        .cast_signed();
+                                    func.instruction(&Instruction::I64Const(val));
+                                    let (local_idx, _) = locals_map
+                                        .get(&constant_definition.name())
+                                        .expect("Local not found in pre-scan");
+                                    func.instruction(&Instruction::LocalSet(*local_idx));
+                                }
+                                _ => panic!(
+                                    "Constant value for u64 should be a number literal. Found: {:?}",
+                                    constant_definition.value
+                                ),
+                            },
                         }
                     }
                     TypeInfoKind::Custom(_) => todo!(),
