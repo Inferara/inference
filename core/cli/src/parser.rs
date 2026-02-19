@@ -2,6 +2,8 @@
 //!
 //! This module defines the CLI interface using `clap`. The `Cli` struct captures
 //! all command line flags and arguments passed to the `infc` binary.
+//!
+//! For comprehensive usage documentation, see `README.md` in this crate.
 
 use clap::Parser;
 
@@ -78,7 +80,7 @@ pub(crate) struct Cli {
 
     /// Run the codegen phase to emit WebAssembly binary.
     ///
-    /// This phase generates LLVM IR and compiles it to WebAssembly. Both parse
+    /// This phase generates WebAssembly binary from the typed AST. Both parse
     /// and analyze phases are automatically run first if not already requested.
     ///
     /// Use `-o` to write the WASM binary to disk, and `-v` to additionally

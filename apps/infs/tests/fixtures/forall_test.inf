@@ -1,0 +1,6 @@
+fn test_forall() -> i32 {
+    forall x: i32 {
+        x >= 0
+    }
+    0
+}

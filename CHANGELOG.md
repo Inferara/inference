@@ -7,19 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Codegen
+
+- Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
+  - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
+  - Rewrite `compiler.rs` to generate WASM binary directly in-process
+  - Non-deterministic instructions emitted as custom opcodes via `Function::raw()` byte sequences
+  - Custom opcodes in 0xfc prefix space: uzumaki (0x31/0x32), forall (0x3a), exists (0x3b), assume (0x3c), unique (0x3d)
+  - Reactor model: all `pub` functions exported individually, no `_start` entry point
+- Add compilation architecture with `CodegenOutput` boundary ([#97], [#125])
+  - `codegen()` returns `CodegenOutput` (WASM bytes + metadata)
+  - `CodegenOutput` carries WASM binary, target, mode, opt level, module name, and `has_main` flag
+  - New `Target` (Wasm32/Soroban), `CompilationMode` (Compile/Proof), and `OptLevel` (O0–O3/Os/Oz) enums
+- Add per-function optimization strategy for proof mode (Decision #32) ([#97])
+  - Spec functions compiled unoptimized to preserve structural correspondence with source for Rocq translation
+  - Execution functions use target's release optimization so proofs cover actual deployed code
+  - `OptLevel` is currently metadata only; optimization passes planned for future
+- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+
+### CLI
+
+- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([#97])
+- Remove external toolchain dependencies: no `inf-llc`, `rust-lld`, or platform-specific library paths required ([#125])
+- Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([#97])
+
+### Documentation
+
+- Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
+  - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
+
+### Testing
+
+- Add 28 codegen tests with three-tier verification architecture ([#97], [#125])
+  - Byte comparison tests against committed `.wasm` reference files
+  - `inf_wasmparser::validate()` validation on all generated output
+  - 2 Wasmtime execution tests verifying runtime behavior
+  - Validation tests for metadata, target/mode combinations, non-det opcode presence
+- Add codegen test helpers ([#97], [#125])
+  - `codegen_output()`, `codegen_output_with_mode()`, `codegen_with_target_mode()`, `codegen_with_full_config()`
+  - `wasm_codegen()`, `wasm_codegen_with_target()`, `assert_wasms_modules_equivalence()`
+- Expand `infs` test coverage from 282 to 429 tests (360 unit + 69 integration) ([#96])
+  - Add TUI rendering tests using TestBackend for main_view, doctor_view, toolchain_view
+  - Add integration tests for non-deterministic features (forall, exists, assume, unique, oracle)
+  - Add tests for error handling, environment variables, and edge cases
+  - Consolidate test fixtures in `apps/infs/tests/fixtures/`
+- Move QA test suite to `apps/infs/docs/qa-test-suite.md` with 9 truly manual tests ([#96])
+
+### infs CLI
+
+- Add automatic PATH configuration on first install ([#96])
+  - Unix: Modifies shell profile (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`)
+  - Windows: Modifies user PATH in registry (`HKCU\Environment\Path`)
+  - Users only need to restart their terminal after installation
+- Rename environment variable and directory for consistency ([#96])
+  - `INFS_HOME` → `INFERENCE_HOME`
+  - `~/.infs` → `~/.inference`
+- Add `infc` symlink to installed toolchain ([#96])
+- Improve `infs install` to auto-set default toolchain when none is configured ([#96])
+  - When installing an already-installed version without a default toolchain, `infs install` now automatically sets that version as default and updates symlinks
+  - Provides graceful recovery if default toolchain file was manually removed
+- Improve `infs doctor` recommendations for missing default toolchain ([#96])
+  - When no default is set but toolchains exist, suggests `infs default <version>` instead of `infs install`
+  - When no toolchains exist, suggests `infs install`
+- Fix `infs install` and `infs self update` to fall back to latest pre-release version when no stable versions exist ([#96])
+  - Previously failed with "No stable version found in manifest" error
+  - Now uses latest stable version if available, otherwise falls back to latest version regardless of stability
+- Fix `infs install` failing with nested archive structure from GitHub releases ([#96])
+  - GitHub releases wrap tar.gz archives in ZIP files
+  - Now automatically detects and extracts nested tar.gz after ZIP extraction
+- Fix `infs uninstall` leaving broken symlinks when removing non-default toolchains ([#96])
+  - Previously, `Path::exists()` returned false for broken symlinks, causing them to remain in `~/.inference/bin/`
+  - Now uses `symlink_metadata().is_ok()` to correctly detect and remove both valid and broken symlinks
+  - Added `validate_symlinks()` to check for broken symlinks after uninstallation
+  - Added `repair_symlinks()` to automatically fix broken symlinks by updating them to the default version or removing them
+- Change `infs doctor` to exit with non-zero status when checks fail ([#116])
+  - Previously always exited 0; now returns non-zero so callers can detect failures
+- Remove manifest caching from `infs` CLI ([#116])
+  - `fetch_manifest()` now always fetches from network
+  - Simplifies CLI code; VS Code extension manages its own fetching lifecycle
+- Remove LLVM toolchain management from `infs` CLI ([#126])
+  - Flatten toolchain layout: `infc` binary now at toolchain root (no more `bin/` subdirectory)
+  - Remove `inf-llc`, `rust-lld`, and `libLLVM` binary management
+  - Simplify doctor checks: single `infc` check replaces `inf-llc`, `rust-lld`, and `libLLVM` checks
+  - Remove platform-specific `#[cfg(target_os = "linux")]` branching in `run_all_checks()`
+  - Slim `InfsError` to single `ProcessExitCode` variant; all other errors use `anyhow::Result`
+  - Replace `rand` dependency with lighter-weight `fastrand`
+  - Remove dead code: unused error variants, `create_project_default()`, `available_versions()`, `selected_bg` theme field
+
+### Build
+
+- Add `infs` binaries to release artifacts for all platforms (Linux x64, Windows x64, macOS ARM64)
+- Update release manifest to schema version 2 with separate `infc` and `infs` tool entries
+
+### Project Manifest
+
+- Replace `manifest_version` field with `infc_version` in Inference.toml ([#96])
+  - `infc_version` is a String (semver format) that records the compiler version used to create the project
+  - Automatically detected from `infc --version` when running `infs new` or `infs init`
+  - Falls back to `infs` version if `infc` is not available
+  - All Inference ecosystem crates share the same version number
+
 ### Editor Support
 
 - Add VS Code extension with syntax highlighting for Inference language ([#94])
 - Add TextMate grammar with hierarchical scopes for non-deterministic keywords (`forall`, `exists`, `assume`, `unique`, `@`)
 - Add language configuration with bracket matching, comment toggling, and code folding
 - Publish extension to VS Code Marketplace: [inference-lang.inference](https://marketplace.visualstudio.com/items?itemName=inference-lang.inference)
-
-### Breaking Changes
-
-- ast: Remove `source` field from `Location` struct ([#69])
-
-  **Migration**: Use `arena.get_node_source(node_id)` to retrieve source text.
-  Source is now stored once in `SourceFile` rather than per-node.
+- Add Configuration sidebar (TreeView) to VS Code extension with toolchain info and settings overview ([#116])
+  - Activity bar icon opens a Configuration view with Toolchain and Settings groups
+  - Displays resolved infs path, version, INFERENCE_HOME, platform, and health status
+  - Click settings items to open VS Code settings; click status to run doctor
+  - Right-click path items for "Copy Value" and "Reveal in File Explorer"
+  - Auto-refreshes on settings change, after install, and after doctor
+- Add automatic terminal PATH integration to VS Code extension ([#116])
+  - `infs` and `infc` are available in integrated terminals immediately after install or update
+  - Existing open terminals show a relaunch indicator when PATH changes
+  - PATH modification persists across VS Code sessions
+- Add toolchain management commands to VS Code extension ([#116])
+  - Install Toolchain: downloads, verifies (SHA-256), extracts, and runs `infs install`
+  - Update Toolchain: checks for newer versions and applies updates
+  - Select Version: switch between installed toolchain versions via QuickPick
+  - Run Doctor: executes `infs doctor` and displays results in output channel
+- Add Getting Started walkthrough to VS Code extension ([#116])
+  - Four-step guided setup: install toolchain, verify with doctor, create project, build
+- Add status bar integration showing toolchain health at a glance ([#116])
+- Update VS Code extension tests and QA docs after LLVM removal ([#127])
+  - Remove `inf-llc`, `rust-lld`, `libLLVM` references from e2e tests and doctor tests
+  - Update fake `infs` shell script to use flat toolchain layout (`TOOLCHAIN_DIR/infc`, no `bin/` subdirectory)
+  - Simplify `buildFakeInfcArchive()` to emit only `infc` binary
+  - Update doctor check expectations from 6 to 5 checks (single `infc` check replaces `inf-llc`, `rust-lld`, `libLLVM`)
+  - Change "missing lib directory triggers doctor warning" to "missing infc triggers doctor failure"
 
 ### Language
 
@@ -100,6 +217,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
 
+### Fixed
+
+- Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
+- Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
+- Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
+- Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
+
 ---
 
 ## [0.0.1-alpha] - 2026-01-03
@@ -112,7 +236,6 @@ Initial tagged release.
 - Function definitions with generic type parameters
 - Module system with visibility modifiers
 - Add `undef` syntax support ([#10])
-- Rename `apply` to `verify` ([#10])
 
 ### Compiler
 
@@ -165,3 +288,9 @@ Initial tagged release.
 [#69]: https://github.com/Inferara/inference/pull/69
 [#86]: https://github.com/Inferara/inference/pull/86
 [#94]: https://github.com/Inferara/inference/pull/94
+[#96]: https://github.com/Inferara/inference/pull/96
+[#97]: https://github.com/Inferara/inference/issues/97
+[#116]: https://github.com/Inferara/inference/pull/116
+[#125]: https://github.com/Inferara/inference/pull/125
+[#126]: https://github.com/Inferara/inference/pull/126
+[#127]: https://github.com/Inferara/inference/pull/127

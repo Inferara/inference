@@ -1,5 +1,12 @@
+![alt text](./assets/inference-logo-oulined-shaped-font.svg)
+
+<div align="center">
+   
 [![Build](https://github.com/Inferara/inference/actions/workflows/build_main.yml/badge.svg?branch=main)](https://github.com/Inferara/inference/actions/workflows/build_main.yml)
+[![Miri Check](https://github.com/Inferara/inference/actions/workflows/miri.yml/badge.svg)](https://github.com/Inferara/inference/actions/workflows/miri.yml)
 [![codecov](https://codecov.io/gh/Inferara/inference/branch/main/graph/badge.svg)](https://codecov.io/gh/Inferara/inference)
+
+</div>
 
 # 🌀 Inference Programming Language
 
@@ -22,113 +29,119 @@ Install the official VS Code extension for syntax highlighting:
 - Access our Inference [book](https://inference-lang.org/book) for a guide on how to get started
 - Inference Programming Language [specification](https://github.com/Inferara/inference-language-spec)
 
-## Inference Compiler CLI (`infc`)
+## Inference Suite CLI (`infs`)
 
-`infc` drives the compilation pipeline for a single `.inf` source file. Phases are:
+`infs` is the unified toolchain CLI for Inference. It provides subcommands for building, managing, and working with Inference projects.
 
-1. Parse (`--parse`) – build the typed AST.
-2. Analyze (`--analyze`) – perform semantic/type inference (WIP).
-3. Codegen (`--codegen`) – emit WebAssembly and optionally translate to `.v` when `-o` is supplied.
+### Build Command
 
-You must specify at least one phase flag; requested phases run in canonical order.
+The `infs build` command compiles a single `.inf` source file through three phases:
 
-### Basic usage
+1. **Parse** (`--parse`) – Build the typed AST using tree-sitter
+2. **Analyze** (`--analyze`) – Perform type checking and semantic validation (WIP)
+3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
-```bash
-cargo run -p inference-cli -- infc path/to/file.inf --parse
-```
+You must specify at least one phase flag; phases run in canonical order (parse → analyze → codegen).
 
-After building you can call the binary directly:
+### Basic Usage
 
 ```bash
-./infc path/to/file.inf --codegen -o
+# Via cargo
+cargo run -p infs -- build path/to/file.inf --parse
+
+# After building, call the binary directly
+./target/debug/infs build path/to/file.inf --codegen -o
 ```
 
-### Show version
+### Compilation Modes
+
+The compiler supports two modes that control optimization and verification behavior:
+
+1. **`compile`** produces optimized production binaries. Non-deterministic `spec` nodes are stripped since they have no runtime meaning.
+2. **`proof`** produces WASM for formal verification. Spec functions (containing non-deterministic operations) are compiled unoptimized to preserve structural correspondence with the source code for Rocq formalization. Execution functions use the target's release optimization so that proofs cover the actual deployed code.
+
+Read more about [compilation modes in the book](./book/compilation_targets.md).
+
+### Output Flags
+
+- `-o` – Generate WASM binary file in `out/` directory
+- `-v` – Generate Rocq (.v) translation file in `out/` directory
+
+### Show Version
 
 ```bash
-infc --version
+infs version
+infs --version
 ```
 
-### Output artifacts
+### Exit Codes
 
-Artifacts are written to an `out/` directory relative to the working directory. Rocq translation output is `out/out.v`.
+| Code | Meaning                    |
+| ---- | -------------------------- |
+| 0    | Success                    |
+| 1    | Usage / IO / Parse failure |
 
-### Exit codes
+### Future Commands (Planned)
 
-| Code | Meaning                         |
-|------|---------------------------------|
-| 0    | Success                         |
-| 1    | Usage / IO / Parse failure      |
+- `infs install` – Download and install toolchain versions
+- `infs new` – Scaffold new projects
+- `infs doctor` – Verify installation health
+- `infs` (no args) – Launch TUI interface
 
 ## Distribution
 
-Prebuilt `infc` binaries distributables are arranged in the following directory structure:
+Prebuilt binaries are available for each release. Two CLI tools are distributed:
+
+- **`infs`** - Full-featured toolchain CLI (recommended for all users)
+- **`infc`** - Standalone compiler CLI
+
+### Release Artifacts
+
+| Platform    | infs                              | infc                              |
+| ----------- | --------------------------------- | --------------------------------- |
+| Linux x64   | `infs-linux-x64.tar.gz`           | `infc-linux-x64.tar.gz`           |
+| Windows x64 | `infs-windows-x64.zip`            | `infc-windows-x64.zip`            |
+| macOS ARM64 | `infs-macos-apple-silicon.tar.gz` | `infc-macos-apple-silicon.tar.gz` |
+
+### Directory Structure
 
 ```
 <distribution-folder>/
-├── infc                    # The main CLI binary
-├── bin/
-│   ├── inf-llc            # LLVM compiler with Inference intrinsics
-│   └── rust-lld           # WebAssembly linker
-└── lib/                   # (Linux only)
-    └── libLLVM.so.*       # LLVM shared library
+└── infs (or infc)          # The CLI binary
 ```
 
-**Notes:**
-- On Linux, the LLVM shared library must be in the `lib/` directory.
-- On Windows, all required DLL files should be placed in the `bin/` directory next to the executables.
-- The `infc` binary automatically locates these dependencies relative to its own location.
-- No system LLVM installation is required for end users.
+The CLI binaries are self-contained and require no external dependencies.
 
 ## Building from Source
 
-To build Inference from source, you'll need the required binary dependencies for your platform.
+To build Inference from source:
 
 For detailed platform-specific setup instructions, see:
+
 - [Linux Development Setup](book/installation_linux.md)
 - [macOS Development Setup](book/installation_macos.md)
 - [Windows Development Setup](book/installation_windows.md)
 
-### Required Binaries
+### Dependencies
 
-Download the following files for your platform and place them in the specified directories:
-
-#### Linux
-- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip) → Extract to `external/bin/linux/`
-- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip) → Extract to `external/bin/linux/`
-- **libLLVM**: [Download](https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.0-nightly.zip) → Extract to `external/lib/linux/`
-
-#### macOS
-- **inf-llc**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/inf-llc.zip) → Extract to `external/bin/macos/`
-- **rust-lld**: [Download](https://storage.googleapis.com/external_binaries/macos/bin/rust-lld.zip) → Extract to `external/bin/macos/`
-
-#### Windows
-- **inf-llc.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip) → Extract to `external/bin/windows/`
-- **rust-lld.exe**: [Download](https://storage.googleapis.com/external_binaries/windows/bin/rust-lld.zip) → Extract to `external/bin/windows/`
+No external binaries are required. The compiler generates WebAssembly directly via `wasm-encoder`.
 
 ### Build Steps
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/Inferara/inference.git
    cd inference
    ```
 
-2. Download and extract the required binaries for your platform (see links above)
+2. Build the project:
 
-3. Make the binaries executable (Linux/macOS only):
-   ```bash
-   chmod +x external/bin/linux/inf-llc external/bin/linux/rust-lld    # Linux
-   chmod +x external/bin/macos/inf-llc external/bin/macos/rust-lld    # macOS
-   ```
-
-4. Build the project:
    ```bash
    cargo build --release
    ```
 
-The compiled `infc` binary will be in `target/release/infc`.
+The compiled binaries will be in `target/release/` (`infs` and `infc`).
 
 ### Build Commands
 

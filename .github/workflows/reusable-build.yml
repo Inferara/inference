@@ -8,11 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-      enable-cache:
-        description: 'Whether to enable caching of external binaries'
-        required: false
-        type: boolean
-        default: false
       package-artifacts:
         description: 'Whether to package release artifacts'
         required: false
@@ -26,7 +21,7 @@ on:
 
 jobs:
   build:
-    name: Build and test infc
+    name: Build and test
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
@@ -37,91 +32,10 @@ jobs:
       - name: Setup Rust
         uses: actions/checkout@v4.1.3
       
-      - name: Cache external binaries
-        if: inputs.enable-cache
-        uses: actions/cache@v4
-        id: cache-binaries
-        with:
-          path: external/
-          key: ${{ runner.os }}-binaries-v6
-          restore-keys: |
-            ${{ runner.os }}-binaries-
-      
-      - name: Download binaries (Linux)
-        if: runner.os == 'Linux' && (!inputs.enable-cache || steps.cache-binaries.outputs.cache-hit != 'true')
-        run: |
-          mkdir -p external/bin/linux external/lib/linux
-          # Download and extract inf-llc
-          curl -L "https://storage.googleapis.com/external_binaries/linux/bin/inf-llc.zip" -o /tmp/inf-llc.zip
-          unzip -o /tmp/inf-llc.zip -d external/bin/linux/
-          # Download and extract rust-lld
-          curl -L "https://storage.googleapis.com/external_binaries/linux/bin/rust-lld.zip" -o /tmp/rust-lld.zip
-          unzip -o /tmp/rust-lld.zip -d external/bin/linux/
-          # Download and extract libLLVM
-          curl -L "https://storage.googleapis.com/external_binaries/linux/lib/libLLVM.so.21.1-rust-1.94.0-nightly.zip" -o /tmp/libLLVM.zip
-          unzip -o /tmp/libLLVM.zip -d external/lib/linux/
-          # Make executables
-          chmod +x external/bin/linux/inf-llc external/bin/linux/rust-lld
-      
-      - name: Download binaries (macOS)
-        if: runner.os == 'macOS' && (!inputs.enable-cache || steps.cache-binaries.outputs.cache-hit != 'true')
-        run: |
-          mkdir -p external/bin/macos
-          # Download and extract inf-llc
-          curl -L "https://storage.googleapis.com/external_binaries/macos/bin/inf-llc.zip" -o /tmp/inf-llc.zip
-          unzip -o /tmp/inf-llc.zip -d external/bin/macos/
-          # Download and extract rust-lld
-          curl -L "https://storage.googleapis.com/external_binaries/macos/bin/rust-lld.zip" -o /tmp/rust-lld.zip
-          unzip -o /tmp/rust-lld.zip -d external/bin/macos/
-          # Make executables
-          chmod +x external/bin/macos/inf-llc external/bin/macos/rust-lld
-      
-      - name: Download binaries (Windows)
-        if: runner.os == 'Windows' && (!inputs.enable-cache || steps.cache-binaries.outputs.cache-hit != 'true')
-        run: |
-          New-Item -ItemType Directory -Force -Path external\bin\windows
-          New-Item -ItemType Directory -Force -Path external\llvm\windows
-          New-Item -ItemType Directory -Force -Path external\lib\windows
-          
-          # Download and extract inf-llc.exe
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/bin/inf-llc.zip" -OutFile "$env:TEMP\inf-llc.zip"
-          Expand-Archive -Path "$env:TEMP\inf-llc.zip" -DestinationPath external\bin\windows\ -Force
-          
-          # Download and extract rust-lld.exe
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/bin/rust-lld.zip" -OutFile "$env:TEMP\rust-lld.zip"
-          Expand-Archive -Path "$env:TEMP\rust-lld.zip" -DestinationPath external\bin\windows\ -Force
-          
-          # Download complete LLVM 21.1.1 (MSYS2 build with all targets)
-          Write-Output "Downloading complete LLVM 21.1.1 from GCS..."
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/llvm/llvm-21-msys2-ucrt64-full-targets.zip" -OutFile "$env:TEMP\llvm-full.zip"
-          Write-Output "Extracting LLVM to external\llvm\windows..."
-          Expand-Archive -Path "$env:TEMP\llvm-full.zip" -DestinationPath external\llvm\windows\ -Force
-          
-          # Download XML-related import/static libraries
-          Write-Output "Downloading XML import libs..."
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libxml2.dll.a" -OutFile "external\lib\windows\libxml2.dll.a"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libxml2.a" -OutFile "external\lib\windows\libxml2.a"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libiconv.dll.a" -OutFile "external\lib\windows\libiconv.dll.a"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libz.a" -OutFile "external\lib\windows\libz.a"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libzstd.dll.a" -OutFile "external\lib\windows\libzstd.dll.a"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libffi.dll.a" -OutFile "external\lib\windows\libffi.dll.a"
-          
-          # Download runtime DLLs
-          Write-Output "Downloading XML runtime DLLs..."
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libxml2-16.dll" -OutFile "external\bin\libxml2-16.dll"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/libiconv-2.dll" -OutFile "external\bin\libiconv-2.dll"
-          Invoke-WebRequest -Uri "https://storage.googleapis.com/external_binaries/windows/build/zlib1.dll" -OutFile "external\bin\zlib1.dll"
-          
-          # Copy LLVM DLL to external\bin for runtime
-          Copy-Item "external\llvm\windows\bin\libLLVM-21.dll" "external\bin\libLLVM-21.dll" -Force
-          
-          Write-Output "All Windows binaries downloaded and cached"
-      
       - name: Update Rust
         run: |
           rustup update ${{ matrix.toolchain }}
           rustup default ${{ matrix.toolchain }}
-          rustup component add llvm-tools-preview
       
       - name: Add MinGW target (Windows)
         if: runner.os == 'Windows'
@@ -185,54 +99,6 @@ jobs:
 
           Write-Output "Installed MSYS2 UCRT64 MinGW toolchain"
       
-      - name: Install LLVM (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 21
-          sudo apt-get install -y llvm-21-dev libpolly-21-dev
-      
-      - name: Install LLVM (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm@21 || brew install llvm
-      
-      - name: Setup LLVM (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $llvmDir = "$PWD\external\llvm\windows"
-          $llvmBin = Join-Path $llvmDir "bin"
-          $dstLib = Join-Path $llvmDir "lib"
-          $cachedLibDir = "external\lib\windows"
-
-          # Copy libraries into LLVM lib directory
-          Copy-Item (Join-Path $cachedLibDir "libxml2.dll.a") (Join-Path $dstLib "libxml2s.lib") -Force
-          Copy-Item (Join-Path $cachedLibDir "libxml2.dll.a") (Join-Path $dstLib "libxml2.dll.a") -Force
-          Copy-Item (Join-Path $cachedLibDir "libxml2.a") (Join-Path $dstLib "libxml2.a") -Force
-          Copy-Item (Join-Path $cachedLibDir "libiconv.dll.a") (Join-Path $dstLib "libiconv.dll.a") -Force
-          Copy-Item (Join-Path $cachedLibDir "libz.a") (Join-Path $dstLib "libz.a") -Force
-          Copy-Item (Join-Path $cachedLibDir "libzstd.dll.a") (Join-Path $dstLib "libzstd.dll.a") -Force
-          Copy-Item (Join-Path $cachedLibDir "libffi.dll.a") (Join-Path $dstLib "libffi.dll.a") -Force
-
-          # Set environment variables
-          Add-Content -Path $env:GITHUB_ENV -Value "LLVM_SYS_211_PREFIX=$llvmDir"
-          Add-Content -Path $env:GITHUB_ENV -Value "PATH=$PWD\external\bin;$llvmBin;$env:PATH"
-          Add-Content -Path $env:GITHUB_ENV -Value "LIB=$dstLib;$env:LIB"
-      
-      - name: Set LLVM Prefix (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> $GITHUB_ENV
-      
-      - name: Set LLVM Prefix (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          LLVM_PREFIX=$(brew --prefix llvm@21 2>/dev/null || brew --prefix llvm)
-          echo "LLVM_SYS_211_PREFIX=$LLVM_PREFIX" >> $GITHUB_ENV
-      
       - name: Install clippy nightly
         run: rustup component add clippy-preview
       
@@ -246,23 +112,11 @@ jobs:
       
       - name: Build Release (Non-Windows)
         if: runner.os != 'Windows' && inputs.release-build
-        run: cargo build-full --release --verbose
+        run: cargo build --release --verbose
       
       - name: Build Release (Windows MinGW)
         if: runner.os == 'Windows' && inputs.release-build
-        run: cargo build-full --release --verbose --target x86_64-pc-windows-gnu
-      
-      - name: Verify vendored LLVM
-        run: |
-          file external/lib/linux/libLLVM.so.21.1-rust-1.94.0-nightly || true
-          file target/debug/lib/libLLVM.so.21.1-rust-1.94.0-nightly || true
-        if: runner.os == 'Linux' && !inputs.release-build
-      
-      - name: Verify vendored LLVM (Release)
-        run: |
-          file external/lib/linux/libLLVM.so.21.1-rust-1.94.0-nightly || true
-          file target/release/lib/libLLVM.so.21.1-rust-1.94.0-nightly || true
-        if: runner.os == 'Linux' && inputs.release-build
+        run: cargo build --release --verbose --target x86_64-pc-windows-gnu
       
       - name: Test (Non-Windows)
         if: runner.os != 'Windows' && !inputs.release-build
@@ -274,11 +128,11 @@ jobs:
       
       - name: Test Release (Non-Windows)
         if: runner.os != 'Windows' && inputs.release-build
-        run: cargo test-full --verbose
+        run: cargo test --release --verbose
       
       - name: Test Release (Windows MinGW)
         if: runner.os == 'Windows' && inputs.release-build
-        run: cargo test-full --verbose --target x86_64-pc-windows-gnu
+        run: cargo test --release --verbose --target x86_64-pc-windows-gnu
       
       - name: Clippy (Non-Windows)
         if: runner.os != 'Windows'
@@ -289,59 +143,85 @@ jobs:
         run: cargo clippy --verbose --target x86_64-pc-windows-gnu -- -D warnings
       
       - name: Install Cargo audit
-        run: cargo install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
       
       - name: Audit
         run: cargo audit
       
       # Package artifacts (only for release builds)
-      - name: Prepare Artifact Package (Windows)
-        if: runner.os == 'Windows' && inputs.package-artifacts
+      - name: Prepare infc Artifact Package (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         run: |
-          New-Item -ItemType Directory -Force -Path artifact\bin
-          New-Item -ItemType Directory -Force -Path artifact\lib
-          Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact\
-          Copy-Item book\check_deps.ps1 artifact\
-          Copy-Item external\bin\windows\inf-llc.exe artifact\bin\
-          Copy-Item external\bin\windows\rust-lld.exe artifact\bin\
+          New-Item -ItemType Directory -Force -Path artifact-infc
+          Copy-Item target\x86_64-pc-windows-gnu\release\infc.exe artifact-infc\
+
+      - name: Prepare infs Artifact Package (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact-infs
+          Copy-Item target\x86_64-pc-windows-gnu\release\infs.exe artifact-infs\
       
-      - name: Prepare Artifact Package (Linux)
-        if: runner.os == 'Linux' && inputs.package-artifacts
+      - name: Prepare infc Artifact Package (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
-          mkdir -p artifact/bin
-          mkdir -p artifact/lib
-          cp target/release/infc artifact/
-          cp target/release/bin/* artifact/bin/
-          cp target/release/lib/* artifact/lib/
+          mkdir -p artifact-infc
+          cp target/release/infc artifact-infc/
+
+      - name: Prepare infs Artifact Package (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
+        run: |
+          mkdir -p artifact-infs
+          cp target/release/infs artifact-infs/
       
-      - name: Package Artifact (Windows)
-        if: runner.os == 'Windows' && inputs.package-artifacts
+      - name: Package infc Artifact (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         run: |
-          7z a -tzip infc-windows-x64.zip .\artifact\*
-          certutil -hashfile infc-windows-x64.zip SHA256 > infc-windows-x64.zip.sha256
+          7z a -tzip infc-windows-x64.zip .\artifact-infc\*
+          $hash = (Get-FileHash infc-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  infc-windows-x64.zip" | Out-File -Encoding ascii infc-windows-x64.zip.sha256
+
+      - name: Package infs Artifact (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
+        run: |
+          7z a -tzip infs-windows-x64.zip .\artifact-infs\*
+          $hash = (Get-FileHash infs-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  infs-windows-x64.zip" | Out-File -Encoding ascii infs-windows-x64.zip.sha256
       
-      - name: Package Artifact (Linux)
-        if: runner.os == 'Linux' && inputs.package-artifacts
+      - name: Package infc Artifact (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
-          tar -czf infc-linux-x64.tar.gz -C artifact .
+          tar -czf infc-linux-x64.tar.gz -C artifact-infc .
           sha256sum infc-linux-x64.tar.gz > infc-linux-x64.tar.gz.sha256
-      
-      - name: Prepare Artifact Package (macOS)
-        if: runner.os == 'macOS' && inputs.package-artifacts
+
+      - name: Package infs Artifact (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         run: |
-          mkdir -p artifact/bin
-          cp target/release/infc artifact/
-          cp target/release/bin/* artifact/bin/ || true
-          if [ -d target/release/lib ] && [ "$(ls -A target/release/lib)" ]; then
-            mkdir -p artifact/lib
-            cp target/release/lib/* artifact/lib/
-          fi
+          tar -czf infs-linux-x64.tar.gz -C artifact-infs .
+          sha256sum infs-linux-x64.tar.gz > infs-linux-x64.tar.gz.sha256
       
-      - name: Package Artifact (macOS)
-        if: runner.os == 'macOS' && inputs.package-artifacts
+      - name: Prepare infc Artifact Package (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
         run: |
-          tar -czf infc-macos-apple-silicon.tar.gz -C artifact .
+          mkdir -p artifact-infc
+          cp target/release/infc artifact-infc/
+
+      - name: Prepare infs Artifact Package (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
+        run: |
+          mkdir -p artifact-infs
+          cp target/release/infs artifact-infs/
+      
+      - name: Package infc Artifact (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
+        run: |
+          tar -czf infc-macos-apple-silicon.tar.gz -C artifact-infc .
           shasum -a 256 infc-macos-apple-silicon.tar.gz > infc-macos-apple-silicon.tar.gz.sha256
+
+      - name: Package infs Artifact (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
+        run: |
+          tar -czf infs-macos-apple-silicon.tar.gz -C artifact-infs .
+          shasum -a 256 infs-macos-apple-silicon.tar.gz > infs-macos-apple-silicon.tar.gz.sha256
       
       - name: Upload to Release (Windows)
         if: runner.os == 'Windows' && inputs.upload-to-release
@@ -350,7 +230,9 @@ jobs:
           files: |
             infc-windows-x64.zip
             infc-windows-x64.zip.sha256
-      
+            infs-windows-x64.zip
+            infs-windows-x64.zip.sha256
+
       - name: Upload to Release (Linux)
         if: runner.os == 'Linux' && inputs.upload-to-release
         uses: softprops/action-gh-release@v1
@@ -358,7 +240,9 @@ jobs:
           files: |
             infc-linux-x64.tar.gz
             infc-linux-x64.tar.gz.sha256
-      
+            infs-linux-x64.tar.gz
+            infs-linux-x64.tar.gz.sha256
+
       - name: Upload to Release (macOS)
         if: runner.os == 'macOS' && inputs.upload-to-release
         uses: softprops/action-gh-release@v1
@@ -366,9 +250,12 @@ jobs:
           files: |
             infc-macos-apple-silicon.tar.gz
             infc-macos-apple-silicon.tar.gz.sha256
+            infs-macos-apple-silicon.tar.gz
+            infs-macos-apple-silicon.tar.gz.sha256
       
-      - name: Upload Workflow Artifact (Windows)
-        if: runner.os == 'Windows' && inputs.package-artifacts && !inputs.upload-to-release
+      # Always upload workflow artifacts when packaging - needed for manifest generation
+      - name: Upload Workflow Artifact infc (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
         uses: actions/upload-artifact@v4
         with:
           name: infc-windows-x64
@@ -376,9 +263,19 @@ jobs:
             infc-windows-x64.*
           retention-days: 90
           compression-level: 0
-      
-      - name: Upload Workflow Artifact (Linux)
-        if: runner.os == 'Linux' && inputs.package-artifacts && !inputs.upload-to-release
+
+      - name: Upload Workflow Artifact infs (Windows)
+        if: runner.os == 'Windows' && inputs.package-artifacts && inputs.release-build
+        uses: actions/upload-artifact@v4
+        with:
+          name: infs-windows-x64
+          path: |
+            infs-windows-x64.*
+          retention-days: 90
+          compression-level: 0
+
+      - name: Upload Workflow Artifact infc (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
         uses: actions/upload-artifact@v4
         with:
           name: infc-linux-x64
@@ -386,13 +283,33 @@ jobs:
             infc-linux-x64.*
           retention-days: 90
           compression-level: 0
-      
-      - name: Upload Workflow Artifact (macOS)
-        if: runner.os == 'macOS' && inputs.package-artifacts && !inputs.upload-to-release
+
+      - name: Upload Workflow Artifact infs (Linux)
+        if: runner.os == 'Linux' && inputs.package-artifacts && inputs.release-build
+        uses: actions/upload-artifact@v4
+        with:
+          name: infs-linux-x64
+          path: |
+            infs-linux-x64.*
+          retention-days: 90
+          compression-level: 0
+
+      - name: Upload Workflow Artifact infc (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
         uses: actions/upload-artifact@v4
         with:
           name: infc-macos-apple-silicon
           path: |
             infc-macos-apple-silicon.*
+          retention-days: 90
+          compression-level: 0
+
+      - name: Upload Workflow Artifact infs (macOS)
+        if: runner.os == 'macOS' && inputs.package-artifacts && inputs.release-build
+        uses: actions/upload-artifact@v4
+        with:
+          name: infs-macos-apple-silicon
+          path: |
+            infs-macos-apple-silicon.*
           retention-days: 90
           compression-level: 0

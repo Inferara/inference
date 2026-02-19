@@ -30,12 +30,93 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<Arena> {
     builder.build_ast()
 }
 
-pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
+/// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).
+///
+/// Returns the [`CodegenOutput`] containing WASM bytes and metadata.
+pub(crate) fn codegen_output(source_code: &str) -> inference_wasm_codegen::CodegenOutput {
     let arena = build_ast(source_code.to_string());
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
-    inference_wasm_codegen::codegen(&typed_context).unwrap()
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    inference_wasm_codegen::codegen(
+        &typed_context,
+        target,
+        mode,
+        target.default_opt_level(),
+    )
+    .unwrap()
+}
+
+/// Generates codegen output from source code with an explicit compilation mode.
+///
+/// Uses `Wasm32` target with the specified mode.
+pub(crate) fn codegen_output_with_mode(
+    source_code: &str,
+    mode: inference_wasm_codegen::CompilationMode,
+) -> inference_wasm_codegen::CodegenOutput {
+    let target = inference_wasm_codegen::Target::Wasm32;
+    codegen_with_target_mode(source_code, target, mode).unwrap()
+}
+
+/// Generates codegen output from source code with explicit target and mode.
+///
+/// Returns `Result` to allow testing error cases (e.g., proof + Soroban rejection).
+pub(crate) fn codegen_with_target_mode(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let opt_level = target.default_opt_level();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+}
+
+/// Generates codegen output from source code with explicit target, mode, and optimization level.
+///
+/// Returns `Result` to allow testing error cases and specific opt_level configurations.
+pub(crate) fn codegen_with_full_config(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+    opt_level: inference_wasm_codegen::OptLevel,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+}
+
+/// Generates WebAssembly bytes from source code for a specific target.
+///
+/// Uses the specified target with default compilation mode (`Compile`).
+pub(crate) fn wasm_codegen_with_target(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+) -> Vec<u8> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    let opt_level = target.default_opt_level();
+    let codegen_output =
+        inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level).unwrap();
+    codegen_output.wasm().to_vec()
+}
+
+/// Generates WebAssembly bytes from source code using the default target (`Wasm32`) and mode (`Compile`).
+///
+/// Returns the WASM binary as bytes. The codegen produces WASM directly in-process
+/// via `wasm-encoder`, no external binaries are needed.
+pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
+    let output = codegen_output(source_code);
+    output.wasm().to_vec()
 }
 
 /// Automatically resolves a test data file path based on the test's module path and name.

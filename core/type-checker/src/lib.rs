@@ -1,50 +1,100 @@
-//! Type Checker Crate
+//! Type Checker for the Inference Programming Language
 //!
-//! This crate provides type checking and type inference for the Inference language.
-//! It implements bidirectional type checking with support for:
+//! This crate provides comprehensive type checking and type inference for Inference,
+//! implementing bidirectional type checking with multi-phase analysis.
 //!
-//! - Primitive types (i8, i16, i32, i64, u8, u16, u32, u64, bool, unit)
-//! - Struct and enum types with visibility checking
-//! - Method resolution on struct types
-//! - Generic function type parameter inference and substitution
-//! - Import resolution with glob and partial imports
-//! - Error recovery for collecting multiple errors
+//! ## Core Features
+//!
+//! **Type System Support**:
+//! - Primitive types: `bool`, `unit`, `i8`-`i64`, `u8`-`u64` (using efficient `SimpleTypeKind` enum)
+//! - Compound types: arrays with fixed sizes, structs with fields, enums with variants
+//! - Generic types: type parameter inference and substitution for generic functions
+//! - Visibility control: `pub` modifiers with private-by-default semantics
+//!
+//! **Type Checking**:
+//! - Bidirectional inference: combines synthesis (bottom-up) and checking (top-down)
+//! - Multi-phase analysis: handles forward references and circular dependencies
+//! - Scope-aware symbol table: hierarchical scope management with proper shadowing
+//! - Method resolution: instance methods and associated functions on structs
+//! - Import system: plain, glob, and partial imports with visibility checking
+//!
+//! **Operator Support**:
+//! - Arithmetic: `+`, `-`, `*`, `/`, `%`, `**`
+//! - Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
+//! - Logical: `&&`, `||`, `!`
+//! - Bitwise: `&`, `|`, `^`, `<<`, `>>`, `~`
+//! - Unary: `-` (negation), `!` (logical NOT), `~` (bitwise NOT)
+//!
+//! **Error Handling**:
+//! - Comprehensive error types with detailed context
+//! - Error recovery: collects multiple errors before failing
+//! - Error deduplication: avoids repeated reports of the same issue
+//! - Precise locations: all errors include source line and column information
 //!
 //! ## Type Representation
 //!
-//! The type checker uses two distinct representations for types:
+//! The type checker uses a two-level type representation strategy:
 //!
-//! - **AST Types** (`Type` enum from `inference_ast`): The source-level representation
-//!   including `Type::Simple(SimpleTypeKind)` for primitive builtin types. The
-//!   `SimpleTypeKind` enum provides a lightweight, value-based representation of
-//!   primitive types without heap allocation.
+//! **Level 1 - AST Types** (`Type` enum from `inference_ast`):
+//! - Source-level representation parsed from code
+//! - Uses `Type::Simple(SimpleTypeKind)` for primitive builtin types
+//! - `SimpleTypeKind` is a lightweight enum without heap allocation
+//! - Efficient for the parser and AST construction
 //!
-//! - **Type Information** (`TypeInfo` from this crate): The type checker's internal
-//!   representation using `TypeInfoKind` for semantic analysis and type inference.
+//! **Level 2 - Type Information** (`TypeInfo` from this crate):
+//! - Semantic representation for type checking and inference
+//! - Uses `TypeInfoKind` with rich semantic information
+//! - Supports type parameter substitution and unification
 //!
-//! ## Entry Point
+//! This design provides both parse efficiency and semantic flexibility.
+//!
+//! ## Quick Start
 //!
 //! Use [`TypeCheckerBuilder`] to type-check an AST arena:
 //!
 //! ```ignore
-//! let arena = parse_source(source_code);
-//! let typed_context = TypeCheckerBuilder::build_typed_context(arena)?.typed_context();
+//! use inference_ast::arena::Arena;
+//! use inference_type_checker::TypeCheckerBuilder;
+//!
+//! // Parse source code into an arena
+//! let arena: Arena = parse_source(source_code)?;
+//!
+//! // Run type checking
+//! let typed_context = TypeCheckerBuilder::build_typed_context(arena)?
+//!     .typed_context();
+//!
+//! // Query type information
+//! if let Some(type_info) = typed_context.get_node_typeinfo(node_id) {
+//!     println!("Node {} has type: {}", node_id, type_info);
+//! }
 //! ```
 //!
-//! ## Architecture
+//! ## Multi-Phase Architecture
 //!
-//! The type checker operates in phases:
-//! 1. Process directives (register raw imports)
-//! 2. Register types (collect type definitions into symbol table)
-//! 3. Resolve imports (bind import paths to symbols)
-//! 4. Collect function definitions (register functions)
-//! 5. Infer variable types in function bodies
+//! The type checker operates in five sequential phases:
 //!
-//! ## Modules
+//! 1. **Process Directives** - Register raw import statements in scope tree
+//! 2. **Register Types** - Collect struct, enum, spec, and type alias definitions
+//! 3. **Resolve Imports** - Bind import paths to symbols in symbol table
+//! 4. **Register Functions** - Collect function and method signatures
+//! 5. **Infer Variables** - Type-check function bodies and variable declarations
 //!
-//! - [`errors`] - Typed error system with 29 variants
-//! - [`type_info`] - Type representation (TypeInfo, TypeInfoKind)
-//! - [`typed_context`] - Type information storage for AST nodes
+//! This ordering ensures that types are available before functions reference them,
+//! and imports are resolved before symbol lookup.
+//!
+//! ## Public Modules
+//!
+//! - [`errors`] - Comprehensive error types with detailed context information
+//! - [`type_info`] - Type representation system (`TypeInfo`, `TypeInfoKind`, `NumberType`)
+//! - [`typed_context`] - Storage for type annotations on AST nodes with query API
+//!
+//! ## Documentation
+//!
+//! For detailed information, see the `docs/` directory:
+//! - [Architecture Guide](../docs/architecture.md) - Internal design and implementation
+//! - [API Guide](../docs/api-guide.md) - Practical usage examples and patterns
+//! - [Type System Reference](../docs/type-system.md) - Complete type system rules
+//! - [Error Reference](../docs/errors.md) - Catalog of all error types
 
 use std::marker::PhantomData;
 

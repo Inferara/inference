@@ -1,8 +1,12 @@
 #![warn(clippy::pedantic)]
 
-//! # Inference Compiler CLI
+//! # Inference Compiler CLI (infc)
 //!
-//! Command line interface for the Inference programming language compiler.
+//! Standalone command line interface for the Inference programming language compiler.
+//!
+//! This is the legacy compiler CLI. For most users, the unified `infs` toolchain
+//! CLI is recommended. Use `infc` directly when you need fine-grained control over
+//! compilation phases or are integrating Inference compilation into build systems.
 //!
 //! ## Compilation Phases
 //!
@@ -22,8 +26,7 @@
 //!    - Reports type errors and semantic issues
 //!
 //! 3. **Codegen** (`--codegen`) – Emits WebAssembly binary
-//!    - Generates LLVM IR from typed AST
-//!    - Compiles LLVM IR to WebAssembly
+//!    - Generates WebAssembly binary from typed AST
 //!    - Supports non-deterministic instructions (uzumaki, forall, exists)
 //!    - Optionally translates to Rocq (.v) format for formal verification
 //!
@@ -54,7 +57,7 @@
 //!
 //! - **Parse errors**: Syntax errors, malformed AST nodes
 //! - **Type errors**: Type mismatches, undefined symbols
-//! - **Codegen errors**: LLVM compilation failures
+//! - **Codegen errors**: WebAssembly generation failures
 //! - **IO errors**: File not found, permission issues
 //!
 //! All errors cause the process to exit with code 1.
@@ -93,6 +96,15 @@
 //! infc example.inf --codegen -v
 //! ```
 //!
+//! ## Relationship to `infs`
+//!
+//! The Inference ecosystem provides two CLI tools:
+//!
+//! - **`infc`** (this binary) - Standalone compiler
+//! - **`infs`** - Unified toolchain CLI with project management and toolchain installation
+//!
+//! See `apps/infs/README.md` for the full-featured toolchain interface.
+//!
 //! ## Current Limitations
 //!
 //! - Single-file compilation only (multi-file projects not yet supported)
@@ -106,16 +118,20 @@
 //! - Phase execution correctness
 //! - Output file generation
 //! - Error message formatting
+//!
+//! See `README.md` in this crate for comprehensive usage documentation.
 
 mod parser;
+pub(crate) mod toolchain;
 use clap::Parser;
-use inference::{analyze, codegen, parse, type_check, wasm_to_v};
+use inference::{analyze, parse, type_check, wasm_to_v};
 use parser::Cli;
 use std::{
     fs,
     path::PathBuf,
     process::{self},
 };
+use toolchain::BuildProfile;
 
 /// Entry point for the Inference compiler CLI.
 ///
@@ -128,7 +144,7 @@ use std::{
 /// 3. **Execute compilation phases** in canonical order:
 ///    - Parse: Build typed AST from source using tree-sitter
 ///    - Analyze: Type check and semantic validation
-///    - Codegen: Generate LLVM IR and compile to WebAssembly
+///    - Codegen: Generate WebAssembly binary from typed AST
 /// 4. **Generate output files** (if requested):
 ///    - Write WASM binary with `-o` flag
 ///    - Write Rocq translation with `-v` flag
@@ -165,6 +181,7 @@ use std::{
 /// - Calls `process::exit(1)` explicitly on errors (no panics)
 /// - Reads entire source file into memory (limitation: no streaming)
 /// - Phase execution is sequential (no parallelization)
+#[allow(clippy::too_many_lines)]
 fn main() {
     let args = Cli::parse();
     if !args.path.exists() {
@@ -182,7 +199,13 @@ fn main() {
         process::exit(1);
     }
 
-    let source_code = fs::read_to_string(&args.path).expect("Error reading source file");
+    let source_code = match fs::read_to_string(&args.path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Error reading source file: {e}");
+            process::exit(1);
+        }
+    };
     let mut t_ast = None;
     if need_codegen || need_analyze || need_parse {
         match parse(source_code.as_str()) {
@@ -198,7 +221,8 @@ fn main() {
     }
 
     let Some(arena) = t_ast else {
-        unreachable!("Phase validation guarantees parse ran when required");
+        eprintln!("Internal error: parse phase did not produce AST");
+        process::exit(1);
     };
 
     let mut typed_context = None;
@@ -220,34 +244,45 @@ fn main() {
         }
     }
     if need_codegen {
-        let wasm = match codegen(&typed_context.unwrap()) {
-            Ok(w) => w,
+        let Some(tctx) = typed_context else {
+            eprintln!("Internal error: type check phase did not produce typed context");
+            process::exit(1);
+        };
+        let profile = BuildProfile::default();
+        let target = inference_wasm_codegen::Target::default();
+        let mode = inference_wasm_codegen::CompilationMode::default();
+        let opt_level = profile.resolve_opt_level(target, mode);
+        let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
+            Ok(o) => o,
             Err(e) => {
                 eprintln!("Codegen failed: {e}");
                 process::exit(1);
             }
         };
-        println!("WASM generated");
+        println!("Codegen complete");
         let source_fname = args
             .path
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("module"))
             .to_str()
             .unwrap();
+
+        let wasm_bytes = codegen_output.wasm();
+
         if args.generate_wasm_output {
             let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
             if let Err(e) = fs::create_dir_all(&output_path) {
                 eprintln!("Failed to create output directory: {e}");
                 process::exit(1);
             }
-            if let Err(e) = fs::write(&wasm_file_path, &wasm) {
+            if let Err(e) = fs::write(&wasm_file_path, wasm_bytes) {
                 eprintln!("Failed to write WASM file: {e}");
                 process::exit(1);
             }
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            match wasm_to_v(source_fname, &wasm) {
+            match wasm_to_v(source_fname, wasm_bytes) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {

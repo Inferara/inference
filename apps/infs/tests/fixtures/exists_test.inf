@@ -1,0 +1,6 @@
+fn test_exists() -> i32 {
+    exists x: i32 {
+        x == 42
+    }
+    0
+}

@@ -1,48 +1,85 @@
 //! WASM Bytecode Parser
 //!
-//! This module provides the parsing phase of WASM to Rocq translation.
-//! It streams through WASM bytecode sections and builds a structured
-//! representation suitable for Rocq code generation.
+//! This module provides the parsing phase (Phase 1) of WASM to Rocq translation.
+//! It streams through WASM bytecode sections and builds a structured representation
+//! suitable for Rocq code generation.
 //!
 //! ## Overview
 //!
-//! The parser uses `inf-wasmparser` (a fork of `wasmparser` with non-deterministic
-//! instruction support) to incrementally parse WASM sections without loading the
-//! entire module into memory.
+//! The parser uses [`inf-wasmparser`] (a fork of `wasmparser` with non-deterministic
+//! instruction support) to incrementally parse WASM sections. This streaming approach
+//! processes bytecode without loading the entire module into memory, enabling efficient
+//! handling of large WASM files.
 //!
 //! ## Entry Point
 //!
-//! The main entry point is [`translate_bytes`], which:
-//! 1. Parses WASM bytecode using [`parse`]
-//! 2. Builds a [`WasmParseData`] structure
-//! 3. Calls [`WasmParseData::translate`] to generate Rocq code
+//! The main entry point is [`translate_bytes`], which orchestrates the complete
+//! translation pipeline:
+//!
+//! 1. **Parse Phase**: Call [`parse`] to stream through WASM sections
+//! 2. **Build Structure**: Populate [`WasmParseData`] with extracted information
+//! 3. **Translate Phase**: Call [`WasmParseData::translate`] to generate Rocq code
 //!
 //! ## Parsing Strategy
 //!
-//! The parser makes a single forward pass through the WASM module,
-//! processing sections in order:
+//! The parser makes a single forward pass through the WASM module, processing
+//! sections in WebAssembly specification order:
 //!
 //! ```text
 //! Version → Type → Import → Function → Table → Memory → Global →
 //! Export → Start → Element → DataCount → Data → Code → Custom
 //! ```
 //!
-//! Each section handler pushes data into the corresponding `WasmParseData` field.
+//! Each section handler:
+//! 1. Receives a section iterator from `inf-wasmparser`
+//! 2. Iterates through section entries
+//! 3. Pushes parsed data into the corresponding `WasmParseData` field
+//!
+//! ### Zero-Copy Parsing
+//!
+//! The parser uses borrowed data (`&[u8]`) throughout to minimize allocations.
+//! Most WASM section data references slices of the original bytecode, avoiding
+//! unnecessary copies.
 //!
 //! ## Custom Name Section
 //!
 //! The parser extracts debug information from the custom "name" section:
 //!
-//! - Module name: Overrides the default module name parameter
-//! - Function names: Maps function indices to human-readable names
-//! - Local names: Maps function indices to local variable name maps
+//! - **Module name**: Overrides the default module name parameter
+//! - **Function names**: Maps function indices to human-readable identifiers
+//! - **Local names**: Maps (function index, local index) to variable names
 //!
-//! This information dramatically improves readability of generated Rocq code.
+//! This information dramatically improves readability of generated Rocq code by
+//! preserving original source-level names.
+//!
+//! ## Component Model Sections
+//!
+//! WebAssembly component model sections are recognized but generate empty stubs:
+//!
+//! - `ModuleSection` - Nested modules
+//! - `InstanceSection` - Module instances
+//! - `ComponentSection` - Component definitions
+//! - `ComponentTypeSection` - Component type definitions
+//! - `ComponentInstanceSection` - Component instances
+//! - `ComponentAliasSection` - Component aliases
+//! - `ComponentCanonicalSection` - Canonical ABI definitions
+//! - `ComponentStartSection` - Component start function
+//! - `ComponentImportSection` - Component imports
+//! - `ComponentExportSection` - Component exports
+//!
+//! These sections are silently ignored during translation.
 //!
 //! ## Error Handling
 //!
-//! Parse errors are propagated using `anyhow::Result`. The parser fails fast
-//! on invalid bytecode, though the translation phase uses error recovery.
+//! Parse errors are propagated using [`anyhow::Result`]. The parser **fails fast**
+//! on invalid bytecode:
+//!
+//! - Malformed WASM magic number or version
+//! - Invalid section data
+//! - Out-of-bounds indices
+//! - Unsupported WASM features (when explicitly detected)
+//!
+//! The translation phase (Phase 2) uses error recovery, but the parsing phase does not.
 
 use inf_wasmparser::{
     Parser,
@@ -91,12 +128,30 @@ use crate::translator::WasmParseData;
 ///
 /// # Examples
 ///
+/// Basic usage:
+///
 /// ```ignore
 /// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
 ///
 /// let wasm_bytes = std::fs::read("output.wasm")?;
 /// let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
 /// std::fs::write("output.v", rocq_code)?;
+/// ```
+///
+/// Integration with Inference compiler:
+///
+/// ```ignore
+/// use inference::{parse, type_check, codegen};
+/// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+///
+/// let source = std::fs::read_to_string("program.inf")?;
+/// let arena = parse(&source)?;
+/// let typed_context = type_check(arena)?;
+/// let wasm_bytes = codegen(&typed_context)?;
+///
+/// // Translate to Rocq
+/// let rocq_code = translate_bytes("Program", &wasm_bytes)?;
+/// std::fs::write("program.v", rocq_code)?;
 /// ```
 pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
     let mut data = Vec::new();

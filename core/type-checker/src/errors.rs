@@ -1,3 +1,84 @@
+//! Type Checking Error Types
+//!
+//! This module defines the error types produced by the type checker, providing
+//! detailed context and location information for all type checking failures.
+//!
+//! ## Error Design
+//!
+//! All type checking errors:
+//! - Include precise source location (line and column)
+//! - Provide contextual information about the error
+//! - Use descriptive error messages via `thiserror`
+//! - Are collected and reported together (error recovery)
+//!
+//! ## Error Categories
+//!
+//! The error types are organized into logical categories:
+//!
+//! **Type Errors**:
+//! - [`TypeCheckError::TypeMismatch`] - Type doesn't match expected type
+//! - [`TypeCheckError::UnknownType`] - Reference to undefined type
+//! - [`TypeCheckError::ExpectedArrayType`] - Expected array, found other type
+//! - [`TypeCheckError::ExpectedStructType`] - Expected struct, found other type
+//! - [`TypeCheckError::ExpectedEnumType`] - Expected enum, found other type
+//!
+//! **Symbol Resolution Errors**:
+//! - [`TypeCheckError::UnknownIdentifier`] - Undeclared variable
+//! - [`TypeCheckError::UndefinedFunction`] - Call to undefined function
+//! - [`TypeCheckError::UndefinedStruct`] - Reference to undefined struct
+//! - [`TypeCheckError::UndefinedEnum`] - Reference to undefined enum
+//!
+//! **Visibility Errors**:
+//! - [`TypeCheckError::PrivateAccessViolation`] - Access to private symbol
+//!
+//! **Operator Errors**:
+//! - [`TypeCheckError::InvalidBinaryOperand`] - Invalid types for binary operator
+//! - [`TypeCheckError::InvalidUnaryOperand`] - Invalid type for unary operator
+//! - [`TypeCheckError::BinaryOperandTypeMismatch`] - Operand types don't match
+//!
+//! **Function and Method Errors**:
+//! - [`TypeCheckError::ArgumentCountMismatch`] - Wrong number of arguments
+//! - [`TypeCheckError::MethodNotFound`] - Undefined method on type
+//! - [`TypeCheckError::MethodCallOnNonStruct`] - Method call on primitive type
+//!
+//! **Other Errors**:
+//! - [`TypeCheckError::FieldNotFound`] - Undefined struct field
+//! - [`TypeCheckError::VariantNotFound`] - Undefined enum variant
+//! - [`TypeCheckError::ArrayIndexNotNumeric`] - Non-numeric array index
+//! - And more...
+//!
+//! ## Error Recovery
+//!
+//! The type checker implements error recovery to collect multiple errors:
+//!
+//! ```ignore
+//! fn example() -> i32 {
+//!     let x: bool = 42;        // Error 1: type mismatch
+//!     let y = undefined_var;   // Error 2: undeclared variable
+//!     return "string";         // Error 3: wrong return type
+//! }
+//! // All three errors reported together
+//! ```
+//!
+//! ## Usage Example
+//!
+//! ```ignore
+//! use inference_type_checker::TypeCheckerBuilder;
+//!
+//! match TypeCheckerBuilder::build_typed_context(arena) {
+//!     Ok(completed) => {
+//!         // Type checking succeeded
+//!     }
+//!     Err(e) => {
+//!         // Error contains all collected errors
+//!         eprintln!("Type checking failed:");
+//!         for error_msg in e.to_string().split("; ") {
+//!             eprintln!("  - {}", error_msg);
+//!         }
+//!     }
+//! }
+//! ```
+
 use std::fmt::{self, Display, Formatter};
 
 use inference_ast::nodes::{Location, OperatorKind, UnaryOperatorKind};

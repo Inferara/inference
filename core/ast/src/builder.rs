@@ -313,12 +313,45 @@ impl<'a> Builder<'a> {
             "type_definition_statement" => {
                 Definition::Type(self.build_type_definition(parent_id, node, code))
             }
-            _ => panic!(
-                "Unexpected definition kind: {}, {}",
-                node.kind(),
-                Self::get_location(node, code)
-            ),
+            "ERROR" => {
+                self.errors.push(anyhow::anyhow!(
+                    "Syntax error at {}: unexpected or malformed token",
+                    Self::get_location(node, code)
+                ));
+                Self::create_error_definition(node, code)
+            }
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected definition kind '{}' at {}",
+                    node.kind(),
+                    Self::get_location(node, code)
+                ));
+                Self::create_error_definition(node, code)
+            }
         }
+    }
+
+    /// Creates a placeholder function definition for error recovery.
+    /// This preserves AST structure with location info while marking the node as erroneous.
+    fn create_error_definition(node: &Node, code: &[u8]) -> Definition {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let name = Rc::new(Identifier::new(
+            Self::get_node_id(),
+            "<error>".to_string(),
+            location,
+        ));
+        let body = BlockType::Block(Rc::new(Block::new(Self::get_node_id(), location, vec![])));
+        Definition::Function(Rc::new(FunctionDefinition::new(
+            id,
+            Visibility::Private,
+            name,
+            None,
+            None,
+            None,
+            body,
+            location,
+        )))
     }
 
     fn build_struct_definition(
@@ -441,9 +474,46 @@ impl<'a> Builder<'a> {
         if let Some(returns_node) = node.child_by_field_name("returns") {
             returns = Some(self.build_type(id, &returns_node, code));
         }
-        let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
-        let body_node = node.child_by_field_name("body").unwrap();
-        let body = self.build_block(id, &body_node, code);
+        let Some(name_node) = node.child_by_field_name("name") else {
+            self.errors.push(anyhow::anyhow!(
+                "Missing function name at {}",
+                Self::get_location(node, code)
+            ));
+            let placeholder_name = Rc::new(Identifier::new(
+                Self::get_node_id(),
+                "<error>".to_string(),
+                location,
+            ));
+            let placeholder_body = BlockType::Block(Rc::new(Block::new(
+                Self::get_node_id(),
+                location,
+                Vec::new(),
+            )));
+            return Rc::new(FunctionDefinition::new(
+                id,
+                Visibility::default(),
+                placeholder_name,
+                None,
+                None,
+                None,
+                placeholder_body,
+                location,
+            ));
+        };
+        let name = self.build_identifier(id, &name_node, code);
+        let body = if let Some(body_node) = node.child_by_field_name("body") {
+            self.build_block(id, &body_node, code)
+        } else {
+            self.errors.push(anyhow::anyhow!(
+                "Missing function body at {}",
+                Self::get_location(node, code)
+            ));
+            BlockType::Block(Rc::new(Block::new(
+                Self::get_node_id(),
+                Self::get_location(node, code),
+                Vec::new(),
+            )))
+        };
         let node = Rc::new(FunctionDefinition::new(
             id,
             Self::get_visibility(node),
@@ -634,11 +704,10 @@ impl<'a> Builder<'a> {
         let location = Self::get_location(node, code);
         match node.kind() {
             "assume_block" => {
-                let statements = self.build_block_statements(
-                    id,
-                    &node.child_by_field_name("body").unwrap(),
-                    code,
-                );
+                let statements = node
+                    .child_by_field_name("body")
+                    .map(|body_node| self.build_block_statements(id, &body_node, code))
+                    .unwrap_or_default();
                 let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(
                     AstNode::Statement(Statement::Block(BlockType::Assume(node.clone()))),
@@ -647,11 +716,10 @@ impl<'a> Builder<'a> {
                 BlockType::Assume(node)
             }
             "forall_block" => {
-                let statements = self.build_block_statements(
-                    id,
-                    &node.child_by_field_name("body").unwrap(),
-                    code,
-                );
+                let statements = node
+                    .child_by_field_name("body")
+                    .map(|body_node| self.build_block_statements(id, &body_node, code))
+                    .unwrap_or_default();
                 let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(
                     AstNode::Statement(Statement::Block(BlockType::Forall(node.clone()))),
@@ -660,11 +728,10 @@ impl<'a> Builder<'a> {
                 BlockType::Forall(node)
             }
             "exists_block" => {
-                let statements = self.build_block_statements(
-                    id,
-                    &node.child_by_field_name("body").unwrap(),
-                    code,
-                );
+                let statements = node
+                    .child_by_field_name("body")
+                    .map(|body_node| self.build_block_statements(id, &body_node, code))
+                    .unwrap_or_default();
                 let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(
                     AstNode::Statement(Statement::Block(BlockType::Exists(node.clone()))),
@@ -673,11 +740,10 @@ impl<'a> Builder<'a> {
                 BlockType::Exists(node)
             }
             "unique_block" => {
-                let statements = self.build_block_statements(
-                    id,
-                    &node.child_by_field_name("body").unwrap(),
-                    code,
-                );
+                let statements = node
+                    .child_by_field_name("body")
+                    .map(|body_node| self.build_block_statements(id, &body_node, code))
+                    .unwrap_or_default();
                 let node = Rc::new(Block::new(id, location, statements));
                 self.arena.add_node(
                     AstNode::Statement(Statement::Block(BlockType::Unique(node.clone()))),
@@ -694,12 +760,34 @@ impl<'a> Builder<'a> {
                 );
                 BlockType::Block(node)
             }
-            _ => panic!(
-                "Unexpected block type: {}, {}",
-                node.kind(),
-                Self::get_location(node, code)
-            ),
+            "ERROR" => {
+                self.errors.push(anyhow::anyhow!(
+                    "Syntax error in block at {}",
+                    Self::get_location(node, code)
+                ));
+                self.create_error_block(node, code, parent_id)
+            }
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected block type '{}' at {}",
+                    node.kind(),
+                    Self::get_location(node, code)
+                ));
+                self.create_error_block(node, code, parent_id)
+            }
         }
+    }
+
+    /// Creates a placeholder empty block for error recovery.
+    fn create_error_block(&mut self, node: &Node, code: &[u8], parent_id: u32) -> BlockType {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let block = Rc::new(Block::new(id, location, vec![]));
+        self.arena.add_node(
+            AstNode::Statement(Statement::Block(BlockType::Block(block.clone()))),
+            parent_id,
+        );
+        BlockType::Block(block)
     }
 
     fn build_block_statements(
@@ -715,7 +803,8 @@ impl<'a> Builder<'a> {
             self.collect_errors(&child, code);
 
             if child.is_named() {
-                statements.push(self.build_statement(parent_id, &child, code));
+                let stmt = self.build_statement(parent_id, &child, code);
+                statements.push(stmt);
             }
         }
         statements
@@ -730,8 +819,11 @@ impl<'a> Builder<'a> {
                 Statement::Block(self.build_block(parent_id, node, code))
             }
             "expression_statement" => {
-                let expr_node = node.child(0).unwrap();
-                Statement::Expression(self.build_expression(parent_id, &expr_node, code))
+                if let Some(expr_node) = node.child(0) {
+                    Statement::Expression(self.build_expression(parent_id, &expr_node, code))
+                } else {
+                    self.create_error_statement(node, code, parent_id)
+                }
             }
             "return_statement" => {
                 Statement::Return(self.build_return_statement(parent_id, node, code))
@@ -753,12 +845,35 @@ impl<'a> Builder<'a> {
             "constant_definition" => {
                 Statement::ConstantDefinition(self.build_constant_definition(parent_id, node, code))
             }
-            _ => panic!(
-                "Unexpected statement type: {}, {}",
-                node.kind(),
-                Self::get_location(node, code)
-            ),
+            "ERROR" => {
+                self.errors.push(anyhow::anyhow!(
+                    "Syntax error in statement at {}",
+                    Self::get_location(node, code)
+                ));
+                self.create_error_statement(node, code, parent_id)
+            }
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected statement type '{}' at {}",
+                    node.kind(),
+                    Self::get_location(node, code)
+                ));
+                self.create_error_statement(node, code, parent_id)
+            }
         }
+    }
+
+    /// Creates a placeholder expression statement for error recovery.
+    fn create_error_statement(&mut self, node: &Node, code: &[u8], parent_id: u32) -> Statement {
+        let id = Self::get_node_id();
+        let location = Self::get_location(node, code);
+        let error_ident = Rc::new(Identifier::new(id, "<error>".to_string(), location));
+        let stmt = Statement::Expression(Expression::Identifier(error_ident.clone()));
+        self.arena.add_node(
+            AstNode::Expression(Expression::Identifier(error_ident)),
+            parent_id,
+        );
+        stmt
     }
 
     fn build_return_statement(
@@ -799,8 +914,15 @@ impl<'a> Builder<'a> {
         let condition = node
             .child_by_field_name("condition")
             .map(|n| self.build_expression(id, &n, code));
-        let body_block = node.child_by_field_name("body").unwrap();
-        let body = self.build_block(id, &body_block, code);
+        let body = if let Some(body_block) = node.child_by_field_name("body") {
+            self.build_block(id, &body_block, code)
+        } else {
+            self.errors.push(anyhow::anyhow!(
+                "Missing loop body at {}",
+                Self::get_location(node, code)
+            ));
+            BlockType::Block(Rc::new(Block::new(Self::get_node_id(), location, vec![])))
+        };
         let node = Rc::new(LoopStatement::new(id, location, condition, body));
         self.arena
             .add_node(AstNode::Statement(Statement::Loop(node.clone())), parent_id);
@@ -811,10 +933,28 @@ impl<'a> Builder<'a> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let condition_node = node.child_by_field_name("condition").unwrap();
-        let condition = self.build_expression(id, &condition_node, code);
-        let if_arm_node = node.child_by_field_name("if_arm").unwrap();
-        let if_arm = self.build_block(id, &if_arm_node, code);
+        let condition = if let Some(condition_node) = node.child_by_field_name("condition") {
+            self.build_expression(id, &condition_node, code)
+        } else {
+            self.errors.push(anyhow::anyhow!(
+                "Missing if condition at {}",
+                Self::get_location(node, code)
+            ));
+            Expression::Identifier(Rc::new(Identifier::new(
+                Self::get_node_id(),
+                "<error>".to_string(),
+                location,
+            )))
+        };
+        let if_arm = if let Some(if_arm_node) = node.child_by_field_name("if_arm") {
+            self.build_block(id, &if_arm_node, code)
+        } else {
+            self.errors.push(anyhow::anyhow!(
+                "Missing if body at {}",
+                Self::get_location(node, code)
+            ));
+            BlockType::Block(Rc::new(Block::new(Self::get_node_id(), location, vec![])))
+        };
         let else_arm = node
             .child_by_field_name("else_arm")
             .map(|n| self.build_block(id, &n, code));
@@ -906,10 +1046,31 @@ impl<'a> Builder<'a> {
                 Expression::Uzumaki(self.build_uzumaki_expression(parent_id, node, code))
             }
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
-            _ => panic!(
-                "Unexpected expression node kind: {node_kind} at {}",
-                Self::get_location(node, code)
-            ),
+            "ERROR" => {
+                self.errors.push(anyhow::anyhow!(
+                    "Syntax error in expression at {}",
+                    Self::get_location(node, code)
+                ));
+                let location = Self::get_location(node, code);
+                Expression::Identifier(Rc::new(Identifier::new(
+                    Self::get_node_id(),
+                    "<error>".to_string(),
+                    location,
+                )))
+            }
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected expression node kind '{}' at {}",
+                    node_kind,
+                    Self::get_location(node, code)
+                ));
+                let location = Self::get_location(node, code);
+                Expression::Identifier(Rc::new(Identifier::new(
+                    Self::get_node_id(),
+                    "<error>".to_string(),
+                    location,
+                )))
+            }
         }
     }
 
@@ -1236,7 +1397,14 @@ impl<'a> Builder<'a> {
             "^" => OperatorKind::BitXor,
             "&" => OperatorKind::BitAnd,
             "|" => OperatorKind::BitOr,
-            _ => panic!("Unexpected operator node: {operator_kind}"),
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected operator '{}' at {}",
+                    operator_kind,
+                    Self::get_location(node, code)
+                ));
+                OperatorKind::Add
+            }
         };
 
         let right = self.build_expression(id, &node.child_by_field_name("right").unwrap(), code);
@@ -1256,7 +1424,17 @@ impl<'a> Builder<'a> {
             "string_literal" => Literal::String(self.build_string_literal(parent_id, node, code)),
             "number_literal" => Literal::Number(self.build_number_literal(parent_id, node, code)),
             "unit_literal" => Literal::Unit(self.build_unit_literal(parent_id, node, code)),
-            _ => panic!("Unexpected literal type: {}", node.kind()),
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected literal type '{}' at {}",
+                    node.kind(),
+                    Self::get_location(node, code)
+                ));
+                Literal::Unit(Rc::new(UnitLiteral::new(
+                    Self::get_node_id(),
+                    Self::get_location(node, code),
+                )))
+            }
         }
     }
 
@@ -1292,10 +1470,18 @@ impl<'a> Builder<'a> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let value = match node.utf8_text(code).unwrap() {
+        let text = node.utf8_text(code).unwrap_or("");
+        let value = match text {
             "true" => true,
             "false" => false,
-            _ => panic!("Unexpected boolean literal value"),
+            _ => {
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected boolean literal value '{}' at {}",
+                    text,
+                    Self::get_location(node, code)
+                ));
+                false
+            }
         };
 
         let node = Rc::new(BoolLiteral::new(id, location, value));
@@ -1382,9 +1568,20 @@ impl<'a> Builder<'a> {
                 let name = self.build_identifier(parent_id, node, code);
                 Type::Custom(name)
             }
+            "ERROR" => {
+                self.errors.push(anyhow::anyhow!(
+                    "Syntax error in type at {}",
+                    Self::get_location(node, code)
+                ));
+                Type::Simple(SimpleTypeKind::Unit)
+            }
             _ => {
-                let location = Self::get_location(node, code);
-                panic!("Unexpected type: {node_kind}, {location}")
+                self.errors.push(anyhow::anyhow!(
+                    "Unexpected type '{}' at {}",
+                    node_kind,
+                    Self::get_location(node, code)
+                ));
+                Type::Simple(SimpleTypeKind::Unit)
             }
         }
     }

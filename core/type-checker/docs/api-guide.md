@@ -747,9 +747,101 @@ let substitutions = build_substitution_map(call_site);
 let concrete_type = generic_type.substitute(&substitutions);
 ```
 
+## Performance Considerations
+
+### Efficient Node Queries
+
+The type checker uses `FxHashMap` for O(1) lookups:
+
+```rust
+// Fast type lookup by node ID
+let type_info = typed_context.get_node_typeinfo(node_id); // O(1)
+
+// Predicate helpers are also O(1)
+if typed_context.is_node_i32(node_id) { /* ... */ }
+```
+
+### Minimizing Allocations
+
+When querying multiple types, clone only when necessary:
+
+```rust
+// Clone only when storing
+let nodes_and_types: Vec<(u32, TypeInfo)> = nodes
+    .iter()
+    .filter_map(|&node_id| {
+        typed_context.get_node_typeinfo(node_id)
+            .map(|type_info| (node_id, type_info))
+    })
+    .collect();
+
+// Use references when just checking
+for node_id in &nodes {
+    if let Some(type_info) = typed_context.get_node_typeinfo(*node_id) {
+        println!("Type: {}", type_info);  // Displays, doesn't clone
+    }
+}
+```
+
+### Arena-Based Iteration
+
+The arena provides efficient iteration without allocations:
+
+```rust
+// Efficient filtering without intermediate collections
+let binary_ops = typed_context.filter_nodes(|node| {
+    matches!(node, AstNode::Expression(Expression::Binary(_)))
+});
+
+// Filter predicate runs once per node, result collected efficiently
+```
+
+## Integration Patterns
+
+### Error Reporting with Source Context
+
+```rust
+use inference_type_checker::TypeCheckerBuilder;
+
+fn type_check_with_diagnostics(source_code: &str) {
+    let arena = parse_source(source_code).unwrap();
+
+    match TypeCheckerBuilder::build_typed_context(arena) {
+        Ok(builder) => {
+            let typed_context = builder.typed_context();
+            println!("Type checking passed!");
+        }
+        Err(e) => {
+            eprintln!("Type checking errors:");
+            eprintln!("{}", e);
+
+            // Parse individual errors if needed
+            for (idx, error_msg) in e.to_string().split("; ").enumerate() {
+                eprintln!("  [{}] {}", idx + 1, error_msg);
+            }
+        }
+    }
+}
+```
+
+### Progressive Type Checking
+
+```rust
+// Type check multiple files separately
+fn type_check_files(files: &[String]) -> Vec<Result<TypedContext, anyhow::Error>> {
+    files.iter().map(|file| {
+        let source = std::fs::read_to_string(file)?;
+        let arena = parse_source(&source)?;
+
+        TypeCheckerBuilder::build_typed_context(arena)
+            .map(|builder| builder.typed_context())
+    }).collect()
+}
+```
+
 ## Further Reading
 
-- [Architecture Documentation](./architecture.md) - Internal design details
-- [Error Reference](./errors.md) - Complete error catalog
-- [Symbol Table Guide](./symbol-table.md) - Scope and symbol management
-- [API Documentation](https://docs.rs/inference-type-checker) - Generated API docs
+- [Architecture Documentation](./architecture.md) - Internal design details and implementation patterns
+- [Error Reference](./errors.md) - Complete catalog of all 29+ error types
+- [Type System Reference](./type-system.md) - Complete type system rules and semantics
+- [Parent Project README](../README.md) - Overview and quick start guide

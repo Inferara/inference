@@ -31,7 +31,9 @@
 //! - [`arena::Arena`] - Central storage for all AST nodes with O(1) lookups
 //! - [`builder::Builder`] - Builds AST from tree-sitter concrete syntax tree
 //! - [`nodes`] - AST node type definitions (`SourceFile`, `FunctionDefinition`, etc.)
+//! - [`extern_prelude`] - External module discovery and parsing
 //! - [`parser_context::ParserContext`] - Multi-file parsing context (WIP)
+//! - [`errors`] - Structured error types for AST operations
 //!
 //! # Key Features
 //!
