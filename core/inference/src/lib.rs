@@ -691,9 +691,9 @@ pub fn codegen(
 /// - [WebAssembly Specification](https://webassembly.github.io/spec/)
 /// - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 /// - [`inference_wasm_to_v_translator`] for implementation details
-pub fn wasm_to_v(mod_name: &str, wasm: &Vec<u8>) -> anyhow::Result<String> {
+pub fn wasm_to_v(mod_name: &str, wasm: &[u8]) -> anyhow::Result<String> {
     if let Ok(v) =
-        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm.as_slice())
+        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm)
     {
         Ok(v)
     } else {

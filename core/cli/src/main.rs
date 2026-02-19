@@ -282,7 +282,7 @@ fn main() {
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            match wasm_to_v(source_fname, &wasm_bytes.to_vec()) {
+            match wasm_to_v(source_fname, wasm_bytes) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {
