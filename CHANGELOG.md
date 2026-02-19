@@ -35,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
-- Document FxHashMap non-deterministic iteration bug in `arena.rs` ([#97])
 
 ### Testing
 
@@ -217,6 +216,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Performance
 
 - ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
+
+### Fixed
+
+- Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
+- Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
+- Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
+- Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
 
 ---
 
