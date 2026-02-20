@@ -125,12 +125,8 @@ mod error_recovery_tests {
     #[test]
     fn test_error_deduplication() {
         let source = r#"
-            struct Container {
-                value: UnknownType;
-            }
-            fn test(c: Container) -> UnknownType {
-                let x: UnknownType = c.value;
-                return x;
+            fn test(a: UnknownType, b: UnknownType) -> i32 {
+                return 0;
             }
         "#;
         let result = try_type_check(source);
@@ -142,13 +138,45 @@ mod error_recovery_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             let unknown_type_count = error_msg.matches("unknown type `UnknownType`").count();
-            assert!(
-                unknown_type_count <= 3,
-                "UnknownType error should not be excessively duplicated (found {} occurrences), got: {}",
-                unknown_type_count,
+            assert_eq!(
+                unknown_type_count, 1,
+                "UnknownType error should appear exactly once due to deduplication, got: {}",
                 error_msg
             );
         }
+    }
+
+    /// Structural coverage: verifies that the first occurrence of a deduplicated
+    /// error type hits the `type_checker_error_dedup_first_occurrence` branch in
+    /// `push_error_dedup`. Uses a source with exactly one `UnknownType` so the
+    /// mark fires exactly once.
+    #[test]
+    fn test_error_dedup_first_occurrence() {
+        let source = r#"fn test(x: UnknownType) -> i32 { return 0; }"#;
+        cov_mark::check_count!(type_checker_error_dedup_first_occurrence, 1);
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should report unknown type error"
+        );
+    }
+
+    /// Structural coverage: verifies that the second occurrence of the same
+    /// deduplicated error type hits the `type_checker_error_dedup_skips_duplicate`
+    /// branch in `push_error_dedup`. Uses a source where `UnknownType` appears
+    /// exactly twice so that the first occurrence hits
+    /// `type_checker_error_dedup_first_occurrence` and the second occurrence
+    /// hits `type_checker_error_dedup_skips_duplicate`; this test specifically
+    /// asserts only on the skips-duplicate path.
+    #[test]
+    fn test_error_dedup_skips_duplicate() {
+        let source = r#"fn test(a: UnknownType, b: UnknownType) -> i32 { return 0; }"#;
+        cov_mark::check_count!(type_checker_error_dedup_skips_duplicate, 1);
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should report unknown type error"
+        );
     }
 
     #[test]

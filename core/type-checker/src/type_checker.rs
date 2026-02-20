@@ -2092,8 +2092,10 @@ impl TypeChecker {
         };
         if let Some(key) = key {
             if self.reported_error_keys.contains(&key) {
+                cov_mark::hit!(type_checker_error_dedup_skips_duplicate);
                 return;
             }
+            cov_mark::hit!(type_checker_error_dedup_first_occurrence);
             self.reported_error_keys.insert(key);
         }
         self.errors.push(error);

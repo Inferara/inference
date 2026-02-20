@@ -11,3 +11,4 @@ inference-ast.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 rustc-hash.workspace = true
+cov-mark.workspace = true

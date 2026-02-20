@@ -58,6 +58,7 @@ tree-sitter-inference = "0.0.38"
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+cov-mark = { version = "2.2.0", default-features = false }
 leb128 = "0.2.5"
 rustc-hash = "2.1.1"
 
