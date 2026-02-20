@@ -101,7 +101,6 @@ mod error_recovery_tests {
                 return helper(10);
             }
         "#;
-        cov_mark::check!(type_checker_error_dedup_first_occurrence);
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -130,7 +129,6 @@ mod error_recovery_tests {
                 return 0;
             }
         "#;
-        cov_mark::check!(type_checker_error_dedup_skips_duplicate);
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -146,6 +144,36 @@ mod error_recovery_tests {
                 error_msg
             );
         }
+    }
+
+    /// Structural coverage: verifies that the first occurrence of a deduplicated
+    /// error type hits the `type_checker_error_dedup_first_occurrence` branch in
+    /// `push_error_dedup`. Uses a source with exactly one `UnknownType` so the
+    /// mark fires exactly once.
+    #[test]
+    fn test_error_dedup_first_occurrence() {
+        let source = r#"fn test(x: UnknownType) -> i32 { return 0; }"#;
+        cov_mark::check_count!(type_checker_error_dedup_first_occurrence, 1);
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should report unknown type error"
+        );
+    }
+
+    /// Structural coverage: verifies that the second occurrence of the same
+    /// deduplicated error type hits the `type_checker_error_dedup_skips_duplicate`
+    /// branch in `push_error_dedup`. Uses a source where `UnknownType` appears
+    /// exactly twice: one first_occurrence hit, one skips_duplicate hit.
+    #[test]
+    fn test_error_dedup_skips_duplicate() {
+        let source = r#"fn test(a: UnknownType, b: UnknownType) -> i32 { return 0; }"#;
+        cov_mark::check_count!(type_checker_error_dedup_skips_duplicate, 1);
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should report unknown type error"
+        );
     }
 
     #[test]
