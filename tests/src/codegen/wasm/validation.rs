@@ -59,6 +59,7 @@ mod codegen_validation_tests {
 
     #[test]
     fn codegen_rejects_proof_with_soroban() {
+        cov_mark::check!(wasm_codegen_proof_mode_rejected_non_wasm32);
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let result = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Proof);
         assert!(
@@ -75,6 +76,7 @@ mod codegen_validation_tests {
 
     #[test]
     fn codegen_rejects_soroban_with_nondet() {
+        cov_mark::check!(wasm_codegen_soroban_rejects_nondet_function);
         let source = "pub fn with_nondet() -> i32 { return @; }";
         let result = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile);
         assert!(

@@ -987,3 +987,17 @@ fn test_parse_function_multiple_params() {
     assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(4), true);
 }
+
+// --- Error Recovery Coverage Tests ---
+
+#[test]
+fn test_error_definition_recovery() {
+    cov_mark::check!(ast_builder_error_definition_recovery);
+    let _ = try_build_ast("$$$".to_string());
+}
+
+#[test]
+fn test_error_statement_recovery() {
+    cov_mark::check!(ast_builder_error_statement_recovery);
+    let _ = try_build_ast("fn f() { $$$; }".to_string());
+}

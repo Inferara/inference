@@ -63,6 +63,11 @@ mod base_codegen_tests {
 
     #[test]
     fn nondet_test() {
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_assume_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_exists_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_unique_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
         let test_name = "nondet";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -78,6 +83,7 @@ mod base_codegen_tests {
 
     #[test]
     fn i64_uzumaki_test() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i64, 1);
         let test_name = "i64_uzumaki";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

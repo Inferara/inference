@@ -600,6 +600,7 @@ impl TypeChecker {
                     if let Some(target) = &target_type {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
                     } else {
+                        cov_mark::hit!(type_checker_uzumaki_cannot_infer_type);
                         self.errors.push(TypeCheckError::CannotInferUzumakiType {
                             location: uzumaki_rc.location,
                         });
@@ -952,6 +953,7 @@ impl TypeChecker {
                         ctx.set_node_typeinfo(type_member_access_expression.id, enum_type.clone());
                         Some(enum_type)
                     } else {
+                        cov_mark::hit!(type_checker_variant_not_found);
                         self.errors.push(TypeCheckError::VariantNotFound {
                             enum_name,
                             variant_name: variant_name.clone(),
@@ -1007,7 +1009,7 @@ impl TypeChecker {
                         {
                             // Found a method - check if it's an instance method or associated function
                             if method_info.is_instance_method() {
-                                // Error: calling instance method without receiver
+                                cov_mark::hit!(type_checker_instance_method_called_as_associated);
                                 self.errors.push(
                                     TypeCheckError::InstanceMethodCalledAsAssociated {
                                         type_name: type_name.clone(),
@@ -1097,7 +1099,7 @@ impl TypeChecker {
                             {
                                 // Check if this is an associated function being called as instance method
                                 if !method_info.is_instance_method() {
-                                    // Error: calling associated function with receiver
+                                    cov_mark::hit!(type_checker_associated_function_called_as_method);
                                     self.errors.push(
                                         TypeCheckError::AssociatedFunctionCalledAsMethod {
                                             type_name: type_name.clone(),
@@ -1927,6 +1929,7 @@ impl TypeChecker {
         };
 
         if self.glob_resolution_in_progress.contains(&target_scope_id) {
+            cov_mark::hit!(type_checker_circular_glob_import_detected);
             self.errors.push(TypeCheckError::CircularImport {
                 path: path.join("::"),
                 location: *location,

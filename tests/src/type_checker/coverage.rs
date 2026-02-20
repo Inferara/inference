@@ -1357,3 +1357,25 @@ mod edge_cases {
         );
     }
 }
+
+#[cfg(test)]
+mod cov_mark_coverage {
+    use super::*;
+
+    #[test]
+    fn test_uzumaki_unresolvable_target_type() {
+        let source = r#"fn test() { y = @; }"#;
+        cov_mark::check!(type_checker_uzumaki_cannot_infer_type);
+        let result = try_type_check(source);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_enum_variant_not_found() {
+        let source =
+            r#"enum Color { Red } fn test_color(c: Color) {} fn test() { test_color(Color::Blue); }"#;
+        cov_mark::check!(type_checker_variant_not_found);
+        let result = try_type_check(source);
+        assert!(result.is_err());
+    }
+}

@@ -337,6 +337,7 @@ impl Compiler {
                     parent_blocks_stack.pop();
                 }
                 BlockType::Forall(forall_block) => {
+                    cov_mark::hit!(wasm_codegen_emit_forall_block);
                     self.emit_nondet_block_start(func, FORALL_OPCODE);
                     parent_blocks_stack.push(BlockType::Forall(forall_block.clone()));
                     for stmt in forall_block.statements.clone() {
@@ -352,6 +353,7 @@ impl Compiler {
                     parent_blocks_stack.pop();
                 }
                 BlockType::Assume(assume_block) => {
+                    cov_mark::hit!(wasm_codegen_emit_assume_block);
                     self.emit_nondet_block_start(func, ASSUME_OPCODE);
                     parent_blocks_stack.push(BlockType::Assume(assume_block.clone()));
                     for stmt in assume_block.statements.clone() {
@@ -367,6 +369,7 @@ impl Compiler {
                     parent_blocks_stack.pop();
                 }
                 BlockType::Exists(exists_block) => {
+                    cov_mark::hit!(wasm_codegen_emit_exists_block);
                     self.emit_nondet_block_start(func, EXISTS_OPCODE);
                     parent_blocks_stack.push(BlockType::Exists(exists_block.clone()));
                     for stmt in exists_block.statements.clone() {
@@ -382,6 +385,7 @@ impl Compiler {
                     parent_blocks_stack.pop();
                 }
                 BlockType::Unique(unique_block) => {
+                    cov_mark::hit!(wasm_codegen_emit_unique_block);
                     self.emit_nondet_block_start(func, UNIQUE_OPCODE);
                     parent_blocks_stack.push(BlockType::Unique(unique_block.clone()));
                     for stmt in unique_block.statements.clone() {
@@ -590,10 +594,12 @@ impl Compiler {
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(uzumaki_expression) => {
                 if ctx.is_node_i32(uzumaki_expression.id) {
+                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                     self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
                     return;
                 }
                 if ctx.is_node_i64(uzumaki_expression.id) {
+                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
                     self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
                     return;
                 }
