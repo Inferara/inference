@@ -101,8 +101,8 @@ mod error_recovery_tests {
                 return helper(10);
             }
         "#;
-        let result = try_type_check(source);
         cov_mark::check!(type_checker_error_dedup_first_occurrence);
+        let result = try_type_check(source);
         assert!(
             result.is_err(),
             "Type checker should report unknown type error"
@@ -126,9 +126,8 @@ mod error_recovery_tests {
     #[test]
     fn test_error_deduplication() {
         let source = r#"
-            fn test(a: UnknownType, b: UnknownType) -> UnknownType {
-                let x: UnknownType = a;
-                return b;
+            fn test(a: UnknownType, b: UnknownType) -> i32 {
+                return 0;
             }
         "#;
         cov_mark::check!(type_checker_error_dedup_skips_duplicate);
@@ -141,10 +140,9 @@ mod error_recovery_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             let unknown_type_count = error_msg.matches("unknown type `UnknownType`").count();
-            assert!(
-                unknown_type_count <= 3,
-                "UnknownType error should not be excessively duplicated (found {} occurrences), got: {}",
-                unknown_type_count,
+            assert_eq!(
+                unknown_type_count, 1,
+                "UnknownType error should appear exactly once due to deduplication, got: {}",
                 error_msg
             );
         }
