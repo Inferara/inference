@@ -314,6 +314,7 @@ impl<'a> Builder<'a> {
                 Definition::Type(self.build_type_definition(parent_id, node, code))
             }
             "ERROR" => {
+                cov_mark::hit!(ast_builder_error_definition_recovery);
                 self.errors.push(anyhow::anyhow!(
                     "Syntax error at {}: unexpected or malformed token",
                     Self::get_location(node, code)
@@ -761,6 +762,8 @@ impl<'a> Builder<'a> {
                 BlockType::Block(node)
             }
             "ERROR" => {
+                // defensive: unreachable with current tree-sitter grammar
+                cov_mark::hit!(ast_builder_error_block_recovery);
                 self.errors.push(anyhow::anyhow!(
                     "Syntax error in block at {}",
                     Self::get_location(node, code)
@@ -846,6 +849,7 @@ impl<'a> Builder<'a> {
                 Statement::ConstantDefinition(self.build_constant_definition(parent_id, node, code))
             }
             "ERROR" => {
+                cov_mark::hit!(ast_builder_error_statement_recovery);
                 self.errors.push(anyhow::anyhow!(
                     "Syntax error in statement at {}",
                     Self::get_location(node, code)
@@ -1047,6 +1051,8 @@ impl<'a> Builder<'a> {
             }
             "identifier" => Expression::Identifier(self.build_identifier(parent_id, node, code)),
             "ERROR" => {
+                // defensive: unreachable with current tree-sitter grammar
+                cov_mark::hit!(ast_builder_error_expression_recovery);
                 self.errors.push(anyhow::anyhow!(
                     "Syntax error in expression at {}",
                     Self::get_location(node, code)
@@ -1569,6 +1575,8 @@ impl<'a> Builder<'a> {
                 Type::Custom(name)
             }
             "ERROR" => {
+                // defensive: unreachable with current tree-sitter grammar
+                cov_mark::hit!(ast_builder_error_type_recovery);
                 self.errors.push(anyhow::anyhow!(
                     "Syntax error in type at {}",
                     Self::get_location(node, code)

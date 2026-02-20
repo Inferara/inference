@@ -82,6 +82,7 @@ pub fn codegen(
     opt_level: OptLevel,
 ) -> anyhow::Result<CodegenOutput> {
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
+        cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
         return Err(anyhow::anyhow!(
             "Proof mode requires Wasm32 target. Proof mode emits custom 0xfc \
              non-deterministic instructions that only the Wasm32 target supports; \
@@ -93,6 +94,7 @@ pub fn codegen(
         for source_file in &typed_context.source_files() {
             for func_def in source_file.function_definitions() {
                 if func_def.is_non_det() {
+                    cov_mark::hit!(wasm_codegen_soroban_rejects_nondet_function);
                     return Err(anyhow::anyhow!(
                         "Soroban target does not support non-deterministic operations. \
                          Function '{}' contains non-deterministic constructs (uzumaki, \

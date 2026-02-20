@@ -51,6 +51,7 @@ fn associated_function_call_via_type_syntax() {
 #[test]
 fn instance_method_called_as_associated_function_errors() {
     let source = r#"struct Point { x: i32; fn get_x(self) -> i32 { return self.x; } } fn test() -> i32 { return Point::get_x(); }"#;
+    cov_mark::check!(type_checker_instance_method_called_as_associated);
     let result = try_type_check(source);
     assert!(
         result.is_err(),
@@ -69,6 +70,7 @@ fn instance_method_called_as_associated_function_errors() {
 #[test]
 fn associated_function_called_as_instance_method_errors() {
     let source = r#"struct Math { fn add(a: i32, b: i32) -> i32 { return a + b; } } fn test(m: Math) -> i32 { return m.add(1, 2); }"#;
+    cov_mark::check!(type_checker_associated_function_called_as_method);
     let result = try_type_check(source);
     assert!(
         result.is_err(),
