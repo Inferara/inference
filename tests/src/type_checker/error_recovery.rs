@@ -164,7 +164,10 @@ mod error_recovery_tests {
     /// Structural coverage: verifies that the second occurrence of the same
     /// deduplicated error type hits the `type_checker_error_dedup_skips_duplicate`
     /// branch in `push_error_dedup`. Uses a source where `UnknownType` appears
-    /// exactly twice: one first_occurrence hit, one skips_duplicate hit.
+    /// exactly twice so that the first occurrence hits
+    /// `type_checker_error_dedup_first_occurrence` and the second occurrence
+    /// hits `type_checker_error_dedup_skips_duplicate`; this test specifically
+    /// asserts only on the skips-duplicate path.
     #[test]
     fn test_error_dedup_skips_duplicate() {
         let source = r#"fn test(a: UnknownType, b: UnknownType) -> i32 { return 0; }"#;
