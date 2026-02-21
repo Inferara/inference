@@ -253,8 +253,9 @@ impl Compiler {
     /// Pre-scans the function body to discover all local variable declarations.
     ///
     /// WASM requires all locals to be declared at the start of a function body.
-    /// This method traverses the AST to find all `ConstantDefinition` statements
-    /// and registers them as locals before instruction emission begins.
+    /// This method traverses the AST to find all `ConstantDefinition` and
+    /// `VariableDefinition` statements and registers them as locals before
+    /// instruction emission begins.
     fn pre_scan_locals(
         block: &BlockType,
         ctx: &TypedContext,
@@ -273,6 +274,18 @@ impl Compiler {
                         _ => ValType::I32,
                     };
                     locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    *local_idx += 1;
+                }
+                Statement::VariableDefinition(variable_definition) => {
+                    let val_type = match ctx
+                        .get_node_typeinfo(variable_definition.id)
+                        .expect("Variable definition must have type info")
+                        .kind
+                    {
+                        TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                        _ => ValType::I32,
+                    };
+                    locals_map.insert(variable_definition.name(), (*local_idx, val_type));
                     *local_idx += 1;
                 }
                 Statement::Block(inner_block) => {
@@ -439,7 +452,21 @@ impl Compiler {
                     .kind
                 {
                     TypeInfoKind::Unit => todo!(),
-                    TypeInfoKind::Bool => todo!(),
+                    TypeInfoKind::Bool => match &constant_definition.value {
+                        Literal::Bool(bool_literal) => {
+                            func.instruction(&Instruction::I32Const(i32::from(
+                                bool_literal.value,
+                            )));
+                            let (local_idx, _) = locals_map
+                                .get(&constant_definition.name())
+                                .expect("Local not found in pre-scan");
+                            func.instruction(&Instruction::LocalSet(*local_idx));
+                        }
+                        _ => panic!(
+                            "Constant value for bool should be a bool literal. Found: {:?}",
+                            constant_definition.value
+                        ),
+                    },
                     TypeInfoKind::String => todo!(),
                     TypeInfoKind::Number(number_type_kind_number_type) => {
                         match number_type_kind_number_type {

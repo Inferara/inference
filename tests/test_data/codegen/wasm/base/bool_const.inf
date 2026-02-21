@@ -1,0 +1,9 @@
+pub fn get_const_true() -> bool {
+    const b: bool = true;
+    return b;
+}
+
+pub fn get_const_false() -> bool {
+    const b: bool = false;
+    return b;
+}
