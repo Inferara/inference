@@ -1,0 +1,39 @@
+pub fn signed_i8() -> i8 {
+    const a: i8 = -128;
+    return a;
+}
+
+pub fn signed_i16() -> i16 {
+    const a: i16 = -32768;
+    return a;
+}
+
+pub fn signed_i32() -> i32 {
+    const a: i32 = -2147483648;
+    return a;
+}
+
+pub fn signed_i64() -> i64 {
+    const a: i64 = -9223372036854775808;
+    return a;
+}
+
+pub fn unsigned_u8() -> u8 {
+    const a: u8 = 255;
+    return a;
+}
+
+pub fn unsigned_u16() -> u16 {
+    const b: u16 = 65535;
+    return b;
+}
+
+pub fn unsigned_u32() -> u32 {
+    const c: u32 = 4294967295;
+    return c;
+}
+
+pub fn unsigned_u64() -> u64 {
+    const d: u64 = 18446744073709551615;
+    return d;
+}
