@@ -222,6 +222,100 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn local_variables_test() {
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 7);
+        cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i32, 1);
+        cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i64, 1);
+        let test_name = "local_variables";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn local_variables_execution_test() {
+        use wasmtime::{Engine, Store, TypedFunc};
+
+        // Build a module with only non-uzumaki functions for wasmtime execution.
+        // Uzumaki functions emit custom opcodes (0xfc 0x31/0x32) that wasmtime cannot run.
+        let source_code = r#"
+            pub fn let_i32_literal() -> i32 {
+                let x: i32 = 42;
+                return x;
+            }
+
+            pub fn let_bool_literal_true() -> bool {
+                let flag: bool = true;
+                return flag;
+            }
+
+            pub fn let_bool_literal_false() -> bool {
+                let flag: bool = false;
+                return flag;
+            }
+
+            pub fn let_from_identifier() -> i32 {
+                let x: i32 = 10;
+                let y: i32 = x;
+                return y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source_code);
+
+        let engine = Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let let_i32_literal: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_i32_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i32_literal' function: {}", e));
+        assert_eq!(
+            let_i32_literal.call(&mut store, ()).unwrap(),
+            42,
+            "let_i32_literal should return 42"
+        );
+
+        let let_bool_literal_true: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_bool_literal_true")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_true' function: {}", e));
+        assert_eq!(
+            let_bool_literal_true.call(&mut store, ()).unwrap(),
+            1,
+            "let_bool_literal_true should return 1"
+        );
+
+        let let_bool_literal_false: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_bool_literal_false")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_false' function: {}", e));
+        assert_eq!(
+            let_bool_literal_false.call(&mut store, ()).unwrap(),
+            0,
+            "let_bool_literal_false should return 0"
+        );
+
+        let let_from_identifier: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_from_identifier")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_from_identifier' function: {}", e));
+        assert_eq!(
+            let_from_identifier.call(&mut store, ()).unwrap(),
+            10,
+            "let_from_identifier should return 10"
+        );
+    }
+
+    #[test]
     fn soroban_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
@@ -394,6 +488,25 @@ mod regenerate {
             .expect("Failed to read numeric_literals.inf");
         let actual = wasm_codegen(&source_code);
         let wasm_path = dir.join("numeric_literals.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_local_variables_wasm() {
+        let dir = base_test_dir();
+        let source_code = std::fs::read_to_string(dir.join("local_variables.inf"))
+            .expect("Failed to read local_variables.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("local_variables.wasm");
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!(

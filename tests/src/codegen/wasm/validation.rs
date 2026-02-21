@@ -437,6 +437,69 @@ mod codegen_validation_tests {
         );
     }
 
+    // --- Variable definition codegen tests ---
+
+    #[test]
+    fn variable_definition_i32_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_i32_test() -> i32 { let x: i32 = 42; return x; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_bool_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_bool_test() -> bool { let f: bool = true; return f; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition bool WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_uzumaki_i32_emits_uzumaki_opcode() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        cov_mark::check!(wasm_codegen_variable_definition_uzumaki_i32);
+        let source = r#"pub fn let_uzumaki_i32_test() -> i32 { let a: i32 = @; return a; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition uzumaki i32 WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0xfc, 0x31]),
+            "WASM should contain i32.uzumaki opcode (0xfc 0x31)"
+        );
+    }
+
+    #[test]
+    fn variable_definition_uzumaki_i64_emits_uzumaki_opcode() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        cov_mark::check!(wasm_codegen_variable_definition_uzumaki_i64);
+        let source = r#"pub fn let_uzumaki_i64_test() -> i64 { let b: i64 = @; return b; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition uzumaki i64 WASM is invalid: {e}"));
+        assert!(
+            wasm_contains_bytes(wasm, &[0xfc, 0x32]),
+            "WASM should contain i64.uzumaki opcode (0xfc 0x32)"
+        );
+    }
+
+    #[test]
+    fn variable_definition_identifier_init_produces_valid_wasm() {
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 2);
+        let source =
+            r#"pub fn let_ident_test() -> i32 { let x: i32 = 10; let y: i32 = x; return y; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition identifier init WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

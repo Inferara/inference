@@ -308,7 +308,8 @@ impl Compiler {
     ///   nested statements with appropriate custom instruction encoding
     /// - **Expression statements** - Evaluate expressions
     /// - **Return statements** - Generate WASM return instructions
-    /// - **Constant definitions** - Initialize locals with values
+    /// - **Constant definitions** - Initialize locals with compile-time literal values
+    /// - **Variable definitions** - Initialize locals with literals, identifiers, or uzumaki
     ///
     /// # Non-Deterministic Blocks
     ///
@@ -436,12 +437,41 @@ impl Compiler {
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
             Statement::If(_if_statement) => todo!(),
-            Statement::VariableDefinition(_variable_definition_statement) => {
-                // Variable definition support is currently disabled pending implementation of:
-                // 1. Type resolution for non-i32 types
-                // 2. Complex expression evaluation (beyond uzumaki and literals)
-                // 3. Proper variable scoping (currently uses flat namespace)
-                // 4. Mutable vs immutable variable semantics
+            Statement::VariableDefinition(variable_definition_statement) => {
+                cov_mark::hit!(wasm_codegen_emit_variable_definition);
+                let (local_idx, _) = locals_map
+                    .get(&variable_definition_statement.name())
+                    .expect("Variable local not found in pre-scan");
+                match &variable_definition_statement.value {
+                    None => todo!("Uninitialized variable definitions are not supported"),
+                    Some(expr_ref) => {
+                        let expr = expr_ref.borrow();
+                        match &*expr {
+                            Expression::Literal(lit) => {
+                                self.lower_literal(lit, ctx, func);
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::Identifier(ident) => {
+                                let (src_idx, _) = locals_map
+                                    .get(&ident.name)
+                                    .expect("Source variable not found in locals map");
+                                func.instruction(&Instruction::LocalGet(*src_idx));
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::Uzumaki(uzumaki_expression) => {
+                                if ctx.is_node_i64(uzumaki_expression.id) {
+                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i64);
+                                    self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
+                                } else {
+                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i32);
+                                    self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
+                                }
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            _ => todo!("Unsupported variable initializer expression"),
+                        }
+                    }
+                }
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
