@@ -59,7 +59,8 @@ use std::iter::Peekable;
 use std::rc::Rc;
 
 use inference_ast::nodes::{
-    BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type, Visibility,
+    ArgumentType, BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement,
+    Type, Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -90,10 +91,11 @@ const END_OPCODE: u8 = 0x0b;
 ///
 /// # Variable Storage
 ///
-/// Local variables and constants are stored as WASM locals mapped by name to
-/// (`local_index`, `ValType`) pairs. Function bodies pre-scan for local declarations
-/// before emitting instructions, since WASM requires all locals to be declared
-/// at the start of a function body.
+/// Local variables, constants, and function parameters are stored as WASM locals mapped by name
+/// to (`local_index`, `ValType`) pairs. Parameters occupy indices `0..param_count`; regular
+/// locals follow at `param_count`.. Function bodies pre-scan for local declarations before
+/// emitting instructions, since WASM requires all locals to be declared at the start of a
+/// function body.
 ///
 /// # Internal Usage Example
 ///
@@ -138,16 +140,50 @@ impl Compiler {
         }
     }
 
+    /// Maps an Inference `Type` to the corresponding WASM `ValType`.
+    ///
+    /// Returns `None` for `Type::Simple(Unit)` because unit functions produce no WASM value.
+    /// Panics for complex types (arrays, generics, function types, custom types) not yet supported.
+    fn val_type_from_type(ty: &Type) -> Option<ValType> {
+        match ty {
+            Type::Simple(SimpleTypeKind::Unit) => None,
+            Type::Simple(
+                SimpleTypeKind::Bool
+                | SimpleTypeKind::I8
+                | SimpleTypeKind::U8
+                | SimpleTypeKind::I16
+                | SimpleTypeKind::U16
+                | SimpleTypeKind::I32
+                | SimpleTypeKind::U32,
+            ) => Some(ValType::I32),
+            Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Some(ValType::I64),
+            Type::Array(_array_type) => todo!(),
+            Type::Generic(_generic_type) => todo!(),
+            Type::Function(_function_type) => todo!(),
+            Type::QualifiedName(_qualified_name) => todo!(),
+            Type::Qualified(_type_qualified_name) => todo!(),
+            Type::Custom(_identifier) => todo!(),
+        }
+    }
+
     /// Translates an AST function definition to a WASM function body.
     ///
     /// This is the main entry point for function compilation. It performs several steps:
     ///
-    /// 1. **Type mapping** - Maps the return type to a WASM `ValType`
-    /// 2. **Type registration** - Registers the function signature in the type section
-    /// 3. **Export annotation** - Marks public functions for WASM export
-    /// 4. **Local pre-scan** - Scans the function body to determine locals before emission
-    /// 5. **Body lowering** - Recursively lowers the function body statements to WASM
-    /// 6. **Return handling** - Inserts implicit `end` for function body termination
+    /// 1. **Type mapping** - Maps return type and parameter types to WASM `ValType`
+    /// 2. **Parameter lowering** - Registers parameters in `locals_map` at indices 0..n
+    /// 3. **Type registration** - Registers the function signature in the type section
+    /// 4. **Export annotation** - Marks public functions for WASM export
+    /// 5. **Local pre-scan** - Scans the function body to determine regular locals (indices n..)
+    /// 6. **Body lowering** - Recursively lowers the function body statements to WASM
+    /// 7. **Return handling** - Inserts implicit `end` for function body termination
+    ///
+    /// # WASM Parameter Semantics
+    ///
+    /// Parameters occupy local slots `0..param_count`. The WASM function body declares only
+    /// additional locals (via `Function::new`); params are implicit from the type signature.
+    /// `pre_scan_locals` starts indexing regular locals at `param_count` so there is no
+    /// collision.
     ///
     /// # Parameters
     ///
@@ -157,38 +193,42 @@ impl Compiler {
     /// # Panics
     ///
     /// This method will panic if it encounters unsupported type constructs (arrays,
-    /// generics, function types, qualified names, custom types) in return positions,
-    /// as these are not yet implemented.
+    /// generics, function types, qualified names, custom types) in parameter or return
+    /// positions, as these are not yet implemented.
     pub(crate) fn visit_function_definition(
         &mut self,
         function_definition: &Rc<FunctionDefinition>,
         ctx: &TypedContext,
     ) {
         let fn_name = function_definition.name();
-        let results: Vec<ValType> = match &function_definition.returns {
-            Some(ret_type) => match ret_type {
-                Type::Simple(SimpleTypeKind::Unit) => vec![],
-                Type::Simple(
-                    SimpleTypeKind::Bool
-                    | SimpleTypeKind::I8
-                    | SimpleTypeKind::U8
-                    | SimpleTypeKind::I16
-                    | SimpleTypeKind::U16
-                    | SimpleTypeKind::I32
-                    | SimpleTypeKind::U32,
-                ) => vec![ValType::I32],
-                Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => vec![ValType::I64],
-                Type::Array(_array_type) => todo!(),
-                Type::Generic(_generic_type) => todo!(),
-                Type::Function(_function_type) => todo!(),
-                Type::QualifiedName(_qualified_name) => todo!(),
-                Type::Qualified(_type_qualified_name) => todo!(),
-                Type::Custom(_identifier) => todo!(),
-            },
-            None => vec![],
-        };
+        let results: Vec<ValType> = function_definition
+            .returns
+            .as_ref()
+            .and_then(Self::val_type_from_type)
+            .into_iter()
+            .collect();
 
-        let params: Vec<ValType> = vec![];
+        let mut params: Vec<ValType> = vec![];
+        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
+        let mut local_idx: u32 = 0;
+
+        if let Some(arguments) = &function_definition.arguments {
+            for arg_type in arguments {
+                if let ArgumentType::Argument(arg) = arg_type {
+                    cov_mark::hit!(wasm_codegen_emit_function_params);
+                    let vt = Self::val_type_from_type(&arg.ty)
+                        .expect("Function parameter type must not be unit");
+                    params.push(vt);
+                    locals_map.insert(arg.name(), (local_idx, vt));
+                    local_idx += 1;
+                }
+            }
+        }
+
+        // Parameters occupy local indices 0..param_count. Regular locals follow.
+        // WASM requires declaring only the additional (non-param) locals in Function::new().
+        let param_count = local_idx;
+
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
@@ -206,8 +246,6 @@ impl Compiler {
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
 
-        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
-        let mut local_idx: u32 = 0;
         Self::pre_scan_locals(
             &function_definition.body,
             ctx,
@@ -215,8 +253,14 @@ impl Compiler {
             &mut local_idx,
         );
 
+        // Only declare locals that come after parameters (index >= param_count).
+        // Parameters are implicitly declared via the function type signature.
         let local_declarations: Vec<(u32, ValType)> = {
-            let mut sorted_locals: Vec<(u32, ValType)> = locals_map.values().copied().collect();
+            let mut sorted_locals: Vec<(u32, ValType)> = locals_map
+                .values()
+                .copied()
+                .filter(|(idx, _)| *idx >= param_count)
+                .collect();
             sorted_locals.sort_by_key(|(idx, _)| *idx);
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };

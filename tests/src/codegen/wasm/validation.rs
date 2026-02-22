@@ -560,6 +560,58 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Variable definition u64 WASM is invalid: {e}"));
     }
 
+    // --- Function parameter tests ---
+
+    #[test]
+    fn function_with_i32_param_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_params);
+        let source = r#"pub fn identity(x: i32) -> i32 { return x; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Function with i32 param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_with_i64_param_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_params);
+        let source = r#"pub fn identity_i64(x: i64) -> i64 { return x; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Function with i64 param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_with_bool_param_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_params);
+        let source = r#"pub fn identity_bool(x: bool) -> bool { return x; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Function with bool param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_with_multiple_params_produces_valid_wasm() {
+        cov_mark::check_count!(wasm_codegen_emit_function_params, 2);
+        let source = r#"pub fn add_params(a: i32, b: i32) -> i32 { return a; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Function with multiple params WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_param_accessible_as_local_in_body() {
+        cov_mark::check!(wasm_codegen_emit_function_params);
+        let source = r#"pub fn identity(x: i32) -> i32 { let y: i32 = x; return y; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Function param as local init WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.
