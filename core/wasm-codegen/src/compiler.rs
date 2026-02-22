@@ -253,8 +253,9 @@ impl Compiler {
     /// Pre-scans the function body to discover all local variable declarations.
     ///
     /// WASM requires all locals to be declared at the start of a function body.
-    /// This method traverses the AST to find all `ConstantDefinition` statements
-    /// and registers them as locals before instruction emission begins.
+    /// This method traverses the AST to find all `ConstantDefinition` and
+    /// `VariableDefinition` statements and registers them as locals before
+    /// instruction emission begins.
     fn pre_scan_locals(
         block: &BlockType,
         ctx: &TypedContext,
@@ -273,6 +274,18 @@ impl Compiler {
                         _ => ValType::I32,
                     };
                     locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    *local_idx += 1;
+                }
+                Statement::VariableDefinition(variable_definition) => {
+                    let val_type = match ctx
+                        .get_node_typeinfo(variable_definition.id)
+                        .expect("Variable definition must have type info")
+                        .kind
+                    {
+                        TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                        _ => ValType::I32,
+                    };
+                    locals_map.insert(variable_definition.name(), (*local_idx, val_type));
                     *local_idx += 1;
                 }
                 Statement::Block(inner_block) => {
@@ -295,7 +308,8 @@ impl Compiler {
     ///   nested statements with appropriate custom instruction encoding
     /// - **Expression statements** - Evaluate expressions
     /// - **Return statements** - Generate WASM return instructions
-    /// - **Constant definitions** - Initialize locals with values
+    /// - **Constant definitions** - Initialize locals with compile-time literal values
+    /// - **Variable definitions** - Initialize locals with literals, identifiers, or uzumaki
     ///
     /// # Non-Deterministic Blocks
     ///
@@ -423,164 +437,51 @@ impl Compiler {
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
             Statement::If(_if_statement) => todo!(),
-            Statement::VariableDefinition(_variable_definition_statement) => {
-                // Variable definition support is currently disabled pending implementation of:
-                // 1. Type resolution for non-i32 types
-                // 2. Complex expression evaluation (beyond uzumaki and literals)
-                // 3. Proper variable scoping (currently uses flat namespace)
-                // 4. Mutable vs immutable variable semantics
+            Statement::VariableDefinition(variable_definition_statement) => {
+                cov_mark::hit!(wasm_codegen_emit_variable_definition);
+                let (local_idx, _) = locals_map
+                    .get(&variable_definition_statement.name())
+                    .expect("Variable local not found in pre-scan");
+                match &variable_definition_statement.value {
+                    None => todo!("Uninitialized variable definitions are not supported"),
+                    Some(expr_ref) => {
+                        let expr = expr_ref.borrow();
+                        match &*expr {
+                            Expression::Literal(lit) => {
+                                self.lower_literal(lit, ctx, func);
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::Identifier(ident) => {
+                                let (src_idx, _) = locals_map
+                                    .get(&ident.name)
+                                    .expect("Source variable not found in locals map");
+                                func.instruction(&Instruction::LocalGet(*src_idx));
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::Uzumaki(uzumaki_expression) => {
+                                if ctx.is_node_i64(uzumaki_expression.id) {
+                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i64);
+                                    self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
+                                } else {
+                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i32);
+                                    self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
+                                }
+                                func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            _ => todo!("Unsupported variable initializer expression"),
+                        }
+                    }
+                }
             }
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
-                match ctx
-                    .get_node_typeinfo(constant_definition.id)
-                    .expect("Constant definition must have a type info")
-                    .kind
-                {
-                    TypeInfoKind::Unit => todo!(),
-                    TypeInfoKind::Bool => todo!(),
-                    TypeInfoKind::String => todo!(),
-                    TypeInfoKind::Number(number_type_kind_number_type) => {
-                        match number_type_kind_number_type {
-                            NumberType::I8 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal.value.parse::<i8>().unwrap_or(0);
-                                    func.instruction(&Instruction::I32Const(i32::from(val)));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for i8 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::I16 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal.value.parse::<i16>().unwrap_or(0);
-                                    func.instruction(&Instruction::I32Const(i32::from(val)));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for i16 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::I32 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal.value.parse::<i32>().unwrap_or(0);
-                                    func.instruction(&Instruction::I32Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for i32 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::I64 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal.value.parse::<i64>().unwrap_or(0);
-                                    func.instruction(&Instruction::I64Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for i64 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::U8 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val =
-                                        i32::from(number_literal.value.parse::<u8>().expect(
-                                            "Failed to parse unsigned 8-bit integer literal",
-                                        ));
-                                    func.instruction(&Instruction::I32Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for u8 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::U16 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val =
-                                        i32::from(number_literal.value.parse::<u16>().expect(
-                                            "Failed to parse unsigned 16-bit integer literal",
-                                        ));
-                                    func.instruction(&Instruction::I32Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for u16 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::U32 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal
-                                        .value
-                                        .parse::<u32>()
-                                        .expect("Failed to parse unsigned 32-bit integer literal")
-                                        .cast_signed();
-                                    func.instruction(&Instruction::I32Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for u32 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                            NumberType::U64 => match &constant_definition.value {
-                                Literal::Number(number_literal) => {
-                                    let val = number_literal
-                                        .value
-                                        .parse::<u64>()
-                                        .expect("Failed to parse unsigned 64-bit integer literal")
-                                        .cast_signed();
-                                    func.instruction(&Instruction::I64Const(val));
-                                    let (local_idx, _) = locals_map
-                                        .get(&constant_definition.name())
-                                        .expect("Local not found in pre-scan");
-                                    func.instruction(&Instruction::LocalSet(*local_idx));
-                                }
-                                _ => panic!(
-                                    "Constant value for u64 should be a number literal. Found: {:?}",
-                                    constant_definition.value
-                                ),
-                            },
-                        }
-                    }
-                    TypeInfoKind::Custom(_) => todo!(),
-                    TypeInfoKind::Array(_type_info, _) => todo!(),
-                    TypeInfoKind::Generic(_) => todo!(),
-                    TypeInfoKind::QualifiedName(_) => todo!(),
-                    TypeInfoKind::Qualified(_) => todo!(),
-                    TypeInfoKind::Function(_) => todo!(),
-                    TypeInfoKind::Struct(_) => todo!(),
-                    TypeInfoKind::Enum(_) => todo!(),
-                    TypeInfoKind::Spec(_) => todo!(),
-                }
+                cov_mark::hit!(wasm_codegen_emit_constant_definition);
+                self.lower_literal(&constant_definition.value, ctx, func);
+                let (local_idx, _) = locals_map
+                    .get(&constant_definition.name())
+                    .expect("Local not found in pre-scan");
+                func.instruction(&Instruction::LocalSet(*local_idx));
             }
         }
     }

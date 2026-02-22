@@ -23,8 +23,9 @@ Compile Inference source to WebAssembly:
 
 ```rust
 use inference::{parse, type_check, codegen};
+use inference_wasm_codegen::CodegenOutput;
 
-fn compile(source_code: &str) -> anyhow::Result<Vec<u8>> {
+fn compile(source_code: &str) -> anyhow::Result<CodegenOutput> {
     // Phase 1: Parse source into AST
     let arena = parse(source_code)?;
 
@@ -32,9 +33,9 @@ fn compile(source_code: &str) -> anyhow::Result<Vec<u8>> {
     let typed_context = type_check(arena)?;
 
     // Phase 3: Generate WASM bytecode
-    let wasm_bytes = codegen(&typed_context)?;
+    let codegen_output = codegen(&typed_context)?;
 
-    Ok(wasm_bytes)
+    Ok(codegen_output)
 }
 ```
 
@@ -47,7 +48,7 @@ The crate exposes five primary functions:
 | [`parse`] | `&str` (source code) | `Arena` | Parse source into arena-based AST |
 | [`type_check`] | `Arena` | `TypedContext` | Type check and infer types |
 | [`analyze`] | `&TypedContext` | `()` | Semantic analysis (WIP) |
-| [`codegen`] | `&TypedContext` | `Vec<u8>` | Generate WebAssembly bytecode |
+| [`codegen`] | `&TypedContext` | `CodegenOutput` | Generate WebAssembly bytecode |
 | [`wasm_to_v`] | `&str`, `&[u8]` | `String` | Translate WASM to Rocq |
 
 ## Compilation Pipeline
@@ -127,9 +128,9 @@ use std::fs;
 
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
-let wasm_bytes = codegen(&typed_context)?;
+let codegen_output = codegen(&typed_context)?;
 
-fs::write("output.wasm", &wasm_bytes)?;
+fs::write("output.wasm", codegen_output.wasm())?;
 ```
 
 The code generator supports Inference's non-deterministic extensions via custom WebAssembly instructions in the `0xfc prefix space:
@@ -179,8 +180,8 @@ let source = r#"
 
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
-let wasm_bytes = codegen(&typed_context)?;
-let rocq_code = wasm_to_v("EvenChecker", &wasm_bytes)?;
+let codegen_output = codegen(&typed_context)?;
+let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
 
 fs::write("even_checker.v", rocq_code)?;
 ```
@@ -237,9 +238,9 @@ fn compile_file(input_path: &str, output_path: &str) -> anyhow::Result<()> {
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
     analyze(&typed_context)?;
-    let wasm_bytes = codegen(&typed_context)?;
+    let codegen_output = codegen(&typed_context)?;
 
-    fs::write(output_path, &wasm_bytes)?;
+    fs::write(output_path, codegen_output.wasm())?;
     println!("Compiled {} to {}", input_path, output_path);
 
     Ok(())
@@ -257,8 +258,8 @@ fn verify_program(source_path: &str, module_name: &str) -> anyhow::Result<()> {
 
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
-    let wasm = codegen(&typed_context)?;
-    let rocq = wasm_to_v(module_name, &wasm)?;
+    let codegen_output = codegen(&typed_context)?;
+    let rocq = wasm_to_v(module_name, codegen_output.wasm())?;
 
     let output = format!("{}.v", module_name.to_lowercase());
     fs::write(&output, rocq)?;

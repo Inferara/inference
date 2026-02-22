@@ -260,6 +260,38 @@ TypedContext {
 }
 ```
 
+#### Contextual Type Propagation for Number Literals
+
+Number literals present a special challenge for sub-i32 numeric types (`i8`, `i16`, `u8`, `u16`). WebAssembly has no native types narrower than 32 bits, so all of them are represented in WASM as `i32`. The syntax `42` carries no inherent width — without additional context, the type checker defaults number literals to `i32`.
+
+When the code generator later lowers a literal to a WASM instruction, it calls `ctx.get_node_typeinfo(number_literal.id)` to decide how to interpret the bits. If the literal's node held `i32`, the generator would produce a plain `i32.const` and lose the declared sub-i32 width information.
+
+To solve this, the `VariableDefinition` handler propagates the declared type onto the number literal's node **before** calling `infer_expression`. The literal inference code checks whether type info already exists for the node and, if so, returns it unchanged rather than falling back to the `i32` default:
+
+```
+VariableDefinition handler
+  │
+  ├─ 1. Compute target_type from the declared type annotation
+  │      e.g. `let a: i8 = 42;`  →  target_type = TypeInfo { kind: Number(I8) }
+  │
+  ├─ 2. If initializer is a number literal:
+  │      ctx.set_node_typeinfo(num_lit.id, target_type.clone())
+  │      (The literal node now carries the declared type)
+  │
+  ├─ 3. infer_expression() is called on the initializer
+  │      └─ Literal::Number branch: type info already present → returns it as-is
+  │         (No i32 fallback applied)
+  │
+  └─ 4. Codegen lower_literal() reads ctx.get_node_typeinfo(number_literal.id)
+         and emits the correct instruction width
+         e.g. Number(I8) → parse as i32, emit i32.const (WASM sub-i32 convention)
+              Number(I64) → parse as i64, emit i64.const
+```
+
+This is a form of **bidirectional type checking**: information flows from the declaration site (the annotation) down into the initializer expression, rather than bottom-up synthesis from the literal value alone.
+
+**Current limitation**: Range validation is not yet performed. A literal that is out of range for the declared type (for example `let a: i8 = 200;`) will compile without error. The out-of-range value is silently truncated during WASM instruction emission. Range checking is tracked separately and will be addressed in a future pass.
+
 ## Symbol Table Design
 
 ### Scope Tree Structure
@@ -768,6 +800,9 @@ fn test_feature() {
 - Array sizes must be numeric literals
 - No const functions or const expressions
 - No compile-time computation of array bounds
+
+**Numeric Literal Range Validation**:
+- Out-of-range literals are not rejected. For example `let a: i8 = 200;` compiles without error. The value is silently truncated when the WASM instruction is emitted by the code generator. Contextual type propagation (see the Phase 5 section above) ensures the declared type reaches the code generator, but no range check is performed before that point.
 
 **Pattern Matching**:
 - No destructuring of structs or arrays

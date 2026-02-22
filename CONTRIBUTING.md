@@ -80,7 +80,7 @@ As you can see, the source code is compact and fits within one line. When it mak
 
 Code generation (codegen) tests validate that the actual lowering matches the expected one. With the help of some utilities, you can write such tests easily. Directories `tests/src/codegen` and `tests/test_data/codegen` are paired and help to organize codegen tests.
 
-Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial.inf` and an expected binary next to it. And if it is, then you can write a test as easy as:
+Modules in the `codegen` directory must reflect the structure of the `test_data/codegen` directory. For example, if you have a test `codegen::wasm::base::trivial_test` then the corresponding source file must be located at `tests/test_data/codegen/wasm/base/trivial/trivial.inf` and an expected binary at `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`. Each test case lives in its own subdirectory named after the test. And if it is, then you can write a test as easy as:
 
 ```rust
     #[test]
@@ -110,6 +110,8 @@ Rationale: `#[should_panic]` is a tool for library authors to make sure that the
 Do not `#[ignore]` tests. If the test currently does not work, assert the wrong behavior and add a fixme explaining why it is wrong.
 
 Rationale: noticing when the behavior is fixed, making sure that even the wrong behavior is acceptable (ie, not a panic).
+
+Exception: test data regeneration helpers in `mod regenerate` blocks are `#[ignore]`d by design. These are not behavioral tests; they regenerate expected `.wasm` golden files from the current compiler output and are run explicitly with `--ignored` when the codegen pipeline changes.
 
 ## Provide Constructed Function Parameters
 

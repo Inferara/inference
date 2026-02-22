@@ -136,12 +136,16 @@ enum NumberType {
 }
 ```
 
+**WebAssembly representation**: WebAssembly provides only `i32` and `i64` as integer types. All numeric types narrower than 64 bits (`i8`, `i16`, `i32`, `u8`, `u16`, `u32`) are lowered to WASM `i32`. `i64` and `u64` are lowered to WASM `i64`. The type checker preserves the Inference-level type so that the code generator can use the correct parse width when emitting literal values.
+
+**Known limitation — range validation not yet implemented**: The type checker does not currently verify that a literal value fits within the declared type's range. For example, `let a: i8 = 200;` compiles without an error even though 200 exceeds the i8 maximum of 127. The value is silently truncated when the WASM instruction is emitted. Proper range checking will be added in a future pass.
+
 **Examples**:
 
 ```rust
 fn test_numbers() {
-    let a: i8 = 127;
-    let b: i16 = 32767;
+    let a: i8 = 127;        // OK: within i8 range [-128, 127]
+    let b: i16 = 32767;     // OK: within i16 range [-32768, 32767]
     let c: i32 = 2147483647;
     let d: i64 = 9223372036854775807;
 
@@ -149,6 +153,9 @@ fn test_numbers() {
     let f: u16 = 65535;
     let g: u32 = 4294967295;
     let h: u64 = 18446744073709551615;
+
+    // No compile error today, but value is truncated in WASM output:
+    let bad: i8 = 200;      // 200 > 127; silently becomes -56 in WASM
 }
 ```
 
@@ -384,12 +391,23 @@ fn sum_array<T>(arr: [T; 3]) -> T {
 
 The type checker uses bidirectional inference:
 
-**1. Literals**: Type inferred from syntax
+**1. Literals**: Type inferred from syntax, with contextual propagation for sub-i32 types
+
+Number literals have no inherent bit-width in the syntax. When a number literal appears as the sole initializer in a variable definition that carries an explicit type annotation, the declared type is propagated onto the literal node before inference runs. This allows sub-i32 types (`i8`, `i16`, `u8`, `u16`) to reach the code generator with the correct type, because WebAssembly provides no native types narrower than 32 bits.
+
 ```rust
-42          → i32
+42          → i32 (default when no context is available)
 true        → bool
 "hello"     → string
+
+// With a type annotation, the literal adopts the declared type:
+let a: i8  = 42;   // literal node type: i8  (not i32)
+let b: i16 = 42;   // literal node type: i16 (not i32)
+let c: i64 = 42;   // literal node type: i64 (not i32)
+let d: i32 = 42;   // literal node type: i32 (same as default)
 ```
+
+Note: Range validation is not yet implemented. A literal that is out of range for its declared type (for example `let a: i8 = 200;`) compiles without error. The out-of-range value is silently truncated at the WASM instruction emission stage. This is a known limitation tracked separately.
 
 **2. Variables**: Type from declaration or initializer
 ```rust

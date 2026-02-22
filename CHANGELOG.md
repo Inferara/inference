@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add local variable lowering (`let` bindings) to WebAssembly codegen ([#134])
+  - Emit `local.set` / `local.get` for variable definitions with literal, identifier, and uzumaki initializers
+  - Support all numeric types (i8, i16, i32, i64, u8, u16, u32, u64), bool, and uzumaki
+  - Type-checker propagates declared type into numeric literal initializers for sub-i32 types
+  - Refactor `ConstantDefinition` lowering to share `lower_literal` helper with `VariableDefinition` (~130 lines removed)
+  - Remove dead `is_uzumaki: bool` field from `VariableDefinitionStatement` AST node
 
 ### CLI
 
@@ -38,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Migrate codegen test data to per-test subdirectory layout ([#134])
+  - `tests/test_data/codegen/wasm/base/{name}/{name}.{inf,wasm}` replaces flat `base/{name}.{inf,wasm}`
+  - `get_test_file_path` / `get_test_wasm_path` helpers updated to resolve through subdirectory
 - Add 28 codegen tests with three-tier verification architecture ([#97], [#125])
   - Byte comparison tests against committed `.wasm` reference files
   - `inf_wasmparser::validate()` validation on all generated output
@@ -294,3 +303,4 @@ Initial tagged release.
 [#125]: https://github.com/Inferara/inference/pull/125
 [#126]: https://github.com/Inferara/inference/pull/126
 [#127]: https://github.com/Inferara/inference/pull/127
+[#134]: https://github.com/Inferara/inference/pull/135

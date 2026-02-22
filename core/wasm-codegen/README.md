@@ -21,9 +21,18 @@ Typed AST (TypedContext)
 ### Compilation Phases
 
 1. **AST Traversal** - Walk typed AST and visit function definitions
-2. **Local Pre-scan** - Discover all variable definitions before emission
-3. **Instruction Emission** - Lower functions, statements, and expressions to WASM instructions
-4. **Module Assembly** - Assemble TypeSection, FunctionSection, ExportSection, CodeSection, and NameSection into a complete WASM binary
+2. **Local Pre-scan** - Walk the entire function body once to collect all `let` and `const`
+   declarations and assign them sequential WASM local indices before any instructions are
+   emitted. This step is mandatory because the WebAssembly binary format requires all local
+   declarations to appear at the very start of a function body, before the instruction
+   sequence. See [docs/local-variables-lowering.md](docs/local-variables-lowering.md) for a
+   detailed explanation.
+3. **Instruction Emission** - Lower functions, statements, and expressions to WASM
+   instructions. `let` definitions are lowered via a push instruction followed by
+   `local.set`; `const` definitions use the same path. Supported initializer expression
+   kinds are literals, identifiers, and uzumaki (`@`) expressions.
+4. **Module Assembly** - Assemble TypeSection, FunctionSection, ExportSection, CodeSection,
+   and NameSection into a complete WASM binary
 
 ## Non-Deterministic Extensions
 
@@ -174,6 +183,14 @@ The `codegen` function:
 - **Expression types** - Limited support for complex expressions (binary operations, function calls, structs, arrays)
 - **Type system** - Generic types, custom types, and function types are not yet fully implemented
 
+## Documentation
+
+Detailed design documents live in `docs/`:
+
+- [docs/local-variables-lowering.md](docs/local-variables-lowering.md) - The two-pass
+  approach for lowering `let`/`const` locals, supported initializer kinds, and the
+  `lower_literal` type-dispatch logic for sub-i32 types.
+
 ## Module Organization
 
 - `lib.rs` - Public API and AST traversal
@@ -197,6 +214,10 @@ Test data includes:
 - `trivial.inf` - Simple function returning a constant
 - `const.inf` - Constant definitions
 - `nondet.inf` - Non-deterministic constructs (uzumaki, forall, exists, assume, unique)
+- `local_variables.inf` - All `let` binding forms: every numeric type, bool, uzumaki, and
+  identifier initializers (validated against `inf_wasmparser` and compared byte-for-byte)
+- `local_variables_exec.inf` - Wasmtime execution tests that verify the correct WASM value
+  is returned for each `let` binding form
 
 ## Related Resources
 
