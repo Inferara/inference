@@ -38,16 +38,6 @@ pub fn let_bool_literal_false() -> bool {
     return flag;
 }
 
-pub fn let_uzumaki_i32() -> i32 {
-    let a: i32 = @;
-    return a;
-}
-
-pub fn let_uzumaki_i64() -> i64 {
-    let b: i64 = @;
-    return b;
-}
-
 pub fn let_from_identifier() -> i32 {
     let x: i32 = 10;
     let y: i32 = x;

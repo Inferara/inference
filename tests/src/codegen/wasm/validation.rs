@@ -503,7 +503,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_i8_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_i8_test() -> i8 { let x: i8 = 100; return x; }"#;
+        let source = r#"pub fn let_i8_test() -> i8 { let a: i8 = 127; return a; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
@@ -513,7 +513,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_i16_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_i16_test() -> i16 { let y: i16 = 1000; return y; }"#;
+        let source = r#"pub fn let_i16_test() -> i16 { let b: i16 = 32767; return b; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
@@ -523,7 +523,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_u8_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_u8_test() -> u8 { let z: u8 = 200; return z; }"#;
+        let source = r#"pub fn let_u8_test() -> u8 { let c: u8 = 255; return c; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
@@ -533,7 +533,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_u16_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_u16_test() -> u16 { let w: u16 = 40000; return w; }"#;
+        let source = r#"pub fn let_u16_test() -> u16 { let d: u16 = 65535; return d; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)

@@ -223,7 +223,7 @@ mod base_codegen_tests {
 
     #[test]
     fn local_variables_test() {
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 11);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 12);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i32, 1);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i64, 1);
         let test_name = "local_variables";
@@ -241,133 +241,102 @@ mod base_codegen_tests {
 
     #[test]
     fn local_variables_execution_test() {
-        use wasmtime::{Engine, Store, TypedFunc};
+        use wasmtime::{Engine, Module, Store, TypedFunc};
 
-        // Build a module with only non-uzumaki functions for wasmtime execution.
-        // Uzumaki functions emit custom opcodes (0xfc 0x31/0x32) that wasmtime cannot run.
-        let source_code = r#"
-            pub fn let_i32_literal() -> i32 {
-                let x: i32 = 42;
-                return x;
-            }
-
-            pub fn let_bool_literal_true() -> bool {
-                let flag: bool = true;
-                return flag;
-            }
-
-            pub fn let_bool_literal_false() -> bool {
-                let flag: bool = false;
-                return flag;
-            }
-
-            pub fn let_from_identifier() -> i32 {
-                let x: i32 = 10;
-                let y: i32 = x;
-                return y;
-            }
-
-            pub fn let_i8_literal() -> i8 {
-                let x: i8 = 100;
-                return x;
-            }
-
-            pub fn let_i16_literal() -> i16 {
-                let y: i16 = 1000;
-                return y;
-            }
-
-            pub fn let_u8_literal() -> u8 {
-                let z: u8 = 200;
-                return z;
-            }
-
-            pub fn let_u16_literal() -> u16 {
-                let w: u16 = 40000;
-                return w;
-            }
-        "#;
-        let wasm_bytes = wasm_codegen(source_code);
+        let test_name = "local_variables_exec";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
 
         let engine = Engine::default();
-        let module = wasmtime::Module::new(&engine, &wasm_bytes)
-            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
 
         let mut store = Store::new(&engine, ());
 
         let instance = wasmtime::Instance::new(&mut store, &module, &[])
-            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
 
-        let let_i32_literal: TypedFunc<(), i32> = instance
+        let f: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "let_i32_literal")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_i32_literal' function: {}", e));
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i32_literal': {e}"));
         assert_eq!(
-            let_i32_literal.call(&mut store, ()).unwrap(),
-            42,
-            "let_i32_literal should return 42"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            42
         );
 
-        let let_bool_literal_true: TypedFunc<(), i32> = instance
-            .get_typed_func(&mut store, "let_bool_literal_true")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_true' function: {}", e));
+        let f: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "let_i64_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i64_literal': {e}"));
         assert_eq!(
-            let_bool_literal_true.call(&mut store, ()).unwrap(),
-            1,
-            "let_bool_literal_true should return 1"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            i64::MAX
         );
 
-        let let_bool_literal_false: TypedFunc<(), i32> = instance
-            .get_typed_func(&mut store, "let_bool_literal_false")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_false' function: {}", e));
-        assert_eq!(
-            let_bool_literal_false.call(&mut store, ()).unwrap(),
-            0,
-            "let_bool_literal_false should return 0"
-        );
-
-        let let_from_identifier: TypedFunc<(), i32> = instance
-            .get_typed_func(&mut store, "let_from_identifier")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_from_identifier' function: {}", e));
-        assert_eq!(
-            let_from_identifier.call(&mut store, ()).unwrap(),
-            10,
-            "let_from_identifier should return 10"
-        );
-
-        let let_i8_literal: TypedFunc<(), i32> = instance
+        let f: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "let_i8_literal")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_i8_literal' function: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i8_literal': {e}"));
         assert_eq!(
-            let_i8_literal.call(&mut store, ()).unwrap(),
-            100,
-            "let_i8_literal should return 100"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            127_i32
         );
 
-        let let_i16_literal: TypedFunc<(), i32> = instance
+        let f: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "let_i16_literal")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_i16_literal' function: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i16_literal': {e}"));
         assert_eq!(
-            let_i16_literal.call(&mut store, ()).unwrap(),
-            1000,
-            "let_i16_literal should return 1000"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            32767_i32
         );
 
-        let let_u8_literal: TypedFunc<(), i32> = instance
+        let f: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "let_u8_literal")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_u8_literal' function: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to get 'let_u8_literal': {e}"));
         assert_eq!(
-            let_u8_literal.call(&mut store, ()).unwrap(),
-            200,
-            "let_u8_literal should return 200"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            255_i32
         );
 
-        let let_u16_literal: TypedFunc<(), i32> = instance
+        let f: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "let_u16_literal")
-            .unwrap_or_else(|e| panic!("Failed to get 'let_u16_literal' function: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to get 'let_u16_literal': {e}"));
         assert_eq!(
-            let_u16_literal.call(&mut store, ()).unwrap(),
-            40000,
-            "let_u16_literal should return 40000"
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            65535_i32
+        );
+
+        let f: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_bool_literal_true")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_true': {e}"));
+        assert_eq!(
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            1_i32
+        );
+
+        let f: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_bool_literal_false")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_bool_literal_false': {e}"));
+        assert_eq!(
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            0_i32
+        );
+
+        let f: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_from_identifier")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_from_identifier': {e}"));
+        assert_eq!(
+            f.call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            10_i32
         );
     }
 
