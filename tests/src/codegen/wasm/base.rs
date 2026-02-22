@@ -273,7 +273,7 @@ mod base_codegen_tests {
         assert_eq!(
             f.call(&mut store, ())
                 .unwrap_or_else(|e| panic!("Call failed: {e}")),
-            i64::MAX
+            i64::MIN
         );
 
         let f: TypedFunc<(), i32> = instance
@@ -282,7 +282,7 @@ mod base_codegen_tests {
         assert_eq!(
             f.call(&mut store, ())
                 .unwrap_or_else(|e| panic!("Call failed: {e}")),
-            127_i32
+            -128_i32
         );
 
         let f: TypedFunc<(), i32> = instance
@@ -291,7 +291,7 @@ mod base_codegen_tests {
         assert_eq!(
             f.call(&mut store, ())
                 .unwrap_or_else(|e| panic!("Call failed: {e}")),
-            32767_i32
+            -32768_i32
         );
 
         let f: TypedFunc<(), i32> = instance

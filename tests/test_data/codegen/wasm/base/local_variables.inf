@@ -4,17 +4,17 @@ pub fn let_i32_literal() -> i32 {
 }
 
 pub fn let_i64_literal() -> i64 {
-    let y: i64 = 9223372036854775807;
+    let y: i64 = -9223372036854775808;
     return y;
 }
 
 pub fn let_i8_literal() -> i8 {
-    let a: i8 = 127;
+    let a: i8 = -128;
     return a;
 }
 
 pub fn let_i16_literal() -> i16 {
-    let b: i16 = 32767;
+    let b: i16 = -32768;
     return b;
 }
 

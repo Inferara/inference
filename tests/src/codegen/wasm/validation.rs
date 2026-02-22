@@ -503,7 +503,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_i8_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_i8_test() -> i8 { let a: i8 = 127; return a; }"#;
+        let source = r#"pub fn let_i8_test() -> i8 { let a: i8 = -128; return a; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
@@ -513,7 +513,7 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_i16_literal_produces_valid_wasm() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        let source = r#"pub fn let_i16_test() -> i16 { let b: i16 = 32767; return b; }"#;
+        let source = r#"pub fn let_i16_test() -> i16 { let b: i16 = -32768; return b; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
