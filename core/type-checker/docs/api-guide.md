@@ -101,6 +101,31 @@ for node in number_literals {
 }
 ```
 
+#### Number literal type info and contextual propagation
+
+The type stored on a number literal node may differ from the syntactic default of `i32`. When a number literal is the direct initializer of a variable definition that carries an explicit type annotation, the type checker propagates the declared type onto the literal's node before running expression inference. This is how sub-i32 types (`i8`, `i16`, `u8`, `u16`) and `i64`/`u64` are made available to the code generator, which must look up the literal's node type to choose the correct WASM instruction.
+
+Concretely:
+
+```rust
+// Source:  let a: i8 = 42;
+//
+// After type checking:
+//   typed_context.get_node_typeinfo(a_name_node_id)   → TypeInfo { kind: Number(I8) }
+//   typed_context.get_node_typeinfo(literal_42_id)    → TypeInfo { kind: Number(I8) }
+//                                                       ^--- NOT i32, because the
+//                                                            declared type was propagated
+
+// Source:  let b = 42;   (no type annotation)
+//
+// After type checking:
+//   typed_context.get_node_typeinfo(b_name_node_id)   → TypeInfo { kind: Number(I32) }
+//   typed_context.get_node_typeinfo(literal_42_id)    → TypeInfo { kind: Number(I32) }
+//                                                       ^--- i32 default applies
+```
+
+When querying number literal nodes, always use the type info from the `TypedContext` rather than assuming `i32`. The stored type reflects the full declared Inference type, not just the underlying WASM representation.
+
 ### Getting Function Definitions
 
 ```rust

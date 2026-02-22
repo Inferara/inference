@@ -407,7 +407,7 @@ pub enum BlockType {
 ```inference
 fn test() {
     forall {
-        let x: i32 = uzumaki;
+        let x: i32 = @;
         assert(x >= 0);
     }
 }
@@ -514,11 +514,19 @@ pub struct VariableDefinitionStatement {
 }
 ```
 
+**Fields:**
+- `name`: The variable identifier being bound
+- `ty`: The declared type (always required; Inference has no type inference for locals)
+- `value`: Optional initializer expression wrapped in `RefCell` for type-checker mutation; `None` means the variable is declared but not yet initialized
+
 **Example source:**
 ```inference
 let x: i32 = 42;
 let y: i32 = @;
 ```
+
+The `value` field can hold any `Expression`, including a `UzumakiExpression` (`@`) for
+non-deterministic initialization inside `forall`, `exists`, or `unique` blocks.
 
 ### AssignStatement
 
@@ -748,7 +756,7 @@ pub struct UzumakiExpression {
 
 **Example source:**
 ```inference
-let x: i32 = uzumaki;
+let x: i32 = @;
 ```
 
 ## Literals
