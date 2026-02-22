@@ -500,6 +500,46 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Variable definition identifier init WASM is invalid: {e}"));
     }
 
+    #[test]
+    fn variable_definition_i8_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_i8_test() -> i8 { let x: i8 = 100; return x; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition i8 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_i16_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_i16_test() -> i16 { let y: i16 = 1000; return y; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition i16 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_u8_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_u8_test() -> u8 { let z: u8 = 200; return z; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition u8 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_u16_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_u16_test() -> u16 { let w: u16 = 40000; return w; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition u16 WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

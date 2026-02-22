@@ -982,10 +982,10 @@ impl<'a> Builder<'a> {
         let value = node
             .child_by_field_name("value")
             .map(|n| self.build_expression(id, &n, code));
-        let is_undef = node.child_by_field_name("undef").is_some();
+        let is_uzumaki = node.child_by_field_name("undef").is_some();
 
         let node = Rc::new(VariableDefinitionStatement::new(
-            id, location, name, ty, value, is_undef,
+            id, location, name, ty, value, is_uzumaki,
         ));
         self.arena.add_node(
             AstNode::Statement(Statement::VariableDefinition(node.clone())),

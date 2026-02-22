@@ -28,3 +28,23 @@ pub fn let_from_identifier() -> i32 {
     let y: i32 = x;
     return y;
 }
+
+pub fn let_i8_literal() -> i8 {
+    let x: i8 = 100;
+    return x;
+}
+
+pub fn let_i16_literal() -> i16 {
+    let y: i16 = 1000;
+    return y;
+}
+
+pub fn let_u8_literal() -> u8 {
+    let z: u8 = 200;
+    return z;
+}
+
+pub fn let_u16_literal() -> u16 {
+    let w: u16 = 40000;
+    return w;
+}

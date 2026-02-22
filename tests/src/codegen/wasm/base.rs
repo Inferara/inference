@@ -223,7 +223,7 @@ mod base_codegen_tests {
 
     #[test]
     fn local_variables_test() {
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 7);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 11);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i32, 1);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i64, 1);
         let test_name = "local_variables";
@@ -265,6 +265,26 @@ mod base_codegen_tests {
                 let x: i32 = 10;
                 let y: i32 = x;
                 return y;
+            }
+
+            pub fn let_i8_literal() -> i8 {
+                let x: i8 = 100;
+                return x;
+            }
+
+            pub fn let_i16_literal() -> i16 {
+                let y: i16 = 1000;
+                return y;
+            }
+
+            pub fn let_u8_literal() -> u8 {
+                let z: u8 = 200;
+                return z;
+            }
+
+            pub fn let_u16_literal() -> u16 {
+                let w: u16 = 40000;
+                return w;
             }
         "#;
         let wasm_bytes = wasm_codegen(source_code);
@@ -312,6 +332,42 @@ mod base_codegen_tests {
             let_from_identifier.call(&mut store, ()).unwrap(),
             10,
             "let_from_identifier should return 10"
+        );
+
+        let let_i8_literal: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_i8_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i8_literal' function: {e}"));
+        assert_eq!(
+            let_i8_literal.call(&mut store, ()).unwrap(),
+            100,
+            "let_i8_literal should return 100"
+        );
+
+        let let_i16_literal: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_i16_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_i16_literal' function: {e}"));
+        assert_eq!(
+            let_i16_literal.call(&mut store, ()).unwrap(),
+            1000,
+            "let_i16_literal should return 1000"
+        );
+
+        let let_u8_literal: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_u8_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_u8_literal' function: {e}"));
+        assert_eq!(
+            let_u8_literal.call(&mut store, ()).unwrap(),
+            200,
+            "let_u8_literal should return 200"
+        );
+
+        let let_u16_literal: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_u16_literal")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_u16_literal' function: {e}"));
+        assert_eq!(
+            let_u16_literal.call(&mut store, ()).unwrap(),
+            40000,
+            "let_u16_literal should return 40000"
         );
     }
 

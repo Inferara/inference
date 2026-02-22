@@ -702,6 +702,9 @@ impl TypeChecker {
                 let target_type = TypeInfo::new(&variable_definition_statement.ty);
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
                     let mut expr_ref = initial_value.borrow_mut();
+                    if let Expression::Literal(Literal::Number(num_lit)) = &*expr_ref {
+                        ctx.set_node_typeinfo(num_lit.id, target_type.clone());
+                    }
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
