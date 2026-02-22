@@ -123,7 +123,7 @@ pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
 ///
 /// # Example
 /// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial.inf`
+/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.inf`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
@@ -136,14 +136,14 @@ pub(crate) fn get_test_file_path(module_path: &str, test_name: &str) -> std::pat
         path = path.join(part);
     }
 
-    path.join(format!("{test_name}.inf"))
+    path.join(test_name).join(format!("{test_name}.inf"))
 }
 
 /// Automatically resolves a WASM test data file path based on the test's module path and name.
 ///
 /// # Example
 /// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial.wasm`
+/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
@@ -156,7 +156,7 @@ pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::pat
         path = path.join(part);
     }
 
-    path.join(format!("{test_name}.wasm"))
+    path.join(test_name).join(format!("{test_name}.wasm"))
 }
 
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {

@@ -476,6 +476,7 @@ impl Compiler {
             Statement::TypeDefinition(_type_definition_statement) => todo!(),
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
+                cov_mark::hit!(wasm_codegen_emit_constant_definition);
                 self.lower_literal(&constant_definition.value, ctx, func);
                 let (local_idx, _) = locals_map
                     .get(&constant_definition.name())

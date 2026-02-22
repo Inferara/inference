@@ -111,6 +111,8 @@ Do not `#[ignore]` tests. If the test currently does not work, assert the wrong 
 
 Rationale: noticing when the behavior is fixed, making sure that even the wrong behavior is acceptable (ie, not a panic).
 
+Exception: test data regeneration helpers in `mod regenerate` blocks are `#[ignore]`d by design. These are not behavioral tests; they regenerate expected `.wasm` golden files from the current compiler output and are run explicitly with `--ignored` when the codegen pipeline changes.
+
 ## Provide Constructed Function Parameters
 
 When writing a function, prefer to provide already constructed parameters instead of `Option`s or similar structs. This makes the function easier to use and understand.

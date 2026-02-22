@@ -223,7 +223,7 @@ mod base_codegen_tests {
 
     #[test]
     fn local_variables_test() {
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 12);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 14);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i32, 1);
         cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i64, 1);
         let test_name = "local_variables";
@@ -233,6 +233,19 @@ mod base_codegen_tests {
         let actual = wasm_codegen(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn local_variables_exec_test() {
+        let test_name = "local_variables_exec";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
         let expected = get_test_wasm_path(module_path!(), test_name);
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
@@ -385,7 +398,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_trivial_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("trivial");
         let source_code =
             std::fs::read_to_string(dir.join("trivial.inf")).expect("Failed to read trivial.inf");
         let actual = wasm_codegen(&source_code);
@@ -402,7 +415,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_const_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("const");
         let source_code =
             std::fs::read_to_string(dir.join("const.inf")).expect("Failed to read const.inf");
         let actual = wasm_codegen(&source_code);
@@ -419,7 +432,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_nondet_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("nondet");
         let source_code =
             std::fs::read_to_string(dir.join("nondet.inf")).expect("Failed to read nondet.inf");
         let actual = wasm_codegen(&source_code);
@@ -438,7 +451,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_i64_uzumaki_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("i64_uzumaki");
         let source_code = std::fs::read_to_string(dir.join("i64_uzumaki.inf"))
             .expect("Failed to read i64_uzumaki.inf");
         let actual = wasm_codegen(&source_code);
@@ -457,7 +470,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_bool_literal_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("bool_literal");
         let source_code = std::fs::read_to_string(dir.join("bool_literal.inf"))
             .expect("Failed to read bool_literal.inf");
         let actual = wasm_codegen(&source_code);
@@ -474,7 +487,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_mixed_visibility_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("mixed_visibility");
         let source_code = std::fs::read_to_string(dir.join("mixed_visibility.inf"))
             .expect("Failed to read mixed_visibility.inf");
         let actual = wasm_codegen(&source_code);
@@ -491,7 +504,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_bool_const_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("bool_const");
         let source_code = std::fs::read_to_string(dir.join("bool_const.inf"))
             .expect("Failed to read bool_const.inf");
         let actual = wasm_codegen(&source_code);
@@ -508,7 +521,7 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_numeric_literals_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("numeric_literals");
         let source_code = std::fs::read_to_string(dir.join("numeric_literals.inf"))
             .expect("Failed to read numeric_literals.inf");
         let actual = wasm_codegen(&source_code);
@@ -525,13 +538,30 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_local_variables_wasm() {
-        let dir = base_test_dir();
+        let dir = base_test_dir().join("local_variables");
         let source_code = std::fs::read_to_string(dir.join("local_variables.inf"))
             .expect("Failed to read local_variables.inf");
         let actual = wasm_codegen(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("local_variables.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_local_variables_exec_wasm() {
+        let dir = base_test_dir().join("local_variables_exec");
+        let source_code = std::fs::read_to_string(dir.join("local_variables_exec.inf"))
+            .expect("Failed to read local_variables_exec.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("local_variables_exec.wasm");
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!(

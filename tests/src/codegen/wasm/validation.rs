@@ -540,6 +540,26 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Variable definition u16 WASM is invalid: {e}"));
     }
 
+    #[test]
+    fn variable_definition_u32_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_u32_test() -> u32 { let e: u32 = 4294967295; return e; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition u32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn variable_definition_u64_literal_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn let_u64_test() -> u64 { let f: u64 = 18446744073709551615; return f; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Variable definition u64 WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

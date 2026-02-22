@@ -28,6 +28,16 @@ pub fn let_u16_literal() -> u16 {
     return d;
 }
 
+pub fn let_u32_literal() -> u32 {
+    let e: u32 = 4294967295;
+    return e;
+}
+
+pub fn let_u64_literal() -> u64 {
+    let f: u64 = 18446744073709551615;
+    return f;
+}
+
 pub fn let_bool_literal_true() -> bool {
     let flag: bool = true;
     return flag;
@@ -36,16 +46,6 @@ pub fn let_bool_literal_true() -> bool {
 pub fn let_bool_literal_false() -> bool {
     let flag: bool = false;
     return flag;
-}
-
-pub fn let_uzumaki_i32() -> i32 {
-    let a: i32 = @;
-    return a;
-}
-
-pub fn let_uzumaki_i64() -> i64 {
-    let b: i64 = @;
-    return b;
 }
 
 pub fn let_from_identifier() -> i32 {
