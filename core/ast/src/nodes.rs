@@ -537,7 +537,6 @@ ast_nodes! {
         pub name: Rc<Identifier>,
         pub ty: Type,
         pub value: Option<RefCell<Expression>>,
-        pub is_uzumaki: bool,
     }
 
     pub struct TypeDefinitionStatement {

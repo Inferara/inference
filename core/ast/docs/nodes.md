@@ -511,19 +511,14 @@ pub struct VariableDefinitionStatement {
     pub name: Rc<Identifier>,
     pub ty: Type,
     pub value: Option<RefCell<Expression>>,
-    pub is_uzumaki: bool,
 }
 ```
 
 **Example source:**
 ```inference
 let x: i32 = 42;
-let y: i32;
-let z: i32 = uzumaki;  // Non-deterministic
+let y: i32 = @;
 ```
-
-**Fields:**
-- `is_uzumaki`: True if initialized with non-deterministic value
 
 ### AssignStatement
 

@@ -573,7 +573,6 @@ impl VariableDefinitionStatement {
         name: Rc<Identifier>,
         type_: Type,
         value: Option<Expression>,
-        is_uzumaki: bool,
     ) -> Self {
         VariableDefinitionStatement {
             id,
@@ -581,7 +580,6 @@ impl VariableDefinitionStatement {
             name,
             ty: type_,
             value: value.map(RefCell::new),
-            is_uzumaki,
         }
     }
 
