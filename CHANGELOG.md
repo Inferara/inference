@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
+- Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])
+  - `infc example.inf` equivalent to `infc example.inf --codegen -o`
+  - `infc example.inf -v` produces both `out/example.wasm` and `out/example.v`
+  - Supplying `--parse`, `--analyze`, or `--codegen` still overrides the default
+  - Matches conventional compiler UX (e.g. `gcc foo.c`)
 - Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([#97])
 - Remove external toolchain dependencies: no `inf-llc`, `rust-lld`, or platform-specific library paths required ([#125])
 - Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([#97])
@@ -311,3 +316,4 @@ Initial tagged release.
 [#127]: https://github.com/Inferara/inference/pull/127
 [#134]: https://github.com/Inferara/inference/pull/135
 [#136]: https://github.com/Inferara/inference/pull/136
+[#138]: https://github.com/Inferara/inference/pull/138

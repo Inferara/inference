@@ -77,7 +77,9 @@ Phases execute in canonical order (parse → analyze → codegen) regardless of 
 - `--analyze` automatically runs parse first
 - `--codegen` automatically runs parse and analyze first
 
-**At least one phase flag must be specified.**
+**Default behavior**: When no phase flag is given, `infc` defaults to full compilation
+(`--codegen -o`), writing `out/<name>.wasm`. Supplying any explicit phase flag overrides
+this default.
 
 ## Output Flags
 
@@ -107,11 +109,14 @@ infc example.inf --codegen -v
 # Creates: out/example.v
 ```
 
-Both flags can be used simultaneously:
+Both flags can be used together, or the simplified default form with `-v`:
 
 ```bash
-infc example.inf --codegen -o -v
+infc example.inf -v
 # Creates: out/example.wasm and out/example.v
+
+# Explicit equivalent:
+infc example.inf --codegen -o -v
 ```
 
 ## Output Directory
@@ -147,18 +152,24 @@ Parsed: example.inf
 Analyzed: example.inf
 ```
 
-### Full Compilation to WebAssembly
+### Full Compilation to WebAssembly (default)
 
 ```bash
-infc example.inf --codegen -o
+infc example.inf
 ```
 
 **Output:**
 ```
 Parsed: example.inf
 Analyzed: example.inf
-WASM generated
+Codegen complete
 WASM generated at: out/example.wasm
+```
+
+Explicit equivalent:
+
+```bash
+infc example.inf --codegen -o
 ```
 
 ### Generate Only Rocq (No WASM File)
@@ -178,16 +189,11 @@ V generated at: out/example.v
 ### Full Pipeline with Both Outputs
 
 ```bash
-infc example.inf --codegen -o -v
-```
+infc example.inf -v
+# Creates: out/example.wasm and out/example.v
 
-**Output:**
-```
-Parsed: example.inf
-Analyzed: example.inf
-WASM generated
-WASM generated at: out/example.wasm
-V generated at: out/example.v
+# Explicit equivalent:
+infc example.inf --codegen -o -v
 ```
 
 ## Error Handling
@@ -294,13 +300,14 @@ core/cli/
 The `main()` function coordinates the compilation pipeline:
 
 1. Parse command line arguments
-2. Validate input (file exists, at least one phase flag)
-3. Execute phases in canonical order:
+2. Validate input (file exists)
+3. Apply default normalization (no phase flags → `--codegen -o`)
+4. Execute phases in canonical order:
    - Parse: `inference::parse()`
    - Analyze: `inference::type_check()` + `inference::analyze()`
    - Codegen: `inference::codegen()` + optional `inference::wasm_to_v()`
-4. Generate output files (if requested)
-5. Exit with appropriate code
+5. Generate output files (if requested)
+6. Exit with appropriate code
 
 ### Error Propagation
 

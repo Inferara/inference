@@ -9,9 +9,12 @@ use clap::Parser;
 
 /// Command line interface definition for the Inference compiler.
 ///
-/// The `infc` compiler operates in phases, and users must explicitly request
-/// which phases to run via command line flags. Phases execute in canonical order
-/// (parse → analyze → codegen) regardless of flag order.
+/// ## Default Behavior
+///
+/// When no phase flags are given, `infc` defaults to full compilation and writes
+/// the WASM binary to disk — equivalent to `--codegen -o`. Supplying any explicit
+/// phase flag (`--parse`, `--analyze`, `--codegen`) overrides this default and
+/// runs only the requested phases.
 ///
 /// ## Phase Dependencies
 ///
@@ -22,25 +25,31 @@ use clap::Parser;
 /// ## Output Flags
 ///
 /// - `-o`: Generate WASM binary file in `out/` directory
-/// - `-v`: Generate Rocq (.v) translation in `out/` directory
+/// - `-v`: Generate Rocq (.v) translation in `out/` directory; when used without
+///   any explicit phase flag, implies full pipeline + `-o`
 ///
-/// Output flags only take effect when `--codegen` is specified.
+/// Output flags only take effect when `--codegen` is active (explicitly or via default).
 ///
 /// ## Examples
 ///
-/// Parse only:
+/// Full compilation (default — no flags required):
 /// ```bash
-/// infc example.inf --parse
-/// ```
-///
-/// Full compilation with WASM output:
-/// ```bash
-/// infc example.inf --codegen -o
+/// infc example.inf
 /// ```
 ///
 /// Full compilation with Rocq translation:
 /// ```bash
-/// infc example.inf --codegen -o -v
+/// infc example.inf -v
+/// ```
+///
+/// Parse only (overrides default):
+/// ```bash
+/// infc example.inf --parse
+/// ```
+///
+/// Explicit full compilation (equivalent to the default):
+/// ```bash
+/// infc example.inf --codegen -o
 /// ```
 #[derive(Parser)]
 #[command(
@@ -48,8 +57,10 @@ use clap::Parser;
     author,
     version,
     about = "Inference compiler CLI (infc)",
-    long_about = "The 'infc' command runs one or more compilation phases over a single .inf source file. \
-Parse builds the typed AST; analyze performs semantic/type inference; codegen emits WASM and can translate to V when -o is supplied."
+    long_about = "The 'infc' command compiles a single .inf source file. \
+By default (no flags), it runs the full pipeline and writes out/<name>.wasm. \
+Use --parse, --analyze, or --codegen to run only specific phases. \
+Add -v to also produce a Rocq (.v) translation for formal verification."
 )]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Cli {
@@ -65,6 +76,9 @@ pub(crate) struct Cli {
     /// an arena-allocated typed AST. If parsing succeeds, the compiler prints
     /// "Parsed: <filepath>" and exits with code 0.
     ///
+    /// Overrides the default full-pipeline behavior: supplying this flag means
+    /// only the parse phase runs (no codegen, no output files).
+    ///
     /// Parse errors will be reported to stderr and the process exits with code 1.
     #[clap(long = "parse", action = clap::ArgAction::SetTrue)]
     pub(crate) parse: bool,
@@ -73,6 +87,9 @@ pub(crate) struct Cli {
     ///
     /// This phase performs type checking and semantic validation on the AST.
     /// The parse phase is automatically run first if not already requested.
+    ///
+    /// Overrides the default full-pipeline behavior: supplying this flag means
+    /// only parse + analyze run (no codegen, no output files).
     ///
     /// Analysis errors will be reported to stderr and the process exits with code 1.
     #[clap(long = "analyze", action = clap::ArgAction::SetTrue)]
@@ -83,6 +100,7 @@ pub(crate) struct Cli {
     /// This phase generates WebAssembly binary from the typed AST. Both parse
     /// and analyze phases are automatically run first if not already requested.
     ///
+    /// When used without `-o` or `-v`, codegen runs but no output files are written.
     /// Use `-o` to write the WASM binary to disk, and `-v` to additionally
     /// generate a Rocq translation.
     ///
@@ -92,23 +110,24 @@ pub(crate) struct Cli {
 
     /// Generate output WASM binary file.
     ///
-    /// When specified with `--codegen`, writes the compiled WebAssembly binary
-    /// to `out/<source_name>.wasm` relative to the current working directory.
+    /// Writes the compiled WebAssembly binary to `out/<source_name>.wasm`
+    /// relative to the current working directory. Requires codegen to be active
+    /// (either via `--codegen` or the default full-pipeline behavior).
     ///
-    /// This flag has no effect without `--codegen`.
+    /// Set automatically when no phase flags are given (default behavior).
     #[clap(short = 'o', action = clap::ArgAction::SetTrue)]
     pub(crate) generate_wasm_output: bool,
 
     /// Generate Rocq (.v) translation file.
     ///
-    /// When specified with `--codegen`, translates the compiled WebAssembly
-    /// to Rocq (Coq) format and writes it to `out/<source_name>.v` relative
-    /// to the current working directory.
+    /// Translates the compiled WebAssembly to Rocq (Coq) format and writes it
+    /// to `out/<source_name>.v` relative to the current working directory.
+    ///
+    /// When used without any explicit phase flag, implies full pipeline + `-o`:
+    /// `infc file.inf -v` produces both `out/file.wasm` and `out/file.v`.
     ///
     /// This enables formal verification of the compiled program using the
     /// Rocq proof assistant.
-    ///
-    /// This flag has no effect without `--codegen`.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub(crate) generate_v_output: bool,
 }

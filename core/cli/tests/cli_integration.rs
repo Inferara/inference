@@ -8,7 +8,7 @@
 //!
 //! The test suite verifies:
 //!
-//! 1. **Input validation**: File existence, required flags
+//! 1. **Input validation**: File existence
 //! 2. **Phase execution**: Correct execution of parse, analyze, codegen
 //! 3. **Output generation**: WASM and Rocq file creation
 //! 4. **Error handling**: Proper error messages and exit codes
@@ -91,19 +91,6 @@ fn fails_when_file_missing() {
         .stderr(predicate::str::contains("path not found"));
 }
 
-/// Verifies that the compiler requires at least one phase flag.
-///
-/// **Expected behavior**: Exit with code 1 when no phase flags are provided,
-/// with an error message explaining that at least one phase must be specified.
-#[test]
-fn fails_when_no_phase_selected() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
-    cmd.arg(example_file("example.inf"));
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("at least one of --parse"));
-}
-
 /// Verifies that the parse phase can run successfully as a standalone operation.
 ///
 /// **Expected behavior**: Exit with code 0 and print "Parsed: <filepath>" to stdout
@@ -117,40 +104,71 @@ fn parse_only_succeeds() {
         .stdout(predicate::str::contains("Parsed:"));
 }
 
-/// Verifies that the full compilation pipeline executes correctly.
+/// Verifies that the full compilation pipeline executes correctly with explicit flags.
 ///
 /// **Test setup**: Copies test input to a temporary directory to avoid
 /// contaminating the repository with `out/` directories during parallel test runs.
 ///
-/// **Expected behavior**: The parse phase completes successfully and prints
-/// "Parsed: <filepath>" to stdout. The codegen phase behavior depends on
-/// current implementation status of the analyze phase.
-///
-/// **Note**: This test is tolerant of both success and failure outcomes for
-/// codegen, as the analyze phase is work-in-progress. Once analysis is fully
-/// implemented, this test should be updated to assert success and verify
-/// output file generation.
+/// **Expected behavior**: All phases complete successfully, producing a WASM file.
 #[test]
 fn full_pipeline_with_codegen() {
     let temp = assert_fs::TempDir::new().unwrap();
-    // Copy example.inf to temp so we don't contaminate repo out/ folder checks in parallel runs.
-    let src = example_file("example.inf");
-    let dest = temp.child("example.inf");
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
     std::fs::copy(&src, dest.path()).unwrap();
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
     cmd.current_dir(temp.path())
         .arg(dest.path())
         .arg("--parse")
-        // Skip --analyze for now (not yet implemented) but still request codegen.
-        .arg("--codegen");
+        .arg("--codegen")
+        .arg("-o");
 
-    // Expect failure because analysis is required prior to codegen; if codegen succeeds without analyze adjust later.
-    let assert = cmd.assert();
-    let out_pred = predicate::str::contains("Parsed:");
-    assert.stdout(out_pred);
-    // Accept either success (future implementation) or failure with panic message.
-    // Can't directly match exit code with assert_cmd when allowing both, so pattern match stderr optional.
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Parsed:"));
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+}
+
+/// Verifies that `infc file.inf` (no flags) defaults to full compilation and
+/// writes a WASM file, matching conventional compiler UX (e.g. `gcc foo.c`).
+#[test]
+fn no_flags_produces_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+}
+
+/// Verifies that `-v` alone (no explicit phase flag) implies full pipeline
+/// and produces both a WASM file and a Rocq translation file.
+#[test]
+fn v_flag_alone_produces_wasm_and_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path()).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+    assert!(temp.child("out").child("trivial.v").path().exists());
 }
 
 /// Verifies that the `--version` flag displays the correct version information.
@@ -164,4 +182,17 @@ fn shows_version() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+}
+
+/// Verifies that the compiler exits with failure and reports a parse error
+/// when given a syntactically invalid source file.
+///
+/// **Expected behavior**: Exit with code 1 and print "Parse error" to stderr.
+#[test]
+fn fails_with_parse_error() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.arg(example_file("bad_syntax.inf")).arg("--parse");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Parse error"));
 }

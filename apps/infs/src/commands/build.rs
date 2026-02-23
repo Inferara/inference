@@ -4,14 +4,16 @@
 //! via subprocess. This module acts as a lightweight bootstrapper, validating
 //! arguments and forwarding them to infc.
 //!
-//! ## Compilation Phases
+//! ## Behavior
 //!
-//! 1. **Parse** (`--parse`) - Builds the typed AST using tree-sitter
-//! 2. **Analyze** (`--analyze`) - Performs type checking and semantic validation
-//! 3. **Codegen** (`--codegen`) - Emits WebAssembly binary
+//! `infs build` always performs full compilation (parse, analyze, codegen)
+//! and writes the WASM binary to disk. The `-v` flag additionally generates
+//! a Rocq (.v) translation file.
 //!
-//! Phases execute in canonical order (parse -> analyze -> codegen) regardless
-//! of the order flags appear on the command line. Each phase depends on the previous.
+//! ```bash
+//! infs build example.inf       # parse -> codegen -> write out/example.wasm
+//! infs build example.inf -v    # parse -> codegen -> write out/example.wasm + out/example.v
+//! ```
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -23,42 +25,14 @@ use crate::toolchain::find_infc;
 
 /// Arguments for the build command.
 ///
-/// The build command operates in phases, and users must explicitly request
-/// which phases to run via command line flags.
-///
-/// ## Phase Dependencies
-///
-/// - `--parse`: Standalone, builds the typed AST
-/// - `--analyze`: Requires parsing (automatically runs parse phase)
-/// - `--codegen`: Requires analysis (automatically runs parse and analyze phases)
-///
-/// ## Output Flags
-///
-/// - `-o`: Generate WASM binary file in `out/` directory
-/// - `-v`: Generate Rocq (.v) translation in `out/` directory
-#[derive(Args)]
-#[allow(clippy::struct_excessive_bools)]
+/// Always performs full compilation (parse, analyze, codegen) and writes
+/// the WASM binary to disk. Use `-v` to also generate a Rocq (.v) file.
+#[derive(Args, Clone)]
 pub struct BuildArgs {
     /// Path to the source file to compile.
     pub path: PathBuf,
 
-    /// Run the parse phase to build the typed AST.
-    #[clap(long = "parse", action = clap::ArgAction::SetTrue)]
-    pub parse: bool,
-
-    /// Run the analyze phase for semantic and type inference.
-    #[clap(long = "analyze", action = clap::ArgAction::SetTrue)]
-    pub analyze: bool,
-
-    /// Run the codegen phase to emit WebAssembly binary.
-    #[clap(long = "codegen", action = clap::ArgAction::SetTrue)]
-    pub codegen: bool,
-
-    /// Generate output WASM binary file.
-    #[clap(short = 'o', action = clap::ArgAction::SetTrue)]
-    pub generate_wasm_output: bool,
-
-    /// Generate Rocq (.v) translation file.
+    /// Generate Rocq (.v) translation file in addition to the WASM binary.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub generate_v_output: bool,
 }
@@ -68,16 +42,14 @@ pub struct BuildArgs {
 /// ## Execution Flow
 ///
 /// 1. Validates that the source file exists
-/// 2. Ensures at least one phase flag is specified
-/// 3. Locates the infc compiler binary
-/// 4. Builds and executes the infc command with appropriate flags
-/// 5. Propagates exit code from infc
+/// 2. Locates the infc compiler binary
+/// 3. Builds and executes the infc command, forwarding `-v` if requested
+/// 4. Propagates exit code from infc
 ///
 /// ## Errors
 ///
 /// Returns an error if:
 /// - The source file does not exist
-/// - No phase flags are specified
 /// - infc compiler cannot be found
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 pub fn execute(args: &BuildArgs) -> Result<()> {
@@ -85,31 +57,10 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
         bail!("Path not found: {}", args.path.display());
     }
 
-    let need_parse = args.parse;
-    let need_analyze = args.analyze;
-    let need_codegen = args.codegen;
-
-    if !(need_parse || need_analyze || need_codegen) {
-        bail!("At least one of --parse, --analyze, or --codegen must be specified");
-    }
-
     let infc_path = find_infc()?;
-
     let mut cmd = Command::new(&infc_path);
     cmd.arg(&args.path);
 
-    if need_parse {
-        cmd.arg("--parse");
-    }
-    if need_analyze {
-        cmd.arg("--analyze");
-    }
-    if need_codegen {
-        cmd.arg("--codegen");
-    }
-    if args.generate_wasm_output {
-        cmd.arg("-o");
-    }
     if args.generate_v_output {
         cmd.arg("-v");
     }

@@ -208,7 +208,7 @@
           {
             "id": "inference.walkthrough.build",
             "title": "Build Your Program",
-            "description": "Use the integrated terminal to compile your Inference source file:\n\n```\ninfs build main.inf --parse --codegen -o\n```\n\nThis produces a WebAssembly `.wasm` file. Learn more in the [Inference Book](https://github.com/Inferara/book).",
+            "description": "Use the integrated terminal to compile your Inference source file:\n\n```\ninfs build main.inf\n```\n\nThis produces a WebAssembly `.wasm` file. Learn more in the [Inference Book](https://github.com/Inferara/book).",
             "media": {
               "image": "icons/inference.png",
               "altText": "Inference logo"

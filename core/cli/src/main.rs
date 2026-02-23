@@ -39,7 +39,23 @@
 //! - `--analyze` automatically runs parse first
 //! - `--codegen` automatically runs parse and analyze first
 //!
-//! At least one phase flag must be specified.
+//! ## Default Behavior
+//!
+//! When no phase flags are given, `infc` defaults to full compilation and writes
+//! the WASM binary to disk — equivalent to `--codegen -o`. This matches
+//! conventional compiler UX (e.g. `gcc foo.c`).
+//!
+//! ```bash
+//! infc example.inf        # parse → codegen → write out/example.wasm
+//! infc example.inf -v     # parse → codegen → write out/example.wasm + out/example.v
+//! ```
+//!
+//! Supplying any explicit phase flag overrides the default:
+//!
+//! ```bash
+//! infc example.inf --parse    # parse only, no output files
+//! infc example.inf --analyze  # parse + analyze only, no output files
+//! ```
 //!
 //! ## Output Artifacts
 //!
@@ -81,14 +97,19 @@
 //! infc example.inf --analyze
 //! ```
 //!
-//! Full compilation to WebAssembly:
+//! Full compilation to WebAssembly (default — no flags needed):
 //! ```bash
-//! infc example.inf --codegen -o
+//! infc example.inf
 //! ```
 //!
 //! Compile and generate Rocq translation:
 //! ```bash
-//! infc example.inf --codegen -o -v
+//! infc example.inf -v
+//! ```
+//!
+//! Full compilation with explicit flags (equivalent to the default):
+//! ```bash
+//! infc example.inf --codegen -o
 //! ```
 //!
 //! Only generate Rocq (no WASM file):
@@ -133,20 +154,31 @@ use std::{
 };
 use toolchain::BuildProfile;
 
+/// Applies default phase normalization to parsed CLI arguments.
+///
+/// When no phase flag (`--parse`, `--analyze`, `--codegen`) is given, defaults
+/// to full pipeline + WASM output — equivalent to `--codegen -o`.
+pub(crate) fn normalize_args(args: &mut Cli) {
+    if !args.parse && !args.analyze && !args.codegen {
+        args.codegen = true;
+        args.generate_wasm_output = true;
+    }
+}
+
 /// Entry point for the Inference compiler CLI.
 ///
 /// ## Execution Flow
 ///
 /// 1. **Parse command line arguments** using clap
-/// 2. **Validate input**:
-///    - Verify source file exists
-///    - Ensure at least one phase flag is specified
-/// 3. **Execute compilation phases** in canonical order:
+/// 2. **Validate input**: verify source file exists
+/// 3. **Apply default normalization**: when no phase flags are given, defaults
+///    to full pipeline (`--codegen -o`) so that `infc file.inf` just works
+/// 4. **Execute compilation phases** in canonical order:
 ///    - Parse: Build typed AST from source using tree-sitter
 ///    - Analyze: Type check and semantic validation
 ///    - Codegen: Generate WebAssembly binary from typed AST
-/// 4. **Generate output files** (if requested):
-///    - Write WASM binary with `-o` flag
+/// 5. **Generate output files** (if requested):
+///    - Write WASM binary with `-o` flag (set by default when no flags given)
 ///    - Write Rocq translation with `-v` flag
 ///
 /// ## Error Handling
@@ -154,7 +186,7 @@ use toolchain::BuildProfile;
 /// All errors are reported to stderr with descriptive messages and cause
 /// process exit with code 1. Error categories:
 ///
-/// - **Usage errors**: Missing phase flags, invalid arguments
+/// - **Usage errors**: Invalid arguments
 /// - **IO errors**: File not found, permission denied, output write failures
 /// - **Compilation errors**: Parse errors, type errors, codegen failures
 ///
@@ -183,21 +215,18 @@ use toolchain::BuildProfile;
 /// - Phase execution is sequential (no parallelization)
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let args = Cli::parse();
+    let mut args = Cli::parse();
     if !args.path.exists() {
         eprintln!("Error: path not found");
         process::exit(1);
     }
 
+    normalize_args(&mut args);
+
     let output_path = PathBuf::from("out");
     let need_parse = args.parse;
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
-
-    if !(need_parse || need_analyze || need_codegen) {
-        eprintln!("Error: at least one of --parse, --analyze, or --codegen must be specified");
-        process::exit(1);
-    }
 
     let source_code = match fs::read_to_string(&args.path) {
         Ok(content) => content,
@@ -305,44 +334,55 @@ fn main() {
     process::exit(0);
 }
 
-/// Unit test helpers for the CLI module.
-///
-/// Most CLI testing is done through integration tests in `tests/cli_integration.rs`
-/// which spawn the actual binary. This module contains helper functions and
-/// placeholder tests for future unit-level testing needs.
 #[cfg(test)]
-mod test {
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
 
-    // Commented out test for WASM to Rocq translation.
-    // This test is currently disabled as it depends on specific test data setup
-    // and may fail in CI environments.
-    //
-    // #[test]
-    // fn test_wasm_to_coq() {
-    //     if std::env::var("GITHUB_ACTIONS").is_ok() {
-    //         eprintln!("Skipping test on GitHub Actions");
-    //         return;
-    //     }
-    //     let path = get_test_data_path().join("wasm").join("comments.0.wasm");
-    //     let absolute_path = path.canonicalize().unwrap();
-    //
-    //     let bytes = std::fs::read(absolute_path).unwrap();
-    //     let mod_name = String::from("index");
-    //     let coq = inference_wasm_coq_translator::wasm_parser::translate_bytes(
-    //         &mod_name,
-    //         bytes.as_slice(),
-    //     );
-    //     assert!(coq.is_ok());
-    //     let coq_file_path = get_out_path().join("test_wasm_to_coq.v");
-    //     std::fs::write(coq_file_path, coq.unwrap()).unwrap();
-    // }
+    fn make_args(parse: bool, analyze: bool, codegen: bool) -> Cli {
+        Cli {
+            path: PathBuf::from("test.inf"),
+            parse,
+            analyze,
+            codegen,
+            generate_wasm_output: false,
+            generate_v_output: false,
+        }
+    }
+
+    #[test]
+    fn normalize_sets_full_pipeline_when_no_flags() {
+        let mut args = make_args(false, false, false);
+        normalize_args(&mut args);
+        assert!(args.codegen);
+        assert!(args.generate_wasm_output);
+        assert!(!args.generate_v_output);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_parse() {
+        let mut args = make_args(true, false, false);
+        normalize_args(&mut args);
+        assert!(!args.codegen);
+        assert!(!args.generate_wasm_output);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_analyze() {
+        let mut args = make_args(false, true, false);
+        normalize_args(&mut args);
+        assert!(!args.codegen);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_codegen() {
+        let mut args = make_args(false, false, true);
+        normalize_args(&mut args);
+        assert!(args.codegen);
+        assert!(!args.generate_wasm_output);
+    }
 
     /// Returns the path to the test data directory.
-    ///
-    /// Navigates from the current working directory to the workspace root
-    /// and locates the `test_data` directory.
-    ///
-    /// This helper is used for locating test input files in unit tests.
     #[allow(dead_code)]
     pub(crate) fn get_test_data_path() -> std::path::PathBuf {
         let current_dir = std::env::current_dir().unwrap();
@@ -353,9 +393,6 @@ mod test {
     }
 
     /// Returns the path to the output directory for test artifacts.
-    ///
-    /// Located at `<workspace_root>/out/`, this directory is where test-generated
-    /// WASM and Rocq files are written during testing.
     #[allow(dead_code)]
     fn get_out_path() -> std::path::PathBuf {
         get_test_data_path().parent().unwrap().join("out")
