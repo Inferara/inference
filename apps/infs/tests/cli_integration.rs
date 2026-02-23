@@ -13,7 +13,7 @@
 //! ### Phase 1: Build Command
 //!
 //! 1. **Error handling**: File existence, no panics on error paths
-//! 2. **Build command**: Parse, analyze, and codegen phases; default (no flags) behavior
+//! 2. **Build command**: Full compilation, `-v` flag for Rocq output
 //! 3. **Output generation**: WASM and Rocq file creation
 //! 4. **Version and help**: CLI metadata display
 //! 5. **Headless mode**: Display info without TUI
@@ -146,9 +146,7 @@ fn path_without_tools() -> String {
 #[test]
 fn build_fails_when_file_missing() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.arg("build")
-        .arg("this-file-does-not-exist.inf")
-        .arg("--parse");
+    cmd.arg("build").arg("this-file-does-not-exist.inf");
 
     cmd.assert().failure().stderr(
         predicate::str::contains("Path not found").or(predicate::str::contains("path not found")),
@@ -233,91 +231,6 @@ fn build_v_flag_alone_produces_both_outputs() {
 // Success Path Tests
 // =============================================================================
 
-/// Verifies that the parse phase can run successfully as a standalone operation.
-///
-/// **Expected behavior**: Exit with code 0 and print "Parsed: <filepath>" to stdout
-/// when the source file is syntactically valid.
-#[test]
-fn build_parse_only_succeeds() {
-    let Some(infc_path) = require_infc() else {
-        return;
-    };
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .arg("build")
-        .arg(example_file("example.inf"))
-        .arg("--parse");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Parsed:"));
-}
-
-/// Verifies that the analyze phase can run successfully.
-///
-/// **Note**: Uses `trivial.inf` which successfully passes type checking,
-/// unlike `example.inf` which has type checker issues.
-#[test]
-fn build_analyze_succeeds() {
-    let Some(infc_path) = require_infc() else {
-        return;
-    };
-
-    let temp = assert_fs::TempDir::new().unwrap();
-    let src = codegen_test_file("trivial.inf");
-    let dest = temp.child("trivial.inf");
-    std::fs::copy(&src, dest.path()).unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .current_dir(temp.path())
-        .arg("build")
-        .arg(dest.path())
-        .arg("--analyze");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Parsed:"))
-        .stdout(predicate::str::contains("Analyzed:"));
-}
-
-/// Verifies that the codegen phase produces WASM output.
-///
-/// **Test setup**: Copies test input to a temporary directory to isolate output files.
-///
-/// **Expected behavior**: The compilation succeeds and produces a .wasm file.
-#[test]
-fn build_codegen_succeeds() {
-    let Some(infc_path) = require_infc() else {
-        return;
-    };
-
-    let temp = assert_fs::TempDir::new().unwrap();
-    let src = codegen_test_file("trivial.inf");
-    let dest = temp.child("trivial.inf");
-    std::fs::copy(&src, dest.path()).unwrap();
-
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .current_dir(temp.path())
-        .arg("build")
-        .arg(dest.path())
-        .arg("--codegen")
-        .arg("-o");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("WASM generated"));
-
-    let wasm_output = temp.child("out").child("trivial.wasm");
-    assert!(
-        wasm_output.path().exists(),
-        "Expected WASM file at: {:?}",
-        wasm_output.path()
-    );
-}
-
 /// Verifies that the full pipeline with Rocq output works correctly.
 ///
 /// **Expected behavior**: The compilation succeeds and produces both .wasm and .v files.
@@ -337,8 +250,6 @@ fn build_full_pipeline_with_v_output() {
         .current_dir(temp.path())
         .arg("build")
         .arg(dest.path())
-        .arg("--codegen")
-        .arg("-o")
         .arg("-v");
 
     cmd.assert()
@@ -497,19 +408,14 @@ fn build_produces_identical_wasm_as_infc() {
         .env("INFC_PATH", &infc_path)
         .current_dir(temp_new.path())
         .arg("build")
-        .arg(dest_new.path())
-        .arg("--codegen")
-        .arg("-o");
+        .arg(dest_new.path());
 
     cmd_new.assert().success();
 
     let mut cmd_legacy = Command::new(&infc_path);
     cmd_legacy
         .current_dir(temp_legacy.path())
-        .arg(dest_legacy.path())
-        .arg("--parse")
-        .arg("--codegen")
-        .arg("-o");
+        .arg(dest_legacy.path());
 
     cmd_legacy.assert().success();
 
@@ -1562,8 +1468,7 @@ fn build_fails_gracefully_on_syntax_error() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
         .arg("build")
-        .arg(&syntax_error_file)
-        .arg("--parse");
+        .arg(&syntax_error_file);
 
     cmd.assert().failure().stderr(
         predicate::str::contains("error")
@@ -1627,8 +1532,7 @@ fn build_handles_empty_file() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
         .arg("build")
-        .arg(empty_file())
-        .arg("--parse");
+        .arg(empty_file());
 
     // Empty file should either succeed or fail gracefully (no panic)
     let output = cmd.output().expect("Failed to execute command");
@@ -1677,8 +1581,7 @@ fn build_with_invalid_infc_path_shows_error() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", "/nonexistent/path/to/infc")
         .arg("build")
-        .arg(example_file("example.inf"))
-        .arg("--parse");
+        .arg(example_file("example.inf"));
 
     cmd.assert().failure().stderr(
         predicate::str::contains("not found")
@@ -1737,9 +1640,7 @@ fn build_compiles_uzumaki_operator() {
     cmd.env("INFC_PATH", &infc_path)
         .current_dir(temp.path())
         .arg("build")
-        .arg(dest.path())
-        .arg("--codegen")
-        .arg("-o");
+        .arg(dest.path());
 
     cmd.assert()
         .success()
@@ -1772,8 +1673,6 @@ fn build_compiles_all_nondet_features() {
         .current_dir(temp.path())
         .arg("build")
         .arg(dest.path())
-        .arg("--codegen")
-        .arg("-o")
         .arg("-v");
 
     cmd.assert()
@@ -1792,43 +1691,6 @@ fn build_compiles_all_nondet_features() {
         v_output.path().exists(),
         "Expected V file at: {:?}",
         v_output.path()
-    );
-}
-
-/// QA: TC-2.11 - Verify phases execute in correct order regardless of flag order.
-///
-/// **Expected behavior**: Exit code 0, phases execute in order: parse -> analyze -> codegen.
-#[test]
-fn build_enforces_phase_order() {
-    let Some(infc_path) = require_infc() else {
-        return;
-    };
-
-    let temp = assert_fs::TempDir::new().unwrap();
-    let src = codegen_test_file("trivial.inf");
-    let dest = temp.child("trivial.inf");
-    std::fs::copy(&src, dest.path()).unwrap();
-
-    // Run with flags in reverse order: --codegen --parse -o
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.env("INFC_PATH", &infc_path)
-        .current_dir(temp.path())
-        .arg("build")
-        .arg(dest.path())
-        .arg("--codegen")
-        .arg("--parse")
-        .arg("-o");
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Parsed:"))
-        .stdout(predicate::str::contains("WASM generated"));
-
-    let wasm_output = temp.child("out").child("trivial.wasm");
-    assert!(
-        wasm_output.path().exists(),
-        "Expected WASM file at: {:?}",
-        wasm_output.path()
     );
 }
 
@@ -1912,9 +1774,7 @@ fn build_fails_on_readonly_output_directory() {
     cmd.env("INFC_PATH", &infc_path)
         .current_dir(temp.path())
         .arg("build")
-        .arg(dest.path())
-        .arg("--codegen")
-        .arg("-o");
+        .arg(dest.path());
 
     cmd.assert().failure().stderr(
         predicate::str::contains("permission")
@@ -1954,10 +1814,7 @@ fn build_handles_nested_paths() {
     cmd.env("INFC_PATH", &infc_path)
         .current_dir(temp.path())
         .arg("build")
-        .arg(dest.path())
-        .arg("--parse");
+        .arg(dest.path());
 
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("Parsed:"));
+    cmd.assert().success();
 }
