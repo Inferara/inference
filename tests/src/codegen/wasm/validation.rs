@@ -839,6 +839,213 @@ mod codegen_validation_tests {
         });
     }
 
+    // --- Binary expression validation tests ---
+
+    #[test]
+    fn binary_add_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("add i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_sub_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn sub(a: i32, b: i32) -> i32 { return a - b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("sub i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_mul_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn mul(a: i32, b: i32) -> i32 { return a * b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("mul i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_div_signed_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn div_s(a: i32, b: i32) -> i32 { return a / b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("div signed WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_div_unsigned_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn div_u(a: u32, b: u32) -> u32 { return a / b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("div unsigned WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_mod_signed_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn rem_s(a: i32, b: i32) -> i32 { return a % b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("mod signed WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_eq_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn eq(a: i32, b: i32) -> bool { return a == b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("eq i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_lt_signed_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn lt_s(a: i32, b: i32) -> bool { return a < b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("lt signed WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_lt_unsigned_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn lt_u(a: u32, b: u32) -> bool { return a < b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("lt unsigned WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_and_bool_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn and(a: bool, b: bool) -> bool { return a && b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("and bool WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_or_bool_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn or(a: bool, b: bool) -> bool { return a || b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("or bool WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_bitand_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn bitand(a: i32, b: i32) -> i32 { return a & b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("bitand WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_shr_signed_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn shr_s(a: i32, b: i32) -> i32 { return a >> b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("shr signed WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_shr_unsigned_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn shr_u(a: u32, b: u32) -> u32 { return a >> b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("shr unsigned WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn binary_add_i64_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn add_i64(a: i64, b: i64) -> i64 { return a + b; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("add i64 WASM is invalid: {e}"));
+    }
+
+    // --- Unary expression validation tests ---
+
+    #[test]
+    fn unary_neg_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_prefix_unary_expression);
+        cov_mark::check!(wasm_codegen_emit_unary_neg);
+        let source = r#"pub fn neg(a: i32) -> i32 { return -a; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("neg i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn unary_not_bool_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_prefix_unary_expression);
+        cov_mark::check!(wasm_codegen_emit_unary_not);
+        let source = r#"pub fn not(a: bool) -> bool { return !a; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("not bool WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn unary_bitnot_i32_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_prefix_unary_expression);
+        cov_mark::check!(wasm_codegen_emit_unary_bitnot);
+        let source = r#"pub fn bitnot(a: i32) -> i32 { return ~a; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("bitnot i32 WASM is invalid: {e}"));
+    }
+
+    // --- Parenthesized expression validation tests ---
+
+    #[test]
+    fn parenthesized_expr_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_parenthesized_expression);
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        let source = r#"pub fn paren(a: i32, b: i32) -> i32 { return (a + b); }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("parenthesized expr WASM is invalid: {e}"));
+    }
+
+    // --- Compound expression validation tests ---
+
+    #[test]
+    fn compound_bitnot_shr_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        cov_mark::check!(wasm_codegen_emit_prefix_unary_expression);
+        cov_mark::check!(wasm_codegen_emit_unary_bitnot);
+        // `~a >> 2` — parsed as `(~a) >> 2`; verifies bitnot + shr compiles and validates
+        let source = r#"pub fn compound(a: i32) -> i32 { return ~a >> 2; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("compound bitnot+shr WASM is invalid: {e}"));
+    }
+
+    // --- Variable definition with binary initializer validation tests ---
+
+    #[test]
+    fn binary_as_let_init_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_binary_expression);
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"pub fn binop_let(a: i32, b: i32) -> i32 { let r: i32 = a + b; return r; }"#;
+        let output = codegen_output(source);
+        inf_wasmparser::validate(output.wasm())
+            .unwrap_or_else(|e| panic!("binary as let init WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

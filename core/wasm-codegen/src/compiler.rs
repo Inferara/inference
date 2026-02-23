@@ -60,8 +60,9 @@ use std::iter::Peekable;
 use std::rc::Rc;
 
 use inference_ast::nodes::{
-    ArgumentType, BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement,
-    Type, Visibility,
+    ArgumentType, BinaryExpression, BlockType, Expression, FunctionDefinition, Literal,
+    OperatorKind, PrefixUnaryExpression, SimpleTypeKind, Statement, Type, UnaryOperatorKind,
+    Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -562,7 +563,13 @@ impl Compiler {
                                 self.lower_expression(&expr, ctx, func, locals_map);
                                 func.instruction(&Instruction::LocalSet(local_idx));
                             }
-                            _ => todo!("Unsupported variable initializer expression"),
+                            _ => {
+                                // General fallback: covers Binary, PrefixUnary, Parenthesized,
+                                // and future value-producing expressions.
+                                let local_idx = *local_idx;
+                                self.lower_expression(&expr, ctx, func, locals_map);
+                                func.instruction(&Instruction::LocalSet(local_idx));
+                            }
                         }
                     }
                 }
@@ -607,7 +614,9 @@ impl Compiler {
     ) {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
-            Expression::Binary(_binary_expression) => todo!(),
+            Expression::Binary(binary_expression) => {
+                self.lower_binary_expression(binary_expression, ctx, func, locals_map);
+            }
             Expression::MemberAccess(_member_access_expression) => todo!(),
             Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
             Expression::FunctionCall(function_call_expression) => {
@@ -626,8 +635,18 @@ impl Compiler {
                 }
             }
             Expression::Struct(_struct_expression) => todo!(),
-            Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
-            Expression::Parenthesized(_parenthesized_expression) => todo!(),
+            Expression::PrefixUnary(prefix_unary_expression) => {
+                self.lower_prefix_unary_expression(prefix_unary_expression, ctx, func, locals_map);
+            }
+            Expression::Parenthesized(parenthesized_expression) => {
+                cov_mark::hit!(wasm_codegen_emit_parenthesized_expression);
+                self.lower_expression(
+                    &parenthesized_expression.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                );
+            }
             Expression::Literal(literal) => self.lower_literal(literal, ctx, func),
             Expression::Identifier(identifier) => {
                 let (local_idx, _) = locals_map
@@ -712,6 +731,211 @@ impl Compiler {
 
         func.instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Returns `true` if `kind` is an unsigned integer type.
+    ///
+    /// Used during binary expression lowering to select the sign-sensitive WASM
+    /// instruction variants (`DivU`, `RemU`, `LtU`, `LeU`, `GtU`, `GeU`, `ShrU`).
+    fn is_unsigned_type(kind: &TypeInfoKind) -> bool {
+        matches!(
+            kind,
+            TypeInfoKind::Number(
+                NumberType::U8 | NumberType::U16 | NumberType::U32 | NumberType::U64
+            )
+        )
+    }
+
+    /// Returns `true` if `kind` maps to a 64-bit WASM value type.
+    fn is_i64_type(kind: &TypeInfoKind) -> bool {
+        matches!(
+            kind,
+            TypeInfoKind::Number(NumberType::I64 | NumberType::U64)
+        )
+    }
+
+    /// Lowers a binary expression to WASM stack instructions.
+    ///
+    /// Strategy (stack machine):
+    /// 1. Lower left operand → value on WASM stack
+    /// 2. Lower right operand → value on WASM stack
+    /// 3. Determine dispatch from the left operand's `TypeInfoKind`
+    /// 4. Emit the appropriate WASM binary instruction
+    ///
+    /// Dispatch is always driven by the **left** operand type (not the result type) because
+    /// comparison operators produce `Bool` (always i32) and cannot be used for dispatch.
+    /// The type-checker guarantees that left and right operand types match for all binary ops.
+    ///
+    /// Signed vs unsigned variants are selected based on whether the left operand type is an
+    /// unsigned integer (`u8`, `u16`, `u32`, `u64`). `Eq`/`Ne` have no sign-distinct WASM
+    /// variant — they compare bit patterns identically for all integer representations.
+    ///
+    /// Logical `&&`/`||` are lowered as bitwise `i32.and`/`i32.or` because the type-checker
+    /// constrains both operands to `bool` (i32 0 or 1), making bitwise and short-circuit
+    /// evaluation produce identical results.
+    fn lower_binary_expression(
+        &self,
+        be: &BinaryExpression,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_binary_expression);
+
+        self.lower_expression(&be.left.borrow(), ctx, func, locals_map);
+        self.lower_expression(&be.right.borrow(), ctx, func, locals_map);
+
+        let left_type_info = ctx
+            .get_node_typeinfo(be.left.borrow().id())
+            .expect("Binary expression left operand must have type info");
+        let is_i64 = Self::is_i64_type(&left_type_info.kind);
+        let is_unsigned = Self::is_unsigned_type(&left_type_info.kind);
+
+        let instruction = match be.operator {
+            OperatorKind::Add => {
+                if is_i64 { Instruction::I64Add } else { Instruction::I32Add }
+            }
+            OperatorKind::Sub => {
+                if is_i64 { Instruction::I64Sub } else { Instruction::I32Sub }
+            }
+            OperatorKind::Mul => {
+                if is_i64 { Instruction::I64Mul } else { Instruction::I32Mul }
+            }
+            OperatorKind::Div => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64DivU,
+                (true, false) => Instruction::I64DivS,
+                (false, true) => Instruction::I32DivU,
+                (false, false) => Instruction::I32DivS,
+            },
+            OperatorKind::Mod => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64RemU,
+                (true, false) => Instruction::I64RemS,
+                (false, true) => Instruction::I32RemU,
+                (false, false) => Instruction::I32RemS,
+            },
+            OperatorKind::And => Instruction::I32And,
+            OperatorKind::Or => Instruction::I32Or,
+            OperatorKind::Eq => {
+                if is_i64 { Instruction::I64Eq } else { Instruction::I32Eq }
+            }
+            OperatorKind::Ne => {
+                if is_i64 { Instruction::I64Ne } else { Instruction::I32Ne }
+            }
+            OperatorKind::Lt => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64LtU,
+                (true, false) => Instruction::I64LtS,
+                (false, true) => Instruction::I32LtU,
+                (false, false) => Instruction::I32LtS,
+            },
+            OperatorKind::Le => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64LeU,
+                (true, false) => Instruction::I64LeS,
+                (false, true) => Instruction::I32LeU,
+                (false, false) => Instruction::I32LeS,
+            },
+            OperatorKind::Gt => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64GtU,
+                (true, false) => Instruction::I64GtS,
+                (false, true) => Instruction::I32GtU,
+                (false, false) => Instruction::I32GtS,
+            },
+            OperatorKind::Ge => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64GeU,
+                (true, false) => Instruction::I64GeS,
+                (false, true) => Instruction::I32GeU,
+                (false, false) => Instruction::I32GeS,
+            },
+            OperatorKind::BitAnd => {
+                if is_i64 { Instruction::I64And } else { Instruction::I32And }
+            }
+            OperatorKind::BitOr => {
+                if is_i64 { Instruction::I64Or } else { Instruction::I32Or }
+            }
+            OperatorKind::BitXor => {
+                if is_i64 { Instruction::I64Xor } else { Instruction::I32Xor }
+            }
+            OperatorKind::Shl => {
+                if is_i64 { Instruction::I64Shl } else { Instruction::I32Shl }
+            }
+            OperatorKind::Shr => match (is_i64, is_unsigned) {
+                (true, true) => Instruction::I64ShrU,
+                (true, false) => Instruction::I64ShrS,
+                (false, true) => Instruction::I32ShrU,
+                (false, false) => Instruction::I32ShrS,
+            },
+            OperatorKind::Pow => {
+                todo!(
+                    "Power operator (`**`) deferred — no native WASM instruction; \
+                     see .claude/plans/codegen/new-pow-operator/master_plan.md"
+                )
+            }
+            OperatorKind::BitNot => {
+                todo!(
+                    "OperatorKind::BitNot in binary context — the AST builder never produces \
+                     this; OperatorKind::BitNot is a design inconsistency and should be removed \
+                     from OperatorKind and the type-checker binary arm cleaned up in a separate issue"
+                )
+            }
+        };
+
+        func.instruction(&instruction);
+    }
+
+    /// Lowers a prefix unary expression to WASM stack instructions.
+    ///
+    /// # Lowering patterns
+    ///
+    /// - `Neg` (`-x`): `[0_const, lower(x), Sub]` — WASM has no integer negation opcode;
+    ///   the standard idiom is `0 - x`.
+    /// - `Not` (`!x`): `[lower(x), I32Eqz]` — inverts boolean (0→1, 1→0) using WASM test op.
+    /// - `BitNot` (`~x`): `[lower(x), -1_const, Xor]` — `x ^ -1` inverts all bits;
+    ///   works identically for i32 and i64.
+    fn lower_prefix_unary_expression(
+        &self,
+        pue: &PrefixUnaryExpression,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_prefix_unary_expression);
+
+        let type_info = ctx
+            .get_node_typeinfo(pue.id)
+            .expect("Prefix unary expression must have type info");
+        let is_i64 = Self::is_i64_type(&type_info.kind);
+
+        match pue.operator {
+            UnaryOperatorKind::Neg => {
+                cov_mark::hit!(wasm_codegen_emit_unary_neg);
+                if is_i64 {
+                    func.instruction(&Instruction::I64Const(0));
+                } else {
+                    func.instruction(&Instruction::I32Const(0));
+                }
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                if is_i64 {
+                    func.instruction(&Instruction::I64Sub);
+                } else {
+                    func.instruction(&Instruction::I32Sub);
+                }
+            }
+            UnaryOperatorKind::Not => {
+                cov_mark::hit!(wasm_codegen_emit_unary_not);
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                func.instruction(&Instruction::I32Eqz);
+            }
+            UnaryOperatorKind::BitNot => {
+                cov_mark::hit!(wasm_codegen_emit_unary_bitnot);
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                if is_i64 {
+                    func.instruction(&Instruction::I64Const(-1));
+                    func.instruction(&Instruction::I64Xor);
+                } else {
+                    func.instruction(&Instruction::I32Const(-1));
+                    func.instruction(&Instruction::I32Xor);
+                }
+            }
+        }
     }
 
     /// Converts an AST literal to WASM constant instructions.
