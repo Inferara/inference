@@ -39,7 +39,23 @@
 //! - `--analyze` automatically runs parse first
 //! - `--codegen` automatically runs parse and analyze first
 //!
-//! At least one phase flag must be specified.
+//! ## Default Behavior
+//!
+//! When no phase flags are given, `infc` defaults to full compilation and writes
+//! the WASM binary to disk — equivalent to `--codegen -o`. This matches
+//! conventional compiler UX (e.g. `gcc foo.c`).
+//!
+//! ```bash
+//! infc example.inf        # parse → codegen → write out/example.wasm
+//! infc example.inf -v     # parse → codegen → write out/example.wasm + out/example.v
+//! ```
+//!
+//! Supplying any explicit phase flag overrides the default:
+//!
+//! ```bash
+//! infc example.inf --parse    # parse only, no output files
+//! infc example.inf --analyze  # parse + analyze only, no output files
+//! ```
 //!
 //! ## Output Artifacts
 //!
@@ -81,14 +97,19 @@
 //! infc example.inf --analyze
 //! ```
 //!
-//! Full compilation to WebAssembly:
+//! Full compilation to WebAssembly (default — no flags needed):
 //! ```bash
-//! infc example.inf --codegen -o
+//! infc example.inf
 //! ```
 //!
 //! Compile and generate Rocq translation:
 //! ```bash
-//! infc example.inf --codegen -o -v
+//! infc example.inf -v
+//! ```
+//!
+//! Full compilation with explicit flags (equivalent to the default):
+//! ```bash
+//! infc example.inf --codegen -o
 //! ```
 //!
 //! Only generate Rocq (no WASM file):
@@ -138,15 +159,15 @@ use toolchain::BuildProfile;
 /// ## Execution Flow
 ///
 /// 1. **Parse command line arguments** using clap
-/// 2. **Validate input**:
-///    - Verify source file exists
-///    - Ensure at least one phase flag is specified
-/// 3. **Execute compilation phases** in canonical order:
+/// 2. **Apply default normalization**: when no phase flags are given, defaults
+///    to full pipeline (`--codegen -o`) so that `infc file.inf` just works
+/// 3. **Validate input**: verify source file exists
+/// 4. **Execute compilation phases** in canonical order:
 ///    - Parse: Build typed AST from source using tree-sitter
 ///    - Analyze: Type check and semantic validation
 ///    - Codegen: Generate WebAssembly binary from typed AST
-/// 4. **Generate output files** (if requested):
-///    - Write WASM binary with `-o` flag
+/// 5. **Generate output files** (if requested):
+///    - Write WASM binary with `-o` flag (set by default when no flags given)
 ///    - Write Rocq translation with `-v` flag
 ///
 /// ## Error Handling
@@ -154,7 +175,7 @@ use toolchain::BuildProfile;
 /// All errors are reported to stderr with descriptive messages and cause
 /// process exit with code 1. Error categories:
 ///
-/// - **Usage errors**: Missing phase flags, invalid arguments
+/// - **Usage errors**: Invalid arguments
 /// - **IO errors**: File not found, permission denied, output write failures
 /// - **Compilation errors**: Parse errors, type errors, codegen failures
 ///
@@ -183,21 +204,23 @@ use toolchain::BuildProfile;
 /// - Phase execution is sequential (no parallelization)
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let args = Cli::parse();
+    let mut args = Cli::parse();
     if !args.path.exists() {
         eprintln!("Error: path not found");
         process::exit(1);
+    }
+
+    // Default normalization: no phase flags → full pipeline + WASM output.
+    // This makes `infc file.inf` behave like `infc file.inf --codegen -o`.
+    if !args.parse && !args.analyze && !args.codegen {
+        args.codegen = true;
+        args.generate_wasm_output = true;
     }
 
     let output_path = PathBuf::from("out");
     let need_parse = args.parse;
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
-
-    if !(need_parse || need_analyze || need_codegen) {
-        eprintln!("Error: at least one of --parse, --analyze, or --codegen must be specified");
-        process::exit(1);
-    }
 
     let source_code = match fs::read_to_string(&args.path) {
         Ok(content) => content,
