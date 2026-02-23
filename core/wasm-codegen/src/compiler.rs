@@ -664,7 +664,7 @@ impl Compiler {
     /// Only `Expression::Identifier`-based callees are supported. Method calls
     /// (`MemberAccess`), associated function calls (`TypeMemberAccess`), and
     /// higher-order calls are out of scope and return
-    /// [`FunctionCallError::UnsupportedCalleeKind`].
+    /// [`CodegenError::UnsupportedCalleeKind`].
     ///
     /// # Recursion
     ///

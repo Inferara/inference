@@ -6,6 +6,7 @@ use thiserror::Error;
 /// Callers convert it to a `todo!` or `panic!` depending on whether the case is planned
 /// future work or indicates a type-checker inconsistency.
 #[derive(Debug, Error)]
+#[must_use = "errors must not be silently ignored"]
 pub(crate) enum CodegenError {
     /// The callee expression is not a plain identifier (e.g., method call, higher-order call).
     /// This case is out of scope for the current implementation.

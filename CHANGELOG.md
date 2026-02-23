@@ -310,3 +310,4 @@ Initial tagged release.
 [#126]: https://github.com/Inferara/inference/pull/126
 [#127]: https://github.com/Inferara/inference/pull/127
 [#134]: https://github.com/Inferara/inference/pull/135
+[#136]: https://github.com/Inferara/inference/pull/136
