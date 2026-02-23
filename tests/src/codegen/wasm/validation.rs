@@ -789,6 +789,48 @@ mod codegen_validation_tests {
         );
     }
 
+    #[test]
+    fn value_returning_call_as_statement_emits_drop() {
+        let source = r#"
+            fn get_value() -> i32 { return 42; }
+            pub fn caller() { get_value(); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Value-returning call as statement WASM is invalid: {e}"));
+        let drop_count = wasm.iter().filter(|&&b| b == 0x1a).count();
+        assert_eq!(
+            drop_count, 1,
+            "Value-returning function call in statement position should emit exactly one Drop (0x1a)"
+        );
+    }
+
+    #[test]
+    #[ignore = "type-checker does not yet assign TypeInfo to uzumaki expressions in argument position"]
+    fn uzumaki_as_function_argument_produces_valid_wasm() {
+        let source = r#"
+            fn identity(x: i32) -> i32 { return x; }
+            pub fn spec() -> i32 { return identity(@); }
+        "#;
+        let wasm = codegen_output(source).wasm().to_vec();
+        inf_wasmparser::validate(&wasm).unwrap_or_else(|e| {
+            panic!("Uzumaki as function argument WASM is invalid: {e}")
+        });
+    }
+
+    #[test]
+    fn value_returning_call_in_nondet_block_with_let_produces_valid_wasm() {
+        let source = r#"
+            fn get_value() -> i32 { return 42; }
+            pub fn spec() { forall { let x: i32 = get_value(); } }
+        "#;
+        let wasm = codegen_output(source).wasm().to_vec();
+        inf_wasmparser::validate(&wasm).unwrap_or_else(|e| {
+            panic!("Value-returning call in non-det block with let WASM is invalid: {e}")
+        });
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.

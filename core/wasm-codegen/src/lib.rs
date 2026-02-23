@@ -50,6 +50,7 @@ use inference_type_checker::typed_context::TypedContext;
 use crate::compiler::Compiler;
 
 mod compiler;
+mod errors;
 pub mod output;
 pub mod target;
 

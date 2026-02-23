@@ -54,6 +54,7 @@
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
 
+use crate::errors::CodegenError;
 use rustc_hash::FxHashMap;
 use std::iter::Peekable;
 use std::rc::Rc;
@@ -70,21 +71,6 @@ use wasm_encoder::{
     CodeSection, ExportKind, ExportSection, Function, FunctionSection, IndirectNameMap,
     Instruction, Module, NameMap, NameSection, TypeSection, ValType,
 };
-
-/// Error returned when a function call expression cannot be lowered by the codegen pass.
-///
-/// This is an internal error type used by [`Compiler::lower_function_call`]. Callers
-/// convert it to a `todo!` or `panic!` depending on whether the case is planned or
-/// indicates a type-checker inconsistency.
-#[derive(Debug)]
-enum FunctionCallError {
-    /// The callee expression is not a plain identifier (e.g., method call, higher-order call).
-    /// This case is out of scope for the current implementation.
-    UnsupportedCalleeKind,
-    /// The function name was not found in the pre-built index map.
-    /// This should never happen if the type-checker ran successfully.
-    UnknownFunction(String),
-}
 
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
@@ -257,7 +243,13 @@ impl Compiler {
                     let vt = Self::val_type_from_type(&arg.ty)
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
-                    locals_map.insert(arg.name(), (local_idx, vt));
+                    let prev = locals_map.insert(arg.name(), (local_idx, vt));
+                    debug_assert!(
+                        prev.is_none(),
+                        "parameter `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected duplicate parameter names",
+                        arg.name(),
+                    );
                     local_idx += 1;
                 }
             }
@@ -291,8 +283,6 @@ impl Compiler {
             &mut local_idx,
         );
 
-        // Only declare locals that come after parameters (index >= param_count).
-        // Parameters are implicitly declared via the function type signature.
         let local_declarations: Vec<(u32, ValType)> = {
             let mut sorted_locals: Vec<(u32, ValType)> = locals_map
                 .values()
@@ -355,7 +345,14 @@ impl Compiler {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
                         _ => ValType::I32,
                     };
-                    locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    let prev =
+                        locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    debug_assert!(
+                        prev.is_none(),
+                        "local `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected shadowing",
+                        constant_definition.name(),
+                    );
                     *local_idx += 1;
                 }
                 Statement::VariableDefinition(variable_definition) => {
@@ -367,7 +364,14 @@ impl Compiler {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
                         _ => ValType::I32,
                     };
-                    locals_map.insert(variable_definition.name(), (*local_idx, val_type));
+                    let prev =
+                        locals_map.insert(variable_definition.name(), (*local_idx, val_type));
+                    debug_assert!(
+                        prev.is_none(),
+                        "local `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected shadowing",
+                        variable_definition.name(),
+                    );
                     *local_idx += 1;
                 }
                 Statement::Block(inner_block) => {
@@ -499,14 +503,17 @@ impl Compiler {
             },
             Statement::Expression(expression) => {
                 self.lower_expression(&expression, ctx, func, locals_map);
-                let is_trailing_in_nondet_void_block = statements_iterator.peek().is_none()
-                    && parent_blocks_stack.last().unwrap().is_non_det()
-                    && parent_blocks_stack.last().unwrap().is_void();
-                if is_trailing_in_nondet_void_block {
-                    let expr_produces_value = ctx
-                        .get_node_typeinfo(expression.id())
-                        .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
-                    if expr_produces_value {
+                let expr_produces_value = ctx
+                    .get_node_typeinfo(expression.id())
+                    .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
+                if expr_produces_value {
+                    // Do not drop if this is the trailing result of a non-void non-det block —
+                    // the value serves as the block's result consumed by the enclosing context.
+                    let is_block_result = statements_iterator.peek().is_none()
+                        && parent_blocks_stack
+                            .last()
+                            .is_some_and(|b| b.is_non_det() && !b.is_void());
+                    if !is_block_result {
                         func.instruction(&Instruction::Drop);
                     }
                 }
@@ -606,13 +613,13 @@ impl Compiler {
             Expression::FunctionCall(function_call_expression) => {
                 match self.lower_function_call(function_call_expression, ctx, func, locals_map) {
                     Ok(()) => {}
-                    Err(FunctionCallError::UnsupportedCalleeKind) => {
+                    Err(CodegenError::UnsupportedCalleeKind) => {
                         todo!(
                             "Non-identifier function calls (method calls, higher-order) \
                              are not yet implemented"
                         )
                     }
-                    Err(FunctionCallError::UnknownFunction(name)) => {
+                    Err(CodegenError::UnknownFunction(name)) => {
                         panic!("Function '{name}' not found in name-to-index map; \
                                 the type-checker should have caught undefined functions")
                     }
@@ -675,7 +682,7 @@ impl Compiler {
     ///
     /// # Errors
     ///
-    /// Returns [`FunctionCallError`] if the callee is not a plain identifier or the
+    /// Returns [`CodegenError`] if the callee is not a plain identifier or the
     /// function name is not in the pre-built index map.
     fn lower_function_call(
         &self,
@@ -683,9 +690,9 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
-    ) -> Result<(), FunctionCallError> {
+    ) -> Result<(), CodegenError> {
         let Expression::Identifier(_) = &fce.function else {
-            return Err(FunctionCallError::UnsupportedCalleeKind);
+            return Err(CodegenError::UnsupportedCalleeKind);
         };
 
         cov_mark::hit!(wasm_codegen_emit_function_call);
@@ -701,7 +708,7 @@ impl Compiler {
             .func_name_to_idx
             .get(&func_name)
             .copied()
-            .ok_or(FunctionCallError::UnknownFunction(func_name))?;
+            .ok_or(CodegenError::UnknownFunction(func_name))?;
 
         func.instruction(&Instruction::Call(func_idx));
         Ok(())

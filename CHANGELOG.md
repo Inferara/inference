@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add function parameter lowering and function call support to WebAssembly codegen ([#136])
+  - Function parameters mapped to WASM local indices `0..n`; body locals start at `n`
+  - Pre-scan builds `func_name_to_idx` map for forward reference support
+  - `Expression::FunctionCall` lowered to `call` instruction with positional arguments
+  - Void function calls in expression-statement position correctly omit `Drop`
+  - Value-returning function calls in expression-statement position emit `Drop`
 - Add local variable lowering (`let` bindings) to WebAssembly codegen ([#134])
   - Emit `local.set` / `local.get` for variable definitions with literal, identifier, and uzumaki initializers
   - Support all numeric types (i8, i16, i32, i64, u8, u16, u32, u64), bool, and uzumaki
