@@ -91,6 +91,16 @@ use inference_ast::{
 };
 use rustc_hash::FxHashMap;
 
+/// Central store produced by type checking.
+///
+/// `TypedContext` combines the original parsed [`Arena`] with a map from
+/// AST node IDs to their inferred [`TypeInfo`] values and the populated
+/// [`SymbolTable`].  It is the primary output of
+/// [`TypeCheckerBuilder::build_typed_context`](crate::TypeCheckerBuilder::build_typed_context)
+/// and the primary input to subsequent compiler phases such as WASM code generation.
+///
+/// See the module-level documentation for details on which expressions receive
+/// type information and which are structural.
 #[derive(Default)]
 pub struct TypedContext {
     pub(crate) symbol_table: SymbolTable,
@@ -372,10 +382,18 @@ impl TypedContext {
     }
 }
 
-/// Information about an expression missing its type after type checking.
+/// Describes a value expression that has no [`TypeInfo`] entry after type checking.
+///
+/// A non-empty list returned by
+/// [`TypedContext::find_untyped_expressions`] indicates a bug in the type
+/// checker: every value expression should be annotated by the time inference
+/// completes.
 #[derive(Debug)]
 pub struct MissingExpressionType {
+    /// AST node ID of the untyped expression.
     pub id: u32,
+    /// Human-readable name of the expression variant (e.g. `"Binary"`, `"FunctionCall"`).
     pub kind: String,
+    /// Source location of the expression, for diagnostic output.
     pub location: Location,
 }

@@ -1,0 +1,12 @@
+pub fn add_i64(a: i64, b: i64) -> i64 { return a + b; }
+pub fn sub_i64(a: i64, b: i64) -> i64 { return a - b; }
+pub fn mul_i64(a: i64, b: i64) -> i64 { return a * b; }
+pub fn div_i64_signed(a: i64, b: i64) -> i64 { return a / b; }
+pub fn div_u64(a: u64, b: u64) -> u64 { return a / b; }
+pub fn mod_i64_signed(a: i64, b: i64) -> i64 { return a % b; }
+pub fn mod_u64(a: u64, b: u64) -> u64 { return a % b; }
+pub fn add_i64_with_let(a: i64, b: i64) -> i64 { let c: i64 = a + b; return c; }
+pub fn sub_chain_i64(a: i64, b: i64, c: i64) -> i64 { return a - b - c; }
+pub fn mul_add_i64(a: i64, b: i64, c: i64) -> i64 { return a * b + c; }
+pub fn add_max_i64() -> i64 { let a: i64 = 9223372036854775806; let b: i64 = 1; return a + b; }
+pub fn sub_neg_result_i64(a: i64, b: i64) -> i64 { return a - b; }

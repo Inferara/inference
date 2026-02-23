@@ -20,6 +20,12 @@ pub struct Arena {
 }
 
 impl Arena {
+    /// Returns all `SourceFile` nodes in the arena, sorted by node ID.
+    ///
+    /// In a single-file compilation the result contains exactly one element.
+    /// In multi-file compilation (via `ParserContext`) it contains one entry per
+    /// parsed file. Node ID order matches the order in which files were added to
+    /// the builder.
     #[must_use]
     pub fn source_files(&self) -> Vec<Rc<SourceFile>> {
         self.list_nodes_cmp(|node| {
@@ -31,6 +37,11 @@ impl Arena {
         })
         .collect()
     }
+
+    /// Returns all `FunctionDefinition` nodes in the arena, sorted by node ID.
+    ///
+    /// This includes both free functions and struct methods. Node ID order
+    /// matches source order within each file.
     #[must_use]
     pub fn functions(&self) -> Vec<Rc<FunctionDefinition>> {
         self.list_nodes_cmp(|node| {
@@ -68,6 +79,10 @@ impl Arena {
         }
     }
 
+    /// Returns a clone of the node with the given ID, or `None` if not present.
+    ///
+    /// This is an O(1) hash map lookup. Cloning an `AstNode` is cheap because
+    /// the heavy node data is behind `Rc`.
     #[must_use]
     pub fn find_node(&self, id: u32) -> Option<AstNode> {
         self.nodes.get(&id).cloned()
@@ -153,6 +168,11 @@ impl Arena {
         }
     }
 
+    /// Returns all descendants of the node with the given ID that satisfy `comparator`.
+    ///
+    /// Performs a depth-first traversal starting from `id`, collecting every
+    /// node (including the root itself) for which `comparator` returns `true`.
+    /// Returns an empty `Vec` if the starting node does not exist.
     pub fn get_children_cmp<F>(&self, id: u32, comparator: F) -> Vec<AstNode>
     where
         F: Fn(&AstNode) -> bool,
@@ -178,6 +198,7 @@ impl Arena {
         result
     }
 
+    /// Returns all `TypeDefinition` nodes in the arena, sorted by node ID.
     #[must_use]
     pub fn list_type_definitions(&self) -> Vec<Rc<TypeDefinition>> {
         self.list_nodes_cmp(|node| {
@@ -190,6 +211,19 @@ impl Arena {
         .collect()
     }
 
+    /// Returns all nodes that satisfy `fn_predicate`, sorted by node ID.
+    ///
+    /// Unlike `get_children_cmp`, this scans the entire arena (not just a
+    /// subtree) and always returns results in ascending node ID order. Use this
+    /// for global queries such as "find all binary expressions".
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let binary_exprs = arena.filter_nodes(|node| {
+    ///     matches!(node, AstNode::Expression(Expression::Binary(_)))
+    /// });
+    /// ```
     pub fn filter_nodes<T: Fn(&AstNode) -> bool>(&self, fn_predicate: T) -> Vec<AstNode> {
         let mut entries: Vec<_> = self.nodes.iter().collect();
         entries.sort_unstable_by_key(|(id, _)| *id);

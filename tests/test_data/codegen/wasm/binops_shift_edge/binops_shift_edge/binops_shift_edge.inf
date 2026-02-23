@@ -1,0 +1,13 @@
+pub fn shl_i32_by0(a: i32) -> i32 { return a << 0; }
+pub fn shl_i32_by1(a: i32) -> i32 { return a << 1; }
+pub fn shl_i32_by31(a: i32) -> i32 { return a << 31; }
+pub fn shr_s_i32_by0(a: i32) -> i32 { return a >> 0; }
+pub fn shr_s_i32_by1(a: i32) -> i32 { return a >> 1; }
+pub fn shr_s_i32_by31(a: i32) -> i32 { return a >> 31; }
+pub fn shr_u_i32(a: u32, n: u32) -> u32 { return a >> n; }
+pub fn shl_u32(a: u32, n: u32) -> u32 { return a << n; }
+pub fn shl_i64(a: i64, n: i64) -> i64 { return a << n; }
+pub fn shr_s_i64(a: i64, n: i64) -> i64 { return a >> n; }
+pub fn shr_u_i64(a: u64, n: u64) -> u64 { return a >> n; }
+pub fn shl_by_amount(a: i32, n: i32) -> i32 { return a << n; }
+pub fn shr_by_amount(a: i32, n: i32) -> i32 { return a >> n; }

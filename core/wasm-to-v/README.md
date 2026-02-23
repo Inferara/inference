@@ -292,12 +292,12 @@ Inference extends WebAssembly with custom instructions for non-deterministic com
 
 | Instruction | Binary Encoding | Purpose | Rocq Translation |
 |-------------|-----------------|---------|------------------|
-| `forall.start` | `0xfc 0x3a` | Begin universal quantification block | Forall block construct |
-| `exists.start` | `0xfc 0x3b` | Begin existential quantification block | Exists block construct |
-| `uzumaki.i32` | `0xfc 0x3c` | Generate non-deterministic i32 value | Uzumaki constructor |
-| `uzumaki.i64` | `0xfc 0x3d` | Generate non-deterministic i64 value | Uzumaki constructor |
-| `assume` | `0xfc 0x3e` | Filter execution paths by constraint | Assume statement |
-| `unique` | `0xfc 0x3f` | Assert exactly one execution path exists | Unique constraint |
+| `forall` | `0xfc 0x3a` | Begin universal quantification block | Forall block construct |
+| `exists` | `0xfc 0x3b` | Begin existential quantification block | Exists block construct |
+| `assume` | `0xfc 0x3c` | Filter execution paths by constraint | Assume statement |
+| `unique` | `0xfc 0x3d` | Assert exactly one execution path exists | Unique constraint |
+| `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value | Uzumaki constructor |
+| `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value | Uzumaki constructor |
 
 These instructions are parsed by the forked `inf-wasmparser` dependency and translated to corresponding Rocq constructs that enable formal reasoning about non-deterministic programs.
 

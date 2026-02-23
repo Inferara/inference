@@ -182,7 +182,7 @@ infc example.inf --codegen -v
 ```
 Parsed: example.inf
 Analyzed: example.inf
-WASM generated
+Codegen complete
 V generated at: out/example.v
 ```
 

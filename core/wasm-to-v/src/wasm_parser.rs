@@ -147,10 +147,10 @@ use crate::translator::WasmParseData;
 /// let source = std::fs::read_to_string("program.inf")?;
 /// let arena = parse(&source)?;
 /// let typed_context = type_check(arena)?;
-/// let wasm_bytes = codegen(&typed_context)?;
+/// let codegen_output = codegen(&typed_context)?;
 ///
 /// // Translate to Rocq
-/// let rocq_code = translate_bytes("Program", &wasm_bytes)?;
+/// let rocq_code = translate_bytes("Program", codegen_output.wasm())?;
 /// std::fs::write("program.v", rocq_code)?;
 /// ```
 pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {

@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add binary and unary expression lowering to WebAssembly codegen ([#140])
+  - All arithmetic operators (`+`, `-`, `*`, `/`, `%`) for i32 and i64, signed and unsigned variants
+  - All comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) with correct sign-sensitive dispatch
+  - All logical operators (`&&`, `||`) lowered as bitwise `i32.and`/`i32.or` (bool operands guaranteed by type-checker)
+  - All bitwise operators (`&`, `|`, `^`) and shift operators (`<<`, `>>`) for i32 and i64
+  - Unary negation (`-x`) via `0 - x` idiom (no native WASM integer negate instruction)
+  - Logical not (`!x`) via `i32.eqz`
+  - Bitwise not (`~x`) via `x ^ -1` idiom (works for both i32 and i64)
+  - Parenthesized expressions lowered transparently (no extra instructions emitted)
+  - Variable definition initializers now accept any value-producing expression (not just literals/identifiers/uzumaki)
+  - `Pow` operator (`**`) deferred — no native WASM instruction
 - Add function parameter lowering and function call support to WebAssembly codegen ([#136])
   - Function parameters mapped to WASM local indices `0..n`; body locals start at `n`
   - Pre-scan builds `func_name_to_idx` map for forward reference support
@@ -317,3 +328,4 @@ Initial tagged release.
 [#134]: https://github.com/Inferara/inference/pull/135
 [#136]: https://github.com/Inferara/inference/pull/136
 [#138]: https://github.com/Inferara/inference/pull/138
+[#140]: https://github.com/Inferara/inference/pull/140

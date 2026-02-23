@@ -1,0 +1,16 @@
+pub fn add_i8(a: i8, b: i8) -> i8 { return a + b; }
+pub fn sub_i8(a: i8, b: i8) -> i8 { return a - b; }
+pub fn mul_i8(a: i8, b: i8) -> i8 { return a * b; }
+pub fn div_i8(a: i8, b: i8) -> i8 { return a / b; }
+pub fn lt_i8(a: i8, b: i8) -> bool { return a < b; }
+pub fn add_u8(a: u8, b: u8) -> u8 { return a + b; }
+pub fn div_u8(a: u8, b: u8) -> u8 { return a / b; }
+pub fn lt_u8(a: u8, b: u8) -> bool { return a < b; }
+pub fn shr_u8(a: u8, b: u8) -> u8 { return a >> b; }
+pub fn add_i16(a: i16, b: i16) -> i16 { return a + b; }
+pub fn div_i16(a: i16, b: i16) -> i16 { return a / b; }
+pub fn lt_i16(a: i16, b: i16) -> bool { return a < b; }
+pub fn add_u16(a: u16, b: u16) -> u16 { return a + b; }
+pub fn div_u16(a: u16, b: u16) -> u16 { return a / b; }
+pub fn gt_u16(a: u16, b: u16) -> bool { return a > b; }
+pub fn mod_u16(a: u16, b: u16) -> u16 { return a % b; }

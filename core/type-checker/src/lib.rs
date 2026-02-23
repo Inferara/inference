@@ -133,6 +133,10 @@ impl Default for TypeCheckerBuilder<TypeCheckerInitState> {
 }
 
 impl TypeCheckerBuilder<TypeCheckerInitState> {
+    /// Create a new builder in the initial (untyped) state.
+    ///
+    /// Prefer [`TypeCheckerBuilder::build_typed_context`] for the common case
+    /// where you have an arena ready to check immediately.
     #[must_use]
     pub fn new() -> Self {
         TypeCheckerBuilder {

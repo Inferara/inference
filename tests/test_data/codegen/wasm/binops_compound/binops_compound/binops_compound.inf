@@ -1,0 +1,70 @@
+pub fn quadratic(a: i32, b: i32, c: i32, x: i32) -> i32 {
+    return a * x * x + b * x + c;
+}
+
+pub fn manhattan_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+    let dx: i32 = x2 - x1;
+    let ax: i32 = (dx + (dx >> 31)) ^ (dx >> 31);
+    let dy: i32 = y2 - y1;
+    let ay: i32 = (dy + (dy >> 31)) ^ (dy >> 31);
+    return ax + ay;
+}
+
+pub fn bitwise_avg(a: i32, b: i32) -> i32 {
+    return (a & b) + ((a ^ b) >> 1);
+}
+
+pub fn swap_nibbles(x: i32) -> i32 {
+    return ((x & 15) << 4) | ((x >> 4) & 15);
+}
+
+pub fn count_high_bits(x: i32) -> i32 {
+    return (x >> 16) & 65535;
+}
+
+pub fn pack_bytes(hi: i32, lo: i32) -> i32 {
+    return ((hi & 255) << 8) | (lo & 255);
+}
+
+pub fn unpack_hi(packed: i32) -> i32 {
+    return (packed >> 8) & 255;
+}
+
+pub fn unpack_lo(packed: i32) -> i32 {
+    return packed & 255;
+}
+
+pub fn dot_product(vax: i32, vay: i32, vbx: i32, vby: i32) -> i32 {
+    return vax * vbx + vay * vby;
+}
+
+pub fn cross_product(vax: i32, vay: i32, vbx: i32, vby: i32) -> i32 {
+    return vax * vby - vay * vbx;
+}
+
+pub fn bit_reverse_nibble(x: i32) -> i32 {
+    return ((x & 1) << 3) | ((x & 2) << 1) | ((x & 4) >> 1) | ((x & 8) >> 3);
+}
+
+pub fn fibonacci_step(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+pub fn compound_arith_chain(a: i32, b: i32) -> i32 {
+    return ((a + b) * (a - b)) + (a * a - b * b);
+}
+
+pub fn multi_let_chain(a: i32, b: i32, c: i32) -> i32 {
+    let x: i32 = a + b;
+    let y: i32 = x * c;
+    let z: i32 = y - a;
+    return z + b;
+}
+
+pub fn i64_compound(a: i64, b: i64, c: i64) -> i64 {
+    return (a + b) * c - (a * b + c);
+}
+
+pub fn mixed_cmp_arith(a: i32, b: i32, c: i32) -> bool {
+    return (a * b + c) > (a + b * c);
+}

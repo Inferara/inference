@@ -1,0 +1,12 @@
+pub fn eq_i64(a: i64, b: i64) -> bool { return a == b; }
+pub fn ne_i64(a: i64, b: i64) -> bool { return a != b; }
+pub fn lt_i64_signed(a: i64, b: i64) -> bool { return a < b; }
+pub fn lt_u64(a: u64, b: u64) -> bool { return a < b; }
+pub fn le_i64_signed(a: i64, b: i64) -> bool { return a <= b; }
+pub fn le_u64(a: u64, b: u64) -> bool { return a <= b; }
+pub fn gt_i64_signed(a: i64, b: i64) -> bool { return a > b; }
+pub fn gt_u64(a: u64, b: u64) -> bool { return a > b; }
+pub fn ge_i64_signed(a: i64, b: i64) -> bool { return a >= b; }
+pub fn ge_u64(a: u64, b: u64) -> bool { return a >= b; }
+pub fn cmp_chain_i64(a: i64, b: i64, c: i64) -> bool { return (a < b) == (b < c); }
+pub fn boundary_signed_i64(a: i64) -> bool { let zero: i64 = 0; return a >= zero; }

@@ -1,0 +1,20 @@
+pub fn neg_add(a: i32, b: i32) -> i32 { return -a + b; }
+pub fn neg_sub(a: i32, b: i32) -> i32 { return -a - b; }
+pub fn neg_mul(a: i32, b: i32) -> i32 { return -(a * b); }
+pub fn add_neg(a: i32, b: i32) -> i32 { return a + (-b); }
+pub fn bitnot_and(a: i32, b: i32) -> i32 { return ~a & b; }
+pub fn bitnot_or(a: i32, b: i32) -> i32 { return ~a | b; }
+pub fn and_bitnot(a: i32, b: i32) -> i32 { return a & ~b; }
+pub fn xor_bitnot(a: i32, b: i32) -> i32 { return a ^ ~b; }
+pub fn not_and(a: bool, b: bool) -> bool { return !a && b; }
+pub fn not_or(a: bool, b: bool) -> bool { return !a || b; }
+pub fn and_not(a: bool, b: bool) -> bool { return a && !b; }
+pub fn not_eq(a: i32, b: i32) -> bool { return !(a == b); }
+pub fn not_lt(a: i32, b: i32) -> bool { return !(a < b); }
+pub fn neg_i64_add(a: i64, b: i64) -> i64 { return -a + b; }
+pub fn bitnot_i64_and(a: i64, b: i64) -> i64 { return ~a & b; }
+pub fn double_neg(a: i32) -> i32 { return -(-a); }
+pub fn neg_bitnot(a: i32) -> i32 { return -(~a); }
+pub fn bitnot_neg(a: i32) -> i32 { return ~(-a); }
+pub fn neg_shift(a: i32, b: i32) -> i32 { return (-a) << b; }
+pub fn bitnot_shift(a: i32, b: i32) -> i32 { return (~a) >> b; }

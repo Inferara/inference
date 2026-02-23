@@ -396,7 +396,7 @@ impl Compiler {
     /// - **Expression statements** - Evaluate expressions
     /// - **Return statements** - Generate WASM return instructions
     /// - **Constant definitions** - Initialize locals with compile-time literal values
-    /// - **Variable definitions** - Initialize locals with literals, identifiers, or uzumaki
+    /// - **Variable definitions** - Initialize locals with any value-producing expression
     ///
     /// # Non-Deterministic Blocks
     ///
@@ -595,9 +595,14 @@ impl Compiler {
     ///
     /// # Supported Expressions
     ///
-    /// - **Literals** - Compile-time constants (numbers, booleans)
-    /// - **Identifiers** - Load values from local variables
-    /// - **Uzumaki** - Non-deterministic value generation via custom opcodes
+    /// - **`Literals`** - Compile-time constants (numbers, booleans)
+    /// - **`Identifiers`** - Load values from local variables
+    /// - **`Uzumaki`** - Non-deterministic value generation via custom opcodes
+    /// - **`Binary`** - Arithmetic, bitwise, comparison, and logical operators;
+    ///   sign-sensitive variants selected from the left operand type
+    /// - **`PrefixUnary`** - Negation (`-`), logical not (`!`), bitwise not (`~`)
+    /// - **`Parenthesized`** - Transparent wrapper; delegates to the inner expression
+    /// - **`FunctionCall`** - Plain identifier-based calls (method/higher-order: `todo!()`)
     ///
     /// # Parameters
     ///
@@ -629,8 +634,10 @@ impl Compiler {
                         )
                     }
                     Err(CodegenError::UnknownFunction(name)) => {
-                        panic!("Function '{name}' not found in name-to-index map; \
-                                the type-checker should have caught undefined functions")
+                        panic!(
+                            "Function '{name}' not found in name-to-index map; \
+                                the type-checker should have caught undefined functions"
+                        )
                     }
                 }
             }
@@ -773,6 +780,7 @@ impl Compiler {
     /// Logical `&&`/`||` are lowered as bitwise `i32.and`/`i32.or` because the type-checker
     /// constrains both operands to `bool` (i32 0 or 1), making bitwise and short-circuit
     /// evaluation produce identical results.
+    #[allow(clippy::too_many_lines)]
     fn lower_binary_expression(
         &self,
         be: &BinaryExpression,
@@ -793,13 +801,25 @@ impl Compiler {
 
         let instruction = match be.operator {
             OperatorKind::Add => {
-                if is_i64 { Instruction::I64Add } else { Instruction::I32Add }
+                if is_i64 {
+                    Instruction::I64Add
+                } else {
+                    Instruction::I32Add
+                }
             }
             OperatorKind::Sub => {
-                if is_i64 { Instruction::I64Sub } else { Instruction::I32Sub }
+                if is_i64 {
+                    Instruction::I64Sub
+                } else {
+                    Instruction::I32Sub
+                }
             }
             OperatorKind::Mul => {
-                if is_i64 { Instruction::I64Mul } else { Instruction::I32Mul }
+                if is_i64 {
+                    Instruction::I64Mul
+                } else {
+                    Instruction::I32Mul
+                }
             }
             OperatorKind::Div => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64DivU,
@@ -816,10 +836,18 @@ impl Compiler {
             OperatorKind::And => Instruction::I32And,
             OperatorKind::Or => Instruction::I32Or,
             OperatorKind::Eq => {
-                if is_i64 { Instruction::I64Eq } else { Instruction::I32Eq }
+                if is_i64 {
+                    Instruction::I64Eq
+                } else {
+                    Instruction::I32Eq
+                }
             }
             OperatorKind::Ne => {
-                if is_i64 { Instruction::I64Ne } else { Instruction::I32Ne }
+                if is_i64 {
+                    Instruction::I64Ne
+                } else {
+                    Instruction::I32Ne
+                }
             }
             OperatorKind::Lt => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64LtU,
@@ -846,16 +874,32 @@ impl Compiler {
                 (false, false) => Instruction::I32GeS,
             },
             OperatorKind::BitAnd => {
-                if is_i64 { Instruction::I64And } else { Instruction::I32And }
+                if is_i64 {
+                    Instruction::I64And
+                } else {
+                    Instruction::I32And
+                }
             }
             OperatorKind::BitOr => {
-                if is_i64 { Instruction::I64Or } else { Instruction::I32Or }
+                if is_i64 {
+                    Instruction::I64Or
+                } else {
+                    Instruction::I32Or
+                }
             }
             OperatorKind::BitXor => {
-                if is_i64 { Instruction::I64Xor } else { Instruction::I32Xor }
+                if is_i64 {
+                    Instruction::I64Xor
+                } else {
+                    Instruction::I32Xor
+                }
             }
             OperatorKind::Shl => {
-                if is_i64 { Instruction::I64Shl } else { Instruction::I32Shl }
+                if is_i64 {
+                    Instruction::I64Shl
+                } else {
+                    Instruction::I32Shl
+                }
             }
             OperatorKind::Shr => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64ShrU,

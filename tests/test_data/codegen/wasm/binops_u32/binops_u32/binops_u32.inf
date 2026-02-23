@@ -1,0 +1,12 @@
+pub fn div_u32(a: u32, b: u32) -> u32 { return a / b; }
+pub fn mod_u32(a: u32, b: u32) -> u32 { return a % b; }
+pub fn lt_u32(a: u32, b: u32) -> bool { return a < b; }
+pub fn le_u32(a: u32, b: u32) -> bool { return a <= b; }
+pub fn gt_u32(a: u32, b: u32) -> bool { return a > b; }
+pub fn ge_u32(a: u32, b: u32) -> bool { return a >= b; }
+pub fn shr_u32(a: u32, b: u32) -> u32 { return a >> b; }
+pub fn add_u32(a: u32, b: u32) -> u32 { return a + b; }
+pub fn mul_u32(a: u32, b: u32) -> u32 { return a * b; }
+pub fn eq_u32(a: u32, b: u32) -> bool { return a == b; }
+pub fn high_bit_div_u32(a: u32, b: u32) -> u32 { return a / b; }
+pub fn high_bit_lt_u32(a: u32, b: u32) -> bool { return a > b; }
