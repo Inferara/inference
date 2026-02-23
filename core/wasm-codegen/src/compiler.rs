@@ -54,12 +54,14 @@
 //! Non-det blocks are structured blocks (like `block`/`loop`/`if`), terminated by a
 //! regular `end` instruction (0x0b).
 
+use crate::errors::CodegenError;
 use rustc_hash::FxHashMap;
 use std::iter::Peekable;
 use std::rc::Rc;
 
 use inference_ast::nodes::{
-    BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement, Type, Visibility,
+    ArgumentType, BlockType, Expression, FunctionDefinition, Literal, SimpleTypeKind, Statement,
+    Type, Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -90,10 +92,11 @@ const END_OPCODE: u8 = 0x0b;
 ///
 /// # Variable Storage
 ///
-/// Local variables and constants are stored as WASM locals mapped by name to
-/// (`local_index`, `ValType`) pairs. Function bodies pre-scan for local declarations
-/// before emitting instructions, since WASM requires all locals to be declared
-/// at the start of a function body.
+/// Local variables, constants, and function parameters are stored as WASM locals mapped by name
+/// to (`local_index`, `ValType`) pairs. Parameters occupy indices `0..param_count`; regular
+/// locals follow at `param_count`.. Function bodies pre-scan for local declarations before
+/// emitting instructions, since WASM requires all locals to be declared at the start of a
+/// function body.
 ///
 /// # Internal Usage Example
 ///
@@ -116,6 +119,11 @@ pub(crate) struct Compiler {
     func_idx: u32,
     has_main: bool,
     module_name: String,
+    /// Maps function names to their WASM function section indices.
+    ///
+    /// Built by `build_func_name_to_idx` before the main compilation pass so that
+    /// forward references (callee defined after caller) resolve correctly.
+    func_name_to_idx: FxHashMap<String, u32>,
 }
 
 impl Compiler {
@@ -135,6 +143,50 @@ impl Compiler {
             func_idx: 0,
             has_main: false,
             module_name: module_name.to_string(),
+            func_name_to_idx: FxHashMap::default(),
+        }
+    }
+
+    /// Builds the function name-to-WASM-index map from the source file's function definitions.
+    ///
+    /// Must be called before `visit_function_definition` so that forward references
+    /// (a caller defined before its callee) resolve correctly during call lowering.
+    /// The traversal order must match the order used in `visit_function_definition`.
+    ///
+    /// # Parameters
+    ///
+    /// - `funcs` - Ordered list of function definitions for one source file
+    pub(crate) fn build_func_name_to_idx(&mut self, funcs: &[Rc<FunctionDefinition>]) {
+        #[allow(clippy::cast_possible_truncation)]
+        for (idx, func_def) in funcs.iter().enumerate() {
+            self.func_name_to_idx
+                .insert(func_def.name(), idx as u32 + self.func_idx);
+        }
+    }
+
+    /// Maps an Inference `Type` to the corresponding WASM `ValType`.
+    ///
+    /// Returns `None` for `Type::Simple(Unit)` because unit functions produce no WASM value.
+    /// Panics for complex types (arrays, generics, function types, custom types) not yet supported.
+    fn val_type_from_type(ty: &Type) -> Option<ValType> {
+        match ty {
+            Type::Simple(SimpleTypeKind::Unit) => None,
+            Type::Simple(
+                SimpleTypeKind::Bool
+                | SimpleTypeKind::I8
+                | SimpleTypeKind::U8
+                | SimpleTypeKind::I16
+                | SimpleTypeKind::U16
+                | SimpleTypeKind::I32
+                | SimpleTypeKind::U32,
+            ) => Some(ValType::I32),
+            Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Some(ValType::I64),
+            Type::Array(_array_type) => todo!(),
+            Type::Generic(_generic_type) => todo!(),
+            Type::Function(_function_type) => todo!(),
+            Type::QualifiedName(_qualified_name) => todo!(),
+            Type::Qualified(_type_qualified_name) => todo!(),
+            Type::Custom(_identifier) => todo!(),
         }
     }
 
@@ -142,12 +194,20 @@ impl Compiler {
     ///
     /// This is the main entry point for function compilation. It performs several steps:
     ///
-    /// 1. **Type mapping** - Maps the return type to a WASM `ValType`
-    /// 2. **Type registration** - Registers the function signature in the type section
-    /// 3. **Export annotation** - Marks public functions for WASM export
-    /// 4. **Local pre-scan** - Scans the function body to determine locals before emission
-    /// 5. **Body lowering** - Recursively lowers the function body statements to WASM
-    /// 6. **Return handling** - Inserts implicit `end` for function body termination
+    /// 1. **Type mapping** - Maps return type and parameter types to WASM `ValType`
+    /// 2. **Parameter lowering** - Registers parameters in `locals_map` at indices 0..n
+    /// 3. **Type registration** - Registers the function signature in the type section
+    /// 4. **Export annotation** - Marks public functions for WASM export
+    /// 5. **Local pre-scan** - Scans the function body to determine regular locals (indices n..)
+    /// 6. **Body lowering** - Recursively lowers the function body statements to WASM
+    /// 7. **Return handling** - Inserts implicit `end` for function body termination
+    ///
+    /// # WASM Parameter Semantics
+    ///
+    /// Parameters occupy local slots `0..param_count`. The WASM function body declares only
+    /// additional locals (via `Function::new`); params are implicit from the type signature.
+    /// `pre_scan_locals` starts indexing regular locals at `param_count` so there is no
+    /// collision.
     ///
     /// # Parameters
     ///
@@ -157,38 +217,48 @@ impl Compiler {
     /// # Panics
     ///
     /// This method will panic if it encounters unsupported type constructs (arrays,
-    /// generics, function types, qualified names, custom types) in return positions,
-    /// as these are not yet implemented.
+    /// generics, function types, qualified names, custom types) in parameter or return
+    /// positions, as these are not yet implemented.
     pub(crate) fn visit_function_definition(
         &mut self,
         function_definition: &Rc<FunctionDefinition>,
         ctx: &TypedContext,
     ) {
         let fn_name = function_definition.name();
-        let results: Vec<ValType> = match &function_definition.returns {
-            Some(ret_type) => match ret_type {
-                Type::Simple(SimpleTypeKind::Unit) => vec![],
-                Type::Simple(
-                    SimpleTypeKind::Bool
-                    | SimpleTypeKind::I8
-                    | SimpleTypeKind::U8
-                    | SimpleTypeKind::I16
-                    | SimpleTypeKind::U16
-                    | SimpleTypeKind::I32
-                    | SimpleTypeKind::U32,
-                ) => vec![ValType::I32],
-                Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => vec![ValType::I64],
-                Type::Array(_array_type) => todo!(),
-                Type::Generic(_generic_type) => todo!(),
-                Type::Function(_function_type) => todo!(),
-                Type::QualifiedName(_qualified_name) => todo!(),
-                Type::Qualified(_type_qualified_name) => todo!(),
-                Type::Custom(_identifier) => todo!(),
-            },
-            None => vec![],
-        };
+        let results: Vec<ValType> = function_definition
+            .returns
+            .as_ref()
+            .and_then(Self::val_type_from_type)
+            .into_iter()
+            .collect();
 
-        let params: Vec<ValType> = vec![];
+        let mut params: Vec<ValType> = vec![];
+        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
+        let mut local_idx: u32 = 0;
+
+        if let Some(arguments) = &function_definition.arguments {
+            for arg_type in arguments {
+                if let ArgumentType::Argument(arg) = arg_type {
+                    cov_mark::hit!(wasm_codegen_emit_function_params);
+                    let vt = Self::val_type_from_type(&arg.ty)
+                        .expect("Function parameter type must not be unit");
+                    params.push(vt);
+                    let prev = locals_map.insert(arg.name(), (local_idx, vt));
+                    debug_assert!(
+                        prev.is_none(),
+                        "parameter `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected duplicate parameter names",
+                        arg.name(),
+                    );
+                    local_idx += 1;
+                }
+            }
+        }
+
+        // Parameters occupy local indices 0..param_count. Regular locals follow.
+        // WASM requires declaring only the additional (non-param) locals in Function::new().
+        let param_count = local_idx;
+
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
@@ -206,8 +276,6 @@ impl Compiler {
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
 
-        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
-        let mut local_idx: u32 = 0;
         Self::pre_scan_locals(
             &function_definition.body,
             ctx,
@@ -216,7 +284,11 @@ impl Compiler {
         );
 
         let local_declarations: Vec<(u32, ValType)> = {
-            let mut sorted_locals: Vec<(u32, ValType)> = locals_map.values().copied().collect();
+            let mut sorted_locals: Vec<(u32, ValType)> = locals_map
+                .values()
+                .copied()
+                .filter(|(idx, _)| *idx >= param_count)
+                .collect();
             sorted_locals.sort_by_key(|(idx, _)| *idx);
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
@@ -273,7 +345,14 @@ impl Compiler {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
                         _ => ValType::I32,
                     };
-                    locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    let prev =
+                        locals_map.insert(constant_definition.name(), (*local_idx, val_type));
+                    debug_assert!(
+                        prev.is_none(),
+                        "local `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected shadowing",
+                        constant_definition.name(),
+                    );
                     *local_idx += 1;
                 }
                 Statement::VariableDefinition(variable_definition) => {
@@ -285,7 +364,14 @@ impl Compiler {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
                         _ => ValType::I32,
                     };
-                    locals_map.insert(variable_definition.name(), (*local_idx, val_type));
+                    let prev =
+                        locals_map.insert(variable_definition.name(), (*local_idx, val_type));
+                    debug_assert!(
+                        prev.is_none(),
+                        "local `{}` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected shadowing",
+                        variable_definition.name(),
+                    );
                     *local_idx += 1;
                 }
                 Statement::Block(inner_block) => {
@@ -417,16 +503,19 @@ impl Compiler {
             },
             Statement::Expression(expression) => {
                 self.lower_expression(&expression, ctx, func, locals_map);
-                if statements_iterator.peek().is_none()
-                    && parent_blocks_stack.last().unwrap().is_non_det()
-                    && parent_blocks_stack.last().unwrap().is_void()
-                {
-                    //TODO: once FunctionCall is implemented (which could call a void function), or Unit literal,
-                    //the Drop would become a bug — it'd try to pop from an empty stack.
-                    //The proper fix would be to check whether the expression's type is non-void before emitting Drop,
-                    //rather than assuming all expressions produce a value.
-                    //Something like checking ctx.is_node_void(expression.id) (or equivalent).
-                    func.instruction(&Instruction::Drop);
+                let expr_produces_value = ctx
+                    .get_node_typeinfo(expression.id())
+                    .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
+                if expr_produces_value {
+                    // Do not drop if this is the trailing result of a non-void non-det block —
+                    // the value serves as the block's result consumed by the enclosing context.
+                    let is_block_result = statements_iterator.peek().is_none()
+                        && parent_blocks_stack
+                            .last()
+                            .is_some_and(|b| b.is_non_det() && !b.is_void());
+                    if !is_block_result {
+                        func.instruction(&Instruction::Drop);
+                    }
                 }
             }
             Statement::Assign(_assign_statement) => todo!(),
@@ -467,6 +556,11 @@ impl Compiler {
                                     self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
                                 }
                                 func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::FunctionCall(_) => {
+                                let local_idx = *local_idx;
+                                self.lower_expression(&expr, ctx, func, locals_map);
+                                func.instruction(&Instruction::LocalSet(local_idx));
                             }
                             _ => todo!("Unsupported variable initializer expression"),
                         }
@@ -516,7 +610,21 @@ impl Compiler {
             Expression::Binary(_binary_expression) => todo!(),
             Expression::MemberAccess(_member_access_expression) => todo!(),
             Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
-            Expression::FunctionCall(_function_call_expression) => todo!(),
+            Expression::FunctionCall(function_call_expression) => {
+                match self.lower_function_call(function_call_expression, ctx, func, locals_map) {
+                    Ok(()) => {}
+                    Err(CodegenError::UnsupportedCalleeKind) => {
+                        todo!(
+                            "Non-identifier function calls (method calls, higher-order) \
+                             are not yet implemented"
+                        )
+                    }
+                    Err(CodegenError::UnknownFunction(name)) => {
+                        panic!("Function '{name}' not found in name-to-index map; \
+                                the type-checker should have caught undefined functions")
+                    }
+                }
+            }
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
             Expression::Parenthesized(_parenthesized_expression) => todo!(),
@@ -542,6 +650,68 @@ impl Compiler {
                 panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");
             }
         }
+    }
+
+    /// Lowers a plain identifier-based function call to a WASM `call` instruction.
+    ///
+    /// Pushes each argument onto the WASM operand stack in positional order, then emits
+    /// `call <func_idx>`. Argument labels (if present) are ignored because WASM is purely
+    /// positional and the type-checker has already validated label correctness and argument
+    /// count.
+    ///
+    /// # Supported Call Kinds
+    ///
+    /// Only `Expression::Identifier`-based callees are supported. Method calls
+    /// (`MemberAccess`), associated function calls (`TypeMemberAccess`), and
+    /// higher-order calls are out of scope and return
+    /// [`CodegenError::UnsupportedCalleeKind`].
+    ///
+    /// # Recursion
+    ///
+    /// Direct or indirect recursion is explicitly forbidden in Inference (Power of 10,
+    /// Rule 1). The type-checker is responsible for detecting and rejecting recursive
+    /// call graphs. At codegen time, recursive calls are left as `todo!` until the
+    /// analysis pass is in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `fce` - Function call expression node
+    /// - `ctx` - Typed context for type lookups
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodegenError`] if the callee is not a plain identifier or the
+    /// function name is not in the pre-built index map.
+    fn lower_function_call(
+        &self,
+        fce: &inference_ast::nodes::FunctionCallExpression,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) -> Result<(), CodegenError> {
+        let Expression::Identifier(_) = &fce.function else {
+            return Err(CodegenError::UnsupportedCalleeKind);
+        };
+
+        cov_mark::hit!(wasm_codegen_emit_function_call);
+
+        if let Some(arguments) = &fce.arguments {
+            for (_label, expr_ref) in arguments {
+                self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map);
+            }
+        }
+
+        let func_name = fce.name();
+        let func_idx = self
+            .func_name_to_idx
+            .get(&func_name)
+            .copied()
+            .ok_or(CodegenError::UnknownFunction(func_name))?;
+
+        func.instruction(&Instruction::Call(func_idx));
+        Ok(())
     }
 
     /// Converts an AST literal to WASM constant instructions.

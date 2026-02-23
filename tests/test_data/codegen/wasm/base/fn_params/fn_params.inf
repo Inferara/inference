@@ -1,0 +1,19 @@
+pub fn identity_i32(x: i32) -> i32 {
+    return x;
+}
+
+pub fn identity_i64(x: i64) -> i64 {
+    return x;
+}
+
+pub fn identity_bool(x: bool) -> bool {
+    return x;
+}
+
+pub fn first_of_two(a: i32, b: i32) -> i32 {
+    return a;
+}
+
+pub fn second_of_two(a: i32, b: i32) -> i32 {
+    return b;
+}

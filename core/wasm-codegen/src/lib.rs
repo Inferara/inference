@@ -50,6 +50,7 @@ use inference_type_checker::typed_context::TypedContext;
 use crate::compiler::Compiler;
 
 mod compiler;
+mod errors;
 pub mod output;
 pub mod target;
 
@@ -150,7 +151,11 @@ pub fn codegen(
 /// - Multi-file compilation is not fully tested (see `codegen` function)
 fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
     for source_file in &typed_context.source_files() {
-        for func_def in source_file.function_definitions() {
+        let func_defs = source_file.function_definitions();
+        // Pre-scan: build function name-to-index map so that forward references
+        // (callee defined after caller in source) resolve correctly at call sites.
+        compiler.build_func_name_to_idx(&func_defs);
+        for func_def in func_defs {
             compiler.visit_function_definition(&func_def, typed_context);
         }
     }

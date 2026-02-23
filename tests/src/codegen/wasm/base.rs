@@ -354,6 +354,166 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn fn_params_test() {
+        cov_mark::check_count!(wasm_codegen_emit_function_params, 7);
+        let test_name = "fn_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn fn_params_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "fn_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let identity_i32: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "identity_i32")
+            .unwrap_or_else(|e| panic!("Failed to get 'identity_i32': {e}"));
+        assert_eq!(
+            identity_i32.call(&mut store, 42).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            42
+        );
+
+        let identity_i64: TypedFunc<i64, i64> = instance
+            .get_typed_func(&mut store, "identity_i64")
+            .unwrap_or_else(|e| panic!("Failed to get 'identity_i64': {e}"));
+        assert_eq!(
+            identity_i64
+                .call(&mut store, -9223372036854775808_i64)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            -9223372036854775808_i64
+        );
+
+        let identity_bool: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "identity_bool")
+            .unwrap_or_else(|e| panic!("Failed to get 'identity_bool': {e}"));
+        assert_eq!(
+            identity_bool.call(&mut store, 1).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            1
+        );
+
+        let first_of_two: TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "first_of_two")
+            .unwrap_or_else(|e| panic!("Failed to get 'first_of_two': {e}"));
+        assert_eq!(
+            first_of_two
+                .call(&mut store, (10, 20))
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            10
+        );
+
+        let second_of_two: TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "second_of_two")
+            .unwrap_or_else(|e| panic!("Failed to get 'second_of_two': {e}"));
+        assert_eq!(
+            second_of_two
+                .call(&mut store, (10, 20))
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            20
+        );
+    }
+
+    #[test]
+    fn fn_calls_test() {
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 5);
+        let test_name = "fn_calls";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn fn_calls_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "fn_calls";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let call_zero: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_zero")
+            .unwrap_or_else(|e| panic!("Failed to get 'call_zero': {e}"));
+        assert_eq!(
+            call_zero.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            0
+        );
+
+        let call_identity: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "call_identity")
+            .unwrap_or_else(|e| panic!("Failed to get 'call_identity': {e}"));
+        assert_eq!(
+            call_identity
+                .call(&mut store, 77)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            77
+        );
+
+        let call_first: TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "call_first")
+            .unwrap_or_else(|e| panic!("Failed to get 'call_first': {e}"));
+        assert_eq!(
+            call_first
+                .call(&mut store, (10, 20))
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
+            10
+        );
+
+        let let_from_call: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "let_from_call")
+            .unwrap_or_else(|e| panic!("Failed to get 'let_from_call': {e}"));
+        assert_eq!(
+            let_from_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            0
+        );
+
+        let forward_call: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "forward_call")
+            .unwrap_or_else(|e| panic!("Failed to get 'forward_call': {e}"));
+        assert_eq!(
+            forward_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            99
+        );
+    }
+
+    #[test]
     fn soroban_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
@@ -562,6 +722,44 @@ mod regenerate {
             .expect("Failed to read local_variables_exec.inf");
         let actual = wasm_codegen(&source_code);
         let wasm_path = dir.join("local_variables_exec.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_fn_params_wasm() {
+        let dir = base_test_dir().join("fn_params");
+        let source_code =
+            std::fs::read_to_string(dir.join("fn_params.inf")).expect("Failed to read fn_params.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("fn_params.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_fn_calls_wasm() {
+        let dir = base_test_dir().join("fn_calls");
+        let source_code =
+            std::fs::read_to_string(dir.join("fn_calls.inf")).expect("Failed to read fn_calls.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("fn_calls.wasm");
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!(
