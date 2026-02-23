@@ -12,6 +12,24 @@
 //!
 //! Phases execute in canonical order (parse -> analyze -> codegen) regardless
 //! of the order flags appear on the command line. Each phase depends on the previous.
+//!
+//! ## Default Behavior
+//!
+//! When no phase flags are given, `infs build` defaults to full compilation and
+//! writes the WASM binary to disk — equivalent to `--codegen -o`. This matches
+//! conventional compiler UX (e.g. `gcc foo.c`).
+//!
+//! ```bash
+//! infs build example.inf       # parse → codegen → write out/example.wasm
+//! infs build example.inf -v    # parse → codegen → write out/example.wasm + out/example.v
+//! ```
+//!
+//! Supplying any explicit phase flag overrides the default:
+//!
+//! ```bash
+//! infs build example.inf --parse    # parse only, no output files
+//! infs build example.inf --analyze  # parse + analyze only, no output files
+//! ```
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -23,20 +41,21 @@ use crate::toolchain::find_infc;
 
 /// Arguments for the build command.
 ///
-/// The build command operates in phases, and users must explicitly request
-/// which phases to run via command line flags.
+/// When no phase flags are given, the command defaults to full compilation and
+/// writes the WASM binary to disk — equivalent to `--codegen -o`.
 ///
 /// ## Phase Dependencies
 ///
-/// - `--parse`: Standalone, builds the typed AST
-/// - `--analyze`: Requires parsing (automatically runs parse phase)
-/// - `--codegen`: Requires analysis (automatically runs parse and analyze phases)
+/// - `--parse`: Standalone, builds the typed AST. Overrides the default.
+/// - `--analyze`: Requires parsing (automatically runs parse phase). Overrides the default.
+/// - `--codegen`: Requires analysis (automatically runs parse and analyze phases).
 ///
 /// ## Output Flags
 ///
 /// - `-o`: Generate WASM binary file in `out/` directory
-/// - `-v`: Generate Rocq (.v) translation in `out/` directory
-#[derive(Args)]
+/// - `-v`: Generate Rocq (.v) translation in `out/` directory. When used without
+///   explicit phase flags, implies full pipeline and also sets `-o`.
+#[derive(Args, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildArgs {
     /// Path to the source file to compile.
@@ -68,7 +87,7 @@ pub struct BuildArgs {
 /// ## Execution Flow
 ///
 /// 1. Validates that the source file exists
-/// 2. Ensures at least one phase flag is specified
+/// 2. Applies default normalization: no phase flags → full pipeline + WASM output
 /// 3. Locates the infc compiler binary
 /// 4. Builds and executes the infc command with appropriate flags
 /// 5. Propagates exit code from infc
@@ -77,7 +96,6 @@ pub struct BuildArgs {
 ///
 /// Returns an error if:
 /// - The source file does not exist
-/// - No phase flags are specified
 /// - infc compiler cannot be found
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 pub fn execute(args: &BuildArgs) -> Result<()> {
@@ -85,13 +103,17 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
         bail!("Path not found: {}", args.path.display());
     }
 
+    // Default normalization: no phase flags → full pipeline + WASM output.
+    // This makes `infs build file.inf` behave like `infs build file.inf --codegen -o`.
+    let mut args = args.clone();
+    if !args.parse && !args.analyze && !args.codegen {
+        args.codegen = true;
+        args.generate_wasm_output = true;
+    }
+
     let need_parse = args.parse;
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
-
-    if !(need_parse || need_analyze || need_codegen) {
-        bail!("At least one of --parse, --analyze, or --codegen must be specified");
-    }
 
     let infc_path = find_infc()?;
 

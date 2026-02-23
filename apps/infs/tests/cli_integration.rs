@@ -12,8 +12,8 @@
 //!
 //! ### Phase 1: Build Command
 //!
-//! 1. **Error handling**: File existence, required flags, no panics on error paths
-//! 2. **Build command**: Parse, analyze, and codegen phases
+//! 1. **Error handling**: File existence, no panics on error paths
+//! 2. **Build command**: Parse, analyze, and codegen phases; default (no flags) behavior
 //! 3. **Output generation**: WASM and Rocq file creation
 //! 4. **Version and help**: CLI metadata display
 //! 5. **Headless mode**: Display info without TUI
@@ -155,18 +155,77 @@ fn build_fails_when_file_missing() {
     );
 }
 
-/// Verifies that the build command requires at least one phase flag.
+/// Verifies that `infs build` with no phase flags defaults to full compilation.
 ///
-/// **Expected behavior**: Exit with non-zero code when no phase flags are provided,
-/// with an error message explaining that at least one phase must be specified.
+/// **Expected behavior**: Exit with code 0 and produce a `.wasm` file in `out/`.
+/// This is equivalent to `infs build file.inf --codegen -o`.
 #[test]
-fn build_fails_when_no_phase_selected() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.arg("build").arg(example_file("example.inf"));
+fn build_no_flags_produces_wasm() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
 
-    cmd.assert().failure().stderr(
-        predicate::str::contains("At least one of --parse")
-            .or(predicate::str::contains("at least one of --parse")),
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let wasm_output = temp.child("out").child("trivial.wasm");
+    assert!(
+        wasm_output.path().exists(),
+        "Expected WASM file at: {:?}",
+        wasm_output.path()
+    );
+}
+
+/// Verifies that `infs build -v` (no explicit phase flags) defaults to full compilation
+/// and produces both `.wasm` and `.v` output files.
+///
+/// **Expected behavior**: Exit with code 0, produce `out/trivial.wasm` and `out/trivial.v`.
+#[test]
+fn build_v_flag_alone_produces_both_outputs() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path())
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    let wasm_output = temp.child("out").child("trivial.wasm");
+    let v_output = temp.child("out").child("trivial.v");
+    assert!(
+        wasm_output.path().exists(),
+        "Expected WASM file at: {:?}",
+        wasm_output.path()
+    );
+    assert!(
+        v_output.path().exists(),
+        "Expected V file at: {:?}",
+        v_output.path()
     );
 }
 
