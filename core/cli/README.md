@@ -300,8 +300,8 @@ core/cli/
 The `main()` function coordinates the compilation pipeline:
 
 1. Parse command line arguments
-2. Apply default normalization (no phase flags → `--codegen -o`)
-3. Validate input (file exists)
+2. Validate input (file exists)
+3. Apply default normalization (no phase flags → `--codegen -o`)
 4. Execute phases in canonical order:
    - Parse: `inference::parse()`
    - Analyze: `inference::type_check()` + `inference::analyze()`

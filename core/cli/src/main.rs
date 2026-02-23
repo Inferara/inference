@@ -159,9 +159,9 @@ use toolchain::BuildProfile;
 /// ## Execution Flow
 ///
 /// 1. **Parse command line arguments** using clap
-/// 2. **Apply default normalization**: when no phase flags are given, defaults
+/// 2. **Validate input**: verify source file exists
+/// 3. **Apply default normalization**: when no phase flags are given, defaults
 ///    to full pipeline (`--codegen -o`) so that `infc file.inf` just works
-/// 3. **Validate input**: verify source file exists
 /// 4. **Execute compilation phases** in canonical order:
 ///    - Parse: Build typed AST from source using tree-sitter
 ///    - Analyze: Type check and semantic validation

@@ -246,7 +246,7 @@ Many QA cases below are covered by automated tests (`npm test`). Cases marked wi
 | 7.4 | Step 2: "Verify Your Installation" | Shows "Run Doctor" button. Completion event: `onCommand:inference.runDoctor` | |
 | 7.5 | Click "Run Doctor" in walkthrough | Triggers doctor command, step completes | |
 | 7.6 | Step 3: "Create a Project" | Shows "Create New File" link. Completion event: `onLanguage:inference` | |
-| 7.7 | Step 4: "Build Your Program" | Shows terminal command example: `infs build main.inf --parse --codegen -o`. Completion event: `stepSelected` | |
+| 7.7 | Step 4: "Build Your Program" | Shows terminal command example: `infs build main.inf`. Completion event: `stepSelected` | |
 
 ---
 

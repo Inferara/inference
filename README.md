@@ -41,16 +41,16 @@ The `infs build` command compiles a single `.inf` source file through three phas
 2. **Analyze** (`--analyze`) – Perform type checking and semantic validation (WIP)
 3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
-You must specify at least one phase flag; phases run in canonical order (parse → analyze → codegen).
+Phases run in canonical order (parse → analyze → codegen). When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk.
 
 ### Basic Usage
 
 ```bash
-# Via cargo
-cargo run -p infs -- build path/to/file.inf --parse
+# Full compilation (default — no flags needed)
+./target/debug/infs build path/to/file.inf
 
-# After building, call the binary directly
-./target/debug/infs build path/to/file.inf --codegen -o
+# Parse only (syntax check)
+cargo run -p infs -- build path/to/file.inf --parse
 ```
 
 ### Compilation Modes

@@ -62,30 +62,30 @@ cargo build -p infs --release
 ### Build Command
 
 ```bash
+# Full compilation with WASM output (default — no flags needed)
+infs build example.inf
+
+# Full compilation with Rocq translation
+infs build example.inf -v
+
 # Parse only (syntax check)
 infs build example.inf --parse
 
 # Type checking
 infs build example.inf --analyze
-
-# Full compilation with WASM output
-infs build example.inf --codegen -o
-
-# Full compilation with Rocq translation
-infs build example.inf --codegen -o -v
 ```
 
 ### Build Flags
 
 | Flag | Description |
 |------|-------------|
-| `--parse` | Run the parse phase to build the typed AST |
-| `--analyze` | Run the analyze phase for type checking |
+| `--parse` | Run the parse phase to build the typed AST (overrides default) |
+| `--analyze` | Run the analyze phase for type checking (overrides default) |
 | `--codegen` | Run the codegen phase to emit WebAssembly |
 | `-o` | Generate WASM binary file in `out/` directory |
 | `-v` | Generate Rocq (.v) translation file |
 
-At least one of `--parse`, `--analyze`, or `--codegen` must be specified.
+When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
 
 ### Run Command
 
@@ -245,7 +245,7 @@ When running `build`, `run` commands, `infs` locates the `infc` compiler using t
 **Priority 1 - INFC_PATH**: Use for development, testing, or CI/CD with a pre-built binary:
 ```bash
 export INFC_PATH=/path/to/custom/infc
-infs build example.inf --codegen -o
+infs build example.inf
 ```
 
 **Priority 2 - System PATH**: Automatic if `infc` is installed system-wide (e.g., via package manager).

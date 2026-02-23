@@ -121,7 +121,7 @@ This document contains tests that require manual verification or are not yet aut
 These should be verified via CI on each platform.
 
 **Steps:**
-1. Run `infs build trivial.inf --parse --codegen -o`
+1. Run `infs build trivial.inf`
 2. Verify WASM output exists
 3. Run `infs run trivial.inf --entry-point hello_world`
 
