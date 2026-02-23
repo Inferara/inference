@@ -82,6 +82,17 @@ pub struct BuildArgs {
     pub generate_v_output: bool,
 }
 
+/// Applies default phase normalization to build arguments.
+///
+/// When no phase flag (`--parse`, `--analyze`, `--codegen`) is given, defaults
+/// to full pipeline + WASM output — equivalent to `--codegen -o`.
+pub(crate) fn normalize_build_args(args: &mut BuildArgs) {
+    if !args.parse && !args.analyze && !args.codegen {
+        args.codegen = true;
+        args.generate_wasm_output = true;
+    }
+}
+
 /// Executes the build command with the given arguments.
 ///
 /// ## Execution Flow
@@ -103,13 +114,8 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
         bail!("Path not found: {}", args.path.display());
     }
 
-    // Default normalization: no phase flags → full pipeline + WASM output.
-    // This makes `infs build file.inf` behave like `infs build file.inf --codegen -o`.
     let mut args = args.clone();
-    if !args.parse && !args.analyze && !args.codegen {
-        args.codegen = true;
-        args.generate_wasm_output = true;
-    }
+    normalize_build_args(&mut args);
 
     let need_parse = args.parse;
     let need_analyze = args.analyze;
@@ -148,5 +154,54 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
     } else {
         let code = status.code().unwrap_or(1);
         Err(InfsError::process_exit_code(code).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn make_args(parse: bool, analyze: bool, codegen: bool) -> BuildArgs {
+        BuildArgs {
+            path: PathBuf::from("test.inf"),
+            parse,
+            analyze,
+            codegen,
+            generate_wasm_output: false,
+            generate_v_output: false,
+        }
+    }
+
+    #[test]
+    fn normalize_sets_full_pipeline_when_no_flags() {
+        let mut args = make_args(false, false, false);
+        normalize_build_args(&mut args);
+        assert!(args.codegen);
+        assert!(args.generate_wasm_output);
+        assert!(!args.generate_v_output);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_parse() {
+        let mut args = make_args(true, false, false);
+        normalize_build_args(&mut args);
+        assert!(!args.codegen);
+        assert!(!args.generate_wasm_output);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_analyze() {
+        let mut args = make_args(false, true, false);
+        normalize_build_args(&mut args);
+        assert!(!args.codegen);
+    }
+
+    #[test]
+    fn normalize_does_not_override_explicit_codegen() {
+        let mut args = make_args(false, false, true);
+        normalize_build_args(&mut args);
+        assert!(args.codegen);
+        assert!(!args.generate_wasm_output);
     }
 }

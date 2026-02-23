@@ -1,0 +1,2 @@
+// intentionally invalid — used to test parse error handling
+fn broken { this is not valid syntax @@@ }

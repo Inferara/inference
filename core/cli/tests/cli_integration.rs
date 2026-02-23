@@ -183,3 +183,16 @@ fn shows_version() {
         .success()
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
+
+/// Verifies that the compiler exits with failure and reports a parse error
+/// when given a syntactically invalid source file.
+///
+/// **Expected behavior**: Exit with code 1 and print "Parse error" to stderr.
+#[test]
+fn fails_with_parse_error() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.arg(example_file("bad_syntax.inf")).arg("--parse");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Parse error"));
+}
