@@ -1,0 +1,36 @@
+fn get_zero() -> i32 {
+    return 0;
+}
+
+fn identity_i32(x: i32) -> i32 {
+    return x;
+}
+
+fn first_i32(a: i32, b: i32) -> i32 {
+    return a;
+}
+
+pub fn call_zero() -> i32 {
+    return get_zero();
+}
+
+pub fn call_identity(x: i32) -> i32 {
+    return identity_i32(x);
+}
+
+pub fn call_first(a: i32, b: i32) -> i32 {
+    return first_i32(a, b);
+}
+
+pub fn let_from_call() -> i32 {
+    let x: i32 = get_zero();
+    return x;
+}
+
+pub fn forward_call() -> i32 {
+    return forward_helper();
+}
+
+fn forward_helper() -> i32 {
+    return 99;
+}

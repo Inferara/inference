@@ -71,6 +71,21 @@ use wasm_encoder::{
     Instruction, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
+/// Error returned when a function call expression cannot be lowered by the codegen pass.
+///
+/// This is an internal error type used by [`Compiler::lower_function_call`]. Callers
+/// convert it to a `todo!` or `panic!` depending on whether the case is planned or
+/// indicates a type-checker inconsistency.
+#[derive(Debug)]
+enum FunctionCallError {
+    /// The callee expression is not a plain identifier (e.g., method call, higher-order call).
+    /// This case is out of scope for the current implementation.
+    UnsupportedCalleeKind,
+    /// The function name was not found in the pre-built index map.
+    /// This should never happen if the type-checker ran successfully.
+    UnknownFunction(String),
+}
+
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
 const OPCODE_PREFIX: u8 = 0xfc;
@@ -118,6 +133,11 @@ pub(crate) struct Compiler {
     func_idx: u32,
     has_main: bool,
     module_name: String,
+    /// Maps function names to their WASM function section indices.
+    ///
+    /// Built by `build_func_name_to_idx` before the main compilation pass so that
+    /// forward references (callee defined after caller) resolve correctly.
+    func_name_to_idx: FxHashMap<String, u32>,
 }
 
 impl Compiler {
@@ -137,6 +157,24 @@ impl Compiler {
             func_idx: 0,
             has_main: false,
             module_name: module_name.to_string(),
+            func_name_to_idx: FxHashMap::default(),
+        }
+    }
+
+    /// Builds the function name-to-WASM-index map from the source file's function definitions.
+    ///
+    /// Must be called before `visit_function_definition` so that forward references
+    /// (a caller defined before its callee) resolve correctly during call lowering.
+    /// The traversal order must match the order used in `visit_function_definition`.
+    ///
+    /// # Parameters
+    ///
+    /// - `funcs` - Ordered list of function definitions for one source file
+    pub(crate) fn build_func_name_to_idx(&mut self, funcs: &[Rc<FunctionDefinition>]) {
+        #[allow(clippy::cast_possible_truncation)]
+        for (idx, func_def) in funcs.iter().enumerate() {
+            self.func_name_to_idx
+                .insert(func_def.name(), idx as u32 + self.func_idx);
         }
     }
 
@@ -461,16 +499,16 @@ impl Compiler {
             },
             Statement::Expression(expression) => {
                 self.lower_expression(&expression, ctx, func, locals_map);
-                if statements_iterator.peek().is_none()
+                let is_trailing_in_nondet_void_block = statements_iterator.peek().is_none()
                     && parent_blocks_stack.last().unwrap().is_non_det()
-                    && parent_blocks_stack.last().unwrap().is_void()
-                {
-                    //TODO: once FunctionCall is implemented (which could call a void function), or Unit literal,
-                    //the Drop would become a bug — it'd try to pop from an empty stack.
-                    //The proper fix would be to check whether the expression's type is non-void before emitting Drop,
-                    //rather than assuming all expressions produce a value.
-                    //Something like checking ctx.is_node_void(expression.id) (or equivalent).
-                    func.instruction(&Instruction::Drop);
+                    && parent_blocks_stack.last().unwrap().is_void();
+                if is_trailing_in_nondet_void_block {
+                    let expr_produces_value = ctx
+                        .get_node_typeinfo(expression.id())
+                        .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
+                    if expr_produces_value {
+                        func.instruction(&Instruction::Drop);
+                    }
                 }
             }
             Statement::Assign(_assign_statement) => todo!(),
@@ -511,6 +549,11 @@ impl Compiler {
                                     self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
                                 }
                                 func.instruction(&Instruction::LocalSet(*local_idx));
+                            }
+                            Expression::FunctionCall(_) => {
+                                let local_idx = *local_idx;
+                                self.lower_expression(&expr, ctx, func, locals_map);
+                                func.instruction(&Instruction::LocalSet(local_idx));
                             }
                             _ => todo!("Unsupported variable initializer expression"),
                         }
@@ -560,7 +603,21 @@ impl Compiler {
             Expression::Binary(_binary_expression) => todo!(),
             Expression::MemberAccess(_member_access_expression) => todo!(),
             Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
-            Expression::FunctionCall(_function_call_expression) => todo!(),
+            Expression::FunctionCall(function_call_expression) => {
+                match self.lower_function_call(function_call_expression, ctx, func, locals_map) {
+                    Ok(()) => {}
+                    Err(FunctionCallError::UnsupportedCalleeKind) => {
+                        todo!(
+                            "Non-identifier function calls (method calls, higher-order) \
+                             are not yet implemented"
+                        )
+                    }
+                    Err(FunctionCallError::UnknownFunction(name)) => {
+                        panic!("Function '{name}' not found in name-to-index map; \
+                                the type-checker should have caught undefined functions")
+                    }
+                }
+            }
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(_prefix_unary_expression) => todo!(),
             Expression::Parenthesized(_parenthesized_expression) => todo!(),
@@ -586,6 +643,68 @@ impl Compiler {
                 panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");
             }
         }
+    }
+
+    /// Lowers a plain identifier-based function call to a WASM `call` instruction.
+    ///
+    /// Pushes each argument onto the WASM operand stack in positional order, then emits
+    /// `call <func_idx>`. Argument labels (if present) are ignored because WASM is purely
+    /// positional and the type-checker has already validated label correctness and argument
+    /// count.
+    ///
+    /// # Supported Call Kinds
+    ///
+    /// Only `Expression::Identifier`-based callees are supported. Method calls
+    /// (`MemberAccess`), associated function calls (`TypeMemberAccess`), and
+    /// higher-order calls are out of scope and return
+    /// [`FunctionCallError::UnsupportedCalleeKind`].
+    ///
+    /// # Recursion
+    ///
+    /// Direct or indirect recursion is explicitly forbidden in Inference (Power of 10,
+    /// Rule 1). The type-checker is responsible for detecting and rejecting recursive
+    /// call graphs. At codegen time, recursive calls are left as `todo!` until the
+    /// analysis pass is in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `fce` - Function call expression node
+    /// - `ctx` - Typed context for type lookups
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FunctionCallError`] if the callee is not a plain identifier or the
+    /// function name is not in the pre-built index map.
+    fn lower_function_call(
+        &self,
+        fce: &inference_ast::nodes::FunctionCallExpression,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) -> Result<(), FunctionCallError> {
+        let Expression::Identifier(_) = &fce.function else {
+            return Err(FunctionCallError::UnsupportedCalleeKind);
+        };
+
+        cov_mark::hit!(wasm_codegen_emit_function_call);
+
+        if let Some(arguments) = &fce.arguments {
+            for (_label, expr_ref) in arguments {
+                self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map);
+            }
+        }
+
+        let func_name = fce.name();
+        let func_idx = self
+            .func_name_to_idx
+            .get(&func_name)
+            .copied()
+            .ok_or(FunctionCallError::UnknownFunction(func_name))?;
+
+        func.instruction(&Instruction::Call(func_idx));
+        Ok(())
     }
 
     /// Converts an AST literal to WASM constant instructions.

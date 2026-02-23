@@ -612,6 +612,183 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Function param as local init WASM is invalid: {e}"));
     }
 
+    // --- Function call codegen tests ---
+
+    #[test]
+    fn function_call_no_args_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        let source = r#"
+            fn get_value() -> i32 { return 42; }
+            pub fn caller() -> i32 { return get_value(); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("No-arg function call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_one_arg_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        let source = r#"
+            fn identity(x: i32) -> i32 { return x; }
+            pub fn caller(v: i32) -> i32 { return identity(v); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("One-arg function call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_two_args_produces_valid_wasm() {
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 1);
+        let source = r#"
+            fn first(a: i32, b: i32) -> i32 { return a; }
+            pub fn caller(x: i32, y: i32) -> i32 { return first(x, y); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Two-arg function call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_as_variable_initializer_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        cov_mark::check!(wasm_codegen_emit_variable_definition);
+        let source = r#"
+            fn get_value() -> i32 { return 7; }
+            pub fn caller() -> i32 { let x: i32 = get_value(); return x; }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Call-as-var-init WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_forward_reference_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        let source = r#"
+            pub fn caller() -> i32 { return callee(); }
+            fn callee() -> i32 { return 55; }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Forward-reference call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_chained_produces_valid_wasm() {
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 2);
+        let source = r#"
+            fn inner(x: i32) -> i32 { return x; }
+            fn middle(x: i32) -> i32 { return inner(x); }
+            pub fn outer(x: i32) -> i32 { return middle(x); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Chained call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_with_literal_arg_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        let source = r#"
+            fn identity(x: i32) -> i32 { return x; }
+            pub fn caller() -> i32 { return identity(42); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Call-with-literal WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_with_i64_param_produces_valid_wasm() {
+        cov_mark::check!(wasm_codegen_emit_function_call);
+        let source = r#"
+            fn identity_i64(x: i64) -> i64 { return x; }
+            pub fn caller(v: i64) -> i64 { return identity_i64(v); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("i64 call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn function_call_execution_returns_correct_value() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            fn identity(x: i32) -> i32 { return x; }
+            pub fn caller() -> i32 { return identity(123); }
+        "#;
+        let wasm = codegen_output(source).wasm().to_vec();
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let caller: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "caller")
+            .unwrap_or_else(|e| panic!("Failed to get 'caller': {e}"));
+        assert_eq!(
+            caller.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            123
+        );
+    }
+
+    #[test]
+    fn function_call_forward_reference_executes_correctly() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn caller() -> i32 { return callee(); }
+            fn callee() -> i32 { return 77; }
+        "#;
+        let wasm = codegen_output(source).wasm().to_vec();
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let caller: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "caller")
+            .unwrap_or_else(|e| panic!("Failed to get 'caller': {e}"));
+        assert_eq!(
+            caller.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            77
+        );
+    }
+
+    #[test]
+    fn void_function_call_as_statement_does_not_emit_drop_in_nondet_block() {
+        let source = r#"
+            fn do_nothing() { }
+            pub fn caller() { forall { do_nothing(); } }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Void call in non-det block WASM is invalid: {e}"));
+        let drop_count = wasm.iter().filter(|&&b| b == 0x1a).count();
+        assert_eq!(
+            drop_count, 0,
+            "Void function call should not emit Drop (0x1a)"
+        );
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.
