@@ -405,8 +405,6 @@ pub enum OperatorKind {
     BitOr,
     /// Bitwise XOR: `a ^ b`
     BitXor,
-    /// Bitwise NOT: `~a` (Note: This is actually a unary operator in most contexts)
-    BitNot,
     /// Bitwise left shift: `a << b`
     Shl,
     /// Bitwise right shift: `a >> b`

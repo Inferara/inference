@@ -889,13 +889,6 @@ impl Compiler {
                      see .claude/plans/codegen/new-pow-operator/master_plan.md"
                 )
             }
-            OperatorKind::BitNot => {
-                todo!(
-                    "OperatorKind::BitNot in binary context — the AST builder never produces \
-                     this; OperatorKind::BitNot is a design inconsistency and should be removed \
-                     from OperatorKind and the type-checker binary arm cleaned up in a separate issue"
-                )
-            }
         };
 
         func.instruction(&instruction);
