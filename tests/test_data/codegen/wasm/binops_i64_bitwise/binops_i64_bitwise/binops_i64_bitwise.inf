@@ -1,0 +1,15 @@
+pub fn bitand_i64(a: i64, b: i64) -> i64 { return a & b; }
+pub fn bitor_i64(a: i64, b: i64) -> i64 { return a | b; }
+pub fn bitxor_i64(a: i64, b: i64) -> i64 { return a ^ b; }
+pub fn shl_i64(a: i64, b: i64) -> i64 { return a << b; }
+pub fn shr_i64_signed(a: i64, b: i64) -> i64 { return a >> b; }
+pub fn shr_u64(a: u64, b: u64) -> u64 { return a >> b; }
+pub fn bitnot_i64(a: i64) -> i64 { return ~a; }
+pub fn bitand_mask_i64(a: i64) -> i64 { let m: i64 = 255; return a & m; }
+pub fn bitor_set_bit_i64(a: i64) -> i64 { let one: i64 = 1; return a | one; }
+pub fn bitxor_flip_i64(a: i64) -> i64 { let neg: i64 = -1; return a ^ neg; }
+pub fn shl_by_one_i64(a: i64) -> i64 { let one: i64 = 1; return a << one; }
+pub fn shr_signed_negative_i64(a: i64) -> i64 { let one: i64 = 1; return a >> one; }
+pub fn shr_unsigned_high_bit_i64(a: u64) -> u64 { let one: u64 = 1; return a >> one; }
+pub fn bitand_bitor_chain_i64(a: i64, b: i64, c: i64) -> i64 { return (a & b) | c; }
+pub fn mask_and_shift_i64(a: i64) -> i64 { let s: i64 = 4; let m: i64 = 15; return (a >> s) & m; }

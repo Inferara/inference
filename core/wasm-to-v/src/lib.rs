@@ -115,12 +115,12 @@
 //!
 //! | Instruction | Encoding | Purpose |
 //! |-------------|----------|---------|
-//! | `forall.start` | `0xfc 0x3a` | Begin universal quantification block |
-//! | `exists.start` | `0xfc 0x3b` | Begin existential quantification block |
-//! | `uzumaki.i32` | `0xfc 0x3c` | Generate non-deterministic i32 value |
-//! | `uzumaki.i64` | `0xfc 0x3d` | Generate non-deterministic i64 value |
-//! | `assume` | `0xfc 0x3e` | Filter execution paths by constraint |
-//! | `unique` | `0xfc 0x3f` | Assert exactly one execution path exists |
+//! | `forall` | `0xfc 0x3a` | Begin universal quantification block |
+//! | `exists` | `0xfc 0x3b` | Begin existential quantification block |
+//! | `assume` | `0xfc 0x3c` | Filter execution paths by constraint |
+//! | `unique` | `0xfc 0x3d` | Assert exactly one execution path exists |
+//! | `i32.uzumaki` | `0xfc 0x31` | Generate non-deterministic i32 value |
+//! | `i64.uzumaki` | `0xfc 0x32` | Generate non-deterministic i64 value |
 //!
 //! These instructions are parsed by the forked [`inf-wasmparser`] dependency and
 //! translated to corresponding Rocq constructs that enable formal reasoning about

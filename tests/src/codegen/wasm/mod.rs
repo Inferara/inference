@@ -1,3 +1,13 @@
 mod base;
+mod binops_bool;
+mod binops_compound;
+mod binops_i64_arith;
+mod binops_i64_bitwise;
+mod binops_i64_cmp;
+mod binops_paren;
+mod binops_shift_edge;
+mod binops_sub_i32;
+mod binops_unary_combos;
+mod binops_u32;
 mod inference_wrapper;
 mod validation;

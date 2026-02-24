@@ -585,14 +585,14 @@ pub struct BinaryExpression {
 **Operators:**
 ```rust
 pub enum OperatorKind {
-    Pow,      // **
+    Pow,      // **  — parsed but NOT yet lowered in WASM codegen (todo!)
     Add,      // +
     Sub,      // -
     Mul,      // *
-    Div,      // /  (Added in issue #86)
+    Div,      // /
     Mod,      // %
-    And,      // &&
-    Or,       // ||
+    And,      // &&  — lowers to i32.and (no short-circuit)
+    Or,       // ||  — lowers to i32.or  (no short-circuit)
     Eq,       // ==
     Ne,       // !=
     Lt,       // <
@@ -602,19 +602,31 @@ pub enum OperatorKind {
     BitAnd,   // &
     BitOr,    // |
     BitXor,   // ^
-    BitNot,   // ~
+    BitNot,   // design inconsistency — never produced for BinaryExpression;
+              // the ~ token is always a PrefixUnaryExpression (UnaryOperatorKind::BitNot)
     Shl,      // <<
     Shr,      // >>
 }
 ```
 
+**Codegen notes:**
+
+- `Pow` (`**`) is not yet implemented in the WASM backend. Attempting to lower a
+  binary expression with this operator will panic with a `todo!()`.
+- `BitNot` should not appear in any `BinaryExpression` node. The `~` token is
+  always parsed as a prefix unary expression and stored as
+  `UnaryOperatorKind::BitNot`. The `OperatorKind::BitNot` variant is a design
+  inconsistency that will be removed in a future cleanup.
+- `And` and `Or` lower to WebAssembly `i32.and`/`i32.or` bitwise instructions.
+  Both operands are always evaluated — there is no short-circuit evaluation.
+
 **Example source:**
 ```inference
 x + y
 a * b + c
-a / b              // Division operator (issue #86)
+a / b
 flag && (count > 0)
-x % 2 == 0         // Modulo
+x % 2 == 0
 ```
 
 ### PrefixUnaryExpression
@@ -630,19 +642,22 @@ pub struct PrefixUnaryExpression {
 }
 
 pub enum UnaryOperatorKind {
-    Not,     // !  - Logical negation
-    Neg,     // -  - Numeric negation (Added in issue #86)
-    BitNot,  // ~  - Bitwise NOT (Added in issue #86)
+    Not,     // !  - Logical negation   — lowers to i32.eqz
+    Neg,     // -  - Numeric negation   — lowers to (0 - expr) using i32.sub or i64.sub
+    BitNot,  // ~  - Bitwise NOT        — lowers to (expr ^ -1) using i32.xor or i64.xor
 }
 ```
+
+Note: `~` always produces a `PrefixUnaryExpression` with `UnaryOperatorKind::BitNot`.
+It is never stored as `OperatorKind::BitNot` in a `BinaryExpression`.
 
 **Example source:**
 ```inference
 !flag              // Logical NOT
 !(x > 0)
--x                 // Numeric negation (issue #86)
+-x                 // Numeric negation
 -42
-~mask              // Bitwise NOT (issue #86)
+~mask              // Bitwise NOT
 ~0xFF
 ```
 

@@ -27,7 +27,7 @@
 //!
 //! 3. **Codegen** (`--codegen`) – Emits WebAssembly binary
 //!    - Generates WebAssembly binary from typed AST
-//!    - Supports non-deterministic instructions (uzumaki, forall, exists)
+//!    - Supports non-deterministic instructions (uzumaki, forall, exists, assume, unique)
 //!    - Optionally translates to Rocq (.v) format for formal verification
 //!
 //! ## Phase Execution

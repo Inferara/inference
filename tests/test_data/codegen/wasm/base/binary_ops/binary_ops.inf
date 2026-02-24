@@ -1,0 +1,26 @@
+pub fn add_i32(a: i32, b: i32) -> i32 { return a + b; }
+pub fn sub_i32(a: i32, b: i32) -> i32 { return a - b; }
+pub fn mul_i32(a: i32, b: i32) -> i32 { return a * b; }
+pub fn div_i32(a: i32, b: i32) -> i32 { return a / b; }
+pub fn mod_i32(a: i32, b: i32) -> i32 { return a % b; }
+pub fn add_i64(a: i64, b: i64) -> i64 { return a + b; }
+pub fn div_u32(a: u32, b: u32) -> u32 { return a / b; }
+pub fn eq_i32(a: i32, b: i32) -> bool { return a == b; }
+pub fn ne_i32(a: i32, b: i32) -> bool { return a != b; }
+pub fn lt_i32(a: i32, b: i32) -> bool { return a < b; }
+pub fn le_i32(a: i32, b: i32) -> bool { return a <= b; }
+pub fn gt_i32(a: i32, b: i32) -> bool { return a > b; }
+pub fn ge_i32(a: i32, b: i32) -> bool { return a >= b; }
+pub fn and_bool(a: bool, b: bool) -> bool { return a && b; }
+pub fn or_bool(a: bool, b: bool) -> bool { return a || b; }
+pub fn band_i32(a: i32, b: i32) -> i32 { return a & b; }
+pub fn bor_i32(a: i32, b: i32) -> i32 { return a | b; }
+pub fn bxor_i32(a: i32, b: i32) -> i32 { return a ^ b; }
+pub fn shl_i32(a: i32, b: i32) -> i32 { return a << b; }
+pub fn shr_i32(a: i32, b: i32) -> i32 { return a >> b; }
+pub fn shr_u32(a: u32, b: u32) -> u32 { return a >> b; }
+pub fn neg_i32(a: i32) -> i32 { return -a; }
+pub fn not_bool(a: bool) -> bool { return !a; }
+pub fn bitnot_i32(a: i32) -> i32 { return ~a; }
+pub fn paren_add(a: i32, b: i32) -> i32 { return (a + b); }
+pub fn binop_as_let(a: i32, b: i32) -> i32 { let r: i32 = a + b; return r; }

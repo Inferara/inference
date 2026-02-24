@@ -179,20 +179,50 @@ impl std::str::FromStr for NumberType {
     }
 }
 
+/// Discriminates the semantic category of a [`TypeInfo`] value.
+///
+/// Variants mirror the type system of the Inference language.
+/// See the module-level documentation for the full hierarchy.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum TypeInfoKind {
+    /// The unit type `unit` — the implicit return type of void functions.
     Unit,
+    /// The boolean type `bool`.
     Bool,
+    /// The string type `string` (UTF-8, partial support).
     String,
+    /// A numeric integer type (signed or unsigned, 8–64 bit).
     Number(NumberType),
+    /// A user-defined type referenced by name that has not yet been resolved
+    /// to a struct or enum entry in the symbol table.
+    ///
+    /// After type registration this should have been replaced by
+    /// [`Struct`](TypeInfoKind::Struct) or [`Enum`](TypeInfoKind::Enum).
     Custom(String),
+    /// A fixed-size array: element type and element count.
     Array(Box<TypeInfo>, u32),
+    /// An unresolved generic type parameter (e.g. `T` in `fn foo<T>(x: T) -> T`).
+    ///
+    /// Replaced by a concrete type after type-parameter substitution.
     Generic(String),
+    /// A two-segment qualified type name (`module::Type`) from the source.
     QualifiedName(String),
+    /// A single-segment qualified type reference carrying an alias prefix.
     Qualified(String),
+    /// A function type. The inner string takes one of three forms depending on
+    /// how the function was referenced:
+    ///
+    /// - `"FunctionName"` — a free function referenced by name (from `function_definition.name()`)
+    /// - `"ReceiverType::MethodName"` — a method or type-member access expression
+    /// - `"Function<N, ReturnType>"` — a function-type literal from a `Type::Function` node
+    ///
+    /// Used to annotate function-name expressions in the `TypedContext`.
     Function(String),
+    /// A resolved struct type, carrying the struct's canonical name.
     Struct(String),
+    /// A resolved enum type, carrying the enum's canonical name.
     Enum(String),
+    /// A spec (specification) type, carrying the spec's canonical name.
     Spec(String),
 }
 
@@ -267,11 +297,19 @@ impl TypeInfoKind {
     }
 }
 
+/// The semantic type of a value expression after type checking.
+///
+/// Produced by [`TypeInfo::new`] from AST [`Type`] nodes and stored in
+/// [`TypedContext`](crate::typed_context::TypedContext) keyed by AST node ID.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct TypeInfo {
+    /// The concrete type category (e.g. `Number(I32)`, `Struct("Point")`).
     pub kind: TypeInfoKind,
+    /// Names of any unresolved generic type parameters carried by this type
+    /// (e.g. `["T"]` for a value whose type is a generic parameter `T`).
+    ///
+    /// After all type parameters have been substituted this will be empty.
     pub type_params: Vec<String>,
-    // (Field type information could be added here if needed for struct field checking.)
 }
 
 impl Default for TypeInfo {
@@ -299,6 +337,10 @@ impl Display for TypeInfo {
 }
 
 impl TypeInfo {
+    /// Construct a `bool` `TypeInfo` value.
+    ///
+    /// Shorthand for the common case of representing a boolean result,
+    /// for example when checking conditions or logical operator results.
     #[must_use]
     pub fn boolean() -> Self {
         Self {
@@ -315,6 +357,10 @@ impl TypeInfo {
         }
     }
 
+    /// Convert an AST [`Type`] to its semantic `TypeInfo` representation.
+    ///
+    /// Equivalent to `TypeInfo::new_with_type_params(ty, &[])` — use this
+    /// when there are no in-scope generic type parameters to consider.
     #[must_use]
     pub fn new(ty: &Type) -> Self {
         Self::new_with_type_params(ty, &[])
