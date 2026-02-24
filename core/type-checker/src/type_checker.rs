@@ -1436,7 +1436,6 @@ impl TypeChecker {
                         | OperatorKind::BitAnd
                         | OperatorKind::BitOr
                         | OperatorKind::BitXor
-                        | OperatorKind::BitNot
                         | OperatorKind::Shl
                         | OperatorKind::Shr => {
                             if !left_type.is_number() || !right_type.is_number() {

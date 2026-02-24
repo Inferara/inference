@@ -178,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compiler
 
+- ast: Remove dead `OperatorKind::BitNot` variant — `~x` is always parsed as `UnaryOperatorKind::BitNot` in a `PrefixUnaryExpression`; the binary enum variant was never produced by the AST builder ([#142])
 - ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])
 - ast: Simplify Builder API to return `Arena` directly instead of using state machine pattern ([#50])
 - ast: Add error collection in Builder with `collect_errors()` for better parse error reporting ([#50])
@@ -329,3 +330,4 @@ Initial tagged release.
 [#136]: https://github.com/Inferara/inference/pull/136
 [#138]: https://github.com/Inferara/inference/pull/138
 [#140]: https://github.com/Inferara/inference/pull/140
+[#142]: https://github.com/Inferara/inference/pull/142

@@ -602,8 +602,6 @@ pub enum OperatorKind {
     BitAnd,   // &
     BitOr,    // |
     BitXor,   // ^
-    BitNot,   // design inconsistency — never produced for BinaryExpression;
-              // the ~ token is always a PrefixUnaryExpression (UnaryOperatorKind::BitNot)
     Shl,      // <<
     Shr,      // >>
 }
@@ -613,10 +611,6 @@ pub enum OperatorKind {
 
 - `Pow` (`**`) is not yet implemented in the WASM backend. Attempting to lower a
   binary expression with this operator will panic with a `todo!()`.
-- `BitNot` should not appear in any `BinaryExpression` node. The `~` token is
-  always parsed as a prefix unary expression and stored as
-  `UnaryOperatorKind::BitNot`. The `OperatorKind::BitNot` variant is a design
-  inconsistency that will be removed in a future cleanup.
 - `And` and `Or` lower to WebAssembly `i32.and`/`i32.or` bitwise instructions.
   Both operands are always evaluated — there is no short-circuit evaluation.
 
@@ -649,7 +643,7 @@ pub enum UnaryOperatorKind {
 ```
 
 Note: `~` always produces a `PrefixUnaryExpression` with `UnaryOperatorKind::BitNot`.
-It is never stored as `OperatorKind::BitNot` in a `BinaryExpression`.
+It is never stored as a `BinaryExpression`.
 
 **Example source:**
 ```inference
