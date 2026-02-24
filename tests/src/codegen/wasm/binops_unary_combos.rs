@@ -26,9 +26,9 @@ mod binops_unary_combos_tests {
     #[test]
     fn binops_unary_combos_test() {
         cov_mark::check_count!(wasm_codegen_emit_binary_expression, 17);
-        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 23);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 24);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 9);
-        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 10);
+        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 11);
         cov_mark::check_count!(wasm_codegen_emit_unary_not, 5);
         cov_mark::check_count!(wasm_codegen_emit_unary_bitnot, 8);
         let test_name = "binops_unary_combos";
@@ -176,6 +176,11 @@ mod binops_unary_combos_tests {
         call!("bitnot_shift", i32, (0_i32, 1_i32), -1_i32);
         call!("bitnot_shift", i32, (-1_i32, 1_i32), 0_i32);
         call!("bitnot_shift", i32, (0xFF_i32, 4_i32), -16_i32);
+
+        // neg_i64: -a (i64 negation)
+        call!("neg_i64", i64, 5_i64, -5_i64);
+        call!("neg_i64", i64, -3_i64, 3_i64);
+        call!("neg_i64", i64, 0_i64, 0_i64);
     }
 }
 

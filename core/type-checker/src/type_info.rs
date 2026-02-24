@@ -209,9 +209,14 @@ pub enum TypeInfoKind {
     QualifiedName(String),
     /// A single-segment qualified type reference carrying an alias prefix.
     Qualified(String),
-    /// A function type, stored as a display string `"FunctionName"` or
-    /// `"ReceiverType::MethodName"`.  Used to annotate function-name
-    /// expressions in the `TypedContext`.
+    /// A function type. The inner string takes one of three forms depending on
+    /// how the function was referenced:
+    ///
+    /// - `"FunctionName"` — a free function referenced by name (from `function_definition.name()`)
+    /// - `"ReceiverType::MethodName"` — a method or type-member access expression
+    /// - `"Function<N, ReturnType>"` — a function-type literal from a `Type::Function` node
+    ///
+    /// Used to annotate function-name expressions in the `TypedContext`.
     Function(String),
     /// A resolved struct type, carrying the struct's canonical name.
     Struct(String),

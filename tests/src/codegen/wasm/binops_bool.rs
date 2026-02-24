@@ -25,7 +25,7 @@ mod binops_bool_tests {
 
     #[test]
     fn binops_bool_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 36);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 38);
         cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 5);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 20);
         let test_name = "binops_bool";
@@ -177,6 +177,15 @@ mod binops_bool_tests {
         call!("bool_majority3", i32, (1_i32, 0_i32, 1_i32), 1_i32);
         call!("bool_majority3", i32, (0_i32, 1_i32, 1_i32), 1_i32);
         call!("bool_majority3", i32, (1_i32, 1_i32, 1_i32), 1_i32);
+
+        // eq_bool: a == b (bool equality)
+        call!("eq_bool", i32, (1_i32, 1_i32), 1_i32);
+        call!("eq_bool", i32, (1_i32, 0_i32), 0_i32);
+        call!("eq_bool", i32, (0_i32, 0_i32), 1_i32);
+
+        // ne_bool: a != b (bool inequality)
+        call!("ne_bool", i32, (1_i32, 0_i32), 1_i32);
+        call!("ne_bool", i32, (1_i32, 1_i32), 0_i32);
     }
 
     #[test]

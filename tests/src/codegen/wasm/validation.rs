@@ -462,7 +462,6 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_uzumaki_i32_emits_uzumaki_opcode() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        cov_mark::check!(wasm_codegen_variable_definition_uzumaki_i32);
         let source = r#"pub fn let_uzumaki_i32_test() -> i32 { let a: i32 = @; return a; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();
@@ -477,7 +476,6 @@ mod codegen_validation_tests {
     #[test]
     fn variable_definition_uzumaki_i64_emits_uzumaki_opcode() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
-        cov_mark::check!(wasm_codegen_variable_definition_uzumaki_i64);
         let source = r#"pub fn let_uzumaki_i64_test() -> i64 { let b: i64 = @; return b; }"#;
         let output = codegen_output(source);
         let wasm = output.wasm();

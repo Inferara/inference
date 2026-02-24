@@ -13,3 +13,5 @@ pub fn all_same_sign(a: i32, b: i32) -> bool { return (a >= 0) == (b >= 0); }
 pub fn xor_bool(a: bool, b: bool) -> bool { return (a || b) && !(a && b); }
 pub fn implies(a: bool, b: bool) -> bool { return !a || b; }
 pub fn bool_majority3(a: bool, b: bool, c: bool) -> bool { return (a && b) || (b && c) || (a && c); }
+pub fn eq_bool(a: bool, b: bool) -> bool { return a == b; }
+pub fn ne_bool(a: bool, b: bool) -> bool { return a != b; }

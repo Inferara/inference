@@ -224,8 +224,6 @@ mod base_codegen_tests {
     #[test]
     fn local_variables_test() {
         cov_mark::check_count!(wasm_codegen_emit_variable_definition, 14);
-        cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i32, 1);
-        cov_mark::check_count!(wasm_codegen_variable_definition_uzumaki_i64, 1);
         let test_name = "local_variables";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

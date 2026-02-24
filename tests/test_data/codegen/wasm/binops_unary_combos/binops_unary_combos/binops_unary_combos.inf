@@ -18,3 +18,4 @@ pub fn neg_bitnot(a: i32) -> i32 { return -(~a); }
 pub fn bitnot_neg(a: i32) -> i32 { return ~(-a); }
 pub fn neg_shift(a: i32, b: i32) -> i32 { return (-a) << b; }
 pub fn bitnot_shift(a: i32, b: i32) -> i32 { return (~a) >> b; }
+pub fn neg_i64(a: i64) -> i64 { return -a; }

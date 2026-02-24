@@ -536,41 +536,9 @@ impl Compiler {
                     None => todo!("Uninitialized variable definitions are not supported"),
                     Some(expr_ref) => {
                         let expr = expr_ref.borrow();
-                        match &*expr {
-                            Expression::Literal(lit) => {
-                                self.lower_literal(lit, ctx, func);
-                                func.instruction(&Instruction::LocalSet(*local_idx));
-                            }
-                            Expression::Identifier(ident) => {
-                                let (src_idx, _) = locals_map
-                                    .get(&ident.name)
-                                    .expect("Source variable not found in locals map");
-                                func.instruction(&Instruction::LocalGet(*src_idx));
-                                func.instruction(&Instruction::LocalSet(*local_idx));
-                            }
-                            Expression::Uzumaki(uzumaki_expression) => {
-                                if ctx.is_node_i64(uzumaki_expression.id) {
-                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i64);
-                                    self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
-                                } else {
-                                    cov_mark::hit!(wasm_codegen_variable_definition_uzumaki_i32);
-                                    self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
-                                }
-                                func.instruction(&Instruction::LocalSet(*local_idx));
-                            }
-                            Expression::FunctionCall(_) => {
-                                let local_idx = *local_idx;
-                                self.lower_expression(&expr, ctx, func, locals_map);
-                                func.instruction(&Instruction::LocalSet(local_idx));
-                            }
-                            _ => {
-                                // General fallback: covers Binary, PrefixUnary, Parenthesized,
-                                // and future value-producing expressions.
-                                let local_idx = *local_idx;
-                                self.lower_expression(&expr, ctx, func, locals_map);
-                                func.instruction(&Instruction::LocalSet(local_idx));
-                            }
-                        }
+                        let local_idx = *local_idx;
+                        self.lower_expression(&expr, ctx, func, locals_map);
+                        func.instruction(&Instruction::LocalSet(local_idx));
                     }
                 }
             }
@@ -780,6 +748,14 @@ impl Compiler {
     /// Logical `&&`/`||` are lowered as bitwise `i32.and`/`i32.or` because the type-checker
     /// constrains both operands to `bool` (i32 0 or 1), making bitwise and short-circuit
     /// evaluation produce identical results.
+    ///
+    /// # WASM Trap Conditions
+    ///
+    /// `Div` and `Mod` can cause WASM traps (immediate runtime termination):
+    /// - Division or remainder by zero traps for all integer div/rem instructions.
+    /// - `i32.div_s(i32::MIN, -1)` and `i64.div_s(i64::MIN, -1)` trap due to signed overflow
+    ///   (the positive result does not fit in the signed range).
+    /// - `i32.rem_s` / `i64.rem_s` with `(MIN, -1)` do **not** trap (the remainder is 0).
     #[allow(clippy::too_many_lines)]
     fn lower_binary_expression(
         &self,
