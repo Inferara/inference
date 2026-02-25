@@ -184,5 +184,3 @@ Inference follows the same layered strategy as rustc, LLVM, GCC, Zig, and Binary
 
 1. **Front-end**: A `core/analysis/` crate will enforce that all non-void functions return on every code path, producing a compile-time error for violations.
 2. **Codegen**: The `unreachable` instruction before function `end` serves as a safety net. If the front-end has a bug, the program traps instead of silently misbehaving.
-
-This is the industry-standard pattern across all production WASM-targeting compilers. After extensive research across the WASM specification, academic literature, compiler source code, security analyses, and community discussions.
