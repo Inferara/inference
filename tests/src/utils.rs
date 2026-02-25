@@ -119,64 +119,76 @@ pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
     output.wasm().to_vec()
 }
 
+/// Build the test directory path. When the last module path component equals test_name,
+/// the file lives directly in that directory (no extra subdirectory).
+///
+/// # Examples
+/// - module `codegen::wasm::base` + test_name `"trivial"` -> `.../base/trivial/`
+/// - module `codegen::wasm::binops_bool` + test_name `"binops_bool"` -> `.../binops_bool/`
+fn get_test_dir(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    let path_parts = get_test_path_parts(module_path);
+
+    let mut path = get_test_data_path();
+    for part in &path_parts {
+        path = path.join(part);
+    }
+
+    if path_parts.last() != Some(&test_name) {
+        path = path.join(test_name);
+    }
+
+    path
+}
+
 /// Automatically resolves a test data file path based on the test's module path and name.
 ///
-/// # Example
-/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.inf`
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.inf`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.inf`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
 /// * `test_name` - The test function name (without `_test` suffix)
 pub(crate) fn get_test_file_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
-    let path_parts = get_test_path_parts(module_path);
-
-    let mut path = get_test_data_path();
-    for part in path_parts {
-        path = path.join(part);
-    }
-
-    path.join(test_name).join(format!("{test_name}.inf"))
+    get_test_dir(module_path, test_name).join(format!("{test_name}.inf"))
 }
 
 /// Automatically resolves a WASM test data file path based on the test's module path and name.
 ///
-/// # Example
-/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.wasm`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
 /// * `test_name` - The test function name (without `_test` suffix)
 pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
-    let path_parts = get_test_path_parts(module_path);
-
-    let mut path = get_test_data_path();
-    for part in path_parts {
-        path = path.join(part);
-    }
-
-    path.join(test_name).join(format!("{test_name}.wasm"))
+    get_test_dir(module_path, test_name).join(format!("{test_name}.wasm"))
 }
 
 /// Automatically resolves a WAT test data file path based on the test's module path and name.
 ///
-/// # Example
-/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.wat`
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.wat`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.wat`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
 /// * `test_name` - The test function name (without `_test` suffix)
 pub(crate) fn get_test_wat_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
-    let path_parts = get_test_path_parts(module_path);
-
-    let mut path = get_test_data_path();
-    for part in path_parts {
-        path = path.join(part);
-    }
-
-    path.join(test_name).join(format!("{test_name}.wat"))
+    get_test_dir(module_path, test_name).join(format!("{test_name}.wat"))
 }
 
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {
