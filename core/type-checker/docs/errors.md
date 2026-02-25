@@ -4,7 +4,11 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 29 distinct error variants, each with specific context and location information. All errors implement the `Error` trait and provide detailed messages.
+The type checker produces 33 distinct error variants, each with specific context and location
+information. All errors implement the `Error` trait and provide detailed messages.
+
+All errors include a precise source location in the form `line:column:` at the start of their
+message. The `TypeCheckError::location()` method returns the associated `Location` directly.
 
 ## Error Categories
 
@@ -16,619 +20,18 @@ The type checker produces 29 distinct error variants, each with specific context
 6. [Import Errors](#import-errors)
 7. [Registration Errors](#registration-errors)
 8. [Structural Errors](#structural-errors)
+9. [Generic Type Errors](#generic-type-errors)
+10. [Non-Deterministic Errors](#non-deterministic-errors)
+
+---
 
 ## Type Mismatch Errors
 
-### TypeMismatch
+### `TypeMismatch`
 
-**Description**: Type of an expression doesn't match the expected type.
+Type of an expression does not match the expected type.
 
-**Context Variants**:
-- `Assignment`
-- `Return`
-- `VariableDefinition`
-- `BinaryOperation(operator)`
-- `Condition`
-- `FunctionArgument { function_name, arg_name, arg_index }`
-- `MethodArgument { type_name, method_name, arg_name, arg_index }`
-- `ArrayElement`
-
-**Examples**:
-
-```rust
-// Return statement mismatch
-fn test() -> i32 {
-    return true;  // Error: type mismatch in return: expected `i32`, found `bool`
-}
-
-// Variable definition mismatch
-fn test() {
-    let x: i32 = "hello";  // Error: type mismatch in variable definition: expected `i32`, found `string`
-}
-
-// Assignment mismatch
-fn test() {
-    let x: bool = false;
-    x = 42;  // Error: type mismatch in assignment: expected `bool`, found `i32`
-}
-
-// Binary operation mismatch
-fn test() {
-    let result = 10 + true;  // Error: type mismatch in binary operation `Add`: expected numeric type
-}
-
-// Function argument mismatch
-fn greet(name: string) -> string {
-    return name;
-}
-
-fn test() {
-    greet(42);  // Error: type mismatch in argument 0 `name` of function `greet`: expected `string`, found `i32`
-}
-
-// Array element mismatch
-fn test() {
-    let arr: [i32; 3] = [1, 2, true];  // Error: type mismatch in array element: expected `i32`, found `bool`
-}
-```
-
-**Solution**: Ensure the expression evaluates to the expected type. Use type conversions if necessary.
-
-## Symbol Resolution Errors
-
-### UnknownType
-
-**Description**: Referenced type name is not defined in scope.
-
-**Example**:
-
-```rust
-fn test(x: UndefinedType) -> i32 {  // Error: unknown type `UndefinedType`
-    return 42;
-}
-```
-
-**Solution**: Define the type before using it, or check for typos in the type name.
-
-### UnknownIdentifier
-
-**Description**: Variable or identifier is used before declaration.
-
-**Example**:
-
-```rust
-fn test() {
-    let y = x + 10;  // Error: use of undeclared variable `x`
-}
-```
-
-**Solution**: Declare the variable before use, or check for typos in the variable name.
-
-### UndefinedFunction
-
-**Description**: Function is called but not defined.
-
-**Example**:
-
-```rust
-fn test() {
-    let result = unknown_function(42);  // Error: call to undefined function `unknown_function`
-}
-```
-
-**Solution**: Define the function, import it, or check for typos in the function name.
-
-### UndefinedMethod
-
-**Description**: Method is called on a type but the method doesn't exist.
-
-**Example**:
-
-```rust
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-fn test() {
-    let p = Point { x: 10, y: 20 };
-    let result = p.distance();  // Error: undefined method `distance` on type `Point`
-}
-```
-
-**Solution**: Define the method in an `impl` block for the type, or check for typos.
-
-## Visibility Errors
-
-### VisibilityViolation
-
-**Description**: Attempting to access a private symbol from outside its defining scope.
-
-**Context Variants**:
-- `Function { name }`
-- `Struct { name }`
-- `Enum { name }`
-- `Field { struct_name, field_name }`
-- `Method { type_name, method_name }`
-- `Import { path }`
-
-**Examples**:
-
-```rust
-// Private function
-mod internal {
-    fn private_func() {}
-}
-
-fn test() {
-    internal::private_func();  // Error: function `private_func` is private
-}
-
-// Private struct
-mod internal {
-    struct PrivateStruct {}
-}
-
-fn test() {
-    let s = internal::PrivateStruct {};  // Error: struct `PrivateStruct` is private
-}
-
-// Private field
-struct Point {
-    x: i32,  // Private by default
-    y: i32,
-}
-
-fn test() {
-    let p = Point { x: 10, y: 20 };
-    let x = p.x;  // Error: field `x` of struct `Point` is private
-}
-
-// Private method
-struct Counter {
-    value: i32,
-}
-
-impl Counter {
-    fn internal_increment(&self) {}  // Private method
-}
-
-fn test() {
-    let c = Counter { value: 0 };
-    c.internal_increment();  // Error: method `internal_increment` on type `Counter` is private
-}
-```
-
-**Solution**: Make the symbol public with `pub` or access it from within its defining scope.
-
-## Function and Method Errors
-
-### ArgumentCountMismatch
-
-**Description**: Function or method called with wrong number of arguments.
-
-**Variants**:
-- `Function { function_name, expected, found }`
-- `Method { type_name, method_name, expected, found }`
-
-**Examples**:
-
-```rust
-fn add(a: i32, b: i32) -> i32 {
-    return a + b;
-}
-
-fn test() {
-    let result = add(42);  // Error: function `add` expects 2 arguments, found 1
-}
-
-struct Calculator {}
-
-impl Calculator {
-    fn multiply(&self, a: i32, b: i32) -> i32 {
-        return a * b;
-    }
-}
-
-fn test() {
-    let calc = Calculator {};
-    let result = calc.multiply(5, 10, 15);  // Error: method `multiply` on type `Calculator` expects 2 arguments, found 3
-}
-```
-
-**Solution**: Provide the correct number of arguments to the function or method call.
-
-### MethodCallOnNonStruct
-
-**Description**: Attempting to call a method on a non-struct type.
-
-**Example**:
-
-```rust
-fn test() {
-    let x: i32 = 42;
-    x.some_method();  // Error: cannot call method `some_method` on non-struct type `i32`
-}
-```
-
-**Solution**: Methods can only be called on struct instances. Use functions for primitive types.
-
-## Operator Errors
-
-### UnsupportedUnaryOperator
-
-**Description**: Unary operator applied to incompatible type.
-
-**Examples**:
-
-```rust
-fn test() {
-    let x: bool = true;
-    let neg = -x;  // Error: unsupported unary operator `-` for type `bool`
-}
-
-fn test() {
-    let x: u32 = 10;
-    let neg = -x;  // Error: unsupported unary operator `-` for type `u32` (unsigned)
-}
-
-fn test() {
-    let x: i32 = 42;
-    let not = !x;  // Error: unsupported unary operator `!` for type `i32` (logical NOT requires bool)
-}
-```
-
-**Operator Requirements**:
-- `!` (logical NOT): Requires `bool`
-- `-` (negation): Requires signed integer types (i8, i16, i32, i64)
-- `~` (bitwise NOT): Requires any integer type
-
-**Solution**: Ensure the operand type matches the operator requirements.
-
-### BinaryOperatorTypeMismatch
-
-**Description**: Binary operator applied to incompatible types.
-
-**Examples**:
-
-```rust
-fn test() {
-    let result = 10 + "hello";  // Error: binary operator `+` cannot be applied to types `i32` and `string`
-}
-
-fn test() {
-    let x: bool = true;
-    let y: i32 = 42;
-    let result = x && y;  // Error: binary operator `&&` expects `bool` operands, found `bool` and `i32`
-}
-```
-
-**Operator Requirements**:
-- Arithmetic (`+`, `-`, `*`, `/`, `%`, `**`): Both operands must be numeric and same type
-- Comparison (`<`, `<=`, `>`, `>=`): Both operands must be numeric and same type
-- Equality (`==`, `!=`): Both operands must be same type
-- Logical (`&&`, `||`): Both operands must be `bool`
-- Bitwise (`&`, `|`, `^`, `<<`, `>>`): Both operands must be integer and same type
-
-**Solution**: Ensure both operands are compatible with the operator.
-
-### DivisionByZero
-
-**Description**: Compile-time detected division by zero.
-
-**Example**:
-
-```rust
-fn test() -> i32 {
-    return 42 / 0;  // Error: division by zero
-}
-```
-
-**Solution**: Use a non-zero divisor. Runtime division checks should be handled separately.
-
-## Import Errors
-
-### ImportPathNotFound
-
-**Description**: Import path doesn't resolve to a valid module or symbol.
-
-**Example**:
-
-```rust
-use std::nonexistent::Module;  // Error: import path `std::nonexistent::Module` not found
-```
-
-**Solution**: Verify the import path is correct and the module exists.
-
-### AmbiguousImport
-
-**Description**: Multiple symbols with the same name are imported.
-
-**Example**:
-
-```rust
-use module_a::Function;
-use module_b::Function;  // Error: ambiguous import: `Function` is imported from multiple sources
-
-fn test() {
-    Function();  // Which Function?
-}
-```
-
-**Solution**: Use aliases to disambiguate:
-
-```rust
-use module_a::Function as FunctionA;
-use module_b::Function as FunctionB;
-```
-
-### CircularImport
-
-**Description**: Module imports create a circular dependency.
-
-**Example**:
-
-```rust
-// module_a.inf
-use module_b::B;
-
-// module_b.inf
-use module_a::A;  // Error: circular import detected: module_a → module_b → module_a
-```
-
-**Solution**: Refactor to remove circular dependencies. Extract common types to a shared module.
-
-### GlobImportFailure
-
-**Description**: Glob import failed to resolve.
-
-**Example**:
-
-```rust
-use undefined_module::*;  // Error: glob import from `undefined_module` failed: module not found
-```
-
-**Solution**: Verify the module exists and is accessible.
-
-## Registration Errors
-
-### RegistrationFailed
-
-**Description**: Failed to register a symbol (type, struct, enum, function, etc.) in the symbol table.
-
-**Example**:
-
-```rust
-fn test() {}
-fn test() {}  // Error: registration failed: function `test` is already defined
-```
-
-**Solution**: Ensure symbol names are unique within their scope.
-
-### DuplicateSymbol
-
-**Description**: Symbol is defined multiple times in the same scope.
-
-**Example**:
-
-```rust
-struct Point {}
-struct Point {}  // Error: duplicate symbol: `Point` is already defined in this scope
-```
-
-**Solution**: Rename one of the symbols or remove the duplicate definition.
-
-### DuplicateField
-
-**Description**: Struct has multiple fields with the same name.
-
-**Example**:
-
-```rust
-struct Point {
-    x: i32,
-    x: i64,  // Error: duplicate field: `x` is already defined in struct `Point`
-}
-```
-
-**Solution**: Rename the duplicate field.
-
-### DuplicateEnumVariant
-
-**Description**: Enum has multiple variants with the same name.
-
-**Example**:
-
-```rust
-enum Color {
-    Red,
-    Green,
-    Red,  // Error: duplicate enum variant: `Red` is already defined in enum `Color`
-}
-```
-
-**Solution**: Rename the duplicate variant.
-
-## Structural Errors
-
-### FieldNotFound
-
-**Description**: Struct field doesn't exist.
-
-**Example**:
-
-```rust
-struct Point {
-    x: i32,
-    y: i32,
-}
-
-fn test() {
-    let p = Point { x: 10, y: 20 };
-    let z = p.z;  // Error: struct `Point` has no field `z`
-}
-```
-
-**Solution**: Use an existing field name or add the field to the struct definition.
-
-### MemberAccessOnNonStruct
-
-**Description**: Attempting to access a field on a non-struct type.
-
-**Example**:
-
-```rust
-fn test() {
-    let x: i32 = 42;
-    let y = x.value;  // Error: cannot access field `value` on non-struct type `i32`
-}
-```
-
-**Solution**: Member access is only valid on struct types.
-
-### ArrayIndexOnNonArray
-
-**Description**: Attempting to index a non-array type.
-
-**Example**:
-
-```rust
-fn test() {
-    let x: i32 = 42;
-    let y = x[0];  // Error: cannot index non-array type `i32`
-}
-```
-
-**Solution**: Array indexing is only valid on array types.
-
-### ArrayIndexTypeMismatch
-
-**Description**: Array index is not a numeric type.
-
-**Example**:
-
-```rust
-fn test() {
-    let arr: [i32; 5] = [1, 2, 3, 4, 5];
-    let x = arr[true];  // Error: array index must be numeric, found `bool`
-}
-```
-
-**Solution**: Use a numeric type (i32, u32, etc.) for array indices.
-
-### ArraySizeMismatch
-
-**Description**: Array literal has wrong number of elements.
-
-**Example**:
-
-```rust
-fn test() {
-    let arr: [i32; 3] = [1, 2, 3, 4, 5];  // Error: array size mismatch: expected 3 elements, found 5
-}
-```
-
-**Solution**: Ensure the array literal has the correct number of elements matching the type annotation.
-
-### EmptyArrayWithoutType
-
-**Description**: Empty array literal without type annotation.
-
-**Example**:
-
-```rust
-fn test() {
-    let arr = [];  // Error: cannot infer type of empty array without type annotation
-}
-```
-
-**Solution**: Provide a type annotation:
-
-```rust
-fn test() {
-    let arr: [i32; 0] = [];
-}
-```
-
-### InvalidEnumVariant
-
-**Description**: Enum variant doesn't exist.
-
-**Example**:
-
-```rust
-enum Color {
-    Red,
-    Green,
-    Blue,
-}
-
-fn test() {
-    let c = Color::Yellow;  // Error: enum `Color` has no variant `Yellow`
-}
-```
-
-**Solution**: Use an existing variant or add the variant to the enum definition.
-
-### TypeMemberAccessOnNonEnum
-
-**Description**: Attempting to access a variant on a non-enum type.
-
-**Example**:
-
-```rust
-struct Point {}
-
-fn test() {
-    let x = Point::SomeVariant;  // Error: cannot access variant on non-enum type `Point`
-}
-```
-
-**Solution**: Type member access (`::`) is only valid for enum variants or associated functions.
-
-### ConditionMustBeBool
-
-**Description**: Condition in if/while/loop must be boolean.
-
-**Example**:
-
-```rust
-fn test() {
-    if 42 {  // Error: condition must be `bool`, found `i32`
-        // ...
-    }
-}
-```
-
-**Solution**: Use a boolean expression:
-
-```rust
-fn test() {
-    if 42 != 0 {
-        // ...
-    }
-}
-```
-
-### InvalidSelfReference
-
-**Description**: `self` used outside method context.
-
-**Example**:
-
-```rust
-fn test() {
-    return self.value;  // Error: `self` can only be used in methods
-}
-```
-
-**Solution**: `self` is only valid inside method definitions.
-
-## Error Context Details
-
-### TypeMismatchContext
-
-Provides specific context for where the type mismatch occurred:
+**`TypeMismatchContext` variants**:
 
 ```rust
 pub enum TypeMismatchContext {
@@ -643,11 +46,172 @@ pub enum TypeMismatchContext {
 }
 ```
 
-This context helps pinpoint the exact location and nature of the type error.
+**Examples**:
 
-### VisibilityContext
+```rust
+// Return statement mismatch
+fn test() -> i32 {
+    return true;  // Error: type mismatch in return statement: expected `i32`, found `Bool`
+}
 
-Provides specific context for visibility violations:
+// Variable definition mismatch
+fn test() {
+    let x: i32 = true;  // Error: type mismatch in variable definition: expected `i32`, found `Bool`
+}
+
+// Function argument mismatch
+fn greet(name: string) -> string { return name; }
+
+fn test() {
+    greet(42);  // Error: type mismatch in argument 0 `name` of function `greet`: expected `string`, found `i32`
+}
+```
+
+**Solution**: Ensure the expression evaluates to the expected type.
+
+### `ArrayElementTypeMismatch`
+
+Array elements must all share the same type. Emitted when a later element differs from the
+first element's type.
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 3] = [1, 2, true];
+    // Error: array elements must be of the same type: expected `i32`, found `Bool`
+}
+```
+
+---
+
+## Symbol Resolution Errors
+
+### `UnknownType`
+
+Referenced type name is not defined in scope.
+
+**Example**:
+
+```rust
+fn test(x: UndefinedType) -> i32 {  // Error: unknown type `UndefinedType`
+    return 42;
+}
+```
+
+**Solution**: Define the type before using it, or check for typos in the type name.
+
+### `UnknownIdentifier`
+
+Variable or identifier is used before declaration.
+
+**Example**:
+
+```rust
+fn test() {
+    let y = x + 10;  // Error: use of undeclared variable `x`
+}
+```
+
+**Solution**: Declare the variable before use, or check for typos.
+
+### `UndefinedFunction`
+
+Function is called but not defined.
+
+**Example**:
+
+```rust
+fn test() {
+    let result = unknown_function(42);  // Error: call to undefined function `unknown_function`
+}
+```
+
+**Solution**: Define the function, import it, or check for typos.
+
+### `UndefinedStruct`
+
+Struct literal or field access references a struct that is not defined.
+
+**Example**:
+
+```rust
+fn test() {
+    let p = MissingStruct { x: 1 };  // Error: struct `MissingStruct` is not defined
+}
+```
+
+### `UndefinedEnum`
+
+Enum variant access references an enum that is not defined.
+
+**Example**:
+
+```rust
+fn test() {
+    let c = UnknownEnum::Variant;  // Error: enum `UnknownEnum` is not defined
+}
+```
+
+### `MethodNotFound`
+
+Method is called on a type but the method is not defined in any `impl` block for that type.
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p = Point { x: 10, y: 20 };
+    let result = p.distance();  // Error: method `distance` not found on type `Point`
+}
+```
+
+**Solution**: Define the method in an `impl` block for the type, or check for typos.
+
+### `FieldNotFound`
+
+Struct field access names a field that does not exist on the struct.
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p = Point { x: 10, y: 20 };
+    let z = p.z;  // Error: field `z` not found on struct `Point`
+}
+```
+
+**Solution**: Use an existing field name or add the field to the struct definition.
+
+### `VariantNotFound`
+
+Enum variant access names a variant that is not defined on the enum.
+
+**Example**:
+
+```rust
+enum Color { Red, Green, Blue }
+
+fn test() {
+    let c = Color::Yellow;  // Error: variant `Yellow` not found on enum `Color`
+}
+```
+
+**Solution**: Use an existing variant or add it to the enum definition.
+
+---
+
+## Visibility Errors
+
+### `PrivateAccessViolation`
+
+Attempting to access a private symbol from outside its defining scope.
+
+**`VisibilityContext` variants**:
 
 ```rust
 pub enum VisibilityContext {
@@ -660,9 +224,244 @@ pub enum VisibilityContext {
 }
 ```
 
-### RegistrationKind
+**Examples**:
 
-Identifies what kind of symbol failed to register:
+```rust
+// Private field access
+struct Point {
+    x: i32,  // Private by default
+    y: i32,
+}
+
+fn test() {
+    let p = Point { x: 10, y: 20 };
+    let x = p.x;  // Error: cannot access private field `x` of struct `Point`
+}
+
+// Private method
+struct Counter { value: i32 }
+
+impl Counter {
+    fn internal_reset(&self) {}  // Private method
+}
+
+fn test() {
+    let c = Counter { value: 0 };
+    c.internal_reset();  // Error: cannot access private method `internal_reset` on type `Counter`
+}
+```
+
+**Solution**: Make the symbol public with `pub` or access it only from within its defining scope.
+
+---
+
+## Function and Method Errors
+
+### `ArgumentCountMismatch`
+
+Function or method called with the wrong number of arguments.
+
+**Example**:
+
+```rust
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+
+fn test() {
+    let result = add(42);  // Error: function `add` expects 2 arguments, but 1 provided
+}
+```
+
+**Solution**: Provide the correct number of arguments.
+
+### `SelfReferenceInFunction`
+
+`self` appears inside a free function (not inside an `impl` method).
+
+**Example**:
+
+```rust
+fn test() {
+    let x = self.value;  // Error: self reference not allowed in standalone function `test`
+}
+```
+
+**Solution**: `self` is only valid inside method definitions.
+
+### `SelfReferenceOutsideMethod`
+
+`self` is used in a position that is not inside any method or `impl` block.
+
+**Example**:
+
+```rust
+fn test() {
+    return self;  // Error: self reference is only allowed in methods, not functions
+}
+```
+
+### `InstanceMethodCalledAsAssociated`
+
+An instance method (one that takes `self`) was called using `Type::method()` syntax instead of
+`instance.method()`.
+
+**Example**:
+
+```rust
+struct Point { x: i32 }
+
+impl Point {
+    fn mirror(&self) -> Point { return Point { x: -self.x }; }
+}
+
+fn test() {
+    Point::mirror();
+    // Error: instance method `Point::mirror` requires a receiver, use `instance.mirror()` instead
+}
+```
+
+### `AssociatedFunctionCalledAsMethod`
+
+An associated function (one that does not take `self`) was called on an instance using
+`instance.function()` syntax instead of `Type::function()`.
+
+**Example**:
+
+```rust
+struct Counter { value: i32 }
+
+impl Counter {
+    fn new() -> Counter { return Counter { value: 0 }; }
+}
+
+fn test() {
+    let c = Counter { value: 0 };
+    c.new();
+    // Error: associated function `Counter::new` cannot be called on an instance,
+    //        use `Counter::new()` instead
+}
+```
+
+### `MethodCallOnNonStruct`
+
+A method call is made on a non-struct (primitive) type.
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 42;
+    x.some_method();  // Error: cannot call method on non-struct type `i32`
+}
+```
+
+---
+
+## Operator Errors
+
+### `InvalidBinaryOperand`
+
+A binary operator is applied to operands whose types are incompatible with that operator
+(e.g., arithmetic on booleans).
+
+**Example**:
+
+```rust
+fn test() {
+    let x: bool = true;
+    let y: bool = false;
+    let result = x + y;  // Error: numeric operator `Add` cannot be applied to non-numeric types
+}
+```
+
+**Operator requirements**:
+
+| Operators | Required operand types |
+|-----------|----------------------|
+| `+`, `-`, `*`, `/`, `%`, `**` | Numeric (same type) |
+| `<`, `<=`, `>`, `>=` | Numeric (same type) |
+| `==`, `!=` | Any (same type) |
+| `&&`, `\|\|` | `bool` |
+| `&`, `\|`, `^`, `<<`, `>>` | Integer (same type) |
+
+### `InvalidUnaryOperand`
+
+A unary operator is applied to an incompatible type.
+
+**Examples**:
+
+```rust
+fn test() {
+    let x: u32 = 10;
+    let neg = -x;  // Error: unary operator `Neg` can only be applied to signed integers, found `u32`
+
+    let y: i32 = 42;
+    let not = !y;  // Error: unary operator `Not` can only be applied to booleans, found `i32`
+}
+```
+
+**Unary operator requirements**:
+
+| Operator | Source syntax | Required type | Result type |
+|----------|--------------|---------------|-------------|
+| `Not` | `!x` | `bool` | `bool` |
+| `Neg` | `-x` | Signed integer (i8/i16/i32/i64) | Same as operand |
+| `BitNot` | `~x` | Integer (signed or unsigned) | Same as operand |
+
+### `BinaryOperandTypeMismatch`
+
+A binary operator is applied to two operands of different types.
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 10;
+    let y: i64 = 20;
+    let z = x + y;
+    // Error: cannot apply operator `Add` to operands of different types: `i32` and `i64`
+}
+```
+
+**Solution**: Ensure both operands have the same type. Inference does not perform implicit widening.
+
+---
+
+## Import Errors
+
+### `ImportResolutionFailed`
+
+Import path does not resolve to a valid module or symbol.
+
+**Example**:
+
+```rust
+use std::nonexistent::Module;  // Error: cannot resolve import path: std::nonexistent::Module
+```
+
+### `CircularImport`
+
+A glob import creates a circular dependency.
+
+**Example**:
+
+```rust
+use mod_a::*;  // mod_a itself imports from the current module → Error: circular glob import detected
+```
+
+### `EmptyGlobImport`
+
+A glob import (`use path::*`) has an empty path segment.
+
+---
+
+## Registration Errors
+
+### `RegistrationFailed`
+
+Failed to register a symbol (type, struct, enum, function, method, or variable) in the symbol
+table. The most common cause is a duplicate definition.
+
+**`RegistrationKind` variants**:
 
 ```rust
 pub enum RegistrationKind {
@@ -676,248 +475,213 @@ pub enum RegistrationKind {
 }
 ```
 
+**Example**:
+
+```rust
+fn test() {}
+fn test() {}  // Error: error registering function `test`
+```
+
+**Solution**: Ensure symbol names are unique within their scope.
+
+---
+
+## Structural Errors
+
+### `ExpectedArrayType`
+
+An array indexing expression (`arr[i]`) is applied to a value that is not an array.
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 42;
+    let y = x[0];  // Error: expected an array type, found `i32`
+}
+```
+
+### `ExpectedStructType`
+
+A member access expression (`value.field`) is applied to a non-struct type.
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 42;
+    let y = x.value;  // Error: member access requires a struct type, found `i32`
+}
+```
+
+### `ExpectedEnumType`
+
+A type member access expression (`Type::Variant`) is applied to a non-enum type.
+
+**Example**:
+
+```rust
+struct Point {}
+
+fn test() {
+    let x = Point::SomeVariant;
+    // Error: type member access requires an enum type, found `Point`
+}
+```
+
+### `ArrayIndexNotNumeric`
+
+The index expression in an array access is not a numeric type.
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 5] = [1, 2, 3, 4, 5];
+    let x = arr[true];  // Error: array index must be of number type, found `Bool`
+}
+```
+
+---
+
+## Generic Type Errors
+
+### `TypeParameterCountMismatch`
+
+A generic function call provides a different number of explicit type arguments than the
+function's type parameter list.
+
+**Example**:
+
+```rust
+fn identity<T>(x: T) -> T { return x; }
+
+fn test() {
+    identity::<i32, bool>(42);
+    // Error: type parameter count mismatch for `identity`: expected 1, found 2
+}
+```
+
+### `MissingTypeParameters`
+
+A generic function requires type parameters but none were provided and they could not be
+inferred.
+
+**Example**:
+
+```rust
+fn make<T>() -> T { /* ... */ }
+
+fn test() {
+    let x = make();
+    // Error: function `make` requires 1 type parameters, but none were provided
+}
+```
+
+### `CannotInferTypeParameter`
+
+A type parameter could not be inferred from the arguments at the call site.
+
+**Example**:
+
+```rust
+fn example<T>(flag: bool) -> i32 { return 0; }
+
+fn test() {
+    example(true);
+    // Error: cannot infer type parameter `T` for `example` - consider adding explicit type arguments
+}
+```
+
+### `ConflictingTypeInference`
+
+The same type parameter was inferred as two different concrete types from different arguments.
+
+**Example**:
+
+```rust
+fn pair<T>(a: T, b: T) -> bool { return true; }
+
+fn test() {
+    pair(42, true);
+    // Error: conflicting types for type parameter `T`: inferred `i32` and `Bool`
+}
+```
+
+---
+
+## Non-Deterministic Errors
+
+### `CannotInferUzumakiType`
+
+A `@` (uzumaki) expression was used in a context where the target variable has no known type.
+The type checker cannot determine what type the uzumaki expression should produce.
+
+**Example**:
+
+```rust
+forall {
+    let x = @;  // Error: cannot infer type for uzumaki expression assigned to variable of unknown type
+}
+```
+
+**Solution**: Add an explicit type annotation to the variable:
+
+```rust
+forall {
+    let x: i32 = @;  // OK: uzumaki produces an i32
+}
+```
+
+---
+
 ## Error Recovery
 
-The type checker implements error recovery to collect multiple errors before failing:
+The type checker implements error recovery to collect multiple errors before failing. All five
+compilation phases run to completion even when earlier phases produce errors. Within the
+inference phase, errors from one function do not prevent checking subsequent functions.
+
+**Example**:
 
 ```rust
 fn test() -> i32 {
     let x: bool = 42;        // Error 1: type mismatch in variable definition
     let y = undefined_var;   // Error 2: use of undeclared variable
-    return "string";         // Error 3: type mismatch in return
+    return "string";         // Error 3: type mismatch in return statement
 }
-
-// All three errors reported:
-// "type mismatch in variable definition: expected `bool`, found `i32`;
-//  use of undeclared variable `undefined_var`;
-//  type mismatch in return: expected `i32`, found `string`"
+// All three errors are reported together
 ```
-
-This allows developers to fix multiple issues in a single iteration.
 
 ## Error Deduplication
 
-The type checker deduplicates errors to avoid repeated reports:
-
-```rust
-fn test() {
-    let x = undefined_var;  // Error reported once
-    let y = undefined_var;  // Not reported again (same variable)
-    let z = undefined_var;  // Not reported again (same variable)
-}
-
-// Only one error: "use of undeclared variable `undefined_var`"
-```
+Errors are deduplicated by a key derived from the error kind and location. The same error
+(same variant, same source position) will not be reported more than once even if the checker
+encounters the same expression multiple times during analysis.
 
 ## Location Information
 
-All errors include precise source location:
+All errors include a `Location` value accessible via `TypeCheckError::location()`. The struct
+has flat fields (not nested `Position` structs):
 
 ```rust
 pub struct Location {
-    pub start: Position,  // Line and column
-    pub end: Position,
-}
-
-pub struct Position {
-    pub line: usize,
-    pub column: usize,
-}
-```
-
-Error messages include location:
-```
-file.inf:10:15: type mismatch in return: expected `i32`, found `bool`
-```
-
-## Best Practices for Error Handling
-
-### 1. Check for Multiple Errors
-
-The type checker collects multiple errors before failing. Always handle the possibility of multiple error messages:
-
-```rust
-match TypeCheckerBuilder::build_typed_context(arena) {
-    Ok(completed) => {
-        let typed_context = completed.typed_context();
-        // Success path
-    }
-    Err(e) => {
-        // Error may contain multiple messages separated by "; "
-        eprintln!("Type checking failed with {} error(s):",
-            e.to_string().split("; ").count());
-
-        for (idx, error_msg) in e.to_string().split("; ").enumerate() {
-            eprintln!("  [{}] {}", idx + 1, error_msg);
-        }
-    }
+    pub offset_start: u32,
+    pub offset_end: u32,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
 }
 ```
 
-### 2. Provide User-Friendly Messages
+Error messages format the location as `start_line:start_column:` at the beginning:
 
-Format errors for human readability with context and suggestions:
-
-```rust
-match TypeCheckerBuilder::build_typed_context(arena) {
-    Err(e) => {
-        eprintln!("Type checking failed:");
-        eprintln!("{}", e);
-        eprintln!("\nPlease fix the errors above and try again.");
-        eprintln!("Tip: Read error messages from top to bottom - later errors");
-        eprintln!("     may be consequences of earlier ones.");
-    }
-    Ok(completed) => { /* ... */ }
-}
 ```
-
-### 3. Log Errors for Debugging
-
-Use structured logging for programmatic error analysis:
-
-```rust
-match TypeCheckerBuilder::build_typed_context(arena) {
-    Err(e) => {
-        log::error!("Type check failed: {}", e);
-
-        // Count errors for metrics
-        let error_count = e.to_string().split("; ").count();
-        log::info!("Total errors: {}", error_count);
-
-        // Continue or abort based on context
-        return Err(e);
-    }
-    Ok(completed) => {
-        log::info!("Type checking succeeded");
-        // ...
-    }
-}
-```
-
-### 4. Extract Location Information
-
-While the current error format includes locations in the message, you can parse them if needed:
-
-```rust
-fn parse_error_location(error_msg: &str) -> Option<(usize, usize)> {
-    // Error format: "line:column: message"
-    let parts: Vec<&str> = error_msg.splitn(2, ": ").collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let location = parts[0];
-    let coords: Vec<&str> = location.split(':').collect();
-    if coords.len() != 2 {
-        return None;
-    }
-
-    let line = coords[0].parse::<usize>().ok()?;
-    let column = coords[1].parse::<usize>().ok()?;
-    Some((line, column))
-}
-```
-
-### 5. Categorize Errors for IDEs
-
-Build structured error reports for editor integration:
-
-```rust
-#[derive(Debug)]
-struct Diagnostic {
-    line: usize,
-    column: usize,
-    severity: Severity,
-    message: String,
-}
-
-#[derive(Debug)]
-enum Severity {
-    Error,
-    Warning,
-}
-
-fn extract_diagnostics(error: anyhow::Error) -> Vec<Diagnostic> {
-    error.to_string()
-        .split("; ")
-        .filter_map(|msg| {
-            let location = parse_error_location(msg)?;
-            Some(Diagnostic {
-                line: location.0,
-                column: location.1,
-                severity: Severity::Error,
-                message: msg.to_string(),
-            })
-        })
-        .collect()
-}
-```
-
-### 6. Handle Partial Results
-
-Since the type checker fails on first unrecoverable error, consider saving partial progress:
-
-```rust
-fn incremental_type_check(source: &str) -> Result<TypedContext, Vec<String>> {
-    let arena = parse_source(source)
-        .map_err(|e| vec![format!("Parse error: {}", e)])?;
-
-    match TypeCheckerBuilder::build_typed_context(arena) {
-        Ok(completed) => Ok(completed.typed_context()),
-        Err(e) => {
-            // Extract individual errors
-            let errors: Vec<String> = e.to_string()
-                .split("; ")
-                .map(|s| s.to_string())
-                .collect();
-            Err(errors)
-        }
-    }
-}
-```
-
-## Common Error Patterns
-
-### Pattern 1: Undefined Symbol Cascade
-
-```rust
-fn test() {
-    let x = undefined;  // Error: use of undeclared variable
-    let y = x + 1;      // x has no type, but no additional error
-    return y;           // y inferred from context
-}
-```
-
-The type checker tries to continue after undefined symbols to collect more errors.
-
-### Pattern 2: Type Mismatch Propagation
-
-```rust
-fn test() -> i32 {
-    let x: bool = true;
-    return x;  // Error: type mismatch (bool vs i32)
-}
-```
-
-Type mismatches don't propagate - each occurrence is checked independently.
-
-### Pattern 3: Visibility Cascade
-
-```rust
-mod internal {
-    struct PrivateStruct {
-        field: i32,
-    }
-}
-
-fn test() {
-    let s = internal::PrivateStruct { field: 42 };  // Error: struct is private
-    let f = s.field;  // If struct was accessible, field access would be checked separately
-}
+1:5: type mismatch in return statement: expected `i32`, found `Bool`
 ```
 
 ## Related Documentation
 
 - [API Guide](./api-guide.md) - How to handle errors in code
-- [Architecture](./architecture.md) - Error recovery implementation
+- [Architecture](./architecture.md) - Error recovery implementation details
 - [Type System](./type-system.md) - Type checking rules

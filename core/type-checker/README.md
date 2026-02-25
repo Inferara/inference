@@ -71,7 +71,7 @@ TypeCheckerBuilder
 
 - [`type_info`] - Type representation system with `TypeInfo` and `TypeInfoKind`
 - [`typed_context`] - Storage for type annotations on AST nodes
-- [`errors`] - Comprehensive error types with 29 distinct variants
+- [`errors`] - Comprehensive error types with 33 distinct variants
 - `symbol_table` (internal) - Hierarchical scope and symbol management
 - `type_checker` (internal) - Core type inference implementation
 
@@ -382,7 +382,7 @@ Detailed documentation is available in the `docs/` directory:
 - [Architecture Guide](./docs/architecture.md) - Internal design, phase walkthrough, and implementation patterns
 - [API Guide](./docs/api-guide.md) - Practical examples and usage patterns for the type checker API
 - [Type System Reference](./docs/type-system.md) - Complete type system rules, operators, and type inference
-- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 29 error types with examples
+- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 33 error variants with examples
 
 ## Related Documentation
 

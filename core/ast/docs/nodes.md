@@ -528,6 +528,35 @@ let y: i32 = @;
 The `value` field can hold any `Expression`, including a `UzumakiExpression` (`@`) for
 non-deterministic initialization inside `forall`, `exists`, or `unique` blocks.
 
+### TypeDefinitionStatement
+
+Local type alias definition inside a function or block body.
+
+```rust
+pub struct TypeDefinitionStatement {
+    pub id: u32,
+    pub location: Location,
+    pub name: Rc<Identifier>,
+    pub ty: Type,
+}
+```
+
+**Fields:**
+- `name`: The identifier being bound as a local type alias
+- `ty`: The aliased type
+
+**Example source:**
+```inference
+fn example() {
+    type Index = i32;
+    let i: Index = 0;
+}
+```
+
+**Note:** This is distinct from `TypeDefinition` (the top-level definition). The statement
+variant (`Statement::TypeDefinition`) carries a `TypeDefinitionStatement` and can appear
+inside function bodies. The top-level variant (`Definition::Type`) carries a `TypeDefinition`.
+
 ### AssignStatement
 
 Assignment to existing variable or expression.
@@ -565,6 +594,27 @@ pub struct AssertStatement {
 assert(x > 0);
 assert(len < MAX_SIZE);
 ```
+
+### Expression Statement
+
+A bare expression used as a statement. The `Statement::Expression` variant uses
+`@inner_enum`, meaning it directly wraps the `Expression` enum without an intermediate
+struct.
+
+```rust
+// In the Statement enum:
+// @inner_enum Expression(Expression),
+```
+
+**Example source:**
+```inference
+foo(x);     // function call used as a statement — result discarded
+(x + y);    // parenthesized expression as a statement
+```
+
+This variant is used when an expression appears in a position that expects a statement.
+In codegen, if the expression produces a value and the surrounding context is a statement,
+the value is dropped with a WASM `drop` instruction.
 
 ## Expressions
 
@@ -695,6 +745,33 @@ point.x
 person.age
 obj.method()
 ```
+
+### TypeMemberAccessExpression
+
+Accessing an associated item on a type rather than on a value expression.
+
+```rust
+pub struct TypeMemberAccessExpression {
+    pub id: u32,
+    pub location: Location,
+    pub expression: RefCell<Expression>,
+    pub name: Rc<Identifier>,
+}
+```
+
+**Fields:**
+- `expression`: The type expression on the left-hand side
+- `name`: The member name being accessed
+
+**Example source:**
+```inference
+MyEnum::Variant
+SomeType::CONSTANT
+```
+
+**Distinction from `MemberAccessExpression`:** `MemberAccessExpression` accesses a field or
+method on a value (e.g., `point.x`). `TypeMemberAccessExpression` is produced when the
+left-hand side is a type expression, as in `Type::Member` qualified access.
 
 ### ArrayIndexAccessExpression
 
@@ -1022,6 +1099,35 @@ pub struct QualifiedName {
 std::io::File
 core::option::Option
 ```
+
+### TypeQualifiedName
+
+Type alias with a qualified member name, produced when a type alias is used as the
+left-hand qualifier in a `::` access.
+
+```rust
+pub struct TypeQualifiedName {
+    pub id: u32,
+    pub location: Location,
+    pub alias: Rc<Identifier>,
+    pub name: Rc<Identifier>,
+}
+```
+
+**Fields:**
+- `alias`: The type alias on the left side of `::`
+- `name`: The member name on the right side
+
+**Example source:**
+```inference
+type Alias = SomeType;
+Alias::Member
+```
+
+**Distinction from `QualifiedName`:** `QualifiedName` represents a module path like
+`std::io::File` where the qualifier is a module identifier. `TypeQualifiedName` is used
+when the qualifier is a type alias, making the semantics type-level rather than
+module-level. The `Type::Qualified` variant holds a `TypeQualifiedName`.
 
 ## Arguments
 

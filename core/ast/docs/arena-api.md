@@ -267,37 +267,54 @@ for child in children {
 
 ### Getting Children of Specific Type
 
+Because `get_children_cmp` only traverses into children that match the comparator, it
+works well when the target nodes are direct children of the starting node.
+
 ```rust
 use inference_ast::nodes::{AstNode, Statement};
 
-// Get all statement children
+// Get all direct statement children of a block
+// (works because Block's children in the arena are Statement nodes)
 let statements = arena.get_children_cmp(block_id, |node| {
     matches!(node, AstNode::Statement(_))
 });
+```
 
-// Get all return statements
-let returns = arena.get_children_cmp(function_id, |node| {
+To find nodes nested inside non-matching parents (for example, all return statements
+anywhere in a function), use `filter_nodes` with a source-file scope instead:
+
+```rust
+use inference_ast::nodes::{AstNode, Statement};
+
+// Find all return statements in the entire arena
+let returns = arena.filter_nodes(|node| {
     matches!(node, AstNode::Statement(Statement::Return(_)))
 });
 ```
 
 ### Recursive Traversal
 
-`get_children_cmp` traverses the entire subtree, not just direct children:
+`get_children_cmp` performs a depth-first traversal. It collects matching nodes and only
+continues traversal into children that also match the comparator. This means nodes that
+fail the comparator act as boundaries — their children are not explored.
 
 ```rust
-// Find all identifiers in a function
-let identifiers = arena.get_children_cmp(function_id, |node| {
-    matches!(node, AstNode::Expression(Expression::Identifier(_)))
+// Find all binary expression descendants of a function
+let binary_exprs = arena.get_children_cmp(function_id, |node| {
+    matches!(node, AstNode::Expression(Expression::Binary(_)))
 });
 
-println!("Found {} identifier uses", identifiers.len());
+println!("Found {} binary expressions", binary_exprs.len());
 ```
 
 **How it works:**
 1. Starts at `function_id`
-2. Visits all descendants depth-first
-3. Returns nodes where comparator returns true
+2. For each visited node: if the comparator returns true, adds the node to results
+3. Pushes only the children of matching nodes onto the traversal stack
+4. Non-matching nodes are not traversed into
+
+**Implication:** If you need all descendants regardless of intermediate nodes, use
+`arena.filter_nodes()` instead, which scans the entire arena.
 
 ## Source Text Retrieval
 
@@ -455,8 +472,9 @@ fn check_function_types(arena: &Arena, func_id: u32) -> Result<(), String> {
         _ => return Err("Not a function".to_string()),
     };
 
-    // Get all return statements in function
-    let returns = arena.get_children_cmp(func_id, |node| {
+    // Get all return statements in function (filter_nodes scans the whole arena;
+    // for a single-file program this is equivalent to searching the function's subtree)
+    let returns = arena.filter_nodes(|node| {
         matches!(node, AstNode::Statement(Statement::Return(_)))
     });
 
@@ -749,7 +767,9 @@ use inference_ast::nodes::{AstNode, Statement};
 fn build_cfg(arena: &Arena, function_id: u32) -> Vec<(u32, u32)> {
     let mut edges = Vec::new();
 
-    let statements = arena.get_children_cmp(function_id, |node| {
+    // filter_nodes scans the entire arena in node-ID order.
+    // For a single-function program this gives all statements.
+    let statements = arena.filter_nodes(|node| {
         matches!(node, AstNode::Statement(_))
     });
 
@@ -784,10 +804,11 @@ fn build_cfg(arena: &Arena, function_id: u32) -> Vec<(u32, u32)> {
 ```rust
 use inference_ast::nodes::{AstNode, Statement};
 
-fn find_unreachable_code(arena: &Arena, function_id: u32) -> Vec<u32> {
+fn find_unreachable_code(arena: &Arena, _function_id: u32) -> Vec<u32> {
     let mut unreachable = Vec::new();
 
-    let statements = arena.get_children_cmp(function_id, |node| {
+    // filter_nodes returns all statements in the arena in node-ID (source) order.
+    let statements = arena.filter_nodes(|node| {
         matches!(node, AstNode::Statement(_))
     });
 
@@ -810,17 +831,18 @@ fn find_unreachable_code(arena: &Arena, function_id: u32) -> Vec<u32> {
 ### Example 3: Complexity Metrics
 
 ```rust
-fn calculate_cyclomatic_complexity(arena: &Arena, function_id: u32) -> u32 {
+fn calculate_cyclomatic_complexity(arena: &Arena, _function_id: u32) -> u32 {
     let mut complexity = 1;  // Base complexity
 
-    let statements = arena.get_children_cmp(function_id, |node| {
+    // filter_nodes returns all matching nodes across the arena in source order.
+    let branch_points = arena.filter_nodes(|node| {
         matches!(
             node,
             AstNode::Statement(Statement::If(_)) | AstNode::Statement(Statement::Loop(_))
         )
     });
 
-    complexity += statements.len() as u32;
+    complexity += branch_points.len() as u32;
 
     complexity
 }

@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add conditional statement lowering (`if`/`else`) to WebAssembly codegen ([#144])
+  - `if`/`else` lowered to WASM structured control flow (`If`/`Else`/`End` with `BlockType::Empty`)
+  - `pre_scan_locals` recurses into both if and else arms to declare locals upfront (WASM requirement)
+  - Nested if statements supported via recursive descent
+  - Emit `unreachable` instruction before function `end` for all non-void functions as defense-in-depth safety net (industry-standard pattern used by rustc, LLVM, GCC, Zig, Binaryen)
+  - If-statements inside non-deterministic blocks (`forall`, `exists`, etc.) supported
 - Add binary and unary expression lowering to WebAssembly codegen ([#140])
   - All arithmetic operators (`+`, `-`, `*`, `/`, `%`) for i32 and i64, signed and unsigned variants
   - All comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`) with correct sign-sensitive dispatch
@@ -63,9 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
+- Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
 
 ### Testing
 
+- Add WAT golden file testing with `wasmprinter` for human-readable codegen verification ([#144])
+  - `assert_wat_equivalence()` compares generated WAT against committed `.wat` reference files
+  - `regenerate_wat()` writes WAT alongside WASM during test data regeneration
+  - Non-det modules gracefully skipped (custom opcodes unsupported by `wasmprinter`)
+- Add 3 conditional test fixtures with 62 Wasmtime execution assertions ([#144])
+  - `if_else.inf`: 6 functions covering if-only, if/else, locals in arms, nested if, void if
+  - `if_bool_exprs.inf`: 16 functions across 7 groups (bool params, logical ops, De Morgan, range checks, bool locals)
+  - `if_nondet.inf`: if-statement inside `forall` non-det block
+- Flatten per-module test directory structure to avoid double-nesting ([#144])
+  - `get_test_dir()` helper deduplicates module-name paths
 - Migrate codegen test data to per-test subdirectory layout ([#134])
   - `tests/test_data/codegen/wasm/base/{name}/{name}.{inf,wasm}` replaces flat `base/{name}.{inf,wasm}`
   - `get_test_file_path` / `get_test_wasm_path` helpers updated to resolve through subdirectory
@@ -331,3 +348,4 @@ Initial tagged release.
 [#138]: https://github.com/Inferara/inference/pull/138
 [#140]: https://github.com/Inferara/inference/pull/140
 [#142]: https://github.com/Inferara/inference/pull/142
+[#144]: https://github.com/Inferara/inference/pull/144

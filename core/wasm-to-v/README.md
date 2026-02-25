@@ -14,7 +14,7 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 - **Custom name section support**: Preserves function and local variable names from WASM debug information
 - **Expression tree reconstruction**: Converts linear WASM instructions into structured Rocq expressions
 - **Non-deterministic instruction support**: Handles Inference's extended WASM instructions (forall, exists, uzumaki, assume, unique)
-- **Error recovery**: Collects multiple translation errors before failing
+- **Partial output on error**: Section entries that fail to translate are skipped rather than aborting the entire module
 - **Zero-copy parsing**: Efficiently processes WASM bytecode using streaming parser
 
 ## Quick Start
@@ -74,7 +74,7 @@ Component model sections (Module, Instance, ComponentType, etc.) are recognized 
 
 ### Phase 2: Translation (`translator.rs`)
 
-The translator converts structured `WasmParseData` into Rocq code strings using error recovery to collect multiple translation failures before reporting:
+The translator converts structured `WasmParseData` into Rocq code strings. Section entries that cannot be translated are skipped and the accumulated output is returned regardless:
 
 1. **Module header**: Generates required Rocq imports from standard libraries
 2. **Helper definitions**: Creates convenience constructors (`Vi32`, `Vi64`, `Mt`, `Mm`, `Mg`, `Mi`, `Me`, `Ma`)
@@ -247,44 +247,33 @@ This dramatically improves readability of generated Rocq code and makes verifica
 
 ## Error Handling
 
-The translator implements error recovery to collect multiple translation failures before reporting. This provides better diagnostics than failing on the first error.
+The parser phase (Phase 1) fails fast on malformed WASM bytecode. The translator phase (Phase 2) currently silently skips individual section entries that fail to translate, always returning whatever output has been accumulated. Errors from section translation (imports, exports, tables, globals, etc.) are collected into an internal `Vec` that is not yet acted upon.
 
-### Error Recovery Strategy
+### Parser Errors
 
-```rust
-pub fn translate(&mut self) -> anyhow::Result<String> {
-    let mut errors = Vec::new();
+The parser returns an `anyhow::Result` and propagates the first error encountered. Common causes:
 
-    // Attempt to translate all imports
-    for import in &self.imports {
-        match translate_module_import(import) {
-            Ok(translated) => { /* Add to output */ }
-            Err(e) => errors.push(e),
-        }
-    }
+- WASM magic bytes or version mismatch
+- Invalid section data or truncated module
+- Malformed instruction sequences
 
-    // Continue with other sections (exports, tables, etc.)
-    // Each section collects its own errors
+### Translator Errors
 
-    // Return first error only if translation failed
-    if let Some(error) = errors.into_iter().next() {
-        return Err(error);
-    }
+The translator (`WasmParseData::translate`) matches each section item result and pushes failures into an error accumulator, but the accumulator is never checked before returning `Ok`. In practice this means:
 
-    Ok(result)
-}
-```
+- Failed imports, exports, tables, globals, data, or element entries are silently omitted from the generated Rocq output
+- A failed function body translation causes that function to be omitted from the `mod_funcs` list
+- The returned `String` is always syntactically valid Rocq, but may be semantically incomplete
 
 ### Error Categories
 
-Common translation errors include:
+Errors that may be silently dropped during translation include:
 
-- **Unsupported WASM features**: Tag section (exception handling), unknown reference types
-- **Malformed WASM data**: Invalid section data, out-of-bounds indices
-- **Unimplemented instructions**: Opcodes not yet supported in the translator
+- **Unsupported WASM features**: Unknown reference types
+- **Unimplemented instructions**: Opcodes not yet handled in `translate_basic_operator`
 - **Type mismatches**: Inconsistent type information between sections
 
-The parser phase (Phase 1) fails fast on invalid bytecode, while the translator phase (Phase 2) uses error recovery to report multiple issues.
+The tag section (exception handling) and component model sections are silently ignored by the parser itself rather than producing errors.
 
 ## Non-Deterministic Instructions
 
@@ -356,21 +345,28 @@ core/wasm-to-v/
 │  ├─ wasm_parser.rs      → WASM parsing logic
 │  └─ translator.rs       → Rocq code generation
 └─ test_data/
-   ├─ comments.*.wasm     → Comment handling tests
-   ├─ custom.*.wasm       → Custom section tests
-   ├─ fac.*.wasm          → Factorial function test
-   ├─ func_ptrs.*.wasm    → Function pointer tests
-   ├─ memory_*.wasm       → Memory section tests
-   ├─ ref_*.wasm          → Reference type tests
-   ├─ start.*.wasm        → Start section tests
-   ├─ table*.wasm         → Table section tests
-   ├─ token.*.wasm        → Token parsing tests
-   └─ type.*.wasm         → Type section tests
+   ├─ comments.*.wasm         → Comment handling tests
+   ├─ custom.*.wasm           → Custom section tests
+   ├─ fac.*.wasm              → Factorial function test
+   ├─ forward.*.wasm          → Forward reference tests
+   ├─ func_ptrs.*.wasm        → Function pointer tests
+   ├─ inline-module.*.wasm    → Inline module tests
+   ├─ memory_*.wasm           → Memory section tests
+   ├─ ref_*.wasm              → Reference type tests
+   ├─ start.*.wasm            → Start section tests
+   ├─ table.*.wasm            → Table section tests
+   ├─ table-sub.*.wasm        → Table subtyping tests
+   ├─ table_get.*.wasm        → table.get instruction tests
+   ├─ table_set.*.wasm        → table.set instruction tests
+   ├─ table_size.*.wasm       → table.size instruction tests
+   ├─ token.*.wasm            → Token parsing tests
+   ├─ type.*.wasm             → Type section tests
+   └─ unreached-valid.*.wasm  → Unreachable code validity tests
 ```
 
-### Integration Test Behavior
+### Test Behavior
 
-The `test_parse_test_data` integration test in `lib.rs`:
+The `test_parse_test_data` test in `lib.rs` (a `#[cfg(test)]` module test):
 
 1. Discovers all `.wasm` files in `test_data/`
 2. Attempts to translate each file to Rocq
@@ -411,7 +407,7 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
    - See [WebAssembly Component Model proposal](https://github.com/WebAssembly/component-model)
 
 2. **Exception Handling**: Tag section (exception handling) is not supported
-   - WASM exception handling instructions will cause translation errors
+   - The tag section is silently ignored during parsing; exception handling instructions in function bodies may cause panics or incorrect output
    - See [WebAssembly Exception Handling proposal](https://github.com/WebAssembly/exception-handling)
 
 3. **Reference Types**: Limited support for complex reference types
@@ -429,8 +425,8 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 
 ### Known Issues
 
+- **Silent translation errors**: Errors during section translation (invalid imports, unsupported reference types, unimplemented opcodes) are collected into an internal accumulator that is never checked. The translator always returns `Ok`, so callers cannot detect incomplete output
 - **Control flow complexity**: Some complex control flow patterns (deeply nested blocks, unusual branch targets) may generate suboptimal or incorrect Rocq code
-- **Error diagnostics**: Error messages could provide more context about the specific location in the WASM module where translation failed
 - **Large data segments**: Memory initialization with large data segments produces verbose output that may be difficult to work with in Rocq
 - **Name conflicts**: Generated Rocq identifiers may conflict with reserved keywords in edge cases
 
@@ -438,16 +434,17 @@ The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instru
 
 Planned improvements for future releases:
 
-1. **Optimization**: Generate more compact Rocq expressions by recognizing common patterns and idioms
-2. **Validation**: Add semantic validation beyond syntactic translation to catch invalid WASM constructs earlier
-3. **Component Model**: Full WebAssembly component model translation support for modern WASM applications
-4. **Source Maps**: Preserve mapping from Inference source → WASM → Rocq for better error reporting and debugging
-5. **Incremental Translation**: Support translating modified modules efficiently for faster development iteration
-6. **Proof Scaffolding**: Generate proof templates and lemmas for common verification tasks
-7. **Better Diagnostics**: Include WASM byte offsets and section names in error messages
-8. **Name Sanitization**: Automatically handle Rocq keyword conflicts in generated identifiers
-9. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
-10. **SIMD Support**: Complete translation of all WebAssembly SIMD instructions
+1. **Error propagation**: Check the translator's error accumulator before returning and surface failures to callers instead of silently producing incomplete output
+2. **Optimization**: Generate more compact Rocq expressions by recognizing common patterns and idioms
+3. **Validation**: Add semantic validation beyond syntactic translation to catch invalid WASM constructs earlier
+4. **Component Model**: Full WebAssembly component model translation support for modern WASM applications
+5. **Source Maps**: Preserve mapping from Inference source → WASM → Rocq for better error reporting and debugging
+6. **Incremental Translation**: Support translating modified modules efficiently for faster development iteration
+7. **Proof Scaffolding**: Generate proof templates and lemmas for common verification tasks
+8. **Better Diagnostics**: Include WASM byte offsets and section names in error messages
+9. **Name Sanitization**: Automatically handle Rocq keyword conflicts in generated identifiers
+10. **Optimized Data Segments**: Represent large data segments more compactly in generated Rocq code
+11. **SIMD Support**: Complete translation of all WebAssembly SIMD instructions
 
 ## Integration with Inference Compiler
 

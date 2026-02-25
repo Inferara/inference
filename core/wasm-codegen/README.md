@@ -36,6 +36,11 @@ Typed AST (TypedContext)
    `local.set`; `const` definitions use the same path. Supported initializer expression
    kinds are literals, identifiers, uzumaki (`@`) expressions, and function calls. Function
    calls push arguments in positional order and emit a `call <func_idx>` instruction.
+   `if`/`else` statements emit WASM structured `if`/`else`/`end` blocks with
+   `BlockType::Empty` because Inference `if` is a statement, not an expression.
+   Non-void functions emit an `unreachable` instruction before the function `end` to
+   satisfy the WASM validator when all paths exit through explicit `return` instructions.
+   See [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
 5. **Module Assembly** - Assemble TypeSection, FunctionSection, ExportSection, CodeSection,
    and NameSection into a complete WASM binary
 
@@ -185,8 +190,10 @@ The `codegen` function:
 
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
+- **Control flow** - `loop` and `break` statements are not yet implemented (`todo!()`)
 - **Expression types** - Limited support for complex expressions (binary operations, structs, arrays). Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
 - **Type system** - Generic types, custom types, and function types are not yet fully implemented
+- **Return-path analysis** - The compiler does not yet emit a compile-time error for non-void functions missing a return on all paths. An `unreachable` trap is emitted as a runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
 
 ## Documentation
 
@@ -198,6 +205,9 @@ Detailed design documents live in `docs/`:
 - [docs/function-calls-lowering.md](docs/function-calls-lowering.md) - Forward-reference
   pre-scan, parameter index interlock with locals, call lowering pipeline, drop emission
   rules, and known limitations.
+- [docs/conditionals-lowering.md](docs/conditionals-lowering.md) - How `if`/`else`
+  statements are lowered to WASM structured control flow and why `unreachable` is emitted
+  before the `end` of every non-void function.
 
 ## Module Organization
 
@@ -231,6 +241,13 @@ Test data includes:
   parameter-to-local-index mapping and WASM type signatures
 - `fn_calls.inf` - Function call scenarios including no-arg calls, arg passing, forward
   references, and `let`-from-call; validated and executed via wasmtime
+- `if_else.inf` - `if`-only, `if`/`else`, nested `if`, locals inside arms, and void
+  `if`; validated against `inf_wasmparser` and byte-compared, executed via wasmtime
+- `if_nondet.inf` - `if` nested inside a `forall` non-deterministic block
+- `if_bool_exprs.inf` - Comprehensive boolean condition coverage: direct bool params,
+  comparison + logical operators, complex nested conditions, boolean locals, boolean
+  equality/inequality, and if/else with complex conditions; validated and executed via
+  wasmtime
 
 ## Related Resources
 

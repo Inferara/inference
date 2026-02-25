@@ -605,7 +605,7 @@ pub fn codegen(
 /// ## Non-Deterministic Code Translation
 ///
 /// ```rust,no_run
-/// use inference::{parse, type_check, codegen};
+/// use inference::{parse, type_check, codegen, wasm_to_v};
 ///
 /// let source = r#"
 ///     pub fn verify_commutativity() {
@@ -620,8 +620,7 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// // WASM bytes are directly available from codegen output:
-/// // wasm_to_v("CommutativityProof", codegen_output.wasm())
+/// let rocq_code = wasm_to_v("CommutativityProof", codegen_output.wasm())?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///

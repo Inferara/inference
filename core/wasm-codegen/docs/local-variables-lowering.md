@@ -36,7 +36,7 @@ The compiler therefore operates in two passes per function:
 
 ```text
 Pass 1 — pre_scan_locals
-  Walk the entire function body (recursively into nested blocks).
+  Walk the entire function body (recursively into nested blocks and if/else arms).
   For every VariableDefinition or ConstantDefinition statement encountered,
   assign a sequential local index and record (name -> (index, ValType))
   in locals_map.
@@ -58,7 +58,8 @@ visit_function_definition
         |
         +---> pre_scan_locals(body)
         |         |
-        |         | Recursively walks all statements (including nested blocks)
+        |         | Recursively walks all statements (including nested blocks
+        |         | and both arms of if/else statements)
         |         | Assigns monotonically increasing local indices
         |         v
         |     locals_map: { "x" -> (0, i32), "y" -> (1, i64), ... }
@@ -76,10 +77,10 @@ visit_function_definition
 ### Scope Flattening
 
 The pre-scan intentionally flattens all nested scopes into a single WASM local pool. A
-local declared inside a `forall { }` block shares the same pool as one declared at the
-top of the function. This is consistent with how WebAssembly defines locals: they are
-function-scoped, not block-scoped. The Inference type-checker is responsible for enforcing
-lexical scoping rules at the language level.
+local declared inside a `forall { }` block, an `if` arm, or an `else` arm shares the same
+pool as one declared at the top of the function. This is consistent with how WebAssembly
+defines locals: they are function-scoped, not block-scoped. The Inference type-checker is
+responsible for enforcing lexical scoping rules at the language level.
 
 ## Supported Initializer Expression Kinds
 

@@ -404,24 +404,19 @@ Complexity: O(d) where d is tree depth, typically < 20 for well-formed code.
 Finding all nodes of a specific type:
 
 ```rust
-pub fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
+// Private helper — call arena.functions(), arena.list_type_definitions(), or arena.filter_nodes() instead.
+fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
 where
-    F: Fn(&AstNode) -> Option<T> + Clone + 'a,
-    T: Clone + 'static,
+    F: Fn(&AstNode) -> Option<T> + 'a,
 {
-    self.nodes
-        .iter()
-        .filter_map(move |(_, node)| cmp(node))
+    let mut ids: Vec<u32> = self.nodes.keys().copied().collect();
+    ids.sort_unstable();
+    ids.into_iter()
+        .filter_map(move |id| self.nodes.get(&id).and_then(&cmp))
 }
 
-// Usage: find all functions
-arena.list_nodes_cmp(|node| {
-    if let AstNode::Definition(Definition::Function(func)) = node {
-        Some(func.clone())
-    } else {
-        None
-    }
-})
+// Usage via public wrapper: find all functions in source order
+let functions = arena.functions();  // internally calls list_nodes_cmp
 ```
 
 ## AST Construction Details

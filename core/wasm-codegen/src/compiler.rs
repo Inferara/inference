@@ -17,8 +17,11 @@
 //!
 //! The compiler operates in several stages:
 //!
-//! 1. **Function lowering** - Convert AST function definitions to WASM function bodies
-//! 2. **Statement lowering** - Translate control flow and non-deterministic blocks
+//! 1. **Function lowering** - Convert AST function definitions to WASM function bodies;
+//!    emit `unreachable` before function `end` for non-void functions so that WASM
+//!    validators accept functions whose all paths exit via explicit `return`
+//! 2. **Statement lowering** - Translate control flow (if/else), non-deterministic blocks,
+//!    variable and constant definitions, return, and expression statements
 //! 3. **Expression lowering** - Generate WASM instructions for expressions and literals
 //! 4. **Non-det emission** - Emit custom 0xfc-prefixed instructions for non-deterministic ops
 //! 5. **Module assembly** - Combine all sections into a valid WASM binary

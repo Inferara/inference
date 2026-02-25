@@ -279,7 +279,8 @@ Test data files are located at `<workspace_root>/tests/test_data/inf/`.
 
 ### Dependencies
 
-- **`inference`** - Main compiler library (parse, type_check, analyze, codegen, wasm_to_v)
+- **`inference`** - Main compiler library (`parse`, `type_check`, `analyze`, `wasm_to_v`)
+- **`inference-wasm-codegen`** - WebAssembly code generator (`codegen`, `Target`, `CompilationMode`, `OptLevel`)
 - **`clap`** - Command-line argument parsing
 - **`anyhow`** - Error handling
 
@@ -288,11 +289,14 @@ Test data files are located at `<workspace_root>/tests/test_data/inf/`.
 ```
 core/cli/
 ├── src/
-│   ├── main.rs     # Entry point and phase orchestration
-│   └── parser.rs   # CLI argument parsing with clap
+│   ├── main.rs              # Entry point and phase orchestration
+│   ├── parser.rs            # CLI argument parsing with clap
+│   └── toolchain/
+│       ├── mod.rs           # Toolchain module exports
+│       └── profile.rs       # BuildProfile enum and OptLevel resolution
 ├── tests/
-│   └── cli_integration.rs  # Integration tests
-└── README.md       # This file
+│   └── cli_integration.rs   # Integration tests
+└── README.md                # This file
 ```
 
 ### Phase Orchestration
@@ -305,7 +309,7 @@ The `main()` function coordinates the compilation pipeline:
 4. Execute phases in canonical order:
    - Parse: `inference::parse()`
    - Analyze: `inference::type_check()` + `inference::analyze()`
-   - Codegen: `inference::codegen()` + optional `inference::wasm_to_v()`
+   - Codegen: resolve `OptLevel` via `BuildProfile`, then `inference_wasm_codegen::codegen()` + optional `inference::wasm_to_v()`
 5. Generate output files (if requested)
 6. Exit with appropriate code
 

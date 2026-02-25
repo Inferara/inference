@@ -354,7 +354,7 @@ match TypeCheckerBuilder::build_typed_context(arena) {
 
 ### Understanding Error Types
 
-The type checker produces 29 different error variants. Here are the most common:
+The type checker produces 33 different error variants. Here are the most common:
 
 ```rust
 use inference_type_checker::errors::{
@@ -373,42 +373,47 @@ TypeCheckError::TypeMismatch {
     context: TypeMismatchContext::Return,
     location: Location { ... }
 }
-// Message: "expected `i32`, found `bool` in return statement"
+// Message: "1:5: type mismatch in return statement: expected `i32`, found `Bool`"
 
 // 2. Unknown Identifier
 TypeCheckError::UnknownIdentifier {
     name: "undefined_var".to_string(),
     location: Location { ... }
 }
-// Message: "use of undeclared variable `undefined_var`"
+// Message: "1:5: use of undeclared variable `undefined_var`"
 
 // 3. Undefined Function
 TypeCheckError::UndefinedFunction {
     name: "unknown_func".to_string(),
     location: Location { ... }
 }
-// Message: "call to undefined function `unknown_func`"
+// Message: "1:5: call to undefined function `unknown_func`"
 
-// 4. Visibility Violation
-TypeCheckError::VisibilityViolation {
+// 4. Private Access Violation
+TypeCheckError::PrivateAccessViolation {
     context: VisibilityContext::Function { name: "private_fn".to_string() },
     location: Location { ... }
 }
-// Message: "function `private_fn` is private"
+// Message: "1:5: cannot access private function `private_fn`"
 ```
 
 ### Error Location Information
 
-All errors include location information:
+All errors include location information. Use the `TypeCheckError::location()` accessor to
+retrieve it. The `Location` struct has flat fields (not nested structs):
 
 ```rust
-// Errors have a location field
+// Errors have a location field accessible via .location()
+let loc = error.location();
+println!("Error at {}:{}", loc.start_line, loc.start_column);
+
+// Or destructure the variant directly
 match error {
     TypeCheckError::TypeMismatch { location, .. } => {
-        println!("Error at {}:{}", location.start.line, location.start.column);
+        println!("Error at {}:{}", location.start_line, location.start_column);
     }
     TypeCheckError::UnknownIdentifier { location, .. } => {
-        println!("Error at {}:{}", location.start.line, location.start.column);
+        println!("Error at {}:{}", location.start_line, location.start_column);
     }
     // ... all variants have location
 }
@@ -867,6 +872,6 @@ fn type_check_files(files: &[String]) -> Vec<Result<TypedContext, anyhow::Error>
 ## Further Reading
 
 - [Architecture Documentation](./architecture.md) - Internal design details and implementation patterns
-- [Error Reference](./errors.md) - Complete catalog of all 29+ error types
+- [Error Reference](./errors.md) - Complete catalog of all 33 error variants
 - [Type System Reference](./type-system.md) - Complete type system rules and semantics
 - [Parent Project README](../README.md) - Overview and quick start guide
