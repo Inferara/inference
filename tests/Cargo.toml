@@ -9,7 +9,7 @@ repository = { workspace = true }
 [dependencies]
 anyhow.workspace = true
 serde_json = "1.0.99"
-wasmtime="41.0.3"
+wasmtime="42.0.0"
 
 inference-ast.workspace = true
 inference-wasm-codegen.workspace = true
@@ -19,6 +19,7 @@ inf-wasmparser.workspace = true
 tree-sitter.workspace = true
 tree-sitter-inference.workspace = true
 rustc-hash.workspace = true
+wasmprinter = "0.245.1"
 
 [dev-dependencies]
 cov-mark = { workspace = true, features = ["enable"] }

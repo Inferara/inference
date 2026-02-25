@@ -159,6 +159,26 @@ pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::pat
     path.join(test_name).join(format!("{test_name}.wasm"))
 }
 
+/// Automatically resolves a WAT test data file path based on the test's module path and name.
+///
+/// # Example
+/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
+/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.wat`
+///
+/// # Arguments
+/// * `module_path` - The module path (use `module_path!()`)
+/// * `test_name` - The test function name (without `_test` suffix)
+pub(crate) fn get_test_wat_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    let path_parts = get_test_path_parts(module_path);
+
+    let mut path = get_test_data_path();
+    for part in path_parts {
+        path = path.join(part);
+    }
+
+    path.join(test_name).join(format!("{test_name}.wat"))
+}
+
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {
     let parts: Vec<&str> = module_path.split("::").collect();
 
@@ -381,6 +401,36 @@ pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<u
             expected_count,
             struct_def.fields.len()
         );
+    }
+}
+
+/// Attempt to generate WAT from WASM bytes and write to disk.
+///
+/// Silently skips if `wasmprinter` fails (e.g. custom non-det opcodes).
+pub(crate) fn regenerate_wat(wasm_bytes: &[u8], dir: &std::path::Path, name: &str) {
+    if let Ok(wat) = wasmprinter::print_bytes(wasm_bytes) {
+        let wat_path = dir.join(format!("{name}.wat"));
+        std::fs::write(&wat_path, &wat)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wat_path.display()));
+        println!(
+            "Regenerated WAT: {} ({} bytes)",
+            wat_path.display(),
+            wat.len()
+        );
+    }
+}
+
+/// Assert WAT equivalence if a golden `.wat` file exists.
+///
+/// Skips silently if no `.wat` file exists (non-det modules).
+pub(crate) fn assert_wat_equivalence(wasm_bytes: &[u8], module_path: &str, test_name: &str) {
+    let wat_path = get_test_wat_path(module_path, test_name);
+    if wat_path.exists() {
+        let expected = std::fs::read_to_string(&wat_path)
+            .unwrap_or_else(|_| panic!("Failed to read WAT file: {wat_path:?}"));
+        let actual = wasmprinter::print_bytes(wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to print WAT for {test_name}: {e}"));
+        assert_eq!(expected, actual, "WAT mismatch for {test_name}");
     }
 }
 

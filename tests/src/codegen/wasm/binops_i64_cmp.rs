@@ -16,7 +16,8 @@
 #[cfg(test)]
 mod binops_i64_cmp_tests {
     use crate::utils::{
-        assert_wasms_modules_equivalence, get_test_file_path, get_test_wasm_path, wasm_codegen,
+        assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
+        get_test_wasm_path, regenerate_wat, wasm_codegen,
     };
 
     #[test]
@@ -33,6 +34,7 @@ mod binops_i64_cmp_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -186,6 +188,7 @@ mod binops_i64_cmp_tests {
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let wasm_path = get_test_wasm_path(module_path!(), test_name);
+        let dir = wasm_path.parent().unwrap();
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!(
@@ -193,5 +196,6 @@ mod binops_i64_cmp_tests {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, dir, test_name);
     }
 }
