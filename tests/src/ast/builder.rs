@@ -478,6 +478,55 @@ fn test_parse_variable_declaration_no_init() {
 }
 
 #[test]
+fn test_parse_variable_mutable() {
+    let source = r#"fn test() { let mut x: i32 = 42; }"#;
+    let arena = build_ast(source.to_string());
+    let var_defs = arena
+        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
+    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
+
+    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
+        assert_eq!(v.name.name, "x");
+        assert!(v.is_mut, "Variable declared with 'mut' should have is_mut == true");
+    } else {
+        panic!("Expected variable definition statement");
+    }
+}
+
+#[test]
+fn test_parse_variable_immutable() {
+    let source = r#"fn test() { let x: i32 = 42; }"#;
+    let arena = build_ast(source.to_string());
+    let var_defs = arena
+        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
+    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
+
+    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
+        assert_eq!(v.name.name, "x");
+        assert!(!v.is_mut, "Variable declared without 'mut' should have is_mut == false");
+    } else {
+        panic!("Expected variable definition statement");
+    }
+}
+
+#[test]
+fn test_parse_variable_mutable_no_init() {
+    let source = r#"fn test() { let mut y: i64; }"#;
+    let arena = build_ast(source.to_string());
+    let var_defs = arena
+        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
+    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
+
+    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
+        assert_eq!(v.name.name, "y");
+        assert!(v.is_mut, "Variable declared with 'mut' should have is_mut == true");
+        assert!(v.value.is_none(), "Uninitialized variable should have no value");
+    } else {
+        panic!("Expected variable definition statement");
+    }
+}
+
+#[test]
 fn test_parse_assignment() {
     let source = r#"fn test() { x = 10; }"#;
     let arena = build_ast(source.to_string());

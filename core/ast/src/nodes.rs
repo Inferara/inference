@@ -533,6 +533,7 @@ ast_nodes! {
 
     pub struct VariableDefinitionStatement {
         pub name: Rc<Identifier>,
+        pub is_mut: bool,
         pub ty: Type,
         pub value: Option<RefCell<Expression>>,
     }

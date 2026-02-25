@@ -571,6 +571,7 @@ impl VariableDefinitionStatement {
         id: u32,
         location: Location,
         name: Rc<Identifier>,
+        is_mut: bool,
         type_: Type,
         value: Option<Expression>,
     ) -> Self {
@@ -578,6 +579,7 @@ impl VariableDefinitionStatement {
             id,
             location,
             name,
+            is_mut,
             ty: type_,
             value: value.map(RefCell::new),
         }
