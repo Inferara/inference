@@ -672,6 +672,122 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn if_bool_exprs_test() {
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 16);
+        cov_mark::check_count!(wasm_codegen_emit_if_with_else, 5);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 32);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 4);
+        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 21);
+        let test_name = "if_bool_exprs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn if_bool_exprs_exec_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "if_bool_exprs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+            }};
+        }
+
+        // Group 1: Direct boolean parameters as conditions
+        call!("if_bool_param", i32, 1_i32, 1_i32);
+        call!("if_bool_param", i32, 0_i32, 0_i32);
+        call!("if_not_param", i32, 1_i32, 0_i32);
+        call!("if_not_param", i32, 0_i32, 1_i32);
+
+        // Group 2: Comparison + logical ops as conditions
+        call!("if_and", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_and", i32, (5_i32, -1_i32), 0_i32);
+        call!("if_and", i32, (-1_i32, 5_i32), 0_i32);
+        call!("if_and", i32, (-1_i32, -1_i32), 0_i32);
+        call!("if_or", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_or", i32, (5_i32, -1_i32), 1_i32);
+        call!("if_or", i32, (-1_i32, 5_i32), 1_i32);
+        call!("if_or", i32, (-1_i32, -1_i32), 0_i32);
+        call!("if_not_cmp", i32, 5_i32, 0_i32);
+        call!("if_not_cmp", i32, -1_i32, 1_i32);
+        call!("if_not_cmp", i32, 0_i32, 1_i32);
+
+        // Group 3: Complex nested boolean conditions
+        call!("if_and_or", i32, (1_i32, 5_i32, 0_i32), 1_i32);
+        call!("if_and_or", i32, (1_i32, 20_i32, 1_i32), 0_i32);
+        call!("if_and_or", i32, (-1_i32, 5_i32, 0_i32), 0_i32);
+        call!("if_or_and", i32, (1_i32, 0_i32, 0_i32), 1_i32);
+        call!("if_or_and", i32, (-1_i32, 1_i32, 1_i32), 1_i32);
+        call!("if_or_and", i32, (-1_i32, 1_i32, -1_i32), 0_i32);
+        call!("if_or_and", i32, (-1_i32, -1_i32, -1_i32), 0_i32);
+        call!("if_demorgan_and", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_demorgan_and", i32, (1_i32, 0_i32), 1_i32);
+        call!("if_demorgan_and", i32, (0_i32, 1_i32), 1_i32);
+        call!("if_demorgan_and", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_demorgan_or", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_demorgan_or", i32, (1_i32, 0_i32), 0_i32);
+        call!("if_demorgan_or", i32, (0_i32, 1_i32), 0_i32);
+        call!("if_demorgan_or", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_between", i32, (5_i32, 1_i32, 10_i32), 1_i32);
+        call!("if_between", i32, (0_i32, 1_i32, 10_i32), 0_i32);
+        call!("if_between", i32, (15_i32, 1_i32, 10_i32), 0_i32);
+        call!("if_between", i32, (1_i32, 1_i32, 10_i32), 1_i32);
+        call!("if_between", i32, (10_i32, 1_i32, 10_i32), 1_i32);
+
+        // Group 4: Boolean locals as conditions
+        call!("if_bool_local", i32, 5_i32, 1_i32);
+        call!("if_bool_local", i32, -1_i32, 0_i32);
+        call!("if_bool_local_complex", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_bool_local_complex", i32, (5_i32, -1_i32), 0_i32);
+
+        // Group 5: Boolean equality/inequality in conditions
+        call!("if_bool_eq", i32, (1_i32, 1_i32), 1_i32);
+        call!("if_bool_eq", i32, (1_i32, 0_i32), 0_i32);
+        call!("if_bool_eq", i32, (0_i32, 1_i32), 0_i32);
+        call!("if_bool_eq", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_bool_ne", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_bool_ne", i32, (1_i32, 0_i32), 1_i32);
+        call!("if_bool_ne", i32, (0_i32, 1_i32), 1_i32);
+        call!("if_bool_ne", i32, (0_i32, 0_i32), 0_i32);
+
+        // Group 6: Boolean return from conditionals
+        call!("cond_returns_bool", i32, 5_i32, 1_i32);
+        call!("cond_returns_bool", i32, -1_i32, 0_i32);
+
+        // Group 7: If-else with complex condition and value-producing arms
+        call!("if_else_complex", i32, (5_i32, 5_i32), 5_i32);
+        call!("if_else_complex", i32, (-1_i32, 5_i32), 5_i32);
+        call!("if_else_complex", i32, (5_i32, -1_i32), -1_i32);
+    }
+
+    #[test]
     fn soroban_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
@@ -956,6 +1072,25 @@ mod regenerate {
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("if_else.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_if_bool_exprs_wasm() {
+        let dir = base_test_dir().join("if_bool_exprs");
+        let source_code = std::fs::read_to_string(dir.join("if_bool_exprs.inf"))
+            .expect("Failed to read if_bool_exprs.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("if_bool_exprs.wasm");
         std::fs::write(&wasm_path, &actual)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
         println!(
