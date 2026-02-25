@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add assignment statement lowering to WebAssembly codegen ([#146])
+  - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
+  - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
+  - `lower_assign_statement()` emits `lower_expression(rhs)` + `LocalSet` for identifier targets
+  - Mutable function parameters (`fn f(mut a: i32)`) supported
+  - Number literal type propagation in assignments: `x = 42;` where `x: i64` correctly infers `42` as `i64`
+  - Non-identifier targets (member access, array index) deferred to compound type support
 - Add conditional statement lowering (`if`/`else`) to WebAssembly codegen ([#144])
   - `if`/`else` lowered to WASM structured control flow (`If`/`Else`/`End` with `BlockType::Empty`)
   - `pre_scan_locals` recurses into both if and else arms to declare locals upfront (WASM requirement)
@@ -73,6 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Add 2 assignment test fixtures with 10 Wasmtime execution assertions ([#146])
+  - `assign.inf`: 10 functions covering simple i32/i64 assignment, expression RHS, parameter assignment, multiple reassignment, function call RHS, bool assignment, assignment inside conditional, mutable parameter assignment
+  - `assign_nondet.inf`: assignment inside `forall` non-det block with uzumaki RHS
+  - AST parse tests for `is_mut` flag on `VariableDefinitionStatement`
+  - Type-checker tests for mutability enforcement (immutable, mutable, parameter mutability)
 - Add WAT golden file testing with `wasmprinter` for human-readable codegen verification ([#144])
   - `assert_wat_equivalence()` compares generated WAT against committed `.wat` reference files
   - `regenerate_wat()` writes WAT alongside WASM during test data regeneration
@@ -349,3 +361,4 @@ Initial tagged release.
 [#140]: https://github.com/Inferara/inference/pull/140
 [#142]: https://github.com/Inferara/inference/pull/142
 [#144]: https://github.com/Inferara/inference/pull/144
+[#146]: https://github.com/Inferara/inference/pull/146

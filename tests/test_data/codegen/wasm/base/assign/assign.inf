@@ -1,0 +1,59 @@
+pub fn assign_simple_i32() -> i32 {
+    let mut x: i32 = 0;
+    x = 42;
+    return x;
+}
+
+pub fn assign_simple_i64() -> i64 {
+    let mut x: i64 = 0;
+    x = 42;
+    return x;
+}
+
+pub fn assign_from_expr() -> i32 {
+    let mut x: i32 = 0;
+    x = 1 + 2;
+    return x;
+}
+
+pub fn assign_from_param(a: i32) -> i32 {
+    let mut x: i32 = 0;
+    x = a;
+    return x;
+}
+
+pub fn assign_multiple() -> i32 {
+    let mut x: i32 = 1;
+    x = 2;
+    x = 3;
+    return x;
+}
+
+fn get_three() -> i32 {
+    return 3;
+}
+
+pub fn assign_from_call() -> i32 {
+    let mut x: i32 = 0;
+    x = get_three();
+    return x;
+}
+
+pub fn assign_bool() -> bool {
+    let mut flag: bool = false;
+    flag = true;
+    return flag;
+}
+
+pub fn assign_in_if(x: i32) -> i32 {
+    let mut result: i32 = 0;
+    if x > 0 {
+        result = x;
+    }
+    return result;
+}
+
+pub fn assign_param_mut(mut a: i32) -> i32 {
+    a = 99;
+    return a;
+}
