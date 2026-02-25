@@ -63,9 +63,9 @@ use std::iter::Peekable;
 use std::rc::Rc;
 
 use inference_ast::nodes::{
-    ArgumentType, BinaryExpression, BlockType, Expression, FunctionDefinition, Literal,
-    OperatorKind, PrefixUnaryExpression, SimpleTypeKind, Statement, Type, UnaryOperatorKind,
-    Visibility,
+    ArgumentType, AssignStatement, BinaryExpression, BlockType, Expression, FunctionDefinition,
+    Literal, OperatorKind, PrefixUnaryExpression, SimpleTypeKind, Statement, Type,
+    UnaryOperatorKind, Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -415,6 +415,7 @@ impl Compiler {
     /// - **Block types** (regular, forall, exists, assume, unique) - Recursively lower
     ///   nested statements with appropriate custom instruction encoding
     /// - **Expression statements** - Evaluate expressions
+    /// - **Assignment statements** - Store expression result to a mutable local variable
     /// - **Return statements** - Generate WASM return instructions
     /// - **Constant definitions** - Initialize locals with compile-time literal values
     /// - **Variable definitions** - Initialize locals with any value-producing expression
@@ -541,7 +542,9 @@ impl Compiler {
                     }
                 }
             }
-            Statement::Assign(_assign_statement) => todo!(),
+            Statement::Assign(assign_statement) => {
+                self.lower_assign_statement(&assign_statement, ctx, func, locals_map);
+            }
             Statement::Return(return_statement) => {
                 self.lower_expression(&return_statement.expression.borrow(), ctx, func, locals_map);
                 func.instruction(&Instruction::Return);
@@ -730,6 +733,53 @@ impl Compiler {
 
         func.instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Lowers an assignment statement to WASM instructions.
+    ///
+    /// # WASM encoding
+    ///
+    /// For `x = expr;` where `x` is a local variable:
+    /// ```text
+    /// lower_expression(right)    // push value onto WASM operand stack
+    /// LocalSet(target_idx)       // pop value and store to local
+    /// ```
+    ///
+    /// This is identical to variable definition initialization -- the difference is that
+    /// the local index is resolved from the LHS identifier rather than from a
+    /// `VariableDefinitionStatement.name()`.
+    ///
+    /// # Supported Targets
+    ///
+    /// Only `Expression::Identifier` targets are currently supported. Member access and
+    /// array index targets require memory operations and are deferred to compound type support.
+    ///
+    /// # Parameters
+    ///
+    /// - `assign_stmt` - The assignment statement AST node to lower
+    /// - `ctx` - Typed context for type information lookup
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    fn lower_assign_statement(
+        &self,
+        assign_stmt: &AssignStatement,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) {
+        let left = assign_stmt.left.borrow();
+        match &*left {
+            Expression::Identifier(identifier) => {
+                cov_mark::hit!(wasm_codegen_emit_assign_identifier);
+                let (local_idx, _) = locals_map
+                    .get(&identifier.name)
+                    .expect("Assignment target variable not found");
+                let local_idx = *local_idx;
+                self.lower_expression(&assign_stmt.right.borrow(), ctx, func, locals_map);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+            _ => todo!("Assignment to non-identifier targets (member access, array index) not yet supported"),
+        }
     }
 
     /// Lowers an `if`/`else` statement to WASM structured control flow.
