@@ -69,8 +69,8 @@ use inference_type_checker::{
     typed_context::TypedContext,
 };
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, Function, FunctionSection, IndirectNameMap,
-    Instruction, Module, NameMap, NameSection, TypeSection, ValType,
+    BlockType as WasmBlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection,
+    IndirectNameMap, Instruction, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -260,6 +260,8 @@ impl Compiler {
         // WASM requires declaring only the additional (non-param) locals in Function::new().
         let param_count = local_idx;
 
+        let has_return_value = !results.is_empty();
+
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
@@ -303,6 +305,16 @@ impl Compiler {
             &mut func,
             &locals_map,
         );
+
+        // For functions with a non-void return type, emit `unreachable` before the function
+        // body's `end` instruction. This satisfies WASM validators when all control-flow paths
+        // inside the function exit via explicit `return` instructions (e.g. if/else where both
+        // arms return). The `unreachable` instruction is dead code in that case and never
+        // executes at runtime. For void functions the instruction is omitted since they do not
+        // require any value on the stack at `end`.
+        if has_return_value {
+            func.instruction(&Instruction::Unreachable);
+        }
 
         func.instruction(&Instruction::End);
 
@@ -378,6 +390,12 @@ impl Compiler {
                 Statement::Block(inner_block) => {
                     Self::pre_scan_locals(inner_block, ctx, locals_map, local_idx);
                 }
+                Statement::If(if_statement) => {
+                    Self::pre_scan_locals(&if_statement.if_arm, ctx, locals_map, local_idx);
+                    if let Some(else_arm) = &if_statement.else_arm {
+                        Self::pre_scan_locals(else_arm, ctx, locals_map, local_idx);
+                    }
+                }
                 _ => {}
             }
         }
@@ -397,6 +415,7 @@ impl Compiler {
     /// - **Return statements** - Generate WASM return instructions
     /// - **Constant definitions** - Initialize locals with compile-time literal values
     /// - **Variable definitions** - Initialize locals with any value-producing expression
+    /// - **If statements** - Conditional branching with optional else arm
     ///
     /// # Non-Deterministic Blocks
     ///
@@ -526,7 +545,9 @@ impl Compiler {
             }
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
-            Statement::If(_if_statement) => todo!(),
+            Statement::If(if_statement) => {
+                self.lower_if_statement(&if_statement, ctx, func, locals_map, parent_blocks_stack);
+            }
             Statement::VariableDefinition(variable_definition_statement) => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
                 let (local_idx, _) = locals_map
@@ -706,6 +727,79 @@ impl Compiler {
 
         func.instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Lowers an `if`/`else` statement to WASM structured control flow.
+    ///
+    /// # WASM encoding
+    ///
+    /// For `if cond { ... }` (no else arm):
+    /// ```text
+    /// lower_expression(condition)   // leaves i32 (0 or 1) on stack
+    /// If(BlockType::Empty)          // 0x04 0x40
+    ///   lower statements in if_arm
+    /// End                           // 0x0b
+    /// ```
+    ///
+    /// For `if cond { ... } else { ... }`:
+    /// ```text
+    /// lower_expression(condition)   // leaves i32 (0 or 1) on stack
+    /// If(BlockType::Empty)          // 0x04 0x40
+    ///   lower statements in if_arm
+    /// Else                          // 0x05
+    ///   lower statements in else_arm
+    /// End                           // 0x0b
+    /// ```
+    ///
+    /// `BlockType::Empty` is correct because Inference `if`/`else` is a statement, not an
+    /// expression — it does not produce a value on the WASM operand stack.
+    ///
+    /// # Parameters
+    ///
+    /// - `if_stmt` - The if statement AST node to lower
+    /// - `ctx` - Typed context for type information lookup
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    /// - `parent_blocks_stack` - Stack tracking enclosing block contexts (passed through to nested
+    ///   statement lowering)
+    fn lower_if_statement(
+        &self,
+        if_stmt: &inference_ast::nodes::IfStatement,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        parent_blocks_stack: &mut Vec<BlockType>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_if_statement);
+
+        self.lower_expression(&if_stmt.condition.borrow(), ctx, func, locals_map);
+        func.instruction(&Instruction::If(WasmBlockType::Empty));
+
+        for stmt in if_stmt.if_arm.statements() {
+            self.lower_statement(
+                std::iter::once(stmt).peekable(),
+                parent_blocks_stack,
+                ctx,
+                func,
+                locals_map,
+            );
+        }
+
+        if let Some(else_arm) = &if_stmt.else_arm {
+            cov_mark::hit!(wasm_codegen_emit_if_with_else);
+            func.instruction(&Instruction::Else);
+            for stmt in else_arm.statements() {
+                self.lower_statement(
+                    std::iter::once(stmt).peekable(),
+                    parent_blocks_stack,
+                    ctx,
+                    func,
+                    locals_map,
+                );
+            }
+        }
+
+        func.instruction(&Instruction::End);
     }
 
     /// Returns `true` if `kind` is an unsigned integer type.

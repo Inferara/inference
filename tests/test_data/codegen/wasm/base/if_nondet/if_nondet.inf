@@ -1,0 +1,8 @@
+pub fn if_inside_forall() {
+    forall {
+        const x: i32 = 42;
+        if x > 0 {
+            const y: i32 = 1;
+        }
+    }
+}

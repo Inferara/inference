@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod base_codegen_tests {
     use crate::utils::{
-        assert_wasms_modules_equivalence, get_test_file_path, get_test_wasm_path, wasm_codegen,
-        wasm_codegen_with_target,
+        assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
+        get_test_wasm_path, wasm_codegen, wasm_codegen_with_target,
     };
 
     #[test]
@@ -16,6 +16,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -29,6 +30,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -79,6 +81,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -95,6 +98,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -108,6 +112,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -121,6 +126,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -170,6 +176,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -219,6 +226,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -235,6 +243,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -248,6 +257,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -365,6 +375,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -446,6 +457,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -530,6 +542,7 @@ mod base_codegen_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -594,6 +607,203 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn if_else_test() {
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 7);
+        cov_mark::check_count!(wasm_codegen_emit_if_with_else, 2);
+        let test_name = "if_else";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn if_else_exec_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "if_else";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+            }};
+        }
+
+        call!("if_only", i32, 5_i32, 1_i32);
+        call!("if_only", i32, -1_i32, 0_i32);
+        call!("if_else_branch", i32, 5_i32, 1_i32);
+        call!("if_else_branch", i32, -1_i32, 0_i32);
+        call!("if_with_local", i32, 3_i32, 3_i32);
+        call!("if_with_local", i32, -1_i32, 0_i32);
+        call!("if_else_with_local", i32, 3_i32, 3_i32);
+        call!("if_else_with_local", i32, -1_i32, -1_i32);
+        call!("nested_if", i32, (1_i32, 1_i32), 2_i32);
+        call!("nested_if", i32, (1_i32, -1_i32), 1_i32);
+        call!("nested_if", i32, (-1_i32, 1_i32), 0_i32);
+        call!("if_void", (), 5_i32, ());
+        call!("if_void", (), -1_i32, ());
+    }
+
+    #[test]
+    fn if_nondet_test() {
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 1);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 1);
+        let test_name = "if_nondet";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn if_bool_exprs_test() {
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 16);
+        cov_mark::check_count!(wasm_codegen_emit_if_with_else, 5);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 32);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 4);
+        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 21);
+        let test_name = "if_bool_exprs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn if_bool_exprs_exec_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "if_bool_exprs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+            }};
+        }
+
+        // Group 1: Direct boolean parameters as conditions
+        call!("if_bool_param", i32, 1_i32, 1_i32);
+        call!("if_bool_param", i32, 0_i32, 0_i32);
+        call!("if_not_param", i32, 1_i32, 0_i32);
+        call!("if_not_param", i32, 0_i32, 1_i32);
+
+        // Group 2: Comparison + logical ops as conditions
+        call!("if_and", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_and", i32, (5_i32, -1_i32), 0_i32);
+        call!("if_and", i32, (-1_i32, 5_i32), 0_i32);
+        call!("if_and", i32, (-1_i32, -1_i32), 0_i32);
+        call!("if_or", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_or", i32, (5_i32, -1_i32), 1_i32);
+        call!("if_or", i32, (-1_i32, 5_i32), 1_i32);
+        call!("if_or", i32, (-1_i32, -1_i32), 0_i32);
+        call!("if_not_cmp", i32, 5_i32, 0_i32);
+        call!("if_not_cmp", i32, -1_i32, 1_i32);
+        call!("if_not_cmp", i32, 0_i32, 1_i32);
+
+        // Group 3: Complex nested boolean conditions
+        call!("if_and_or", i32, (1_i32, 5_i32, 0_i32), 1_i32);
+        call!("if_and_or", i32, (1_i32, 20_i32, 1_i32), 0_i32);
+        call!("if_and_or", i32, (-1_i32, 5_i32, 0_i32), 0_i32);
+        call!("if_or_and", i32, (1_i32, 0_i32, 0_i32), 1_i32);
+        call!("if_or_and", i32, (-1_i32, 1_i32, 1_i32), 1_i32);
+        call!("if_or_and", i32, (-1_i32, 1_i32, -1_i32), 0_i32);
+        call!("if_or_and", i32, (-1_i32, -1_i32, -1_i32), 0_i32);
+        call!("if_demorgan_and", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_demorgan_and", i32, (1_i32, 0_i32), 1_i32);
+        call!("if_demorgan_and", i32, (0_i32, 1_i32), 1_i32);
+        call!("if_demorgan_and", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_demorgan_or", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_demorgan_or", i32, (1_i32, 0_i32), 0_i32);
+        call!("if_demorgan_or", i32, (0_i32, 1_i32), 0_i32);
+        call!("if_demorgan_or", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_between", i32, (5_i32, 1_i32, 10_i32), 1_i32);
+        call!("if_between", i32, (0_i32, 1_i32, 10_i32), 0_i32);
+        call!("if_between", i32, (15_i32, 1_i32, 10_i32), 0_i32);
+        call!("if_between", i32, (1_i32, 1_i32, 10_i32), 1_i32);
+        call!("if_between", i32, (10_i32, 1_i32, 10_i32), 1_i32);
+
+        // Group 4: Boolean locals as conditions
+        call!("if_bool_local", i32, 5_i32, 1_i32);
+        call!("if_bool_local", i32, -1_i32, 0_i32);
+        call!("if_bool_local_complex", i32, (5_i32, 5_i32), 1_i32);
+        call!("if_bool_local_complex", i32, (5_i32, -1_i32), 0_i32);
+
+        // Group 5: Boolean equality/inequality in conditions
+        call!("if_bool_eq", i32, (1_i32, 1_i32), 1_i32);
+        call!("if_bool_eq", i32, (1_i32, 0_i32), 0_i32);
+        call!("if_bool_eq", i32, (0_i32, 1_i32), 0_i32);
+        call!("if_bool_eq", i32, (0_i32, 0_i32), 1_i32);
+        call!("if_bool_ne", i32, (1_i32, 1_i32), 0_i32);
+        call!("if_bool_ne", i32, (1_i32, 0_i32), 1_i32);
+        call!("if_bool_ne", i32, (0_i32, 1_i32), 1_i32);
+        call!("if_bool_ne", i32, (0_i32, 0_i32), 0_i32);
+
+        // Group 6: Boolean return from conditionals
+        call!("cond_returns_bool", i32, 5_i32, 1_i32);
+        call!("cond_returns_bool", i32, -1_i32, 0_i32);
+
+        // Group 7: If-else with complex condition and value-producing arms
+        call!("if_else_complex", i32, (5_i32, 5_i32), 5_i32);
+        call!("if_else_complex", i32, (-1_i32, 5_i32), 5_i32);
+        call!("if_else_complex", i32, (5_i32, -1_i32), -1_i32);
+    }
+
+    #[test]
     fn soroban_produces_valid_wasm() {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
@@ -625,7 +835,7 @@ mod base_codegen_tests {
 /// byte-different WASM output (e.g., after architecture refactoring).
 #[cfg(test)]
 mod regenerate {
-    use crate::utils::{get_test_data_path, wasm_codegen};
+    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen};
 
     /// Base directory for codegen/wasm/base test data.
     fn base_test_dir() -> std::path::PathBuf {
@@ -650,6 +860,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "trivial");
     }
 
     #[test]
@@ -667,6 +878,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "const");
     }
 
     #[test]
@@ -686,6 +898,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "nondet");
     }
 
     #[test]
@@ -705,6 +918,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "i64_uzumaki");
     }
 
     #[test]
@@ -722,6 +936,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "bool_literal");
     }
 
     #[test]
@@ -739,6 +954,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "mixed_visibility");
     }
 
     #[test]
@@ -756,6 +972,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "bool_const");
     }
 
     #[test]
@@ -773,6 +990,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "numeric_literals");
     }
 
     #[test]
@@ -792,6 +1010,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "local_variables");
     }
 
     #[test]
@@ -809,6 +1028,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "local_variables_exec");
     }
 
     #[test]
@@ -828,6 +1048,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "fn_params");
     }
 
     #[test]
@@ -847,6 +1068,7 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "binary_ops");
     }
 
     #[test]
@@ -866,5 +1088,66 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "fn_calls");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_if_else_wasm() {
+        let dir = base_test_dir().join("if_else");
+        let source_code =
+            std::fs::read_to_string(dir.join("if_else.inf")).expect("Failed to read if_else.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("if_else.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "if_else");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_if_bool_exprs_wasm() {
+        let dir = base_test_dir().join("if_bool_exprs");
+        let source_code = std::fs::read_to_string(dir.join("if_bool_exprs.inf"))
+            .expect("Failed to read if_bool_exprs.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("if_bool_exprs.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "if_bool_exprs");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_if_nondet_wasm() {
+        let dir = base_test_dir().join("if_nondet");
+        let source_code = std::fs::read_to_string(dir.join("if_nondet.inf"))
+            .expect("Failed to read if_nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("if_nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "if_nondet");
     }
 }

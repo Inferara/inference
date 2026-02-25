@@ -19,7 +19,8 @@
 #[cfg(test)]
 mod binops_sub_i32_tests {
     use crate::utils::{
-        assert_wasms_modules_equivalence, get_test_file_path, get_test_wasm_path, wasm_codegen,
+        assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
+        get_test_wasm_path, wasm_codegen,
     };
 
     #[test]
@@ -36,6 +37,7 @@ mod binops_sub_i32_tests {
         let expected = std::fs::read(&expected)
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
     }
 
     #[test]
@@ -126,7 +128,7 @@ mod binops_sub_i32_tests {
 
 #[cfg(test)]
 mod regenerate {
-    use crate::utils::{get_test_data_path, wasm_codegen};
+    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen};
 
     fn test_dir() -> std::path::PathBuf {
         get_test_data_path()
@@ -153,5 +155,6 @@ mod regenerate {
             wasm_path.display(),
             actual.len()
         );
+        regenerate_wat(&actual, &dir, "binops_sub_i32");
     }
 }

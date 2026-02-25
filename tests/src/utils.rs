@@ -119,44 +119,76 @@ pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
     output.wasm().to_vec()
 }
 
+/// Build the test directory path. When the last module path component equals test_name,
+/// the file lives directly in that directory (no extra subdirectory).
+///
+/// # Examples
+/// - module `codegen::wasm::base` + test_name `"trivial"` -> `.../base/trivial/`
+/// - module `codegen::wasm::binops_bool` + test_name `"binops_bool"` -> `.../binops_bool/`
+fn get_test_dir(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    let path_parts = get_test_path_parts(module_path);
+
+    let mut path = get_test_data_path();
+    for part in &path_parts {
+        path = path.join(part);
+    }
+
+    if path_parts.last() != Some(&test_name) {
+        path = path.join(test_name);
+    }
+
+    path
+}
+
 /// Automatically resolves a test data file path based on the test's module path and name.
 ///
-/// # Example
-/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.inf`
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.inf`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.inf`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
 /// * `test_name` - The test function name (without `_test` suffix)
 pub(crate) fn get_test_file_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
-    let path_parts = get_test_path_parts(module_path);
-
-    let mut path = get_test_data_path();
-    for part in path_parts {
-        path = path.join(part);
-    }
-
-    path.join(test_name).join(format!("{test_name}.inf"))
+    get_test_dir(module_path, test_name).join(format!("{test_name}.inf"))
 }
 
 /// Automatically resolves a WASM test data file path based on the test's module path and name.
 ///
-/// # Example
-/// For a test at `tests/src/codegen/wasm/base.rs::trivial_test`,
-/// this will resolve to `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.wasm`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.wasm`
 ///
 /// # Arguments
 /// * `module_path` - The module path (use `module_path!()`)
 /// * `test_name` - The test function name (without `_test` suffix)
 pub(crate) fn get_test_wasm_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
-    let path_parts = get_test_path_parts(module_path);
+    get_test_dir(module_path, test_name).join(format!("{test_name}.wasm"))
+}
 
-    let mut path = get_test_data_path();
-    for part in path_parts {
-        path = path.join(part);
-    }
-
-    path.join(test_name).join(format!("{test_name}.wasm"))
+/// Automatically resolves a WAT test data file path based on the test's module path and name.
+///
+/// When the last module path component equals the test name, no extra subdirectory is added.
+///
+/// # Examples
+/// - `tests/src/codegen/wasm/base.rs::trivial_test`
+///   -> `tests/test_data/codegen/wasm/base/trivial/trivial.wat`
+/// - `tests/src/codegen/wasm/binops_bool.rs::binops_bool_test`
+///   -> `tests/test_data/codegen/wasm/binops_bool/binops_bool.wat`
+///
+/// # Arguments
+/// * `module_path` - The module path (use `module_path!()`)
+/// * `test_name` - The test function name (without `_test` suffix)
+pub(crate) fn get_test_wat_path(module_path: &str, test_name: &str) -> std::path::PathBuf {
+    get_test_dir(module_path, test_name).join(format!("{test_name}.wat"))
 }
 
 fn get_test_path_parts(module_path: &str) -> Vec<&str> {
@@ -381,6 +413,38 @@ pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<u
             expected_count,
             struct_def.fields.len()
         );
+    }
+}
+
+/// Attempt to generate WAT from WASM bytes and write to disk.
+///
+/// Silently skips if `wasmprinter` fails (e.g. custom non-det opcodes).
+pub(crate) fn regenerate_wat(wasm_bytes: &[u8], dir: &std::path::Path, name: &str) {
+    if let Ok(wat) = wasmprinter::print_bytes(wasm_bytes) {
+        let wat_path = dir.join(format!("{name}.wat"));
+        std::fs::write(&wat_path, &wat)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wat_path.display()));
+        println!(
+            "Regenerated WAT: {} ({} bytes)",
+            wat_path.display(),
+            wat.len()
+        );
+    }
+}
+
+/// Assert WAT equivalence if a golden `.wat` file exists.
+///
+/// Skips silently if no `.wat` file exists (non-det modules).
+pub(crate) fn assert_wat_equivalence(wasm_bytes: &[u8], module_path: &str, test_name: &str) {
+    let wat_path = get_test_wat_path(module_path, test_name);
+    if wat_path.exists() {
+        let expected = std::fs::read_to_string(&wat_path)
+            .unwrap_or_else(|_| panic!("Failed to read WAT file: {wat_path:?}"));
+        let actual = wasmprinter::print_bytes(wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to print WAT for {test_name}: {e}"));
+        let expected = expected.replace("\r\n", "\n");
+        let actual = actual.replace("\r\n", "\n");
+        assert_eq!(expected, actual, "WAT mismatch for {test_name}");
     }
 }
 
