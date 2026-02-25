@@ -442,6 +442,8 @@ pub(crate) fn assert_wat_equivalence(wasm_bytes: &[u8], module_path: &str, test_
             .unwrap_or_else(|_| panic!("Failed to read WAT file: {wat_path:?}"));
         let actual = wasmprinter::print_bytes(wasm_bytes)
             .unwrap_or_else(|e| panic!("Failed to print WAT for {test_name}: {e}"));
+        let expected = expected.replace("\r\n", "\n");
+        let actual = actual.replace("\r\n", "\n");
         assert_eq!(expected, actual, "WAT mismatch for {test_name}");
     }
 }
