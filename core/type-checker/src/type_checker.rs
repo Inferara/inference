@@ -158,8 +158,8 @@ impl TypeChecker {
 
                             let param_types: Vec<TypeInfo> = method
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -179,8 +179,8 @@ impl TypeChecker {
 
                             let type_params: Vec<String> = method
                                 .type_parameters
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .map(|p| p.name())
                                 .collect();
@@ -262,7 +262,9 @@ impl TypeChecker {
             for definition in &sf.definitions {
                 match definition {
                     Definition::Constant(constant_definition) => {
-                        let const_type = TypeInfo::new(&constant_definition.ty);
+                        let const_type = self
+                            .symbol_table
+                            .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
                             const_type.clone(),
@@ -278,7 +280,7 @@ impl TypeChecker {
                         ctx.set_node_typeinfo(constant_definition.value.id(), const_type);
                     }
                     Definition::Function(function_definition) => {
-                        for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
+                        for param in function_definition.arguments.as_deref().unwrap_or(&[]) {
                             match param {
                                 ArgumentType::SelfReference(self_ref) => {
                                     self.errors.push(TypeCheckError::SelfReferenceInFunction {
@@ -336,15 +338,15 @@ impl TypeChecker {
                             &function_definition.name(),
                             function_definition
                                 .type_parameters
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .map(|param| param.name())
                                 .collect::<Vec<_>>(),
                             &function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -375,8 +377,8 @@ impl TypeChecker {
                             vec![],
                             &external_function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -494,7 +496,9 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
-                        let arg_type = TypeInfo::new_with_type_params(&arg.ty, &type_param_names);
+                        let arg_type = self.symbol_table.resolve_custom_type(
+                            TypeInfo::new_with_type_params(&arg.ty, &type_param_names),
+                        );
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &arg.name(),
                             arg_type,
@@ -544,9 +548,11 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
+                        let arg_type =
+                            self.symbol_table.resolve_custom_type(TypeInfo::new(&arg.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &arg.name(),
-                            TypeInfo::new(&arg.ty),
+                            arg_type,
                             arg.is_mut,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
@@ -730,7 +736,9 @@ impl TypeChecker {
                 }
             }
             Statement::VariableDefinition(variable_definition_statement) => {
-                let target_type = TypeInfo::new(&variable_definition_statement.ty);
+                let target_type = self
+                    .symbol_table
+                    .resolve_custom_type(TypeInfo::new(&variable_definition_statement.ty));
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Literal(Literal::Number(num_lit)) = &*expr_ref {
@@ -739,7 +747,7 @@ impl TypeChecker {
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
-                        && init_type != TypeInfo::new(&variable_definition_statement.ty)
+                        && self.symbol_table.resolve_custom_type(init_type.clone()) != target_type
                     {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: target_type.clone(),
@@ -751,7 +759,7 @@ impl TypeChecker {
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &variable_definition_statement.name(),
-                    TypeInfo::new(&variable_definition_statement.ty),
+                    target_type.clone(),
                     variable_definition_statement.is_mut,
                 ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
@@ -793,7 +801,9 @@ impl TypeChecker {
                 }
             }
             Statement::ConstantDefinition(constant_definition) => {
-                let constant_type = TypeInfo::new(&constant_definition.ty);
+                let constant_type = self
+                    .symbol_table
+                    .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &constant_definition.name(),
                     constant_type.clone(),
@@ -1728,9 +1738,12 @@ impl TypeChecker {
                         self.infer_variables(function_definition.clone(), ctx);
                     }
                     Definition::Constant(constant_definition) => {
+                        let const_type = self
+                            .symbol_table
+                            .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
-                            TypeInfo::new(&constant_definition.ty),
+                            const_type,
                             false,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
@@ -1747,8 +1760,8 @@ impl TypeChecker {
                             vec![],
                             &external_function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,

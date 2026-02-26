@@ -598,7 +598,7 @@ impl SymbolTable {
     /// by looking up the name in the symbol table. Falls through to `Custom`
     /// if the name is not found (e.g., forward references in nested modules).
     /// Recurses into array element types.
-    fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
+    pub(crate) fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
         match &ti.kind {
             TypeInfoKind::Custom(name) => {
                 if self.lookup_struct(name).is_some() {
@@ -952,8 +952,8 @@ impl SymbolTable {
                     .unwrap_or_default();
                 let param_types: Vec<_> = f
                     .arguments
-                    .as_ref()
-                    .unwrap_or(&vec![])
+                    .as_deref()
+                    .unwrap_or(&[])
                     .iter()
                     .filter_map(|a| match a {
                         ArgumentType::Argument(arg) => Some(arg.ty.clone()),
@@ -1355,7 +1355,6 @@ mod tests {
                 signature: FuncInfo {
                     name: "get_value".to_string(),
                     type_params: vec![],
-
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
@@ -1374,7 +1373,6 @@ mod tests {
                 signature: FuncInfo {
                     name: "new".to_string(),
                     type_params: vec![],
-
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Public,
@@ -1435,7 +1433,6 @@ mod tests {
                 signature: FuncInfo {
                     name: "test".to_string(),
                     type_params: vec![],
-
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
@@ -1449,7 +1446,6 @@ mod tests {
                 signature: FuncInfo {
                     name: "test".to_string(),
                     type_params: vec![],
-
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
