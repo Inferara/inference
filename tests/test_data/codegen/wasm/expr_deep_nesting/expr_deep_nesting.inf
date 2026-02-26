@@ -1,0 +1,23 @@
+pub fn nest_8_add() -> i32 {
+    return ((((((((1 + 2) + 3) + 4) + 5) + 6) + 7) + 8) + 9);
+}
+
+pub fn nest_mixed_ops(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    return ((a + b) * (c - d)) + ((a - b) * (c + d));
+}
+
+pub fn nest_comparison(a: i32, b: i32, c: i32, d: i32) -> bool {
+    return (a > b) && ((c < d) || (a == c));
+}
+
+fn helper_square(x: i32) -> i32 {
+    return x * x;
+}
+
+pub fn nest_call_in_expr(x: i32) -> i32 {
+    return (helper_square(x) + helper_square(x + 1)) * 2;
+}
+
+pub fn nest_unary_deep() -> i32 {
+    return -(-(-(-1)));
+}

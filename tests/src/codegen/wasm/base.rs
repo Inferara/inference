@@ -230,6 +230,50 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn numeric_literals_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "numeric_literals";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+            }};
+        }
+
+        // Signed types return as i32 (sub-i32 types promoted)
+        call!("signed_i8", i32, (), -128_i32);
+        call!("signed_i16", i32, (), -32768_i32);
+        call!("signed_i32", i32, (), i32::MIN);
+        call!("signed_i64", i64, (), i64::MIN);
+
+        // Unsigned types: sub-i32 promoted to i32, u32/u64 bit-reinterpreted
+        call!("unsigned_u8", i32, (), 255_i32);
+        call!("unsigned_u16", i32, (), 65535_i32);
+        // u32::MAX (4294967295) is bit-reinterpreted as i32(-1)
+        call!("unsigned_u32", i32, (), -1_i32);
+        // u64::MAX is bit-reinterpreted as i64(-1)
+        call!("unsigned_u64", i64, (), -1_i64);
+    }
+
+    #[test]
     fn local_variables_test() {
         cov_mark::check_count!(wasm_codegen_emit_variable_definition, 14);
         let test_name = "local_variables";

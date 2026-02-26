@@ -1,0 +1,42 @@
+pub fn i32_max_plus_one() -> i32 {
+    const max: i32 = 2147483647;
+    return max + 1;
+}
+
+pub fn i32_min_minus_one() -> i32 {
+    const min: i32 = -2147483648;
+    return min - 1;
+}
+
+pub fn i64_max_plus_one() -> i64 {
+    const max: i64 = 9223372036854775807;
+    const one: i64 = 1;
+    return max + one;
+}
+
+pub fn i64_min_minus_one() -> i64 {
+    const min: i64 = -9223372036854775808;
+    const one: i64 = 1;
+    return min - one;
+}
+
+pub fn u32_max_plus_one() -> u32 {
+    const max: u32 = 4294967295;
+    const one: u32 = 1;
+    return max + one;
+}
+
+pub fn i32_mul_overflow() -> i32 {
+    const big: i32 = 2147483647;
+    return big * 2;
+}
+
+pub fn i32_neg_min() -> i32 {
+    const min: i32 = -2147483648;
+    return -min;
+}
+
+pub fn i64_neg_min() -> i64 {
+    const min: i64 = -9223372036854775808;
+    return -min;
+}

@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Upgrade shadowing detection from `debug_assert!` to `assert!` in `pre_scan_locals` — fires in release builds for parameter, constant, and variable name collisions in `locals_map`
+- Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies will be pre-registered when loop lowering is implemented
+- Replace silent `if let ArgumentType::Argument` skip with exhaustive `match` covering `SelfReference`, `IgnoreArgument`, and `Type` variants, each with an explicit `todo!()`
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -80,6 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime
+- Add `arith_overflow` test module with 8 functions covering two's-complement wrapping arithmetic: i32/i64/u32 overflow and underflow, multiplication overflow, and negation of MIN (8 Wasmtime execution assertions)
+- Add `expr_deep_nesting` test module with 5 functions verifying 8+ level expression nesting: left-associative addition chain, mixed arithmetic in nested groups, boolean connectives over nested comparisons, function calls embedded in expressions, and chained unary negation (6 Wasmtime execution assertions)
 - Add 2 assignment test fixtures with 10 Wasmtime execution assertions ([#146])
   - `assign.inf`: 10 functions covering simple i32/i64 assignment, expression RHS, parameter assignment, multiple reassignment, function call RHS, bool assignment, assignment inside conditional, mutable parameter assignment
   - `assign_nondet.inf`: assignment inside `forall` non-det block with uzumaki RHS

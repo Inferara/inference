@@ -242,19 +242,30 @@ impl Compiler {
 
         if let Some(arguments) = &function_definition.arguments {
             for arg_type in arguments {
-                if let ArgumentType::Argument(arg) = arg_type {
-                    cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type(&arg.ty)
-                        .expect("Function parameter type must not be unit");
-                    params.push(vt);
-                    let prev = locals_map.insert(arg.name(), (local_idx, vt));
-                    debug_assert!(
-                        prev.is_none(),
-                        "parameter `{}` collides with an existing entry in locals_map; \
-                         the type-checker should have rejected duplicate parameter names",
-                        arg.name(),
-                    );
-                    local_idx += 1;
+                match arg_type {
+                    ArgumentType::Argument(arg) => {
+                        cov_mark::hit!(wasm_codegen_emit_function_params);
+                        let vt = Self::val_type_from_type(&arg.ty)
+                            .expect("Function parameter type must not be unit");
+                        params.push(vt);
+                        let prev = locals_map.insert(arg.name(), (local_idx, vt));
+                        assert!(
+                            prev.is_none(),
+                            "parameter `{}` collides with an existing entry in locals_map; \
+                             the type-checker should have rejected duplicate parameter names",
+                            arg.name(),
+                        );
+                        local_idx += 1;
+                    }
+                    ArgumentType::SelfReference(_) => {
+                        todo!("Self-reference parameters are not yet supported in WASM codegen")
+                    }
+                    ArgumentType::IgnoreArgument(_) => {
+                        todo!("Ignore arguments are not yet supported in WASM codegen")
+                    }
+                    ArgumentType::Type(_) => {
+                        todo!("Type arguments are not yet supported in WASM codegen")
+                    }
                 }
             }
         }
@@ -363,7 +374,7 @@ impl Compiler {
                     };
                     let prev =
                         locals_map.insert(constant_definition.name(), (*local_idx, val_type));
-                    debug_assert!(
+                    assert!(
                         prev.is_none(),
                         "local `{}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected shadowing",
@@ -382,7 +393,7 @@ impl Compiler {
                     };
                     let prev =
                         locals_map.insert(variable_definition.name(), (*local_idx, val_type));
-                    debug_assert!(
+                    assert!(
                         prev.is_none(),
                         "local `{}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected shadowing",
@@ -398,6 +409,9 @@ impl Compiler {
                     if let Some(else_arm) = &if_statement.else_arm {
                         Self::pre_scan_locals(else_arm, ctx, locals_map, local_idx);
                     }
+                }
+                Statement::Loop(loop_statement) => {
+                    Self::pre_scan_locals(&loop_statement.body, ctx, locals_map, local_idx);
                 }
                 _ => {}
             }
