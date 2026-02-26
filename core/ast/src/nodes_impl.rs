@@ -135,10 +135,8 @@ impl BlockType {
             for stmt in statements {
                 match stmt {
                     Statement::Return(_) => return true,
-                    Statement::Block(block_type) => {
-                        if block_type.is_void() {
-                            return true;
-                        }
+                    Statement::Block(block_type) if block_type.is_void() => {
+                        return true;
                     }
                     _ => {}
                 }

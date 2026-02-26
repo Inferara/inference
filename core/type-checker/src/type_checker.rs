@@ -612,10 +612,10 @@ impl TypeChecker {
                 }
                 let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
                 let right_expr = assign_statement.right.borrow();
-                if let Some(target) = &target_type {
-                    if let Expression::Literal(Literal::Number(num_lit)) = &*right_expr {
-                        ctx.set_node_typeinfo(num_lit.id, target.clone());
-                    }
+                if let Some(target) = &target_type
+                    && let Expression::Literal(Literal::Number(num_lit)) = &*right_expr
+                {
+                    ctx.set_node_typeinfo(num_lit.id, target.clone());
                 }
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
                     if let Some(target) = &target_type {
