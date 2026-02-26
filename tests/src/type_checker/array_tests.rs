@@ -280,13 +280,111 @@ mod type_mismatches {
     fn test_function_param_array_size_mismatch() {
         let source = r#"fn process(arr: [i32; 5]) -> i32 { return arr[0]; } fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; return process(arr); }"#;
         let result = try_type_check(source);
-        // FIXME: Array size mismatches in function arguments are not yet detected by the type checker
-        // Once this is implemented, this test should verify the error contains "type mismatch" or "array"
+        assert!(
+            result.is_err(),
+            "Array size mismatch in function args should be detected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("type mismatch"),
+                "Error should mention type mismatch: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("[i32; 5]") && error_msg.contains("[i32; 3]"),
+                "Error should mention both array types: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_function_param_array_size_mismatch_larger() {
+        let source = r#"fn process(arr: [i32; 3]) -> i32 { return arr[0]; } fn test() -> i32 { let arr: [i32; 5] = [1, 2, 3, 4, 5]; return process(arr); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Passing larger array to smaller parameter should be detected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("[i32; 3]") && error_msg.contains("[i32; 5]"),
+                "Error should mention both array sizes: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_function_param_array_element_type_mismatch() {
+        let source = r#"fn process(arr: [i32; 3]) -> i32 { return arr[0]; } fn test() -> i32 { let arr: [i64; 3] = [1, 2, 3]; return process(arr); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Passing array with wrong element type should be detected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("type mismatch"),
+                "Error should mention type mismatch: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_function_param_array_correct_size() {
+        let source = r#"fn process(arr: [i32; 3]) -> i32 { return arr[0]; } fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; return process(arr); }"#;
+        let result = try_type_check(source);
         assert!(
             result.is_ok(),
-            "Array size mismatch in function args currently not detected: {:?}",
+            "Passing array with matching size should succeed, got: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_function_multiple_array_params_size_mismatch() {
+        let source = r#"fn process(a: [i32; 2], b: [i32; 3]) -> i32 { return a[0] + b[0]; } fn test() -> i32 { let x: [i32; 2] = [1, 2]; let y: [i32; 2] = [3, 4]; return process(x, y); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Second array arg with wrong size should be detected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("[i32; 3]") && error_msg.contains("[i32; 2]"),
+                "Error should mention mismatched array sizes: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("argument 1"),
+                "Error should indicate it is the second argument: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_function_param_scalar_instead_of_array() {
+        let source = r#"fn process(arr: [i32; 3]) -> i32 { return arr[0]; } fn test() -> i32 { let x: i32 = 42; return process(x); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Passing scalar where array expected should be detected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("type mismatch"),
+                "Error should mention type mismatch: {}",
+                error_msg
+            );
+        }
     }
 }
 

@@ -472,6 +472,30 @@ impl TypeInfo {
         matches!(self.kind, TypeInfoKind::Generic(_))
     }
 
+    /// Check type compatibility for argument type validation.
+    ///
+    /// This is more lenient than `PartialEq`: it treats `Custom("Foo")` as compatible
+    /// with `Struct("Foo")` or `Enum("Foo")`, since parameter types from function
+    /// registration may use `Custom` while inferred argument types use `Struct`/`Enum`.
+    /// For arrays, both element type and size must be compatible.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn is_compatible_with(&self, other: &TypeInfo) -> bool {
+        if self == other {
+            return true;
+        }
+        match (&self.kind, &other.kind) {
+            (TypeInfoKind::Custom(a), TypeInfoKind::Struct(b))
+            | (TypeInfoKind::Struct(a), TypeInfoKind::Custom(b))
+            | (TypeInfoKind::Custom(a), TypeInfoKind::Enum(b))
+            | (TypeInfoKind::Enum(a), TypeInfoKind::Custom(b))
+            | (TypeInfoKind::Custom(a), TypeInfoKind::Custom(b)) => a == b,
+            (TypeInfoKind::Array(elem_a, size_a), TypeInfoKind::Array(elem_b, size_b)) => {
+                size_a == size_b && elem_a.is_compatible_with(elem_b)
+            }
+            _ => false,
+        }
+    }
+
     /// Returns true if this is a signed integer type (i8, i16, i32, i64).
     #[must_use = "this is a pure check with no side effects"]
     pub fn is_signed_integer(&self) -> bool {

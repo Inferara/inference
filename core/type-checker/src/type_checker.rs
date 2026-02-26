@@ -156,6 +156,9 @@ impl TypeChecker {
                                     .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
                             });
 
+                            let param_names =
+                                Self::extract_param_names(method.arguments.as_ref());
+
                             let param_types: Vec<TypeInfo> = method
                                 .arguments
                                 .as_ref()
@@ -190,6 +193,7 @@ impl TypeChecker {
                             let signature = FuncInfo {
                                 name: method.name(),
                                 type_params,
+                                param_names,
                                 param_types,
                                 return_type,
                                 visibility: method.visibility.clone(),
@@ -341,6 +345,9 @@ impl TypeChecker {
                                 .iter()
                                 .map(|param| param.name())
                                 .collect::<Vec<_>>(),
+                            Self::extract_param_names(
+                                function_definition.arguments.as_ref(),
+                            ),
                             &function_definition
                                 .arguments
                                 .as_ref()
@@ -373,6 +380,9 @@ impl TypeChecker {
                         if let Err(err) = self.symbol_table.register_function(
                             &external_function_definition.name(),
                             vec![],
+                            Self::extract_param_names(
+                                external_function_definition.arguments.as_ref(),
+                            ),
                             &external_function_definition
                                 .arguments
                                 .as_ref()
@@ -1074,8 +1084,31 @@ impl TypeChecker {
                             }
 
                             if let Some(arguments) = &function_call_expression.arguments {
-                                for arg in arguments {
-                                    self.infer_expression(&arg.1.borrow(), ctx);
+                                for (i, arg) in arguments.iter().enumerate() {
+                                    let arg_type =
+                                        self.infer_expression(&arg.1.borrow(), ctx);
+                                    if let Some(arg_type) = arg_type
+                                        && i < signature.param_types.len()
+                                        && !arg_type
+                                            .is_compatible_with(&signature.param_types[i])
+                                    {
+                                        let arg_name = signature
+                                            .param_names
+                                            .get(i)
+                                            .cloned()
+                                            .unwrap_or_else(|| format!("arg{i}"));
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: signature.param_types[i].clone(),
+                                            found: arg_type,
+                                            context: TypeMismatchContext::MethodArgument {
+                                                type_name: type_name.clone(),
+                                                method_name: method_name.clone(),
+                                                arg_name,
+                                                arg_index: i,
+                                            },
+                                            location: function_call_expression.location,
+                                        });
+                                    }
                                 }
                             }
 
@@ -1164,8 +1197,31 @@ impl TypeChecker {
                                 }
 
                                 if let Some(arguments) = &function_call_expression.arguments {
-                                    for arg in arguments {
-                                        self.infer_expression(&arg.1.borrow(), ctx);
+                                    for (i, arg) in arguments.iter().enumerate() {
+                                        let arg_type =
+                                            self.infer_expression(&arg.1.borrow(), ctx);
+                                        if let Some(arg_type) = arg_type
+                                            && i < signature.param_types.len()
+                                            && !arg_type
+                                                .is_compatible_with(&signature.param_types[i])
+                                        {
+                                            let arg_name = signature
+                                                .param_names
+                                                .get(i)
+                                                .cloned()
+                                                .unwrap_or_else(|| format!("arg{i}"));
+                                            self.errors.push(TypeCheckError::TypeMismatch {
+                                                expected: signature.param_types[i].clone(),
+                                                found: arg_type,
+                                                context: TypeMismatchContext::MethodArgument {
+                                                    type_name: type_name.clone(),
+                                                    method_name: method_name.clone(),
+                                                    arg_name,
+                                                    arg_index: i,
+                                                },
+                                                location: function_call_expression.location,
+                                            });
+                                        }
                                     }
                                 }
 
@@ -1311,10 +1367,33 @@ impl TypeChecker {
                 // Apply substitution to return type
                 let return_type = signature.return_type.substitute(&substitutions);
 
-                // Infer argument types
+                // Infer argument types and validate against parameter types
                 if let Some(arguments) = &function_call_expression.arguments {
-                    for arg in arguments {
-                        self.infer_expression(&arg.1.borrow(), ctx);
+                    for (i, arg) in arguments.iter().enumerate() {
+                        let arg_type = self.infer_expression(&arg.1.borrow(), ctx);
+                        if let Some(arg_type) = arg_type
+                            && i < signature.param_types.len()
+                        {
+                            let expected =
+                                signature.param_types[i].substitute(&substitutions);
+                            if !arg_type.is_compatible_with(&expected) {
+                                let arg_name = signature
+                                    .param_names
+                                    .get(i)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("arg{i}"));
+                                self.errors.push(TypeCheckError::TypeMismatch {
+                                    expected,
+                                    found: arg_type,
+                                    context: TypeMismatchContext::FunctionArgument {
+                                        function_name: function_call_expression.name(),
+                                        arg_name,
+                                        arg_index: i,
+                                    },
+                                    location: function_call_expression.location,
+                                });
+                            }
+                        }
                     }
                 }
 
@@ -1573,7 +1652,10 @@ impl TypeChecker {
         match (left, right) {
             (Type::Simple(left), Type::Simple(right)) => left == right,
             (Type::Array(left), Type::Array(right)) => {
-                Self::types_equal(&left.element_type, &right.element_type)
+                // Compare element types and sizes via TypeInfo which extracts
+                // the numeric size from the expression for proper comparison
+                TypeInfo::new(&Type::Array(left.clone()))
+                    == TypeInfo::new(&Type::Array(right.clone()))
             }
             (Type::Generic(left), Type::Generic(right)) => {
                 left.base.name() == right.base.name() && left.parameters == right.parameters
@@ -1734,6 +1816,9 @@ impl TypeChecker {
                         if let Err(err) = self.symbol_table.register_function(
                             &external_function_definition.name(),
                             vec![],
+                            Self::extract_param_names(
+                                external_function_definition.arguments.as_ref(),
+                            ),
                             &external_function_definition
                                 .arguments
                                 .as_ref()
@@ -2102,6 +2187,20 @@ impl TypeChecker {
         }
 
         substitutions
+    }
+
+    /// Extract parameter names from function arguments, filtering out `self` references.
+    fn extract_param_names(arguments: Option<&Vec<ArgumentType>>) -> Vec<String> {
+        arguments
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|param| match param {
+                ArgumentType::SelfReference(_) => None,
+                ArgumentType::IgnoreArgument(_) => Some("_".to_string()),
+                ArgumentType::Argument(arg) => Some(arg.name.name.clone()),
+                ArgumentType::Type(_) => Some("_".to_string()),
+            })
+            .collect()
     }
 
     /// Push an error, deduplicating errors for the same unknown type/function/identifier.

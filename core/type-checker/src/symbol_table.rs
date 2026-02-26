@@ -38,6 +38,7 @@ pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
 pub(crate) struct FuncInfo {
     pub(crate) name: String,
     pub(crate) type_params: Vec<String>,
+    pub(crate) param_names: Vec<String>,
     pub(crate) param_types: Vec<TypeInfo>,
     pub(crate) return_type: TypeInfo,
     pub(crate) visibility: Visibility,
@@ -598,12 +599,14 @@ impl SymbolTable {
         &mut self,
         name: &str,
         type_params: Vec<String>,
+        param_names: Vec<String>,
         param_types: &[Type],
         return_type: &Type,
     ) -> Result<(), String> {
         self.register_function_with_visibility(
             name,
             type_params,
+            param_names,
             param_types,
             return_type,
             Visibility::Private,
@@ -614,6 +617,7 @@ impl SymbolTable {
         &mut self,
         name: &str,
         type_params: Vec<String>,
+        param_names: Vec<String>,
         param_types: &[Type],
         return_type: &Type,
         visibility: Visibility,
@@ -625,6 +629,7 @@ impl SymbolTable {
             let sig = FuncInfo {
                 name: name.to_string(),
                 type_params: type_params.clone(),
+                param_names,
                 param_types: param_types
                     .iter()
                     .map(|t| TypeInfo::new_with_type_params(t, &type_params))
@@ -920,6 +925,18 @@ impl SymbolTable {
                     .as_ref()
                     .map(|tps| tps.iter().map(|p| p.name()).collect())
                     .unwrap_or_default();
+                let param_names: Vec<String> = f
+                    .arguments
+                    .as_ref()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|a| match a {
+                        ArgumentType::Argument(arg) => Some(arg.name.name.clone()),
+                        ArgumentType::IgnoreArgument(_) => Some("_".to_string()),
+                        ArgumentType::Type(_) => Some("_".to_string()),
+                        ArgumentType::SelfReference(_) => None,
+                    })
+                    .collect();
                 let param_types: Vec<_> = f
                     .arguments
                     .as_ref()
@@ -940,6 +957,7 @@ impl SymbolTable {
                 self.register_function_with_visibility(
                     &f.name(),
                     type_params,
+                    param_names,
                     &param_types,
                     &return_type,
                     f.visibility.clone(),
@@ -1325,6 +1343,7 @@ mod tests {
                 signature: FuncInfo {
                     name: "get_value".to_string(),
                     type_params: vec![],
+                    param_names: vec![],
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
@@ -1343,6 +1362,7 @@ mod tests {
                 signature: FuncInfo {
                     name: "new".to_string(),
                     type_params: vec![],
+                    param_names: vec![],
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Public,
@@ -1362,6 +1382,7 @@ mod tests {
             let sig = FuncInfo {
                 name: "instance_method".to_string(),
                 type_params: vec![],
+                param_names: vec![],
                 param_types: vec![],
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
@@ -1383,6 +1404,7 @@ mod tests {
             let sig = FuncInfo {
                 name: "constructor".to_string(),
                 type_params: vec![],
+                param_names: vec![],
                 param_types: vec![],
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
@@ -1403,6 +1425,7 @@ mod tests {
                 signature: FuncInfo {
                     name: "test".to_string(),
                     type_params: vec![],
+                    param_names: vec![],
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
@@ -1416,6 +1439,7 @@ mod tests {
                 signature: FuncInfo {
                     name: "test".to_string(),
                     type_params: vec![],
+                    param_names: vec![],
                     param_types: vec![],
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
