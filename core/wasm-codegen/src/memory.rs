@@ -128,7 +128,6 @@ fn store_instruction_for_size(size: u32) -> Instruction<'static> {
 /// - 2 bytes: align=1 (2^1 = 2)
 /// - 4 bytes: align=2 (2^2 = 4)
 /// - 8 bytes: align=3 (2^3 = 8)
-#[allow(dead_code)] // Prepared for Phase 3 (array element access)
 pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static> {
     let memarg = MemArg {
         offset: 0,

@@ -1370,6 +1370,111 @@ mod base_codegen_tests {
         let result = func.call(&mut store, ()).expect("single_read failed");
         assert_eq!(result, 42, "arr[0] of [42] should be 42");
     }
+
+    #[test]
+    fn array_assign_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_index_write, 9);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 11);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 11);
+        let test_name = "array_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_assign_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "array_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // write_and_read: arr[0] = 42, return arr[0] -> 42
+        let write_and_read: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_and_read")
+            .expect("Failed to get 'write_and_read'");
+        let result = write_and_read
+            .call(&mut store, ())
+            .expect("write_and_read failed");
+        assert_eq!(result, 42, "arr[0] = 42; arr[0] should be 42");
+
+        // write_multiple: arr[0]=10, arr[1]=20, arr[2]=30, return sum -> 60
+        let write_multiple: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_multiple")
+            .expect("Failed to get 'write_multiple'");
+        let result = write_multiple
+            .call(&mut store, ())
+            .expect("write_multiple failed");
+        assert_eq!(
+            result, 60,
+            "arr[0]+arr[1]+arr[2] after writes should be 60"
+        );
+
+        // swap_elements: arr=[1,2], swap -> arr=[2,1], return arr[0]*10+arr[1] -> 21
+        let swap_elements: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "swap_elements")
+            .expect("Failed to get 'swap_elements'");
+        let result = swap_elements
+            .call(&mut store, ())
+            .expect("swap_elements failed");
+        assert_eq!(
+            result, 21,
+            "After swap [1,2]->[2,1], arr[0]*10+arr[1] should be 21"
+        );
+
+        // write_computed_index(1): arr[1+1]=arr[2]=99, return arr[2] -> 99
+        let write_computed_index: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "write_computed_index")
+            .expect("Failed to get 'write_computed_index'");
+        let result = write_computed_index
+            .call(&mut store, 1)
+            .expect("write_computed_index(1) failed");
+        assert_eq!(result, 99, "arr[i+1] where i=1 should write to arr[2]=99");
+
+        // write_bool: flags[0]=true, flags[2]=true, check both -> 1
+        let write_bool: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_bool")
+            .expect("Failed to get 'write_bool'");
+        let result = write_bool
+            .call(&mut store, ())
+            .expect("write_bool failed");
+        assert_eq!(
+            result, 1,
+            "flags[0]=true, flags[2]=true, both checked -> 1"
+        );
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all calls"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -1780,5 +1885,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_index");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_assign_wasm() {
+        let dir = base_test_dir().join("array_assign");
+        let source_code = std::fs::read_to_string(dir.join("array_assign.inf"))
+            .expect("Failed to read array_assign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_assign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_assign");
     }
 }

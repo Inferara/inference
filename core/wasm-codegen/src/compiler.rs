@@ -932,8 +932,10 @@ impl Compiler {
     ///
     /// # Supported Targets
     ///
-    /// Only `Expression::Identifier` targets are currently supported. Member access and
-    /// array index targets require memory operations and are deferred to compound type support.
+    /// - `Expression::Identifier`: plain variable assignment (`x = expr`)
+    /// - `Expression::ArrayIndexAccess`: array element assignment (`arr[i] = expr`)
+    ///
+    /// Member access targets require struct support and are deferred.
     ///
     /// # Parameters
     ///
@@ -941,6 +943,7 @@ impl Compiler {
     /// - `ctx` - Typed context for type information lookup
     /// - `func` - WASM function body being built
     /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    /// - `frame_layout` - Stack frame layout for array memory access (may be `None`)
     fn lower_assign_statement(
         &self,
         assign_stmt: &AssignStatement,
@@ -966,8 +969,61 @@ impl Compiler {
                 );
                 func.instruction(&Instruction::LocalSet(local_idx));
             }
-            _ => todo!("Assignment to non-identifier targets (member access, array index) not yet supported"),
+            Expression::ArrayIndexAccess(aiae) => {
+                self.lower_array_index_write(aiae, assign_stmt, ctx, func, locals_map, frame_layout);
+            }
+            _ => todo!("Assignment to non-identifier targets (member access) not yet supported"),
         }
+    }
+
+    /// Lowers an array index assignment (`arr[i] = value`) to WASM store instructions.
+    ///
+    /// Computes the element address as `base_pointer + index * element_size`, then
+    /// stores the right-hand side value using the appropriate store instruction
+    /// (`i32.store`, `i64.store`, `i32.store8`, etc.) based on the element type.
+    ///
+    /// The type checker sets the `ArrayIndexAccessExpression` node's type info to the
+    /// element type, so we query it directly to select the correct store instruction.
+    ///
+    /// # Generated WASM
+    ///
+    /// ```text
+    /// <lower array expression>   ;; push base pointer (i32)
+    /// <lower index expression>   ;; push index (i32)
+    /// i32.const <elem_size>
+    /// i32.mul                    ;; byte offset = index * elem_size
+    /// i32.add                    ;; address = base + byte_offset
+    /// <lower right-hand side>    ;; push value to store
+    /// i32.store / i64.store / ...;; store value at address
+    /// ```
+    fn lower_array_index_write(
+        &self,
+        aiae: &inference_ast::nodes::ArrayIndexAccessExpression,
+        assign_stmt: &AssignStatement,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_array_index_write);
+
+        let elem_type_info = ctx
+            .get_node_typeinfo(aiae.id)
+            .expect("ArrayIndexAccess must have type info (element type)");
+        let elem_sz = memory::element_size(&elem_type_info.kind);
+
+        self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
+
+        self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(elem_sz as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+
+        self.lower_expression(&assign_stmt.right.borrow(), ctx, func, locals_map, frame_layout);
+
+        let store_instr = memory::store_instruction(&elem_type_info.kind);
+        func.instruction(&store_instr);
     }
 
     /// Lowers an `if`/`else` statement to WASM structured control flow.
