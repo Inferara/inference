@@ -1,3 +1,7 @@
+mod algo_bitwise;
+mod algo_converge;
+mod algo_i64_mixed;
+mod algo_recursive_math;
 mod base;
 mod binops_bool;
 mod binops_compound;
