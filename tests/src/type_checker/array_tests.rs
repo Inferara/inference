@@ -587,3 +587,205 @@ mod comprehensive_scenarios {
         );
     }
 }
+
+mod mutability {
+    use super::*;
+
+    #[test]
+    fn test_array_index_assign_immutable_variable() {
+        let source = r#"
+            fn test() -> i32 {
+                let arr: [i32; 3] = [1, 2, 3];
+                arr[0] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to immutable array element should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("arr"),
+                "Error should mention the array variable name: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_index_assign_mutable_variable() {
+        let source = r#"
+            fn test() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                arr[0] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment to mutable array element should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_array_index_assign_immutable_parameter() {
+        let source = r#"
+            fn test(arr: [i32; 3]) -> i32 {
+                arr[0] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to immutable parameter array element should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("arr"),
+                "Error should mention the array parameter name: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_index_assign_mutable_parameter() {
+        let source = r#"
+            fn test(mut arr: [i32; 3]) -> i32 {
+                arr[0] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment to mutable parameter array element should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_array_index_assign_with_variable_index() {
+        let source = r#"
+            fn test() -> i32 {
+                let arr: [i32; 3] = [1, 2, 3];
+                let i: i32 = 0;
+                arr[i] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment via variable index to immutable array should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_array_index_assign_mutable_with_variable_index() {
+        let source = r#"
+            fn test() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                let i: i32 = 0;
+                arr[i] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment via variable index to mutable array should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_nested_array_index_assign_immutable() {
+        let source = r#"
+            fn test() -> i32 {
+                let arr: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+                arr[0][1] = 42;
+                return arr[0][1];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to nested immutable array element should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+            assert!(
+                error_msg.contains("arr"),
+                "Error should mention the root array variable name: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_nested_array_index_assign_mutable() {
+        let source = r#"
+            fn test() -> i32 {
+                let mut arr: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+                arr[0][1] = 42;
+                return arr[0][1];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment to nested mutable array element should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_multiple_array_index_assignments_mutable() {
+        let source = r#"
+            fn test() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                arr[0] = 10;
+                arr[1] = 20;
+                arr[2] = 30;
+                return arr[0];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Multiple assignments to mutable array elements should succeed, got: {:?}",
+            result.err()
+        );
+    }
+}

@@ -30,6 +30,20 @@ use crate::{
     typed_context::TypedContext,
 };
 
+/// Extracts the root identifier name from a potentially nested array index
+/// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
+/// also returns `Some("arr")`. Returns `None` for non-identifier bases
+/// (e.g., function calls).
+fn extract_root_array_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.clone()),
+        Expression::ArrayIndexAccess(access) => {
+            extract_root_array_name(&access.array.borrow())
+        }
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
@@ -616,6 +630,16 @@ impl TypeChecker {
                     {
                         self.errors.push(TypeCheckError::AssignToImmutable {
                             name: identifier.name.clone(),
+                            location: assign_statement.location,
+                        });
+                    } else if let Expression::ArrayIndexAccess(access) = &*left_expr
+                        && let Some(name) =
+                            extract_root_array_name(&access.array.borrow())
+                        && let Some(false) =
+                            self.symbol_table.lookup_variable_is_mut(&name)
+                    {
+                        self.errors.push(TypeCheckError::AssignToImmutable {
+                            name,
                             location: assign_statement.location,
                         });
                     }
