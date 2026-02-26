@@ -593,13 +593,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_immutable_variable() {
-        let source = r#"
-            fn test() -> i32 {
-                let arr: [i32; 3] = [1, 2, 3];
-                arr[0] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; arr[0] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -622,13 +616,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_mutable_variable() {
-        let source = r#"
-            fn test() -> i32 {
-                let mut arr: [i32; 3] = [1, 2, 3];
-                arr[0] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let mut arr: [i32; 3] = [1, 2, 3]; arr[0] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -639,12 +627,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_immutable_parameter() {
-        let source = r#"
-            fn test(arr: [i32; 3]) -> i32 {
-                arr[0] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test(arr: [i32; 3]) -> i32 { arr[0] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -667,12 +650,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_mutable_parameter() {
-        let source = r#"
-            fn test(mut arr: [i32; 3]) -> i32 {
-                arr[0] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test(mut arr: [i32; 3]) -> i32 { arr[0] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -683,14 +661,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_with_variable_index() {
-        let source = r#"
-            fn test() -> i32 {
-                let arr: [i32; 3] = [1, 2, 3];
-                let i: i32 = 0;
-                arr[i] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; let i: i32 = 0; arr[i] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -708,14 +679,7 @@ mod mutability {
 
     #[test]
     fn test_array_index_assign_mutable_with_variable_index() {
-        let source = r#"
-            fn test() -> i32 {
-                let mut arr: [i32; 3] = [1, 2, 3];
-                let i: i32 = 0;
-                arr[i] = 42;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let mut arr: [i32; 3] = [1, 2, 3]; let i: i32 = 0; arr[i] = 42; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -726,13 +690,7 @@ mod mutability {
 
     #[test]
     fn test_nested_array_index_assign_immutable() {
-        let source = r#"
-            fn test() -> i32 {
-                let arr: [[i32; 2]; 2] = [[1, 2], [3, 4]];
-                arr[0][1] = 42;
-                return arr[0][1];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let arr: [[i32; 2]; 2] = [[1, 2], [3, 4]]; arr[0][1] = 42; return arr[0][1]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -755,13 +713,7 @@ mod mutability {
 
     #[test]
     fn test_nested_array_index_assign_mutable() {
-        let source = r#"
-            fn test() -> i32 {
-                let mut arr: [[i32; 2]; 2] = [[1, 2], [3, 4]];
-                arr[0][1] = 42;
-                return arr[0][1];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let mut arr: [[i32; 2]; 2] = [[1, 2], [3, 4]]; arr[0][1] = 42; return arr[0][1]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -772,15 +724,7 @@ mod mutability {
 
     #[test]
     fn test_multiple_array_index_assignments_mutable() {
-        let source = r#"
-            fn test() -> i32 {
-                let mut arr: [i32; 3] = [1, 2, 3];
-                arr[0] = 10;
-                arr[1] = 20;
-                arr[2] = 30;
-                return arr[0];
-            }
-        "#;
+        let source = r#"fn test() -> i32 { let mut arr: [i32; 3] = [1, 2, 3]; arr[0] = 10; arr[1] = 20; arr[2] = 30; return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),

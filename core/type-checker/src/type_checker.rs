@@ -30,20 +30,6 @@ use crate::{
     typed_context::TypedContext,
 };
 
-/// Extracts the root identifier name from a potentially nested array index
-/// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
-/// also returns `Some("arr")`. Returns `None` for non-identifier bases
-/// (e.g., function calls).
-fn extract_root_array_name(expr: &Expression) -> Option<String> {
-    match expr {
-        Expression::Identifier(id) => Some(id.name.clone()),
-        Expression::ArrayIndexAccess(access) => {
-            extract_root_array_name(&access.array.borrow())
-        }
-        _ => None,
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
@@ -170,9 +156,6 @@ impl TypeChecker {
                                     .any(|arg| matches!(arg, ArgumentType::SelfReference(_)))
                             });
 
-                            let param_names =
-                                Self::extract_param_names(method.arguments.as_ref());
-
                             let param_types: Vec<TypeInfo> = method
                                 .arguments
                                 .as_ref()
@@ -207,7 +190,6 @@ impl TypeChecker {
                             let signature = FuncInfo {
                                 name: method.name(),
                                 type_params,
-                                param_names,
                                 param_types,
                                 return_type,
                                 visibility: method.visibility.clone(),
@@ -359,9 +341,6 @@ impl TypeChecker {
                                 .iter()
                                 .map(|param| param.name())
                                 .collect::<Vec<_>>(),
-                            Self::extract_param_names(
-                                function_definition.arguments.as_ref(),
-                            ),
                             &function_definition
                                 .arguments
                                 .as_ref()
@@ -394,9 +373,6 @@ impl TypeChecker {
                         if let Err(err) = self.symbol_table.register_function(
                             &external_function_definition.name(),
                             vec![],
-                            Self::extract_param_names(
-                                external_function_definition.arguments.as_ref(),
-                            ),
                             &external_function_definition
                                 .arguments
                                 .as_ref()
@@ -634,7 +610,7 @@ impl TypeChecker {
                         });
                     } else if let Expression::ArrayIndexAccess(access) = &*left_expr
                         && let Some(name) =
-                            extract_root_array_name(&access.array.borrow())
+                            Self::extract_root_array_name(&access.array.borrow())
                         && let Some(false) =
                             self.symbol_table.lookup_variable_is_mut(&name)
                     {
@@ -1113,14 +1089,9 @@ impl TypeChecker {
                                         self.infer_expression(&arg.1.borrow(), ctx);
                                     if let Some(arg_type) = arg_type
                                         && i < signature.param_types.len()
-                                        && !arg_type
-                                            .is_compatible_with(&signature.param_types[i])
+                                        && arg_type != signature.param_types[i]
                                     {
-                                        let arg_name = signature
-                                            .param_names
-                                            .get(i)
-                                            .cloned()
-                                            .unwrap_or_else(|| format!("arg{i}"));
+                                        let arg_name = format!("arg{i}");
                                         self.errors.push(TypeCheckError::TypeMismatch {
                                             expected: signature.param_types[i].clone(),
                                             found: arg_type,
@@ -1226,14 +1197,9 @@ impl TypeChecker {
                                             self.infer_expression(&arg.1.borrow(), ctx);
                                         if let Some(arg_type) = arg_type
                                             && i < signature.param_types.len()
-                                            && !arg_type
-                                                .is_compatible_with(&signature.param_types[i])
+                                            && arg_type != signature.param_types[i]
                                         {
-                                            let arg_name = signature
-                                                .param_names
-                                                .get(i)
-                                                .cloned()
-                                                .unwrap_or_else(|| format!("arg{i}"));
+                                            let arg_name = format!("arg{i}");
                                             self.errors.push(TypeCheckError::TypeMismatch {
                                                 expected: signature.param_types[i].clone(),
                                                 found: arg_type,
@@ -1400,12 +1366,8 @@ impl TypeChecker {
                         {
                             let expected =
                                 signature.param_types[i].substitute(&substitutions);
-                            if !arg_type.is_compatible_with(&expected) {
-                                let arg_name = signature
-                                    .param_names
-                                    .get(i)
-                                    .cloned()
-                                    .unwrap_or_else(|| format!("arg{i}"));
+                            if arg_type != expected {
+                                let arg_name = format!("arg{i}");
                                 self.errors.push(TypeCheckError::TypeMismatch {
                                     expected,
                                     found: arg_type,
@@ -1671,63 +1633,6 @@ impl TypeChecker {
         }
     }
 
-    #[allow(dead_code)]
-    fn types_equal(left: &Type, right: &Type) -> bool {
-        match (left, right) {
-            (Type::Simple(left), Type::Simple(right)) => left == right,
-            (Type::Array(left), Type::Array(right)) => {
-                // Compare element types and sizes via TypeInfo which extracts
-                // the numeric size from the expression for proper comparison
-                TypeInfo::new(&Type::Array(left.clone()))
-                    == TypeInfo::new(&Type::Array(right.clone()))
-            }
-            (Type::Generic(left), Type::Generic(right)) => {
-                left.base.name() == right.base.name() && left.parameters == right.parameters
-            }
-            (Type::Qualified(left), Type::Qualified(right)) => left.name() == right.name(),
-            (Type::QualifiedName(left), Type::QualifiedName(right)) => {
-                left.qualifier() == right.qualifier() && left.name() == right.name()
-            }
-            (Type::Custom(left), Type::Custom(right)) => left.name() == right.name(),
-            (Type::Function(left), Type::Function(right)) => {
-                let left_has_return_type = left.returns.is_some();
-                let right_has_return_type = right.returns.is_some();
-                if left_has_return_type != right_has_return_type {
-                    return false;
-                }
-                if left_has_return_type
-                    && let (Some(left_return_type), Some(right_return_type)) =
-                        (&left.returns, &right.returns)
-                    && !Self::types_equal(left_return_type, right_return_type)
-                {
-                    return false;
-                }
-                let left_has_parameters = left.parameters.is_some();
-                let right_has_parameters = right.parameters.is_some();
-                if left_has_parameters != right_has_parameters {
-                    return false;
-                }
-                if left_has_parameters
-                    && let (Some(left_parameters), Some(right_parameters)) =
-                        (&left.parameters, &right.parameters)
-                {
-                    if left_parameters.len() != right_parameters.len() {
-                        return false;
-                    }
-                    for (left_param, right_param) in
-                        left_parameters.iter().zip(right_parameters.iter())
-                    {
-                        if !Self::types_equal(left_param, right_param) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Process a module definition.
     ///
     /// Creates a new scope for the module and processes all definitions within it.
@@ -1840,9 +1745,6 @@ impl TypeChecker {
                         if let Err(err) = self.symbol_table.register_function(
                             &external_function_definition.name(),
                             vec![],
-                            Self::extract_param_names(
-                                external_function_definition.arguments.as_ref(),
-                            ),
                             &external_function_definition
                                 .arguments
                                 .as_ref()
@@ -2213,18 +2115,18 @@ impl TypeChecker {
         substitutions
     }
 
-    /// Extract parameter names from function arguments, filtering out `self` references.
-    fn extract_param_names(arguments: Option<&Vec<ArgumentType>>) -> Vec<String> {
-        arguments
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|param| match param {
-                ArgumentType::SelfReference(_) => None,
-                ArgumentType::IgnoreArgument(_) => Some("_".to_string()),
-                ArgumentType::Argument(arg) => Some(arg.name.name.clone()),
-                ArgumentType::Type(_) => Some("_".to_string()),
-            })
-            .collect()
+    /// Extracts the root identifier name from a potentially nested array index
+    /// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
+    /// also returns `Some("arr")`. Returns `None` for non-identifier bases
+    /// (e.g., function calls).
+    fn extract_root_array_name(expr: &Expression) -> Option<String> {
+        match expr {
+            Expression::Identifier(id) => Some(id.name.clone()),
+            Expression::ArrayIndexAccess(access) => {
+                Self::extract_root_array_name(&access.array.borrow())
+            }
+            _ => None,
+        }
     }
 
     /// Push an error, deduplicating errors for the same unknown type/function/identifier.

@@ -1334,20 +1334,20 @@ mod type_info_with_type_params {
     }
 }
 
-mod type_compatibility {
+mod type_equality {
     use super::*;
 
     #[test]
-    fn test_identical_types_are_compatible() {
+    fn identical_types_are_equal() {
         let ti = TypeInfo {
             kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
         };
-        assert!(ti.is_compatible_with(&ti));
+        assert_eq!(ti, ti);
     }
 
     #[test]
-    fn test_different_number_types_not_compatible() {
+    fn different_number_types_not_equal() {
         let i32_type = TypeInfo {
             kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
@@ -1356,52 +1356,11 @@ mod type_compatibility {
             kind: TypeInfoKind::Number(NumberType::I64),
             type_params: vec![],
         };
-        assert!(!i32_type.is_compatible_with(&i64_type));
+        assert_ne!(i32_type, i64_type);
     }
 
     #[test]
-    fn test_custom_compatible_with_struct() {
-        let custom = TypeInfo {
-            kind: TypeInfoKind::Custom("Point".to_string()),
-            type_params: vec![],
-        };
-        let struct_type = TypeInfo {
-            kind: TypeInfoKind::Struct("Point".to_string()),
-            type_params: vec![],
-        };
-        assert!(custom.is_compatible_with(&struct_type));
-        assert!(struct_type.is_compatible_with(&custom));
-    }
-
-    #[test]
-    fn test_custom_compatible_with_enum() {
-        let custom = TypeInfo {
-            kind: TypeInfoKind::Custom("Color".to_string()),
-            type_params: vec![],
-        };
-        let enum_type = TypeInfo {
-            kind: TypeInfoKind::Enum("Color".to_string()),
-            type_params: vec![],
-        };
-        assert!(custom.is_compatible_with(&enum_type));
-        assert!(enum_type.is_compatible_with(&custom));
-    }
-
-    #[test]
-    fn test_custom_not_compatible_with_different_name() {
-        let custom = TypeInfo {
-            kind: TypeInfoKind::Custom("Point".to_string()),
-            type_params: vec![],
-        };
-        let struct_type = TypeInfo {
-            kind: TypeInfoKind::Struct("Rect".to_string()),
-            type_params: vec![],
-        };
-        assert!(!custom.is_compatible_with(&struct_type));
-    }
-
-    #[test]
-    fn test_arrays_same_size_compatible() {
+    fn arrays_same_size_are_equal() {
         let arr_a = TypeInfo {
             kind: TypeInfoKind::Array(
                 Box::new(TypeInfo {
@@ -1422,11 +1381,11 @@ mod type_compatibility {
             ),
             type_params: vec![],
         };
-        assert!(arr_a.is_compatible_with(&arr_b));
+        assert_eq!(arr_a, arr_b);
     }
 
     #[test]
-    fn test_arrays_different_size_not_compatible() {
+    fn arrays_different_size_not_equal() {
         let arr_3 = TypeInfo {
             kind: TypeInfoKind::Array(
                 Box::new(TypeInfo {
@@ -1447,11 +1406,11 @@ mod type_compatibility {
             ),
             type_params: vec![],
         };
-        assert!(!arr_3.is_compatible_with(&arr_5));
+        assert_ne!(arr_3, arr_5);
     }
 
     #[test]
-    fn test_arrays_different_element_type_not_compatible() {
+    fn arrays_different_element_type_not_equal() {
         let arr_i32 = TypeInfo {
             kind: TypeInfoKind::Array(
                 Box::new(TypeInfo {
@@ -1472,11 +1431,11 @@ mod type_compatibility {
             ),
             type_params: vec![],
         };
-        assert!(!arr_i32.is_compatible_with(&arr_i64));
+        assert_ne!(arr_i32, arr_i64);
     }
 
     #[test]
-    fn test_bool_not_compatible_with_i32() {
+    fn bool_not_equal_to_i32() {
         let bool_type = TypeInfo {
             kind: TypeInfoKind::Bool,
             type_params: vec![],
@@ -1485,6 +1444,6 @@ mod type_compatibility {
             kind: TypeInfoKind::Number(NumberType::I32),
             type_params: vec![],
         };
-        assert!(!bool_type.is_compatible_with(&i32_type));
+        assert_ne!(bool_type, i32_type);
     }
 }
