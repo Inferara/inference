@@ -72,9 +72,12 @@ use inference_type_checker::{
     typed_context::TypedContext,
 };
 use wasm_encoder::{
-    BlockType as WasmBlockType, CodeSection, ExportKind, ExportSection, Function, FunctionSection,
-    IndirectNameMap, Instruction, Module, NameMap, NameSection, TypeSection, ValType,
+    BlockType as WasmBlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function,
+    FunctionSection, GlobalSection, GlobalType, IndirectNameMap, Instruction, MemorySection,
+    MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
 };
+
+use crate::memory::STACK_POINTER_INIT;
 
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
@@ -128,6 +131,9 @@ pub(crate) struct Compiler {
     /// Built by `build_func_name_to_idx` before the main compilation pass so that
     /// forward references (callee defined after caller) resolve correctly.
     func_name_to_idx: FxHashMap<String, u32>,
+    /// Sticky flag: set to `true` when any function requires linear memory (e.g. arrays).
+    /// Once set, the module emits Memory and Global sections in `finish()`.
+    has_memory: bool,
 }
 
 impl Compiler {
@@ -148,6 +154,7 @@ impl Compiler {
             has_main: false,
             module_name: module_name.to_string(),
             func_name_to_idx: FxHashMap::default(),
+            has_memory: false,
         }
     }
 
@@ -1227,18 +1234,22 @@ impl Compiler {
         self.has_main
     }
 
-    /// Assembles the complete WASM binary module from all accumulated sections.
+    /// Marks the module as requiring linear memory.
     ///
-    /// Builds the following WASM sections in order:
-    /// 1. **Type section** - All function signatures
-    /// 2. **Function section** - Type index for each function
-    /// 3. **Export section** - Exported functions
-    /// 4. **Code section** - Function bodies
-    /// 5. **Name section** (custom) - Debug names for module, functions, and locals
+    /// This is a sticky flag: once enabled, it stays enabled for the rest of the
+    /// compilation. When set, `finish()` emits Memory and Global sections and exports
+    /// `"memory"` and `"__stack_pointer"`.
+    pub(crate) fn enable_memory(&mut self) {
+        self.has_memory = true;
+    }
+
+    /// Assembles the complete WASM binary from accumulated sections.
     ///
-    /// # Returns
+    /// Section ordering follows the WASM spec:
+    /// Type -> Function -> [Memory] -> [Global] -> Export -> Code -> Name
     ///
-    /// Complete WASM binary as `Vec<u8>`.
+    /// Memory and Global sections are only emitted when `has_memory` is `true`
+    /// (i.e. at least one function uses linear memory for arrays).
     pub(crate) fn finish(&self) -> Vec<u8> {
         let mut module = Module::new();
 
@@ -1256,10 +1267,41 @@ impl Compiler {
         }
         module.section(&function_section);
 
-        if !self.exports.is_empty() {
+        if self.has_memory {
+            cov_mark::hit!(wasm_codegen_emit_memory_section);
+            let mut memory_section = MemorySection::new();
+            memory_section.memory(MemoryType {
+                minimum: 1,
+                maximum: Some(1),
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            module.section(&memory_section);
+        }
+
+        if self.has_memory {
+            let mut global_section = GlobalSection::new();
+            global_section.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: true,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(STACK_POINTER_INIT),
+            );
+            module.section(&global_section);
+        }
+
+        let has_func_exports = !self.exports.is_empty();
+        if has_func_exports || self.has_memory {
             let mut export_section = ExportSection::new();
             for (name, kind, idx) in &self.exports {
                 export_section.export(name, *kind, *idx);
+            }
+            if self.has_memory {
+                export_section.export("memory", ExportKind::Memory, 0);
+                export_section.export("__stack_pointer", ExportKind::Global, 0);
             }
             module.section(&export_section);
         }
@@ -1296,5 +1338,119 @@ impl Compiler {
         module.section(&name_section);
 
         module.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finish_without_memory_omits_memory_section() {
+        let compiler = Compiler::new("test");
+        let wasm = compiler.finish();
+        assert!(!wasm.is_empty());
+        assert!(!has_memory_section(&wasm));
+    }
+
+    #[test]
+    fn finish_with_memory_includes_memory_section() {
+        cov_mark::check!(wasm_codegen_emit_memory_section);
+        let mut compiler = Compiler::new("test");
+        compiler.enable_memory();
+        let wasm = compiler.finish();
+        assert!(has_memory_section(&wasm));
+    }
+
+    #[test]
+    fn finish_with_memory_validates_via_wasmparser() {
+        let mut compiler = Compiler::new("test");
+        compiler.enable_memory();
+        let wasm = compiler.finish();
+        inf_wasmparser::validate(&wasm)
+            .unwrap_or_else(|e| panic!("Generated WASM with memory is invalid: {e}"));
+    }
+
+    #[test]
+    fn finish_with_memory_exports_memory_and_stack_pointer() {
+        let mut compiler = Compiler::new("test");
+        compiler.enable_memory();
+        let wasm = compiler.finish();
+        let wat = wasmprinter::print_bytes(&wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("(export \"memory\""),
+            "WAT must export memory:\n{wat}"
+        );
+        assert!(
+            wat.contains("(export \"__stack_pointer\""),
+            "WAT must export __stack_pointer:\n{wat}"
+        );
+    }
+
+    #[test]
+    fn finish_with_memory_has_correct_stack_pointer_init() {
+        let mut compiler = Compiler::new("test");
+        compiler.enable_memory();
+        let wasm = compiler.finish();
+        let wat = wasmprinter::print_bytes(&wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("i32.const 65536"),
+            "Stack pointer must be initialized to 65536 (one page):\n{wat}"
+        );
+    }
+
+    #[test]
+    fn finish_with_memory_has_mutable_global() {
+        let mut compiler = Compiler::new("test");
+        compiler.enable_memory();
+        let wasm = compiler.finish();
+        let wat = wasmprinter::print_bytes(&wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("(mut i32)"),
+            "Stack pointer global must be mutable i32:\n{wat}"
+        );
+    }
+
+    #[test]
+    fn enable_memory_is_sticky() {
+        let mut compiler = Compiler::new("test");
+        assert!(!compiler.has_memory);
+        compiler.enable_memory();
+        assert!(compiler.has_memory);
+    }
+
+    /// Checks whether the WASM binary contains a memory section (section ID 5).
+    fn has_memory_section(wasm: &[u8]) -> bool {
+        // WASM module starts with 8-byte header (magic + version).
+        // Sections follow as: section_id (1 byte), size (LEB128), payload.
+        let mut pos = 8;
+        while pos < wasm.len() {
+            let section_id = wasm[pos];
+            pos += 1;
+            let (size, consumed) = read_leb128_u32(&wasm[pos..]);
+            pos += consumed;
+            if section_id == 5 {
+                return true;
+            }
+            pos += size as usize;
+        }
+        false
+    }
+
+    /// Reads a LEB128-encoded u32 and returns `(value, bytes_consumed)`.
+    fn read_leb128_u32(bytes: &[u8]) -> (u32, usize) {
+        let mut result: u32 = 0;
+        let mut shift: u32 = 0;
+        for (i, &byte) in bytes.iter().enumerate() {
+            result |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return (result, i + 1);
+            }
+            shift += 7;
+        }
+        (result, bytes.len())
     }
 }

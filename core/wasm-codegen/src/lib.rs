@@ -40,6 +40,7 @@
 //! # Module Organization
 //!
 //! - [`compiler`] - WASM binary generation via wasm-encoder (private)
+//! - [`memory`] - Linear memory infrastructure for stack-allocated compound types (private)
 //! - [`output`] - `CodegenOutput` struct definition
 //! - [`target`] - `Target`, `CompilationMode`, and `OptLevel` enums
 
@@ -51,6 +52,7 @@ use crate::compiler::Compiler;
 
 mod compiler;
 mod errors;
+mod memory;
 pub mod output;
 pub mod target;
 
