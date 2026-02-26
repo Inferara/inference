@@ -1,0 +1,94 @@
+pub fn factorial_i64(n: i64) -> i64 {
+    let one: i64 = 1;
+    if n <= one {
+        return one;
+    }
+    return n * factorial_i64(n - one);
+}
+
+pub fn fibonacci_i64(n: i64) -> i64 {
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    let two: i64 = 2;
+    if n <= zero {
+        return zero;
+    }
+    if n == one {
+        return one;
+    }
+    return fibonacci_i64(n - one) + fibonacci_i64(n - two);
+}
+
+fn gcd_i64_helper(a: i64, b: i64) -> i64 {
+    let zero: i64 = 0;
+    if b == zero {
+        return a;
+    }
+    return gcd_i64_helper(b, a % b);
+}
+
+pub fn gcd_i64(a: i64, b: i64) -> i64 {
+    let zero: i64 = 0;
+    if a < zero {
+        return gcd_i64_helper(-a, b);
+    }
+    return gcd_i64_helper(a, b);
+}
+
+pub fn lcm_i64(a: i64, b: i64) -> i64 {
+    let zero: i64 = 0;
+    if a == zero {
+        return zero;
+    }
+    if b == zero {
+        return zero;
+    }
+    let g: i64 = gcd_i64(a, b);
+    return (a / g) * b;
+}
+
+pub fn is_even(n: i32) -> bool {
+    return (n & 1) == 0;
+}
+
+pub fn is_odd(n: i32) -> bool {
+    return (n & 1) == 1;
+}
+
+fn abs_i64(x: i64) -> i64 {
+    let zero: i64 = 0;
+    if x < zero {
+        return -x;
+    }
+    return x;
+}
+
+pub fn sum_range_i64(n: i64) -> i64 {
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    if n <= zero {
+        return zero;
+    }
+    let mut result: i64 = 0;
+    let mut i: i64 = 1;
+    if i <= n {
+        result = result + i;
+        i = i + one;
+        if i <= n {
+            result = result + i;
+            i = i + one;
+            if i <= n {
+                result = result + i;
+                i = i + one;
+                if i <= n {
+                    result = result + i;
+                    i = i + one;
+                    if i <= n {
+                        result = result + i;
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}

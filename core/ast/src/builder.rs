@@ -649,9 +649,7 @@ impl<'a> Builder<'a> {
         let name_node = node.child_by_field_name("name").unwrap();
         let type_node = node.child_by_field_name("type").unwrap();
         let ty = self.build_type(id, &type_node, code);
-        let is_mut = node
-            .child_by_field_name("mut")
-            .is_some_and(|n| n.kind() == "true");
+        let is_mut = node.child_by_field_name("mut").is_some();
         let name = self.build_identifier(id, &name_node, code);
         let node = Rc::new(Argument::new(id, location, name, is_mut, ty));
         self.arena.add_node(
@@ -670,9 +668,7 @@ impl<'a> Builder<'a> {
         self.collect_errors(node, code);
         let id = Self::get_node_id();
         let location = Self::get_location(node, code);
-        let is_mut = node
-            .child_by_field_name("mut")
-            .is_some_and(|n| n.kind() == "true");
+        let is_mut = node.child_by_field_name("mut").is_some();
         let node = Rc::new(SelfReference::new(id, location, is_mut));
         self.arena.add_node(
             AstNode::ArgumentType(ArgumentType::SelfReference(node.clone())),
@@ -979,11 +975,12 @@ impl<'a> Builder<'a> {
         let location = Self::get_location(node, code);
         let ty = self.build_type(id, &node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(id, &node.child_by_field_name("name").unwrap(), code);
+        let is_mut = node.child_by_field_name("mut").is_some();
         let value = node
             .child_by_field_name("value")
             .map(|n| self.build_expression(id, &n, code));
         let node = Rc::new(VariableDefinitionStatement::new(
-            id, location, name, ty, value,
+            id, location, name, is_mut, ty, value,
         ));
         self.arena.add_node(
             AstNode::Statement(Statement::VariableDefinition(node.clone())),

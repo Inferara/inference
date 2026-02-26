@@ -135,10 +135,8 @@ impl BlockType {
             for stmt in statements {
                 match stmt {
                     Statement::Return(_) => return true,
-                    Statement::Block(block_type) => {
-                        if block_type.is_void() {
-                            return true;
-                        }
+                    Statement::Block(block_type) if block_type.is_void() => {
+                        return true;
                     }
                     _ => {}
                 }
@@ -571,6 +569,7 @@ impl VariableDefinitionStatement {
         id: u32,
         location: Location,
         name: Rc<Identifier>,
+        is_mut: bool,
         type_: Type,
         value: Option<Expression>,
     ) -> Self {
@@ -578,6 +577,7 @@ impl VariableDefinitionStatement {
             id,
             location,
             name,
+            is_mut,
             ty: type_,
             value: value.map(RefCell::new),
         }

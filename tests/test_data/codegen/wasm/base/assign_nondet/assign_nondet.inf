@@ -1,0 +1,7 @@
+pub fn assign_uzumaki() -> i32 {
+    let mut x: i32 = 0;
+    forall {
+        x = @;
+    }
+    return x;
+}

@@ -416,6 +416,13 @@ pub enum TypeCheckError {
         method_name: String,
         location: Location,
     },
+
+    /// Assignment to an immutable variable.
+    ///
+    /// Variables declared with `let` (without `mut`) cannot be reassigned.
+    /// Use `let mut` to declare a mutable binding.
+    #[error("{location}: cannot assign to immutable variable `{name}`")]
+    AssignToImmutable { name: String, location: Location },
 }
 
 impl TypeCheckError {
@@ -455,7 +462,8 @@ impl TypeCheckError {
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
-            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. } => location,
+            | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
+            | TypeCheckError::AssignToImmutable { location, .. } => location,
         }
     }
 }
@@ -1029,5 +1037,17 @@ mod tests {
         assert!(msg.contains("Point"));
         assert!(msg.contains("new"));
         assert!(msg.contains("cannot be called on an instance"));
+    }
+
+    #[test]
+    fn display_assign_to_immutable() {
+        let err = TypeCheckError::AssignToImmutable {
+            name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot assign to immutable variable `x`"
+        );
     }
 }

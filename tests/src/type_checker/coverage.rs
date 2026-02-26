@@ -221,7 +221,7 @@ mod statement_coverage {
 
     #[test]
     fn test_assign_statement() {
-        let source = r#"fn test() -> i32 { let x: i32 = 0; x = 42; return x; }"#;
+        let source = r#"fn test() -> i32 { let mut x: i32 = 0; x = 42; return x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -232,7 +232,7 @@ mod statement_coverage {
 
     #[test]
     fn test_assign_statement_type_mismatch() {
-        let source = r#"fn test() -> i32 { let x: i32 = 0; x = true; return x; }"#;
+        let source = r#"fn test() -> i32 { let mut x: i32 = 0; x = true; return x; }"#;
         let result = try_type_check(source);
         assert!(result.is_err(), "Assignment with type mismatch should fail");
         if let Err(error) = result {
@@ -247,13 +247,71 @@ mod statement_coverage {
 
     #[test]
     fn test_assign_uzumaki_to_variable() {
-        let source = r#"fn test() -> i32 { let x: i32; x = @; return x; }"#;
+        let source = r#"fn test() -> i32 { let mut x: i32; x = @; return x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
             "Assigning uzumaki to variable should work, got: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_assign_to_immutable_variable() {
+        let source = r#"fn test() -> i32 { let x: i32 = 0; x = 1; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to immutable variable should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_assign_to_mutable_variable() {
+        let source = r#"fn test() -> i32 { let mut x: i32 = 0; x = 1; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment to mutable variable should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assign_to_mutable_parameter() {
+        let source = r#"fn test(mut a: i32) -> i32 { a = 99; return a; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assignment to mutable parameter should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assign_to_immutable_parameter() {
+        let source = r#"fn test(a: i32) -> i32 { a = 99; return a; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to immutable parameter should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("cannot assign to immutable variable"),
+                "Error should mention immutable variable: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]

@@ -258,7 +258,7 @@ pub(crate) struct Scope {
     pub(crate) parent: Option<WeakScopeRef>,
     pub(crate) children: Vec<ScopeRef>,
     pub(crate) symbols: FxHashMap<String, Symbol>,
-    pub(crate) variables: FxHashMap<String, (u32, TypeInfo)>,
+    pub(crate) variables: FxHashMap<String, (u32, TypeInfo, bool)>,
     pub(crate) methods: FxHashMap<String, Vec<MethodInfo>>,
     /// Unresolved imports registered in this scope
     pub(crate) imports: Vec<Import>,
@@ -323,26 +323,44 @@ impl Scope {
         name: &str,
         node_id: u32,
         ty: TypeInfo,
+        is_mut: bool,
     ) -> anyhow::Result<()> {
         if self.variables.contains_key(name) {
             bail!("Variable `{name}` already declared in this scope");
         }
-        self.variables.insert(name.to_string(), (node_id, ty));
+        self.variables
+            .insert(name.to_string(), (node_id, ty, is_mut));
         Ok(())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
-    fn lookup_variable_local(&self, name: &str) -> Option<(u32, TypeInfo)> {
+    fn lookup_variable_local(&self, name: &str) -> Option<(u32, TypeInfo, bool)> {
         self.variables.get(name).cloned()
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_variable(&self, name: &str) -> Option<TypeInfo> {
-        if let Some((_, ty)) = self.lookup_variable_local(name) {
+        if let Some((_, ty, _)) = self.lookup_variable_local(name) {
             return Some(ty);
         }
         if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
             return parent.borrow().lookup_variable(name);
+        }
+        None
+    }
+
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn lookup_variable_is_mut_local(&self, name: &str) -> Option<bool> {
+        self.variables.get(name).map(|(_, _, is_mut)| *is_mut)
+    }
+
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_is_mut(&self, name: &str) -> Option<bool> {
+        if let Some(is_mut) = self.lookup_variable_is_mut_local(name) {
+            return Some(is_mut);
+        }
+        if let Some(parent) = self.parent.as_ref().and_then(|p| p.upgrade()) {
+            return parent.borrow().lookup_variable_is_mut(name);
         }
         None
     }
@@ -628,9 +646,12 @@ impl SymbolTable {
         &mut self,
         name: &str,
         var_type: TypeInfo,
+        is_mut: bool,
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
-            scope.borrow_mut().insert_variable(name, 0, var_type)
+            scope
+                .borrow_mut()
+                .insert_variable(name, 0, var_type, is_mut)
         } else {
             bail!("No active scope to push variable")
         }
@@ -654,6 +675,13 @@ impl SymbolTable {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_variable(name))
+    }
+
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_is_mut(&self, name: &str) -> Option<bool> {
+        self.current_scope
+            .as_ref()
+            .and_then(|scope| scope.borrow().lookup_variable_is_mut(name))
     }
 
     #[must_use = "this is a pure lookup with no side effects"]

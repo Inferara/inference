@@ -826,7 +826,7 @@ mod type_inference_tests {
         fn test_assignment_type_check() {
             let source = r#"
             fn test() {
-                let x: i32 = 10;
+                let mut x: i32 = 10;
                 x = 20;
             }"#;
             let typed_context = try_type_check(source).expect("Type checking should succeed");
@@ -970,7 +970,7 @@ mod type_inference_tests {
                 let c: i32 = @;
                 let d: i64 = @;
 
-                let e: u8;
+                let mut e: u8;
                 e = @;
                 let f: u16 = @;
                 let g: u32 = @;

@@ -21,7 +21,7 @@
 //!    emit `unreachable` before function `end` for non-void functions so that WASM
 //!    validators accept functions whose all paths exit via explicit `return`
 //! 2. **Statement lowering** - Translate control flow (if/else), non-deterministic blocks,
-//!    variable and constant definitions, return, and expression statements
+//!    variable and constant definitions, assignment statements, return, and expression statements
 //! 3. **Expression lowering** - Generate WASM instructions for expressions and literals
 //! 4. **Non-det emission** - Emit custom 0xfc-prefixed instructions for non-deterministic ops
 //! 5. **Module assembly** - Combine all sections into a valid WASM binary
@@ -63,9 +63,9 @@ use std::iter::Peekable;
 use std::rc::Rc;
 
 use inference_ast::nodes::{
-    ArgumentType, BinaryExpression, BlockType, Expression, FunctionDefinition, Literal,
-    OperatorKind, PrefixUnaryExpression, SimpleTypeKind, Statement, Type, UnaryOperatorKind,
-    Visibility,
+    ArgumentType, AssignStatement, BinaryExpression, BlockType, Expression, FunctionDefinition,
+    Literal, OperatorKind, PrefixUnaryExpression, SimpleTypeKind, Statement, Type,
+    UnaryOperatorKind, Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfoKind},
@@ -242,19 +242,30 @@ impl Compiler {
 
         if let Some(arguments) = &function_definition.arguments {
             for arg_type in arguments {
-                if let ArgumentType::Argument(arg) = arg_type {
-                    cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type(&arg.ty)
-                        .expect("Function parameter type must not be unit");
-                    params.push(vt);
-                    let prev = locals_map.insert(arg.name(), (local_idx, vt));
-                    debug_assert!(
-                        prev.is_none(),
-                        "parameter `{}` collides with an existing entry in locals_map; \
-                         the type-checker should have rejected duplicate parameter names",
-                        arg.name(),
-                    );
-                    local_idx += 1;
+                match arg_type {
+                    ArgumentType::Argument(arg) => {
+                        cov_mark::hit!(wasm_codegen_emit_function_params);
+                        let vt = Self::val_type_from_type(&arg.ty)
+                            .expect("Function parameter type must not be unit");
+                        params.push(vt);
+                        let prev = locals_map.insert(arg.name(), (local_idx, vt));
+                        assert!(
+                            prev.is_none(),
+                            "parameter `{}` collides with an existing entry in locals_map; \
+                             the type-checker should have rejected duplicate parameter names",
+                            arg.name(),
+                        );
+                        local_idx += 1;
+                    }
+                    ArgumentType::SelfReference(_) => {
+                        todo!("Self-reference parameters are not yet supported in WASM codegen")
+                    }
+                    ArgumentType::IgnoreArgument(_) => {
+                        todo!("Ignore arguments are not yet supported in WASM codegen")
+                    }
+                    ArgumentType::Type(_) => {
+                        todo!("Type arguments are not yet supported in WASM codegen")
+                    }
                 }
             }
         }
@@ -363,7 +374,7 @@ impl Compiler {
                     };
                     let prev =
                         locals_map.insert(constant_definition.name(), (*local_idx, val_type));
-                    debug_assert!(
+                    assert!(
                         prev.is_none(),
                         "local `{}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected shadowing",
@@ -382,7 +393,7 @@ impl Compiler {
                     };
                     let prev =
                         locals_map.insert(variable_definition.name(), (*local_idx, val_type));
-                    debug_assert!(
+                    assert!(
                         prev.is_none(),
                         "local `{}` collides with an existing entry in locals_map; \
                          the type-checker should have rejected shadowing",
@@ -398,6 +409,9 @@ impl Compiler {
                     if let Some(else_arm) = &if_statement.else_arm {
                         Self::pre_scan_locals(else_arm, ctx, locals_map, local_idx);
                     }
+                }
+                Statement::Loop(loop_statement) => {
+                    Self::pre_scan_locals(&loop_statement.body, ctx, locals_map, local_idx);
                 }
                 _ => {}
             }
@@ -415,6 +429,7 @@ impl Compiler {
     /// - **Block types** (regular, forall, exists, assume, unique) - Recursively lower
     ///   nested statements with appropriate custom instruction encoding
     /// - **Expression statements** - Evaluate expressions
+    /// - **Assignment statements** - Store expression result to a mutable local variable
     /// - **Return statements** - Generate WASM return instructions
     /// - **Constant definitions** - Initialize locals with compile-time literal values
     /// - **Variable definitions** - Initialize locals with any value-producing expression
@@ -541,7 +556,9 @@ impl Compiler {
                     }
                 }
             }
-            Statement::Assign(_assign_statement) => todo!(),
+            Statement::Assign(assign_statement) => {
+                self.lower_assign_statement(&assign_statement, ctx, func, locals_map);
+            }
             Statement::Return(return_statement) => {
                 self.lower_expression(&return_statement.expression.borrow(), ctx, func, locals_map);
                 func.instruction(&Instruction::Return);
@@ -730,6 +747,53 @@ impl Compiler {
 
         func.instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Lowers an assignment statement to WASM instructions.
+    ///
+    /// # WASM encoding
+    ///
+    /// For `x = expr;` where `x` is a local variable:
+    /// ```text
+    /// lower_expression(right)    // push value onto WASM operand stack
+    /// LocalSet(target_idx)       // pop value and store to local
+    /// ```
+    ///
+    /// This is identical to variable definition initialization -- the difference is that
+    /// the local index is resolved from the LHS identifier rather than from a
+    /// `VariableDefinitionStatement.name()`.
+    ///
+    /// # Supported Targets
+    ///
+    /// Only `Expression::Identifier` targets are currently supported. Member access and
+    /// array index targets require memory operations and are deferred to compound type support.
+    ///
+    /// # Parameters
+    ///
+    /// - `assign_stmt` - The assignment statement AST node to lower
+    /// - `ctx` - Typed context for type information lookup
+    /// - `func` - WASM function body being built
+    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    fn lower_assign_statement(
+        &self,
+        assign_stmt: &AssignStatement,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+    ) {
+        let left = assign_stmt.left.borrow();
+        match &*left {
+            Expression::Identifier(identifier) => {
+                cov_mark::hit!(wasm_codegen_emit_assign_identifier);
+                let (local_idx, _) = locals_map
+                    .get(&identifier.name)
+                    .expect("Assignment target variable not found");
+                let local_idx = *local_idx;
+                self.lower_expression(&assign_stmt.right.borrow(), ctx, func, locals_map);
+                func.instruction(&Instruction::LocalSet(local_idx));
+            }
+            _ => todo!("Assignment to non-identifier targets (member access, array index) not yet supported"),
+        }
     }
 
     /// Lowers an `if`/`else` statement to WASM structured control flow.

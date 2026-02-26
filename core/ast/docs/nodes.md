@@ -502,13 +502,14 @@ loop {
 
 ### VariableDefinitionStatement
 
-Variable declaration with optional initialization.
+Variable declaration with optional initialization and mutability.
 
 ```rust
 pub struct VariableDefinitionStatement {
     pub id: u32,
     pub location: Location,
     pub name: Rc<Identifier>,
+    pub is_mut: bool,
     pub ty: Type,
     pub value: Option<RefCell<Expression>>,
 }
@@ -516,17 +517,21 @@ pub struct VariableDefinitionStatement {
 
 **Fields:**
 - `name`: The variable identifier being bound
+- `is_mut`: Whether the variable is declared as mutable (`let mut`); immutable by default (`let`)
 - `ty`: The declared type (always required; Inference has no type inference for locals)
 - `value`: Optional initializer expression wrapped in `RefCell` for type-checker mutation; `None` means the variable is declared but not yet initialized
 
 **Example source:**
 ```inference
 let x: i32 = 42;
-let y: i32 = @;
+let mut y: i32 = 0;
+let z: i32 = @;
 ```
 
 The `value` field can hold any `Expression`, including a `UzumakiExpression` (`@`) for
 non-deterministic initialization inside `forall`, `exists`, or `unique` blocks.
+
+Only variables declared with `let mut` may be reassigned via `AssignStatement`.
 
 ### TypeDefinitionStatement
 

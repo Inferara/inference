@@ -263,10 +263,11 @@ impl TypeChecker {
                 match definition {
                     Definition::Constant(constant_definition) => {
                         let const_type = TypeInfo::new(&constant_definition.ty);
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope(&constant_definition.name(), const_type.clone())
-                        {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            &constant_definition.name(),
+                            const_type.clone(),
+                            false,
+                        ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: constant_definition.name(),
@@ -494,10 +495,11 @@ impl TypeChecker {
                 match argument {
                     ArgumentType::Argument(arg) => {
                         let arg_type = TypeInfo::new_with_type_params(&arg.ty, &type_param_names);
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope(&arg.name(), arg_type)
-                        {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            &arg.name(),
+                            arg_type,
+                            arg.is_mut,
+                        ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: arg.name(),
@@ -542,10 +544,11 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope(&arg.name(), TypeInfo::new(&arg.ty))
-                        {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            &arg.name(),
+                            TypeInfo::new(&arg.ty),
+                            arg.is_mut,
+                        ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: arg.name(),
@@ -555,10 +558,11 @@ impl TypeChecker {
                         }
                     }
                     ArgumentType::SelfReference(self_ref) => {
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope("self", self_type.clone())
-                        {
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            "self",
+                            self_type.clone(),
+                            self_ref.is_mut,
+                        ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: "self".to_string(),
@@ -594,8 +598,25 @@ impl TypeChecker {
     ) {
         match statement {
             Statement::Assign(assign_statement) => {
+                {
+                    let left_expr = assign_statement.left.borrow();
+                    if let Expression::Identifier(identifier) = &*left_expr
+                        && let Some(false) =
+                            self.symbol_table.lookup_variable_is_mut(&identifier.name)
+                    {
+                        self.errors.push(TypeCheckError::AssignToImmutable {
+                            name: identifier.name.clone(),
+                            location: assign_statement.location,
+                        });
+                    }
+                }
                 let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
                 let right_expr = assign_statement.right.borrow();
+                if let Some(target) = &target_type
+                    && let Expression::Literal(Literal::Number(num_lit)) = &*right_expr
+                {
+                    ctx.set_node_typeinfo(num_lit.id, target.clone());
+                }
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
                     if let Some(target) = &target_type {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target.clone());
@@ -721,6 +742,7 @@ impl TypeChecker {
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &variable_definition_statement.name(),
                     TypeInfo::new(&variable_definition_statement.ty),
+                    variable_definition_statement.is_mut,
                 ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Variable,
@@ -762,10 +784,11 @@ impl TypeChecker {
             }
             Statement::ConstantDefinition(constant_definition) => {
                 let constant_type = TypeInfo::new(&constant_definition.ty);
-                if let Err(err) = self
-                    .symbol_table
-                    .push_variable_to_scope(&constant_definition.name(), constant_type.clone())
-                {
+                if let Err(err) = self.symbol_table.push_variable_to_scope(
+                    &constant_definition.name(),
+                    constant_type.clone(),
+                    false,
+                ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Variable,
                         name: constant_definition.name(),
@@ -1697,6 +1720,7 @@ impl TypeChecker {
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
                             TypeInfo::new(&constant_definition.ty),
+                            false,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
