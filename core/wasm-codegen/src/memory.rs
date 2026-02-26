@@ -139,9 +139,7 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
         TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::I8 | NumberType::U8) => {
             Instruction::I32Store8(memarg)
         }
-        TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => {
-            Instruction::I32Store16(memarg)
-        }
+        TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => Instruction::I32Store16(memarg),
         TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => Instruction::I32Store(memarg),
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Store(memarg),
         _ => todo!("Unsupported array element type for store: {elem_type:?}"),
@@ -153,7 +151,6 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
 /// Uses signed extension for sub-i32 types (`i32.load8_s`, `i32.load16_s`)
 /// to preserve the sign bit. This matches the convention that sub-i32 values
 /// are stored truncated and loaded with sign extension.
-#[allow(dead_code)] // Prepared for Phase 3 (array element access)
 pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static> {
     let memarg = MemArg {
         offset: 0,
@@ -161,9 +158,7 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
         memory_index: MEMORY_INDEX,
     };
     match elem_type {
-        TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::U8) => {
-            Instruction::I32Load8U(memarg)
-        }
+        TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::U8) => Instruction::I32Load8U(memarg),
         TypeInfoKind::Number(NumberType::I8) => Instruction::I32Load8S(memarg),
         TypeInfoKind::Number(NumberType::U16) => Instruction::I32Load16U(memarg),
         TypeInfoKind::Number(NumberType::I16) => Instruction::I32Load16S(memarg),
@@ -334,33 +329,21 @@ mod tests {
     #[test]
     fn natural_alignment_1_byte() {
         assert_eq!(natural_alignment(&TypeInfoKind::Bool), 0);
-        assert_eq!(
-            natural_alignment(&TypeInfoKind::Number(NumberType::I8)),
-            0
-        );
+        assert_eq!(natural_alignment(&TypeInfoKind::Number(NumberType::I8)), 0);
     }
 
     #[test]
     fn natural_alignment_2_byte() {
-        assert_eq!(
-            natural_alignment(&TypeInfoKind::Number(NumberType::I16)),
-            1
-        );
+        assert_eq!(natural_alignment(&TypeInfoKind::Number(NumberType::I16)), 1);
     }
 
     #[test]
     fn natural_alignment_4_byte() {
-        assert_eq!(
-            natural_alignment(&TypeInfoKind::Number(NumberType::I32)),
-            2
-        );
+        assert_eq!(natural_alignment(&TypeInfoKind::Number(NumberType::I32)), 2);
     }
 
     #[test]
     fn natural_alignment_8_byte() {
-        assert_eq!(
-            natural_alignment(&TypeInfoKind::Number(NumberType::I64)),
-            3
-        );
+        assert_eq!(natural_alignment(&TypeInfoKind::Number(NumberType::I64)), 3);
     }
 }

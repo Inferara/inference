@@ -764,7 +764,15 @@ impl Compiler {
         frame_layout: Option<&FrameLayout>,
     ) {
         match expression {
-            Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
+            Expression::ArrayIndexAccess(array_index_access_expression) => {
+                self.lower_array_index_access(
+                    array_index_access_expression,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
+            }
             Expression::Binary(binary_expression) => {
                 self.lower_binary_expression(
                     binary_expression,
@@ -1057,6 +1065,52 @@ impl Compiler {
             kind,
             TypeInfoKind::Number(NumberType::I64 | NumberType::U64)
         )
+    }
+
+    /// Lowers an array index access expression (`arr[i]`) to WASM load instructions.
+    ///
+    /// Computes the element address as `base_pointer + index * element_size` and emits
+    /// the appropriate load instruction (`i32.load`, `i64.load`, `i32.load8_s`, etc.)
+    /// based on the element type.
+    ///
+    /// The type checker sets the `ArrayIndexAccessExpression` node's type info to the
+    /// element type, so we query it directly to select the correct load instruction.
+    ///
+    /// # Generated WASM
+    ///
+    /// ```text
+    /// <lower array expression>   ;; push base pointer (i32)
+    /// <lower index expression>   ;; push index (i32)
+    /// i32.const <elem_size>
+    /// i32.mul                    ;; byte offset = index * elem_size
+    /// i32.add                    ;; address = base + byte_offset
+    /// i32.load / i64.load / ...  ;; load element value
+    /// ```
+    fn lower_array_index_access(
+        &self,
+        aiae: &inference_ast::nodes::ArrayIndexAccessExpression,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_array_index_read);
+
+        let elem_type_info = ctx
+            .get_node_typeinfo(aiae.id)
+            .expect("ArrayIndexAccess must have type info (element type)");
+        let elem_sz = memory::element_size(&elem_type_info.kind);
+
+        self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
+
+        self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(elem_sz as i32));
+        func.instruction(&Instruction::I32Mul);
+        func.instruction(&Instruction::I32Add);
+
+        let load_instr = memory::load_instruction(&elem_type_info.kind);
+        func.instruction(&load_instr);
     }
 
     /// Lowers a binary expression to WASM stack instructions.

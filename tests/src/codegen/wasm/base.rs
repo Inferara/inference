@@ -1220,6 +1220,156 @@ mod base_codegen_tests {
         func.call(&mut store, ())
             .expect("void_with_array should not trap");
     }
+
+    #[test]
+    fn array_index_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 6);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 14);
+        let test_name = "array_index";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_index_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "array_index";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // read_first: arr[0] of [10, 20, 30] -> 10
+        let read_first: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_first")
+            .expect("Failed to get 'read_first'");
+        let result = read_first.call(&mut store, ()).expect("read_first failed");
+        assert_eq!(result, 10, "arr[0] of [10, 20, 30] should be 10");
+        let sp_after = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_after, initial_sp,
+            "Stack pointer should be restored after read_first"
+        );
+
+        // read_last: arr[2] of [10, 20, 30] -> 30
+        let read_last: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_last")
+            .expect("Failed to get 'read_last'");
+        let result = read_last.call(&mut store, ()).expect("read_last failed");
+        assert_eq!(result, 30, "arr[2] of [10, 20, 30] should be 30");
+
+        // read_middle: arr[1] of [10, 20, 30] -> 20
+        let read_middle: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_middle")
+            .expect("Failed to get 'read_middle'");
+        let result = read_middle.call(&mut store, ()).expect("read_middle failed");
+        assert_eq!(result, 20, "arr[1] of [10, 20, 30] should be 20");
+
+        // read_with_variable: arr[i] of [100, 200, 300]
+        let read_with_variable: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "read_with_variable")
+            .expect("Failed to get 'read_with_variable'");
+        let result = read_with_variable
+            .call(&mut store, 0)
+            .expect("read_with_variable(0) failed");
+        assert_eq!(result, 100, "arr[0] of [100, 200, 300] should be 100");
+        let result = read_with_variable
+            .call(&mut store, 1)
+            .expect("read_with_variable(1) failed");
+        assert_eq!(result, 200, "arr[1] of [100, 200, 300] should be 200");
+        let result = read_with_variable
+            .call(&mut store, 2)
+            .expect("read_with_variable(2) failed");
+        assert_eq!(result, 300, "arr[2] of [100, 200, 300] should be 300");
+
+        // read_bool_true: flags[0] of [true, false, true] -> 1 (enters if branch)
+        let read_bool_true: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_bool_true")
+            .expect("Failed to get 'read_bool_true'");
+        let result = read_bool_true
+            .call(&mut store, ())
+            .expect("read_bool_true failed");
+        assert_eq!(result, 1, "flags[0] is true, should return 1");
+
+        // read_bool_false: flags[1] of [true, false, true] -> 0 (skips if branch)
+        let read_bool_false: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_bool_false")
+            .expect("Failed to get 'read_bool_false'");
+        let result = read_bool_false
+            .call(&mut store, ())
+            .expect("read_bool_false failed");
+        assert_eq!(result, 0, "flags[1] is false, should return 0");
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all calls"
+        );
+    }
+
+    #[test]
+    fn array_index_inline_validation() {
+        let source = r#"
+            pub fn single_read() -> i32 {
+                let arr: [i32; 1] = [42];
+                return arr[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Array index WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_index_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn single_read() -> i32 {
+                let arr: [i32; 1] = [42];
+                return arr[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "single_read")
+            .expect("Failed to get 'single_read'");
+        let result = func.call(&mut store, ()).expect("single_read failed");
+        assert_eq!(result, 42, "arr[0] of [42] should be 42");
+    }
 }
 
 /// Test data regeneration helpers.
@@ -1610,5 +1760,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_literal");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_index_wasm() {
+        let dir = base_test_dir().join("array_index");
+        let source_code = std::fs::read_to_string(dir.join("array_index.inf"))
+            .expect("Failed to read array_index.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_index.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_index");
     }
 }
