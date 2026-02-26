@@ -87,7 +87,7 @@ use crate::{
 };
 use inference_ast::{
     arena::Arena,
-    nodes::{AstNode, Expression, FunctionDefinition, Location, SourceFile},
+    nodes::{AstNode, Expression, FunctionDefinition, Location, SourceFile, Statement},
 };
 use rustc_hash::FxHashMap;
 
@@ -291,6 +291,27 @@ impl TypedContext {
         self.arena
             .find_parent_node(id)
             .and_then(|parent_id| self.arena.find_node(parent_id))
+    }
+
+    /// Walks the AST parent chain from a given node to find the enclosing
+    /// `VariableDefinitionStatement` and return its variable name.
+    ///
+    /// Returns `None` if the root of the tree is reached without finding a
+    /// variable definition.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn find_enclosing_variable_name(&self, node_id: u32) -> Option<String> {
+        let mut current_id = node_id;
+        loop {
+            match self.get_parent_node(current_id) {
+                Some(AstNode::Statement(Statement::VariableDefinition(var_def))) => {
+                    return Some(var_def.name());
+                }
+                Some(node) => {
+                    current_id = node.id();
+                }
+                None => return None,
+            }
+        }
     }
 
     pub(crate) fn set_node_typeinfo(&mut self, node_id: u32, type_info: TypeInfo) {

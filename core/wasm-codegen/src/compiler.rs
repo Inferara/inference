@@ -77,7 +77,10 @@ use wasm_encoder::{
     MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
-use crate::memory::STACK_POINTER_INIT;
+use crate::memory::{
+    self, align_to_frame, element_size, emit_stack_epilogue, emit_stack_prologue, ArraySlot,
+    FrameLayout, STACK_POINTER_INIT,
+};
 
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
@@ -192,7 +195,7 @@ impl Compiler {
                 | SimpleTypeKind::U32,
             ) => Some(ValType::I32),
             Type::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Some(ValType::I64),
-            Type::Array(_array_type) => todo!(),
+            Type::Array(_array_type) => Some(ValType::I32),
             Type::Generic(_generic_type) => todo!(),
             Type::Function(_function_type) => todo!(),
             Type::QualifiedName(_qualified_name) => todo!(),
@@ -230,6 +233,7 @@ impl Compiler {
     /// This method will panic if it encounters unsupported type constructs (arrays,
     /// generics, function types, qualified names, custom types) in parameter or return
     /// positions, as these are not yet implemented.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn visit_function_definition(
         &mut self,
         function_definition: &Rc<FunctionDefinition>,
@@ -277,10 +281,7 @@ impl Compiler {
             }
         }
 
-        // Parameters occupy local indices 0..param_count. Regular locals follow.
-        // WASM requires declaring only the additional (non-param) locals in Function::new().
         let param_count = local_idx;
-
         let has_return_value = !results.is_empty();
 
         #[allow(clippy::cast_possible_truncation)]
@@ -307,7 +308,15 @@ impl Compiler {
             &mut local_idx,
         );
 
-        let local_declarations: Vec<(u32, ValType)> = {
+        // compute_frame_layout returns None when no arrays exist (or all are zero-length),
+        // so frame_layout.is_some() implies total_size > 0.
+        let frame_layout = Self::compute_frame_layout(&function_definition.body, ctx, local_idx);
+
+        if frame_layout.is_some() {
+            self.has_memory = true;
+        }
+
+        let mut local_declarations: Vec<(u32, ValType)> = {
             let mut sorted_locals: Vec<(u32, ValType)> = locals_map
                 .values()
                 .copied()
@@ -317,7 +326,15 @@ impl Compiler {
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
+        if frame_layout.is_some() {
+            local_declarations.push((1, ValType::I32));
+        }
+
         let mut func = Function::new(local_declarations);
+
+        if let Some(ref layout) = frame_layout {
+            emit_stack_prologue(&mut func, layout);
+        }
 
         self.lower_statement(
             std::iter::once(Statement::Block(function_definition.body.clone())).peekable(),
@@ -325,29 +342,29 @@ impl Compiler {
             ctx,
             &mut func,
             &locals_map,
+            frame_layout.as_ref(),
         );
 
-        // For functions with a non-void return type, emit `unreachable` before the function
-        // body's `end` instruction. This satisfies WASM validators when all control-flow paths
-        // inside the function exit via explicit `return` instructions (e.g. if/else where both
-        // arms return). The `unreachable` instruction is dead code in that case and never
-        // executes at runtime. For void functions the instruction is omitted since they do not
-        // require any value on the stack at `end`.
         if has_return_value {
+            if let Some(ref layout) = frame_layout {
+                emit_stack_epilogue(&mut func, layout);
+            }
             func.instruction(&Instruction::Unreachable);
+        } else if let Some(ref layout) = frame_layout {
+            emit_stack_epilogue(&mut func, layout);
         }
 
         func.instruction(&Instruction::End);
 
         self.func_names.push((self.func_idx, fn_name.clone()));
-        let local_name_entries: Vec<(u32, String)> = {
-            let mut entries: Vec<(u32, String)> = locals_map
-                .iter()
-                .map(|(name, (idx, _))| (*idx, name.clone()))
-                .collect();
-            entries.sort_by_key(|(idx, _)| *idx);
-            entries
-        };
+        let mut local_name_entries: Vec<(u32, String)> = locals_map
+            .iter()
+            .map(|(name, (idx, _))| (*idx, name.clone()))
+            .collect();
+        if let Some(ref layout) = frame_layout {
+            local_name_entries.push((layout.frame_ptr_local, "__frame_ptr".to_string()));
+        }
+        local_name_entries.sort_by_key(|(idx, _)| *idx);
         if !local_name_entries.is_empty() {
             self.local_names.push((self.func_idx, local_name_entries));
         }
@@ -425,6 +442,86 @@ impl Compiler {
         }
     }
 
+    /// Computes the stack frame layout for a function by collecting array variable
+    /// declarations and assigning byte offsets within the frame.
+    ///
+    /// Returns `None` if the function contains no array variables (no frame needed).
+    /// When arrays are present, the returned `FrameLayout` contains the total
+    /// (16-byte-aligned) frame size, per-array offsets, and the WASM local index
+    /// assigned to the synthetic `__frame_ptr` local.
+    fn compute_frame_layout(
+        block: &BlockType,
+        ctx: &TypedContext,
+        frame_ptr_local_idx: u32,
+    ) -> Option<FrameLayout> {
+        let mut array_offsets = FxHashMap::default();
+        let mut current_offset: u32 = 0;
+        Self::collect_array_slots(block, ctx, &mut array_offsets, &mut current_offset);
+
+        if current_offset == 0 {
+            return None;
+        }
+
+        Some(FrameLayout {
+            total_size: align_to_frame(current_offset),
+            array_offsets,
+            frame_ptr_local: frame_ptr_local_idx,
+        })
+    }
+
+    /// Recursively walks a block collecting array variable declarations into the
+    /// frame layout offset map.
+    fn collect_array_slots(
+        block: &BlockType,
+        ctx: &TypedContext,
+        array_offsets: &mut FxHashMap<String, ArraySlot>,
+        current_offset: &mut u32,
+    ) {
+        for stmt in block.statements() {
+            match &stmt {
+                Statement::VariableDefinition(var_def) => {
+                    let type_info = ctx
+                        .get_node_typeinfo(var_def.id)
+                        .expect("Variable definition must have type info");
+                    if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
+                        let elem_sz = element_size(&elem_type.kind);
+                        let byte_count = elem_sz * length;
+                        let slot = ArraySlot {
+                            offset: *current_offset,
+                            elem_size: elem_sz,
+                            length: *length,
+                        };
+                        array_offsets.insert(var_def.name(), slot);
+                        *current_offset += byte_count;
+                    }
+                }
+                Statement::Block(inner_block) => {
+                    Self::collect_array_slots(inner_block, ctx, array_offsets, current_offset);
+                }
+                Statement::If(if_stmt) => {
+                    Self::collect_array_slots(
+                        &if_stmt.if_arm,
+                        ctx,
+                        array_offsets,
+                        current_offset,
+                    );
+                    if let Some(else_arm) = &if_stmt.else_arm {
+                        Self::collect_array_slots(else_arm, ctx, array_offsets, current_offset);
+                    }
+                }
+                Statement::Loop(loop_stmt) => {
+                    Self::collect_array_slots(
+                        &loop_stmt.body,
+                        ctx,
+                        array_offsets,
+                        current_offset,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Recursively lowers AST statements to WASM instructions.
     ///
     /// This method handles all statement types including control flow, blocks, and
@@ -464,6 +561,7 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         let statement = statements_iterator.next().unwrap();
         match statement {
@@ -477,6 +575,7 @@ impl Compiler {
                             ctx,
                             func,
                             locals_map,
+                            frame_layout,
                         );
                     }
                     parent_blocks_stack.pop();
@@ -492,6 +591,7 @@ impl Compiler {
                             ctx,
                             func,
                             locals_map,
+                            frame_layout,
                         );
                     }
                     self.emit_nondet_block_end(func);
@@ -508,6 +608,7 @@ impl Compiler {
                             ctx,
                             func,
                             locals_map,
+                            frame_layout,
                         );
                     }
                     self.emit_nondet_block_end(func);
@@ -524,6 +625,7 @@ impl Compiler {
                             ctx,
                             func,
                             locals_map,
+                            frame_layout,
                         );
                     }
                     self.emit_nondet_block_end(func);
@@ -540,6 +642,7 @@ impl Compiler {
                             ctx,
                             func,
                             locals_map,
+                            frame_layout,
                         );
                     }
                     self.emit_nondet_block_end(func);
@@ -547,13 +650,11 @@ impl Compiler {
                 }
             },
             Statement::Expression(expression) => {
-                self.lower_expression(&expression, ctx, func, locals_map);
+                self.lower_expression(&expression, ctx, func, locals_map, frame_layout);
                 let expr_produces_value = ctx
                     .get_node_typeinfo(expression.id())
                     .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
                 if expr_produces_value {
-                    // Do not drop if this is the trailing result of a non-void non-det block —
-                    // the value serves as the block's result consumed by the enclosing context.
                     let is_block_result = statements_iterator.peek().is_none()
                         && parent_blocks_stack
                             .last()
@@ -564,16 +665,38 @@ impl Compiler {
                 }
             }
             Statement::Assign(assign_statement) => {
-                self.lower_assign_statement(&assign_statement, ctx, func, locals_map);
+                self.lower_assign_statement(
+                    &assign_statement,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
             }
             Statement::Return(return_statement) => {
-                self.lower_expression(&return_statement.expression.borrow(), ctx, func, locals_map);
+                self.lower_expression(
+                    &return_statement.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
+                if let Some(layout) = frame_layout {
+                    emit_stack_epilogue(func, layout);
+                }
                 func.instruction(&Instruction::Return);
             }
             Statement::Loop(_loop_statement) => todo!(),
             Statement::Break(_break_statement) => todo!(),
             Statement::If(if_statement) => {
-                self.lower_if_statement(&if_statement, ctx, func, locals_map, parent_blocks_stack);
+                self.lower_if_statement(
+                    &if_statement,
+                    ctx,
+                    func,
+                    locals_map,
+                    parent_blocks_stack,
+                    frame_layout,
+                );
             }
             Statement::VariableDefinition(variable_definition_statement) => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
@@ -585,7 +708,7 @@ impl Compiler {
                     Some(expr_ref) => {
                         let expr = expr_ref.borrow();
                         let local_idx = *local_idx;
-                        self.lower_expression(&expr, ctx, func, locals_map);
+                        self.lower_expression(&expr, ctx, func, locals_map, frame_layout);
                         func.instruction(&Instruction::LocalSet(local_idx));
                     }
                 }
@@ -594,7 +717,13 @@ impl Compiler {
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
                 cov_mark::hit!(wasm_codegen_emit_constant_definition);
-                self.lower_literal(&constant_definition.value, ctx, func);
+                self.lower_literal(
+                    &constant_definition.value,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
                 let (local_idx, _) = locals_map
                     .get(&constant_definition.name())
                     .expect("Local not found in pre-scan");
@@ -632,16 +761,29 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         match expression {
             Expression::ArrayIndexAccess(_array_index_access_expression) => todo!(),
             Expression::Binary(binary_expression) => {
-                self.lower_binary_expression(binary_expression, ctx, func, locals_map);
+                self.lower_binary_expression(
+                    binary_expression,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
             }
             Expression::MemberAccess(_member_access_expression) => todo!(),
             Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
             Expression::FunctionCall(function_call_expression) => {
-                match self.lower_function_call(function_call_expression, ctx, func, locals_map) {
+                match self.lower_function_call(
+                    function_call_expression,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                ) {
                     Ok(()) => {}
                     Err(CodegenError::UnsupportedCalleeKind) => {
                         todo!(
@@ -659,7 +801,13 @@ impl Compiler {
             }
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(prefix_unary_expression) => {
-                self.lower_prefix_unary_expression(prefix_unary_expression, ctx, func, locals_map);
+                self.lower_prefix_unary_expression(
+                    prefix_unary_expression,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
             }
             Expression::Parenthesized(parenthesized_expression) => {
                 cov_mark::hit!(wasm_codegen_emit_parenthesized_expression);
@@ -668,9 +816,12 @@ impl Compiler {
                     ctx,
                     func,
                     locals_map,
+                    frame_layout,
                 );
             }
-            Expression::Literal(literal) => self.lower_literal(literal, ctx, func),
+            Expression::Literal(literal) => {
+                self.lower_literal(literal, ctx, func, locals_map, frame_layout);
+            }
             Expression::Identifier(identifier) => {
                 let (local_idx, _) = locals_map
                     .get(&identifier.name)
@@ -732,6 +883,7 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) -> Result<(), CodegenError> {
         let Expression::Identifier(_) = &fce.function else {
             return Err(CodegenError::UnsupportedCalleeKind);
@@ -741,7 +893,7 @@ impl Compiler {
 
         if let Some(arguments) = &fce.arguments {
             for (_label, expr_ref) in arguments {
-                self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map);
+                self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map, frame_layout);
             }
         }
 
@@ -787,6 +939,7 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         let left = assign_stmt.left.borrow();
         match &*left {
@@ -796,7 +949,13 @@ impl Compiler {
                     .get(&identifier.name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                self.lower_expression(&assign_stmt.right.borrow(), ctx, func, locals_map);
+                self.lower_expression(
+                    &assign_stmt.right.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
                 func.instruction(&Instruction::LocalSet(local_idx));
             }
             _ => todo!("Assignment to non-identifier targets (member access, array index) not yet supported"),
@@ -843,10 +1002,11 @@ impl Compiler {
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
         parent_blocks_stack: &mut Vec<BlockType>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
-        self.lower_expression(&if_stmt.condition.borrow(), ctx, func, locals_map);
+        self.lower_expression(&if_stmt.condition.borrow(), ctx, func, locals_map, frame_layout);
         func.instruction(&Instruction::If(WasmBlockType::Empty));
 
         for stmt in if_stmt.if_arm.statements() {
@@ -856,6 +1016,7 @@ impl Compiler {
                 ctx,
                 func,
                 locals_map,
+                frame_layout,
             );
         }
 
@@ -869,6 +1030,7 @@ impl Compiler {
                     ctx,
                     func,
                     locals_map,
+                    frame_layout,
                 );
             }
         }
@@ -931,11 +1093,12 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
-        self.lower_expression(&be.left.borrow(), ctx, func, locals_map);
-        self.lower_expression(&be.right.borrow(), ctx, func, locals_map);
+        self.lower_expression(&be.left.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(&be.right.borrow(), ctx, func, locals_map, frame_layout);
 
         let left_type_info = ctx
             .get_node_typeinfo(be.left.borrow().id())
@@ -1077,6 +1240,7 @@ impl Compiler {
         ctx: &TypedContext,
         func: &mut Function,
         locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_prefix_unary_expression);
 
@@ -1093,7 +1257,7 @@ impl Compiler {
                 } else {
                     func.instruction(&Instruction::I32Const(0));
                 }
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
                 if is_i64 {
                     func.instruction(&Instruction::I64Sub);
                 } else {
@@ -1102,12 +1266,12 @@ impl Compiler {
             }
             UnaryOperatorKind::Not => {
                 cov_mark::hit!(wasm_codegen_emit_unary_not);
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
                 func.instruction(&Instruction::I32Eqz);
             }
             UnaryOperatorKind::BitNot => {
                 cov_mark::hit!(wasm_codegen_emit_unary_bitnot);
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map);
+                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
                 if is_i64 {
                     func.instruction(&Instruction::I64Const(-1));
                     func.instruction(&Instruction::I64Xor);
@@ -1134,10 +1298,77 @@ impl Compiler {
     /// - `literal` - AST literal node to convert
     /// - `ctx` - Typed context for type lookups
     /// - `func` - WASM function body being built
-    #[allow(clippy::unused_self)]
-    fn lower_literal(&self, literal: &Literal, ctx: &TypedContext, func: &mut Function) {
+    #[allow(clippy::too_many_lines)]
+    fn lower_literal(
+        &self,
+        literal: &Literal,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
+    ) {
         match literal {
-            Literal::Array(_array_literal) => todo!(),
+            Literal::Array(array_literal) => {
+                cov_mark::hit!(wasm_codegen_emit_array_literal);
+                let parent_var_name =
+                    ctx.find_enclosing_variable_name(array_literal.id).unwrap_or_else(|| {
+                        panic!(
+                            "Array literal (id={}) has no enclosing VariableDefinitionStatement",
+                            array_literal.id
+                        )
+                    });
+
+                let Some(layout) = frame_layout else {
+                    func.instruction(&Instruction::I32Const(0));
+                    return;
+                };
+
+                let slot = layout
+                    .array_offsets
+                    .get(&parent_var_name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Array variable '{parent_var_name}' not found in frame layout offsets"
+                        )
+                    });
+
+                if slot.length == 0 {
+                    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                    if slot.offset > 0 {
+                        #[allow(clippy::cast_possible_wrap)]
+                        func.instruction(&Instruction::I32Const(slot.offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                    }
+                    return;
+                }
+
+                if let Some(elements) = &array_literal.elements {
+                    let store_instr = memory::store_instruction_from_slot(slot);
+                    for (i, elem_ref) in elements.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let byte_offset = slot.offset + (i as u32) * slot.elem_size;
+                        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                        #[allow(clippy::cast_possible_wrap)]
+                        func.instruction(&Instruction::I32Const(byte_offset as i32));
+                        func.instruction(&Instruction::I32Add);
+                        self.lower_expression(
+                            &elem_ref.borrow(),
+                            ctx,
+                            func,
+                            locals_map,
+                            frame_layout,
+                        );
+                        func.instruction(&store_instr);
+                    }
+                }
+
+                func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                if slot.offset > 0 {
+                    #[allow(clippy::cast_possible_wrap)]
+                    func.instruction(&Instruction::I32Const(slot.offset as i32));
+                    func.instruction(&Instruction::I32Add);
+                }
+            }
             Literal::Bool(bool_literal) => {
                 func.instruction(&Instruction::I32Const(i32::from(bool_literal.value)));
             }
@@ -1239,6 +1470,7 @@ impl Compiler {
     /// This is a sticky flag: once enabled, it stays enabled for the rest of the
     /// compilation. When set, `finish()` emits Memory and Global sections and exports
     /// `"memory"` and `"__stack_pointer"`.
+    #[cfg(test)]
     pub(crate) fn enable_memory(&mut self) {
         self.has_memory = true;
     }

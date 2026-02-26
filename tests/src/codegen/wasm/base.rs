@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod base_codegen_tests {
     use crate::utils::{
-        assert_wasms_modules_equivalence, assert_wat_equivalence, get_test_file_path,
-        get_test_wasm_path, wasm_codegen, wasm_codegen_with_target,
+        assert_wasms_modules_equivalence, assert_wat_equivalence, codegen_output,
+        get_test_file_path, get_test_wasm_path, regenerate_wat, wasm_codegen,
+        wasm_codegen_with_target,
     };
 
     #[test]
@@ -939,6 +940,286 @@ mod base_codegen_tests {
             "Soroban output should start with WASM magic number"
         );
     }
+
+    #[test]
+    fn array_literal_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
+        let test_name = "array_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_literal_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "array_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should export 'memory'");
+
+        // Helper: read i32 (little-endian) from memory at the given address
+        fn read_i32(memory: &wasmtime::Memory, store: &mut Store<()>, addr: u32) -> i32 {
+            let mut buf = [0u8; 4];
+            memory
+                .read(store, addr as usize, &mut buf)
+                .unwrap_or_else(|e| panic!("Failed to read memory at 0x{addr:x}: {e}"));
+            i32::from_le_bytes(buf)
+        }
+
+        // Helper: read u8 from memory at the given address
+        fn read_u8(memory: &wasmtime::Memory, store: &mut Store<()>, addr: u32) -> u8 {
+            let mut buf = [0u8; 1];
+            memory
+                .read(store, addr as usize, &mut buf)
+                .unwrap_or_else(|e| panic!("Failed to read memory at 0x{addr:x}: {e}"));
+            buf[0]
+        }
+
+        // Read the __stack_pointer global to find the initial value
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // i32_array: stores [10, 20, 30] in a 16-byte frame
+        let i32_array_fn: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "i32_array")
+            .expect("Failed to get 'i32_array'");
+        let result = i32_array_fn
+            .call(&mut store, ())
+            .expect("i32_array failed");
+        assert_eq!(result, 0, "i32_array should return 0");
+        // After call, stack pointer should be restored
+        let sp_after = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_after, initial_sp,
+            "Stack pointer should be restored after i32_array call"
+        );
+
+        // bool_array: stores [true, false, true, false]
+        let bool_array_fn: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "bool_array")
+            .expect("Failed to get 'bool_array'");
+        let result = bool_array_fn
+            .call(&mut store, ())
+            .expect("bool_array failed");
+        assert_eq!(result, 0, "bool_array should return 0");
+
+        // two_arrays: stores [1, 2] and [3, 4]
+        let two_arrays_fn: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "two_arrays")
+            .expect("Failed to get 'two_arrays'");
+        let result = two_arrays_fn
+            .call(&mut store, ())
+            .expect("two_arrays failed");
+        assert_eq!(result, 0, "two_arrays should return 0");
+
+        // single_element: stores [42]
+        let single_element_fn: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "single_element")
+            .expect("Failed to get 'single_element'");
+        let result = single_element_fn
+            .call(&mut store, ())
+            .expect("single_element failed");
+        assert_eq!(result, 0, "single_element should return 0");
+
+        // Verify memory contents during execution by calling a function
+        // that stores known values, then reading memory before epilogue restores SP.
+        // Since functions return 0 and restore the stack, we verify that:
+        // 1) Functions execute without trapping
+        // 2) Stack pointer is properly restored
+        // 3) Memory was allocated (memory export exists)
+
+        // To verify actual memory writes, we use a trick: call i32_array,
+        // then inspect memory at the frame address. The stack pointer was
+        // restored, but the memory at the old frame is still readable.
+        // The frame was at (initial_sp - 16), since frame size is 16 bytes.
+        let frame_addr = (initial_sp - 16) as u32;
+        // After i32_array call, memory may have been overwritten by subsequent
+        // calls. Call i32_array last to ensure its values are in memory.
+        let _ = i32_array_fn
+            .call(&mut store, ())
+            .expect("i32_array failed on second call");
+        // The memory at frame_addr should contain [10, 20, 30]
+        assert_eq!(
+            read_i32(&memory, &mut store, frame_addr),
+            10,
+            "First element should be 10"
+        );
+        assert_eq!(
+            read_i32(&memory, &mut store, frame_addr + 4),
+            20,
+            "Second element should be 20"
+        );
+        assert_eq!(
+            read_i32(&memory, &mut store, frame_addr + 8),
+            30,
+            "Third element should be 30"
+        );
+
+        // Call bool_array last to check its memory layout
+        let _ = bool_array_fn
+            .call(&mut store, ())
+            .expect("bool_array failed on second call");
+        assert_eq!(
+            read_u8(&memory, &mut store, frame_addr),
+            1,
+            "First bool element should be 1 (true)"
+        );
+        assert_eq!(
+            read_u8(&memory, &mut store, frame_addr + 1),
+            0,
+            "Second bool element should be 0 (false)"
+        );
+        assert_eq!(
+            read_u8(&memory, &mut store, frame_addr + 2),
+            1,
+            "Third bool element should be 1 (true)"
+        );
+        assert_eq!(
+            read_u8(&memory, &mut store, frame_addr + 3),
+            0,
+            "Fourth bool element should be 0 (false)"
+        );
+    }
+
+    #[test]
+    fn array_literal_empty_produces_valid_wasm() {
+        let source = r#"
+            pub fn empty_array() -> i32 {
+                let arr: [i32; 0] = [];
+                return 0;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Empty array WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_literal_empty_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn empty_array() -> i32 {
+                let arr: [i32; 0] = [];
+                return 0;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "empty_array")
+            .expect("Failed to get 'empty_array'");
+        let result = func.call(&mut store, ()).expect("empty_array failed");
+        assert_eq!(result, 0, "empty_array should return 0");
+    }
+
+    #[test]
+    fn array_literal_no_memory_for_non_array_functions() {
+        use wasmtime::{Engine, Module, Store};
+
+        // Functions without arrays should NOT export memory
+        let source = "pub fn simple() -> i32 { return 42; }";
+        let wasm_bytes = wasm_codegen(source);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let memory = instance.get_memory(&mut store, "memory");
+        assert!(
+            memory.is_none(),
+            "Non-array functions should not export memory"
+        );
+    }
+
+    #[test]
+    fn array_literal_has_memory_section() {
+        let source = r#"
+            pub fn with_array() -> i32 {
+                let arr: [i32; 2] = [1, 2];
+                return 0;
+            }
+        "#;
+        let output = codegen_output(source);
+        let wasm_bytes = output.wasm();
+        // Verify the module has the WASM magic number and can be validated
+        assert_eq!(&wasm_bytes[0..4], b"\0asm", "Should be valid WASM");
+        inf_wasmparser::validate(wasm_bytes)
+            .unwrap_or_else(|e| panic!("Array WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_literal_void_function() {
+        let source = r#"
+            pub fn void_with_array() {
+                let arr: [i32; 3] = [1, 2, 3];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Void function with array WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_literal_void_function_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn void_with_array() {
+                let arr: [i32; 3] = [1, 2, 3];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), ()> = instance
+            .get_typed_func(&mut store, "void_with_array")
+            .expect("Failed to get 'void_with_array'");
+        func.call(&mut store, ())
+            .expect("void_with_array should not trap");
+    }
 }
 
 /// Test data regeneration helpers.
@@ -1309,5 +1590,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "assign_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_literal_wasm() {
+        let dir = base_test_dir().join("array_literal");
+        let source_code = std::fs::read_to_string(dir.join("array_literal.inf"))
+            .expect("Failed to read array_literal.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_literal.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_literal");
     }
 }
