@@ -80,12 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
 - Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
+- Add arithmetic overflow in WASM codegen deep-dive (`book/arithmetic-overflow-in-wasm-codegen.md`) ([#146])
+  - WASM wrapping semantics, trapping instructions, negation behavior
+  - Comparison with Rust, C, Zig, Go, Java overflow handling
+  - Formal verification implications for Rocq translation
+  - Empirical comparison: Inference vs rustc release vs rustc debug vs Soroban
 
 ### Testing
 
 - Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime
 - Add `arith_overflow` test module with 8 functions covering two's-complement wrapping arithmetic: i32/i64/u32 overflow and underflow, multiplication overflow, and negation of MIN (8 Wasmtime execution assertions)
 - Add `expr_deep_nesting` test module with 5 functions verifying 8+ level expression nesting: left-associative addition chain, mixed arithmetic in nested groups, boolean connectives over nested comparisons, function calls embedded in expressions, and chained unary negation (6 Wasmtime execution assertions)
+- Add 4 algorithm integration test modules exercising assignments, conditionals, and expressions in realistic patterns:
+  - `algo_bitwise`: bit manipulation (popcount, reverse bits, parity, hamming distance, power-of-2 check)
+  - `algo_converge`: iterative convergence (integer sqrt, binary search, GCD, collatz steps)
+  - `algo_i64_mixed`: i64 arithmetic (sum range, factorial, fibonacci, digit sum, geometric progression)
+  - `algo_recursive_math`: recursive functions (factorial, fibonacci, GCD, power, sum-to-n)
 - Add 2 assignment test fixtures with 10 Wasmtime execution assertions ([#146])
   - `assign.inf`: 10 functions covering simple i32/i64 assignment, expression RHS, parameter assignment, multiple reassignment, function call RHS, bool assignment, assignment inside conditional, mutable parameter assignment
   - `assign_nondet.inf`: assignment inside `forall` non-det block with uzumaki RHS

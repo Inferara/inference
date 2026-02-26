@@ -77,10 +77,10 @@ visit_function_definition
 ### Scope Flattening
 
 The pre-scan intentionally flattens all nested scopes into a single WASM local pool. A
-local declared inside a `forall { }` block, an `if` arm, or an `else` arm shares the same
-pool as one declared at the top of the function. This is consistent with how WebAssembly
-defines locals: they are function-scoped, not block-scoped. The Inference type-checker is
-responsible for enforcing lexical scoping rules at the language level.
+local declared inside a `forall { }` block, an `if` arm, an `else` arm, or a `loop` body
+shares the same pool as one declared at the top of the function. This is consistent with
+how WebAssembly defines locals: they are function-scoped, not block-scoped. The Inference
+type-checker is responsible for enforcing lexical scoping rules at the language level.
 
 ## Supported Initializer Expression Kinds
 

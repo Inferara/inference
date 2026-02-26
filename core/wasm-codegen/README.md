@@ -36,6 +36,8 @@ Typed AST (TypedContext)
    `local.set`; `const` definitions use the same path. Supported initializer expression
    kinds are literals, identifiers, uzumaki (`@`) expressions, and function calls. Function
    calls push arguments in positional order and emit a `call <func_idx>` instruction.
+   Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
+   evaluating the right-hand side expression and emitting `local.set` to store the result.
    `if`/`else` statements emit WASM structured `if`/`else`/`end` blocks with
    `BlockType::Empty` because Inference `if` is a statement, not an expression.
    Non-void functions emit an `unreachable` instruction before the function `end` to
@@ -190,7 +192,7 @@ The `codegen` function:
 
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
-- **Control flow** - `loop` and `break` statements are not yet implemented (`todo!()`)
+- **Control flow** - `loop` and `break` statements are not yet implemented (`todo!()`). Assignment statements (`x = value;`) are supported for simple identifier targets only; assignments to member access (struct fields, array elements) are deferred to compound type support.
 - **Expression types** - Limited support for complex expressions (binary operations, structs, arrays). Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
 - **Type system** - Generic types, custom types, and function types are not yet fully implemented
 - **Return-path analysis** - The compiler does not yet emit a compile-time error for non-void functions missing a return on all paths. An `unreachable` trap is emitted as a runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -202,6 +204,9 @@ Detailed design documents live in `docs/`:
 - [docs/local-variables-lowering.md](docs/local-variables-lowering.md) - The two-pass
   approach for lowering `let`/`const` locals, supported initializer kinds, and the
   `lower_literal` type-dispatch logic for sub-i32 types.
+- [docs/assignment-lowering.md](docs/assignment-lowering.md) - How assignment statements
+  (`x = expr;`) are lowered to WASM local.set instructions, local index resolution, and
+  current limitations on target forms.
 - [docs/function-calls-lowering.md](docs/function-calls-lowering.md) - Forward-reference
   pre-scan, parameter index interlock with locals, call lowering pipeline, drop emission
   rules, and known limitations.
@@ -248,6 +253,20 @@ Test data includes:
   comparison + logical operators, complex nested conditions, boolean locals, boolean
   equality/inequality, and if/else with complex conditions; validated and executed via
   wasmtime
+- `assign.inf` - Assignment statement tests including simple assignments (i32, i64, bool),
+  assignments from expressions, parameters, function calls, multiple assignments, and
+  assignments inside `if` blocks; validated against `inf_wasmparser` and executed via
+  wasmtime
+- `assign_nondet.inf` - Assignment statements inside non-deterministic blocks (forall,
+  exists, assume, unique)
+- `algo_bitwise.inf` - 12 functions implementing bitwise algorithms (popcount, power-of-2
+  checks, bit manipulation, rotation, byte swapping) demonstrating combined use of binary
+  operations, prefix unary expressions, conditionals, and recursive function calls
+- `algo_i64_mixed.inf` - Demonstrates i64 operations in context of classic algorithms
+  (factorial, fibonacci, GCD) with variable definitions and recursive calls
+- `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with loops (planned)
+  and recursive patterns
+- `algo_recursive_math.inf` - Various mathematical algorithms using recursion and arithmetic
 
 ## Related Resources
 

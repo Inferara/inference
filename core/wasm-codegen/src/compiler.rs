@@ -21,7 +21,7 @@
 //!    emit `unreachable` before function `end` for non-void functions so that WASM
 //!    validators accept functions whose all paths exit via explicit `return`
 //! 2. **Statement lowering** - Translate control flow (if/else), non-deterministic blocks,
-//!    variable and constant definitions, return, and expression statements
+//!    variable and constant definitions, assignment statements, return, and expression statements
 //! 3. **Expression lowering** - Generate WASM instructions for expressions and literals
 //! 4. **Non-det emission** - Emit custom 0xfc-prefixed instructions for non-deterministic ops
 //! 5. **Module assembly** - Combine all sections into a valid WASM binary
