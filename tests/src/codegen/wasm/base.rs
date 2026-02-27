@@ -1610,6 +1610,30 @@ mod base_codegen_tests {
         let result = caller.call(&mut store, ()).expect("caller failed");
         assert_eq!(result, 15, "read_elem([5, 15, 25]) should return arr[1] = 15");
     }
+
+    #[test]
+    fn array_nondet_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 3);
+        cov_mark::check_count!(wasm_codegen_emit_exists_block, 1);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 3);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 3);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_write, 1);
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 4);
+        let test_name = "array_nondet";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
 }
 
 /// Test data regeneration helpers.
@@ -2060,5 +2084,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_params");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_nondet_wasm() {
+        let dir = base_test_dir().join("array_nondet");
+        let source_code = std::fs::read_to_string(dir.join("array_nondet.inf"))
+            .expect("Failed to read array_nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_nondet");
     }
 }

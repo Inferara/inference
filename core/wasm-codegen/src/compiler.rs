@@ -801,6 +801,7 @@ impl Compiler {
     /// - `ctx` - Typed context for type lookups
     /// - `func` - WASM function body being built
     /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
+    #[allow(clippy::too_many_lines)]
     fn lower_expression(
         &self,
         expression: &Expression,
@@ -884,6 +885,20 @@ impl Compiler {
             }
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(uzumaki_expression) => {
+                if let Some(type_info) = ctx.get_node_typeinfo(uzumaki_expression.id)
+                    && let TypeInfoKind::Array(ref elem_type, length) = type_info.kind
+                {
+                    cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                    self.lower_array_uzumaki(
+                        uzumaki_expression.id,
+                        elem_type,
+                        length,
+                        ctx,
+                        func,
+                        frame_layout,
+                    );
+                    return;
+                }
                 if ctx.is_node_i32(uzumaki_expression.id) {
                     cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                     self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
@@ -1231,6 +1246,92 @@ impl Compiler {
 
         let load_instr = memory::load_instruction(&elem_type_info.kind);
         func.instruction(&load_instr);
+    }
+
+    /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
+    ///
+    /// `let arr: [T; N] = @;` means each element independently receives a non-deterministic
+    /// value. At the WASM level this emits N stores, each preceded by the appropriate
+    /// uzumaki opcode (`i32.uzumaki` for sub-i32 and i32 element types, `i64.uzumaki` for
+    /// i64/u64 element types).
+    ///
+    /// After all element stores, the array base pointer is pushed onto the WASM operand
+    /// stack (same convention as `lower_literal` for array literals).
+    ///
+    /// # Generated WASM (for `let arr: [i32; 3] = @;`)
+    ///
+    /// ```text
+    /// local.get $__frame_ptr
+    /// i32.const <offset + 0>
+    /// i32.add
+    /// 0xfc 0x31              ;; i32.uzumaki
+    /// i32.store
+    ///
+    /// local.get $__frame_ptr
+    /// i32.const <offset + 4>
+    /// i32.add
+    /// 0xfc 0x31              ;; i32.uzumaki
+    /// i32.store
+    ///
+    /// local.get $__frame_ptr
+    /// i32.const <offset + 8>
+    /// i32.add
+    /// 0xfc 0x31              ;; i32.uzumaki
+    /// i32.store
+    ///
+    /// local.get $__frame_ptr  ;; push array base pointer
+    /// i32.const <offset>
+    /// i32.add
+    /// ```
+    fn lower_array_uzumaki(
+        &self,
+        uzumaki_id: u32,
+        elem_type: &inference_type_checker::type_info::TypeInfo,
+        length: u32,
+        ctx: &TypedContext,
+        func: &mut Function,
+        frame_layout: Option<&FrameLayout>,
+    ) {
+        let parent_var_name = ctx
+            .find_enclosing_variable_name(uzumaki_id)
+            .expect("Array uzumaki must have an enclosing variable definition");
+
+        let layout = frame_layout
+            .expect("Array uzumaki requires a frame layout (function must have arrays)");
+
+        let slot = layout
+            .array_offsets
+            .get(&parent_var_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Array variable '{parent_var_name}' not found in frame layout offsets"
+                )
+            });
+
+        let uzumaki_opcode = if Self::is_i64_type(&elem_type.kind) {
+            UZUMAKI_I64_OPCODE
+        } else {
+            UZUMAKI_I32_OPCODE
+        };
+
+        let store_instr = memory::store_instruction_from_slot(slot);
+
+        for i in 0..length {
+            #[allow(clippy::cast_possible_wrap)]
+            let byte_offset = (slot.offset + i * slot.elem_size) as i32;
+            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+            func.instruction(&Instruction::I32Const(byte_offset));
+            func.instruction(&Instruction::I32Add);
+            self.emit_uzumaki(func, uzumaki_opcode);
+            func.instruction(&store_instr);
+        }
+
+        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+        if slot.offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            func.instruction(&Instruction::I32Const(slot.offset as i32));
+            func.instruction(&Instruction::I32Add);
+        }
     }
 
     /// Lowers a binary expression to WASM stack instructions.

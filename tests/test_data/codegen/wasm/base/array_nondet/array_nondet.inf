@@ -1,0 +1,27 @@
+pub fn array_in_forall() {
+    forall {
+        let arr: [i32; 3] = [1, 2, 3];
+        let x: i32 = arr[0];
+    }
+}
+
+pub fn array_index_in_exists() {
+    let arr: [i32; 3] = [10, 20, 30];
+    exists {
+        let val: i32 = arr[1];
+    }
+}
+
+pub fn array_assign_uzumaki_in_forall() {
+    let mut arr: [i32; 2] = [0, 0];
+    forall {
+        arr[0] = @;
+    }
+}
+
+pub fn array_uzumaki_init() {
+    forall {
+        let arr: [i32; 3] = @;
+        let x: i32 = arr[0];
+    }
+}
