@@ -105,6 +105,76 @@ mod edge_cases {
     }
 }
 
+mod element_type_propagation {
+    use super::*;
+
+    #[test]
+    fn test_i64_array_literal() {
+        let source = r#"fn test() -> i64 { let arr: [i64; 2] = [100, 200]; return arr[1]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "i64 array with number literal elements should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_u64_array_literal() {
+        let source = r#"fn test() -> u64 { let arr: [u64; 3] = [10, 20, 30]; return arr[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "u64 array with number literal elements should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_i8_array_literal() {
+        let source = r#"fn test() -> i8 { let arr: [i8; 2] = [1, 2]; return arr[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "i8 array with number literal elements should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_u32_array_literal() {
+        let source = r#"fn test() -> u32 { let arr: [u32; 2] = [42, 84]; return arr[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "u32 array with number literal elements should work, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_i32_array_literal_still_works() {
+        let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; return arr[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "i32 array should still work after fix, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_i64_array_literal_declaration_only() {
+        let source = r#"fn test() -> i32 { let arr: [i64; 2] = [100, 200]; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "i64 array literal declaration should pass type checking, got: {:?}",
+            result.err()
+        );
+    }
+}
+
 mod function_parameters {
     use super::*;
 

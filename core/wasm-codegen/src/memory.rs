@@ -74,17 +74,22 @@ pub(crate) struct FrameLayout {
 /// Returns the byte size of a single element for the given type.
 ///
 /// Used by `compute_frame_layout` and store/load instruction selection.
+#[must_use = "returns element size in bytes"]
 pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
     match kind {
         TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::I8 | NumberType::U8) => 1,
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => 2,
         TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => 4,
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => 8,
+        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
+        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
+        // struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type: {kind:?}"),
     }
 }
 
 /// Rounds `size` up to the nearest multiple of [`FRAME_ALIGNMENT`].
+#[must_use = "returns the aligned size"]
 pub(crate) fn align_to_frame(size: u32) -> u32 {
     (size + FRAME_ALIGNMENT - 1) & !(FRAME_ALIGNMENT - 1)
 }
@@ -94,6 +99,7 @@ pub(crate) fn align_to_frame(size: u32) -> u32 {
 /// This avoids needing a `TypeInfoKind` at the call site (useful when the array
 /// literal node may not have type info, but the slot was pre-computed from the
 /// variable definition).
+#[must_use = "returns the WASM store instruction"]
 pub(crate) fn store_instruction_from_slot(slot: &ArraySlot) -> Instruction<'static> {
     store_instruction_for_size(slot.elem_size)
 }
@@ -128,6 +134,7 @@ fn store_instruction_for_size(size: u32) -> Instruction<'static> {
 /// - 2 bytes: align=1 (2^1 = 2)
 /// - 4 bytes: align=2 (2^2 = 4)
 /// - 8 bytes: align=3 (2^3 = 8)
+#[must_use = "returns the WASM store instruction"]
 pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static> {
     let memarg = MemArg {
         offset: 0,
@@ -141,15 +148,19 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => Instruction::I32Store16(memarg),
         TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => Instruction::I32Store(memarg),
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Store(memarg),
+        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
+        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
+        // struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type for store: {elem_type:?}"),
     }
 }
 
 /// Selects the appropriate WASM load instruction for an element type.
 ///
-/// Uses signed extension for sub-i32 types (`i32.load8_s`, `i32.load16_s`)
-/// to preserve the sign bit. This matches the convention that sub-i32 values
-/// are stored truncated and loaded with sign extension.
+/// Uses sign-appropriate extension for sub-i32 types:
+/// - Signed types (`i8`, `i16`): `i32.load8_s`, `i32.load16_s` (sign-extending)
+/// - Unsigned types (`u8`, `u16`, `bool`): `i32.load8_u`, `i32.load16_u` (zero-extending)
+#[must_use = "returns the WASM load instruction"]
 pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static> {
     let memarg = MemArg {
         offset: 0,
@@ -163,6 +174,9 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
         TypeInfoKind::Number(NumberType::I16) => Instruction::I32Load16S(memarg),
         TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => Instruction::I32Load(memarg),
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Load(memarg),
+        // The type checker restricts array element types to: bool, i8, u8, i16, u16,
+        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
+        // struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type for load: {elem_type:?}"),
     }
 }
@@ -188,6 +202,13 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 ///
 /// The prologue decrements `__stack_pointer`, saves the frame pointer, and
 /// zero-initializes the entire frame via `memory.fill`.
+///
+/// **Optimization opportunity**: When all array elements are explicitly initialized
+/// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the `memory.fill` is redundant since
+/// every byte will be overwritten. This is intentionally not optimized to ensure
+/// deterministic behavior for partially-initialized arrays and to simplify the
+/// implementation. A future optimization pass could skip `memory.fill` when all
+/// arrays in the frame are fully initialized.
 ///
 /// ```text
 /// global.get $__stack_pointer

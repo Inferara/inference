@@ -314,7 +314,7 @@ impl Compiler {
             &function_definition.body,
             ctx,
             local_idx,
-            function_definition.arguments.as_ref(),
+            function_definition.arguments.as_deref(),
         );
 
         if frame_layout.is_some() {
@@ -491,7 +491,7 @@ impl Compiler {
         block: &BlockType,
         ctx: &TypedContext,
         frame_ptr_local_idx: u32,
-        arguments: Option<&Vec<ArgumentType>>,
+        arguments: Option<&[ArgumentType]>,
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
@@ -533,6 +533,13 @@ impl Compiler {
 
     /// Recursively walks a block collecting array variable declarations into the
     /// frame layout offset map.
+    ///
+    /// NOTE: Arrays are packed sequentially without per-element-type alignment padding.
+    /// This means a bool array (1-byte elements) followed by an i32 array (4-byte elements)
+    /// may result in the i32 array starting at a non-4-byte-aligned offset. WASM tolerates
+    /// misaligned access (alignment in `MemArg` is a hint, not enforced), so this is correct
+    /// but may be suboptimal on some runtimes. A future improvement could insert alignment
+    /// padding between arrays of different element sizes.
     fn collect_array_slots(
         block: &BlockType,
         ctx: &TypedContext,
@@ -1082,6 +1089,8 @@ impl Compiler {
 
         self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
 
+        // TODO(#148): For constant indices, compute byte offset at compile time
+        // instead of emitting runtime multiplication.
         self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
         #[allow(clippy::cast_possible_wrap)]
         func.instruction(&Instruction::I32Const(elem_sz as i32));
@@ -1238,6 +1247,9 @@ impl Compiler {
         let elem_sz = memory::element_size(&elem_type_info.kind);
 
         self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
+
+        // TODO(#148): For constant indices, compute byte offset at compile time
+        // instead of emitting runtime multiplication.
         self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
         #[allow(clippy::cast_possible_wrap)]
         func.instruction(&Instruction::I32Const(elem_sz as i32));
@@ -1292,13 +1304,23 @@ impl Compiler {
         func: &mut Function,
         frame_layout: Option<&FrameLayout>,
     ) {
+        // INVARIANT: `lower_array_uzumaki` is only called from `lower_literal` when the
+        // AST node is an `Expression::Uzumaki` inside an array variable definition. The
+        // tree-sitter grammar and typed AST construction guarantee that an uzumaki node
+        // always has an enclosing `VariableDefinitionStatement`.
         let parent_var_name = ctx
             .find_enclosing_variable_name(uzumaki_id)
             .expect("Array uzumaki must have an enclosing variable definition");
 
+        // INVARIANT: `lower_array_uzumaki` is only reachable for array-typed variables.
+        // `compile_function` creates a `FrameLayout` whenever `pre_scan_locals` discovers
+        // array locals, and array uzumaki nodes can only appear inside such variables.
         let layout = frame_layout
             .expect("Array uzumaki requires a frame layout (function must have arrays)");
 
+        // INVARIANT: `compute_frame_layout` scans the same AST nodes as `lower_literal`,
+        // so every array variable encountered during lowering was already registered in
+        // `array_offsets` during frame layout computation.
         let slot = layout
             .array_offsets
             .get(&parent_var_name)
@@ -1603,6 +1625,10 @@ impl Compiler {
         match literal {
             Literal::Array(array_literal) => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
+                // INVARIANT: Array literals only appear as the initializer of a
+                // `VariableDefinitionStatement`. The tree-sitter grammar does not
+                // permit array literals in other expression positions, so the
+                // enclosing variable always exists in the typed AST.
                 let parent_var_name = ctx
                     .find_enclosing_variable_name(array_literal.id)
                     .unwrap_or_else(|| {
@@ -1617,6 +1643,10 @@ impl Compiler {
                     return;
                 };
 
+                // INVARIANT: `compute_frame_layout` scans the same AST nodes as
+                // `lower_literal`, so every array variable encountered during
+                // lowering was already registered in `array_offsets` during frame
+                // layout computation.
                 let slot = layout
                     .array_offsets
                     .get(&parent_var_name)

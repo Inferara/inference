@@ -598,6 +598,7 @@ impl SymbolTable {
     /// by looking up the name in the symbol table. Falls through to `Custom`
     /// if the name is not found (e.g., forward references in nested modules).
     /// Recurses into array element types.
+    #[must_use = "returns the resolved type; discarding it loses the resolution"]
     pub(crate) fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
         match &ti.kind {
             TypeInfoKind::Custom(name) => {

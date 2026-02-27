@@ -744,6 +744,18 @@ impl TypeChecker {
                     if let Expression::Literal(Literal::Number(num_lit)) = &*expr_ref {
                         ctx.set_node_typeinfo(num_lit.id, target_type.clone());
                     }
+                    if let Expression::Literal(Literal::Array(array_lit)) = &*expr_ref
+                        && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
+                        && let Some(elements) = &array_lit.elements
+                    {
+                        for element in elements {
+                            if let Expression::Literal(Literal::Number(num_lit)) =
+                                &*element.borrow()
+                            {
+                                ctx.set_node_typeinfo(num_lit.id, (**elem_type).clone());
+                            }
+                        }
+                    }
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)

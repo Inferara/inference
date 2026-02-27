@@ -1634,6 +1634,46 @@ mod base_codegen_tests {
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
     }
+
+    #[test]
+    fn array_i64_literal_validation() {
+        let source = r#"
+            pub fn i64_array_read() -> i64 {
+                let arr: [i64; 2] = [100, 200];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("i64 array literal WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_i64_literal_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn i64_array_read() -> i64 {
+                let arr: [i64; 2] = [100, 200];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to compile Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "i64_array_read")
+            .expect("Failed to get 'i64_array_read'");
+        let result = func
+            .call(&mut store, ())
+            .expect("i64_array_read should not trap");
+        assert_eq!(result, 200, "arr[1] should be 200 (i64)");
+    }
 }
 
 /// Test data regeneration helpers.
