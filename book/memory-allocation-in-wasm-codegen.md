@@ -22,16 +22,18 @@ WebAssembly linear memory is a contiguous byte array. Inference allocates one pa
 Linear Memory (1 page = 64KB)
 +--------------------------------------------+  0x10000 (65536)
 |                                            |
+|     (free space)                           |
+|     (future: data sections, heap)          |
+|                                            |
++-- __stack_pointer -------------------------+  STACK_SIZE (65536)
+|                                            |
 |         Stack (grows downward)             |
 |                                            |
-+-- __stack_pointer -------------------------+  (mutable global i32)
-|                                            |
-|              (free space)                  |
-|                                            |
 +--------------------------------------------+  0x00000
+  overflow below 0 = WASM OOB trap
 ```
 
-`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the first memory page. When a function with arrays is called, `__stack_pointer` is decremented by the frame size. When the function returns, it is restored. The stack grows downward, matching the convention used by LLVM, Rust, and Zig when targeting WebAssembly.
+`__stack_pointer` is a mutable i32 WebAssembly global initialized to 65536 — the top of the stack region. When a function with arrays is called, `__stack_pointer` is decremented by the frame size. When the function returns, it is restored. The stack grows downward toward address 0, following the `--stack-first` convention used by Rust and Zig when targeting WebAssembly. Any stack overflow that pushes the pointer below address 0 causes a WASM out-of-bounds memory trap automatically, providing free overflow protection without a runtime guard. Future data sections and heap allocations will be placed above the stack region, starting at STACK_SIZE and growing upward.
 
 Programs without arrays do not get a memory section, a global section, or any memory-related exports. The compiler tracks a `has_memory` flag and only emits these sections when at least one function uses arrays. Existing programs produce identical WASM output — zero regression.
 
@@ -441,13 +443,13 @@ LLVM uses the same shadow stack pattern with a `__stack_pointer` mutable global.
 
 ### Rust to WASM
 
-Rust arrays on WASM use the same LLVM shadow stack. `[i32; 3]` is allocated on the shadow stack with a frame pointer pattern identical to Inference's output. Rust passes small arrays by value (copying into the callee's frame) and large aggregates by reference with compiler-generated memcpy.
+Rust arrays on WASM use the same LLVM shadow stack with `--stack-first` layout: the stack occupies the bottom of the address space and grows downward toward address 0, while data sections are placed above. `[i32; 3]` is allocated on the shadow stack with a frame pointer pattern identical to Inference's output. Rust passes small arrays by value (copying into the callee's frame) and large aggregates by reference with compiler-generated memcpy.
 
-The key difference is that Rust has lifetime analysis and borrow checking. A `&[i32; 3]` reference can be passed without copying because the borrow checker guarantees no aliasing. Inference does not have a borrow checker, so it always copies.
+Inference now matches Rust's stack-first layout. The one remaining difference is the borrow checker: a `&[i32; 3]` reference can be passed without copying because the borrow checker guarantees no aliasing. Inference does not have a borrow checker, so it always copies.
 
 ### Zig to WASM
 
-Zig uses a shadow stack for stack-allocated arrays when targeting WASM. Zig zero-initializes local arrays (matching Inference's `memory.fill` approach). Zig's safety modes add bounds checks on array access; Inference does not currently emit bounds checks (this is deferred to a future `BuildProfile` feature).
+Zig also uses `--stack-first` layout when targeting WASM, placing the stack at low addresses so overflow naturally traps. Inference matches this layout. Zig zero-initializes local arrays (matching Inference's `memory.fill` approach). Zig's safety modes add bounds checks on array access; Inference does not currently emit bounds checks (this is deferred to a future `BuildProfile` feature).
 
 ## WASM Section Layout
 
@@ -491,7 +493,7 @@ A future implementation, gated on `BuildProfile`, will add bounds checking in De
 
 1. **No runtime bounds checking**: Out-of-bounds array access reads/writes arbitrary memory. Deferred to a future `BuildProfile`-gated feature.
 
-2. **No stack overflow guard**: Deep call chains with large arrays can silently overflow the 64 KB stack. A prologue trap check (`if __stack_pointer < 0 then unreachable`) is planned.
+2. **Natural stack overflow protection via stack-first layout**: Stack overflow that pushes `__stack_pointer` below address 0 is caught automatically as a WASM out-of-bounds memory trap. The error message from the runtime is generic ("out of bounds memory access") rather than "stack overflow". A future compile-time static call-graph analysis (feasible because recursion is forbidden) could detect overflow at compile time and produce a better diagnostic.
 
 3. **No nested arrays**: `[[i32; 3]; 2]` is not supported. Interior pointer management and aliasing concerns need design work.
 

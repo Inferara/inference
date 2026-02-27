@@ -8,16 +8,16 @@
 //! # Memory Layout
 //!
 //! ```text
-//! Linear Memory (1 page = 64KB initially)
+//! Stack-first layout (1 page = 64KB, no data sections yet)
 //! +--------------------------------------------+  0x10000 (64KB)
-//! |                                            |
-//! |         Stack (grows downward)             |
-//! |                                            |
-//! +-- __stack_pointer -------------------------+  (mutable global i32)
-//! |                                            |
-//! |              (free space)                  |
-//! |                                            |
+//! |              (free space)                   |
+//! |     (future: data sections, heap)           |
+//! +-- __stack_pointer --------------------------+  STACK_SIZE
+//! |                                             |
+//! |         Stack (grows downward)              |
+//! |                                             |
 //! +--------------------------------------------+  0x00000
+//! overflow below 0 = WASM OOB trap
 //! ```
 //!
 //! # Responsibilities
@@ -34,8 +34,27 @@ use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use rustc_hash::FxHashMap;
 use wasm_encoder::{Function, Instruction, MemArg};
 
-/// Initial value for `__stack_pointer`: top of the first 64 KB memory page.
-pub(crate) const STACK_POINTER_INIT: i32 = 65536;
+/// One WASM memory page in bytes.
+pub(crate) const PAGE_SIZE: u32 = 65536;
+
+/// Size of the stack region in bytes.
+///
+/// In the stack-first layout, the stack occupies addresses `[0, STACK_SIZE)` and grows
+/// downward from `STACK_SIZE` toward 0. Overflow below address 0 traps automatically
+/// via WASM out-of-bounds memory access — specifically, the `memory.fill` in the
+/// prologue fails its bounds check when the wrapped SP is used as a destination address.
+///
+/// Must not exceed `PAGE_SIZE`. When data sections are added (constant arrays, strings),
+/// reduce this to leave room above the stack region: `STACK_SIZE + data_size <= PAGE_SIZE`.
+pub(crate) const STACK_SIZE: u32 = PAGE_SIZE;
+
+/// Initial value for `__stack_pointer`: one past the last valid stack address.
+///
+/// This is a "past-the-end" value (like C++ `vector::end()`). Address `STACK_SIZE`
+/// itself is never accessed — the prologue subtracts `frame_size` before any memory
+/// operation, so the first actual access is at `STACK_SIZE - frame_size`.
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) const STACK_POINTER_INIT: i32 = STACK_SIZE as i32;
 
 /// Stack frame alignment in bytes (matches LLVM/Rust WASM convention).
 pub(crate) const FRAME_ALIGNMENT: u32 = 16;
@@ -203,12 +222,22 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 /// The prologue decrements `__stack_pointer`, saves the frame pointer, and
 /// zero-initializes the entire frame via `memory.fill`.
 ///
+/// # Stack overflow protection
+///
+/// `i32.sub` uses modular arithmetic and never traps. If the subtraction wraps
+/// (SP goes "below 0"), the result is a large unsigned value (e.g., `0xFFFFFFF0`).
+/// The subsequent `memory.fill` uses this wrapped value as the destination address,
+/// which fails the WASM bounds check (`addr + size > mem_size`) and traps. This is
+/// the mechanism behind the stack-first "free trap" — the `memory.fill` instruction
+/// MUST remain immediately after the sub for this protection to hold.
+///
 /// **Optimization opportunity**: When all array elements are explicitly initialized
 /// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the `memory.fill` is redundant since
 /// every byte will be overwritten. This is intentionally not optimized to ensure
 /// deterministic behavior for partially-initialized arrays and to simplify the
 /// implementation. A future optimization pass could skip `memory.fill` when all
-/// arrays in the frame are fully initialized.
+/// arrays in the frame are fully initialized — but must preserve the overflow trap
+/// by emitting an explicit guard (`if SP < 0 then unreachable`).
 ///
 /// ```text
 /// global.get $__stack_pointer
@@ -222,7 +251,7 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 /// memory.fill
 /// ```
 pub(crate) fn emit_stack_prologue(func: &mut Function, layout: &FrameLayout) {
-    debug_assert!(
+    assert!(
         layout.total_size > 0,
         "emit_stack_prologue called with zero-size frame; memory.fill would trap per WASM spec"
     );
@@ -389,8 +418,25 @@ mod tests {
     }
 
     #[test]
-    fn stack_pointer_init_is_page_size() {
-        assert_eq!(STACK_POINTER_INIT, 65536);
+    fn stack_pointer_init_equals_stack_size() {
+        assert_eq!(STACK_SIZE, 65536);
+        assert_eq!(STACK_POINTER_INIT, STACK_SIZE as i32);
+    }
+
+    #[test]
+    fn stack_size_fits_in_one_page() {
+        assert!(
+            STACK_SIZE <= PAGE_SIZE,
+            "STACK_SIZE ({STACK_SIZE}) must not exceed PAGE_SIZE ({PAGE_SIZE})"
+        );
+    }
+
+    #[test]
+    fn stack_pointer_init_fits_in_i32() {
+        assert!(
+            STACK_SIZE <= i32::MAX as u32,
+            "STACK_SIZE must fit in i32 for STACK_POINTER_INIT cast"
+        );
     }
 
     #[test]

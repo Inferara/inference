@@ -78,7 +78,7 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, align_to_frame, element_size,
+    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to_frame, element_size,
     emit_array_param_copy, emit_stack_epilogue, emit_stack_prologue,
 };
 
@@ -529,11 +529,9 @@ impl Compiler {
         }
 
         let total_size = align_to_frame(current_offset);
-        #[allow(clippy::cast_sign_loss)]
-        let max_frame = STACK_POINTER_INIT as u32;
         assert!(
-            total_size <= max_frame,
-            "Frame size ({total_size} bytes) exceeds available stack memory ({max_frame} bytes)"
+            total_size <= STACK_SIZE,
+            "Frame size ({total_size} bytes) exceeds available stack memory ({STACK_SIZE} bytes)"
         );
 
         Some(FrameLayout {

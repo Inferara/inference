@@ -1951,6 +1951,36 @@ mod base_codegen_tests {
             "mut param: double_first([21, 0, 0]) should return 42"
         );
     }
+
+    #[test]
+    fn stack_overflow_traps_at_runtime() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let zeros = vec!["0"; 8200].join(", ");
+        let source = format!(
+            "pub fn callee() -> i32 {{\
+                 let b: [i32; 8200] = [{zeros}];\
+                 return b[0];\
+             }}\
+             pub fn caller() -> i32 {{\
+                 let a: [i32; 8200] = [{zeros}];\
+                 return a[0] + callee();\
+             }}"
+        );
+        let wasm_bytes = wasm_codegen(&source);
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "caller")
+            .expect("get func");
+        let result = func.call(&mut store, ());
+        assert!(
+            result.is_err(),
+            "two 32KB frames should trap (stack overflow in 64KB stack)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.

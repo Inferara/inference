@@ -67,8 +67,8 @@ In `finish()`, if any function uses arrays (`self.has_memory == true`):
 
 1. **Memory Section** - Declares 1 linear memory page (64 KB initial)
 2. **Global Section** - Exports `__stack_pointer` (mutable i32 global)
-   - Initialized to `0x10000` (65536 = 64 KB)
-   - Stack grows downward from this address
+   - Initialized to `0x10000` (65536 = STACK_SIZE, top of the stack region)
+   - Stack grows downward toward address 0 (stack-first layout)
 
 ## Memory Layout
 
@@ -77,14 +77,17 @@ WebAssembly linear memory is a flat byte array accessed via load/store instructi
 ```
 +------ 0x10000 (65536 bytes = 1 page)
 |
+|  [ Free space: future data sections, heap ]
+|
++-- STACK_SIZE (65536) = __stack_pointer initial value
+|
 |  [ Stack grows downward ]
 |
-+-- __stack_pointer (mutable global)
-|
-|  [ Free space ]
-|
 +------ 0x00000 (memory start)
+  overflow below 0 = WASM OOB trap
 ```
+
+This is the stack-first layout used by Rust and Zig: the stack occupies the bottom of the address space so that any overflow that pushes `__stack_pointer` below address 0 triggers a WASM out-of-bounds memory trap automatically. Future data sections will be placed above the stack region, starting at STACK_SIZE.
 
 **Frame allocation**:
 
