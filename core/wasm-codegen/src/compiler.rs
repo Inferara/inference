@@ -78,8 +78,8 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, align_to_frame, element_size, emit_stack_epilogue, emit_stack_prologue, ArraySlot,
-    FrameLayout, STACK_POINTER_INIT,
+    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, align_to_frame, element_size,
+    emit_array_param_copy, emit_stack_epilogue, emit_stack_prologue,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -310,7 +310,12 @@ impl Compiler {
 
         // compute_frame_layout returns None when no arrays exist (or all are zero-length),
         // so frame_layout.is_some() implies total_size > 0.
-        let frame_layout = Self::compute_frame_layout(&function_definition.body, ctx, local_idx);
+        let frame_layout = Self::compute_frame_layout(
+            &function_definition.body,
+            ctx,
+            local_idx,
+            function_definition.arguments.as_ref(),
+        );
 
         if frame_layout.is_some() {
             self.has_memory = true;
@@ -334,6 +339,35 @@ impl Compiler {
 
         if let Some(ref layout) = frame_layout {
             emit_stack_prologue(&mut func, layout);
+
+            // Copy-on-entry: for each array-typed parameter, copy the caller's data
+            // into the callee's frame to enforce value semantics.
+            if let Some(arguments) = &function_definition.arguments {
+                for arg_type in arguments {
+                    if let ArgumentType::Argument(arg) = arg_type {
+                        let type_info = ctx
+                            .get_node_typeinfo(arg.id)
+                            .expect("Argument must have type info");
+                        if let TypeInfoKind::Array(elem_type, _length) = &type_info.kind {
+                            let param_local = locals_map
+                                .get(&arg.name())
+                                .expect("Array parameter must be in locals_map")
+                                .0;
+                            let slot = layout
+                                .array_offsets
+                                .get(&arg.name())
+                                .expect("Array parameter must have a frame slot");
+                            emit_array_param_copy(
+                                &mut func,
+                                layout,
+                                slot,
+                                param_local,
+                                &elem_type.kind,
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         self.lower_statement(
@@ -443,19 +477,47 @@ impl Compiler {
     }
 
     /// Computes the stack frame layout for a function by collecting array variable
-    /// declarations and assigning byte offsets within the frame.
+    /// declarations and array-typed parameters, assigning byte offsets within the frame.
     ///
-    /// Returns `None` if the function contains no array variables (no frame needed).
-    /// When arrays are present, the returned `FrameLayout` contains the total
-    /// (16-byte-aligned) frame size, per-array offsets, and the WASM local index
-    /// assigned to the synthetic `__frame_ptr` local.
+    /// Array-typed parameters need copy space in the callee's frame so that value
+    /// semantics are preserved (the callee cannot mutate the caller's array through
+    /// the shared pointer).
+    ///
+    /// Returns `None` if the function contains no array variables or array parameters
+    /// (no frame needed). When arrays are present, the returned `FrameLayout` contains
+    /// the total (16-byte-aligned) frame size, per-array offsets, and the WASM local
+    /// index assigned to the synthetic `__frame_ptr` local.
     fn compute_frame_layout(
         block: &BlockType,
         ctx: &TypedContext,
         frame_ptr_local_idx: u32,
+        arguments: Option<&Vec<ArgumentType>>,
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
+
+        // Allocate copy space for array-typed parameters
+        if let Some(args) = arguments {
+            for arg_type in args {
+                if let ArgumentType::Argument(arg) = arg_type {
+                    let type_info = ctx
+                        .get_node_typeinfo(arg.id)
+                        .expect("Argument must have type info");
+                    if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
+                        let elem_sz = element_size(&elem_type.kind);
+                        let byte_count = elem_sz * length;
+                        let slot = ArraySlot {
+                            offset: current_offset,
+                            elem_size: elem_sz,
+                            length: *length,
+                        };
+                        array_offsets.insert(arg.name(), slot);
+                        current_offset += byte_count;
+                    }
+                }
+            }
+        }
+
         Self::collect_array_slots(block, ctx, &mut array_offsets, &mut current_offset);
 
         if current_offset == 0 {
@@ -499,23 +561,13 @@ impl Compiler {
                     Self::collect_array_slots(inner_block, ctx, array_offsets, current_offset);
                 }
                 Statement::If(if_stmt) => {
-                    Self::collect_array_slots(
-                        &if_stmt.if_arm,
-                        ctx,
-                        array_offsets,
-                        current_offset,
-                    );
+                    Self::collect_array_slots(&if_stmt.if_arm, ctx, array_offsets, current_offset);
                     if let Some(else_arm) = &if_stmt.else_arm {
                         Self::collect_array_slots(else_arm, ctx, array_offsets, current_offset);
                     }
                 }
                 Statement::Loop(loop_stmt) => {
-                    Self::collect_array_slots(
-                        &loop_stmt.body,
-                        ctx,
-                        array_offsets,
-                        current_offset,
-                    );
+                    Self::collect_array_slots(&loop_stmt.body, ctx, array_offsets, current_offset);
                 }
                 _ => {}
             }
@@ -665,13 +717,7 @@ impl Compiler {
                 }
             }
             Statement::Assign(assign_statement) => {
-                self.lower_assign_statement(
-                    &assign_statement,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_assign_statement(&assign_statement, ctx, func, locals_map, frame_layout);
             }
             Statement::Return(return_statement) => {
                 self.lower_expression(
@@ -970,7 +1016,14 @@ impl Compiler {
                 func.instruction(&Instruction::LocalSet(local_idx));
             }
             Expression::ArrayIndexAccess(aiae) => {
-                self.lower_array_index_write(aiae, assign_stmt, ctx, func, locals_map, frame_layout);
+                self.lower_array_index_write(
+                    aiae,
+                    assign_stmt,
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
             }
             _ => todo!("Assignment to non-identifier targets (member access) not yet supported"),
         }
@@ -1020,7 +1073,13 @@ impl Compiler {
         func.instruction(&Instruction::I32Mul);
         func.instruction(&Instruction::I32Add);
 
-        self.lower_expression(&assign_stmt.right.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(
+            &assign_stmt.right.borrow(),
+            ctx,
+            func,
+            locals_map,
+            frame_layout,
+        );
 
         let store_instr = memory::store_instruction(&elem_type_info.kind);
         func.instruction(&store_instr);
@@ -1070,7 +1129,13 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
-        self.lower_expression(&if_stmt.condition.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(
+            &if_stmt.condition.borrow(),
+            ctx,
+            func,
+            locals_map,
+            frame_layout,
+        );
         func.instruction(&Instruction::If(WasmBlockType::Empty));
 
         for stmt in if_stmt.if_arm.statements() {
@@ -1158,7 +1223,6 @@ impl Compiler {
         let elem_sz = memory::element_size(&elem_type_info.kind);
 
         self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
-
         self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
         #[allow(clippy::cast_possible_wrap)]
         func.instruction(&Instruction::I32Const(elem_sz as i32));
@@ -1367,7 +1431,13 @@ impl Compiler {
                 } else {
                     func.instruction(&Instruction::I32Const(0));
                 }
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
+                self.lower_expression(
+                    &pue.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
                 if is_i64 {
                     func.instruction(&Instruction::I64Sub);
                 } else {
@@ -1376,12 +1446,24 @@ impl Compiler {
             }
             UnaryOperatorKind::Not => {
                 cov_mark::hit!(wasm_codegen_emit_unary_not);
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
+                self.lower_expression(
+                    &pue.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
                 func.instruction(&Instruction::I32Eqz);
             }
             UnaryOperatorKind::BitNot => {
                 cov_mark::hit!(wasm_codegen_emit_unary_bitnot);
-                self.lower_expression(&pue.expression.borrow(), ctx, func, locals_map, frame_layout);
+                self.lower_expression(
+                    &pue.expression.borrow(),
+                    ctx,
+                    func,
+                    locals_map,
+                    frame_layout,
+                );
                 if is_i64 {
                     func.instruction(&Instruction::I64Const(-1));
                     func.instruction(&Instruction::I64Xor);
@@ -1420,8 +1502,9 @@ impl Compiler {
         match literal {
             Literal::Array(array_literal) => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
-                let parent_var_name =
-                    ctx.find_enclosing_variable_name(array_literal.id).unwrap_or_else(|| {
+                let parent_var_name = ctx
+                    .find_enclosing_variable_name(array_literal.id)
+                    .unwrap_or_else(|| {
                         panic!(
                             "Array literal (id={}) has no enclosing VariableDefinitionStatement",
                             array_literal.id
@@ -1718,8 +1801,8 @@ mod tests {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
         let wasm = compiler.finish();
-        let wat = wasmprinter::print_bytes(&wasm)
-            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
             wat.contains("(export \"memory\""),
             "WAT must export memory:\n{wat}"
@@ -1735,8 +1818,8 @@ mod tests {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
         let wasm = compiler.finish();
-        let wat = wasmprinter::print_bytes(&wasm)
-            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
             wat.contains("i32.const 65536"),
             "Stack pointer must be initialized to 65536 (one page):\n{wat}"
@@ -1748,8 +1831,8 @@ mod tests {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
         let wasm = compiler.finish();
-        let wat = wasmprinter::print_bytes(&wasm)
-            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let wat =
+            wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
             wat.contains("(mut i32)"),
             "Stack pointer global must be mutable i32:\n{wat}"

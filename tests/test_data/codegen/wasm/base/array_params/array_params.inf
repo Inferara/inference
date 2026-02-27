@@ -1,0 +1,43 @@
+pub fn sum_array(arr: [i32; 3]) -> i32 {
+    return arr[0] + arr[1] + arr[2];
+}
+
+pub fn call_sum() -> i32 {
+    let data: [i32; 3] = [10, 20, 30];
+    return sum_array(data);
+}
+
+pub fn mutate_copy(mut arr: [i32; 3]) -> i32 {
+    arr[0] = 99;
+    return arr[0];
+}
+
+pub fn verify_copy_semantics() -> i32 {
+    let data: [i32; 3] = [1, 2, 3];
+    let ignored: i32 = mutate_copy(data);
+    return data[0];
+}
+
+pub fn two_array_params(a: [i32; 2], b: [i32; 2]) -> i32 {
+    return a[0] + a[1] + b[0] + b[1];
+}
+
+pub fn call_two_params() -> i32 {
+    let x: [i32; 2] = [10, 20];
+    let y: [i32; 2] = [30, 40];
+    return two_array_params(x, y);
+}
+
+pub fn bool_array_param(flags: [bool; 3]) -> i32 {
+    if flags[0] {
+        if flags[2] {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+pub fn call_bool_param() -> i32 {
+    let f: [bool; 3] = [true, false, true];
+    return bool_array_param(f);
+}

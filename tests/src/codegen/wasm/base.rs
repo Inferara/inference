@@ -1475,6 +1475,141 @@ mod base_codegen_tests {
             "Stack pointer should be restored after all calls"
         );
     }
+
+    #[test]
+    fn array_params_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 17);
+        let test_name = "array_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_params_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "array_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // call_sum: sum_array([10, 20, 30]) -> 60
+        let call_sum: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_sum")
+            .expect("Failed to get 'call_sum'");
+        let result = call_sum.call(&mut store, ()).expect("call_sum failed");
+        assert_eq!(result, 60, "sum_array([10, 20, 30]) should be 60");
+
+        // verify_copy_semantics: pass [1,2,3] to mutate_copy which sets arr[0]=99,
+        // but the original data[0] should still be 1 (copy semantics)
+        let verify_copy: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "verify_copy_semantics")
+            .expect("Failed to get 'verify_copy_semantics'");
+        let result = verify_copy
+            .call(&mut store, ())
+            .expect("verify_copy_semantics failed");
+        assert_eq!(
+            result, 1,
+            "After mutate_copy, original data[0] should still be 1 (copy semantics)"
+        );
+
+        // call_two_params: two_array_params([10, 20], [30, 40]) -> 100
+        let call_two: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_two_params")
+            .expect("Failed to get 'call_two_params'");
+        let result = call_two
+            .call(&mut store, ())
+            .expect("call_two_params failed");
+        assert_eq!(
+            result, 100,
+            "two_array_params([10,20], [30,40]) should be 100"
+        );
+
+        // call_bool_param: bool_array_param([true, false, true]) -> 1
+        let call_bool: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_bool_param")
+            .expect("Failed to get 'call_bool_param'");
+        let result = call_bool
+            .call(&mut store, ())
+            .expect("call_bool_param failed");
+        assert_eq!(
+            result, 1,
+            "bool_array_param([true, false, true]) should return 1"
+        );
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all array param calls"
+        );
+    }
+
+    #[test]
+    fn array_params_inline_validation() {
+        let source = r#"
+            pub fn identity(arr: [i32; 1]) -> i32 {
+                return arr[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Array param inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_params_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn read_elem(arr: [i32; 3]) -> i32 {
+                return arr[1];
+            }
+            pub fn caller() -> i32 {
+                let data: [i32; 3] = [5, 15, 25];
+                return read_elem(data);
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let caller: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "caller")
+            .expect("Failed to get 'caller'");
+        let result = caller.call(&mut store, ()).expect("caller failed");
+        assert_eq!(result, 15, "read_elem([5, 15, 25]) should return arr[1] = 15");
+    }
 }
 
 /// Test data regeneration helpers.
@@ -1905,5 +2040,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_assign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_params_wasm() {
+        let dir = base_test_dir().join("array_params");
+        let source_code = std::fs::read_to_string(dir.join("array_params.inf"))
+            .expect("Failed to read array_params.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_params.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_params");
     }
 }

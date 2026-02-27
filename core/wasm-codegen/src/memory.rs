@@ -215,6 +215,113 @@ pub(crate) fn emit_stack_prologue(func: &mut Function, layout: &FrameLayout) {
     func.instruction(&Instruction::MemoryFill(MEMORY_INDEX));
 }
 
+/// Threshold: arrays with more than this many elements use `memory.copy`
+/// instead of unrolled element-by-element copying.
+const UNROLL_THRESHOLD: u32 = 16;
+
+/// Emits copy-on-entry code for one array-typed parameter.
+///
+/// Copies `slot.length` elements from the caller's pointer (`param_local`) into
+/// the callee's frame at `slot.offset` from `__frame_ptr`, then updates
+/// `param_local` to point to the callee's copy.
+///
+/// For arrays with N <= 16 elements, the copy is unrolled element by element.
+/// For larger arrays (N > 16), a single `memory.copy` instruction is used.
+///
+/// After the copy, the parameter local is overwritten with the callee's frame
+/// address so that subsequent reads/writes inside the function operate on the
+/// local copy (value semantics).
+///
+/// ```text
+/// ;; unrolled copy (N <= 16):
+/// local.get $__frame_ptr
+/// i32.const <offset + i * elem_size>
+/// i32.add
+/// local.get $param_ptr
+/// i32.const <i * elem_size>
+/// i32.add
+/// i32.load / i32.load8_s / ...     ;; load source element
+/// i32.store / i32.store8 / ...     ;; store to destination
+/// ;; ... repeat for each element
+///
+/// ;; bulk copy (N > 16):
+/// local.get $__frame_ptr
+/// i32.const <offset>
+/// i32.add                          ;; destination
+/// local.get $param_ptr             ;; source
+/// i32.const <byte_size>
+/// memory.copy
+///
+/// ;; update param local:
+/// local.get $__frame_ptr
+/// i32.const <offset>
+/// i32.add
+/// local.set $param_ptr
+/// ```
+pub(crate) fn emit_array_param_copy(
+    func: &mut Function,
+    layout: &FrameLayout,
+    slot: &ArraySlot,
+    param_local: u32,
+    elem_type: &TypeInfoKind,
+) {
+    cov_mark::hit!(wasm_codegen_emit_array_param_copy);
+
+    let byte_size = slot.elem_size * slot.length;
+
+    if slot.length > UNROLL_THRESHOLD {
+        // Bulk copy via memory.copy
+        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+        if slot.offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            func.instruction(&Instruction::I32Const(slot.offset as i32));
+            func.instruction(&Instruction::I32Add);
+        }
+        func.instruction(&Instruction::LocalGet(param_local));
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(byte_size as i32));
+        func.instruction(&Instruction::MemoryCopy {
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
+        });
+    } else {
+        // Unrolled element-by-element copy
+        let load_instr = load_instruction(elem_type);
+        let store_instr = store_instruction(elem_type);
+        for i in 0..slot.length {
+            #[allow(clippy::cast_possible_wrap)]
+            let byte_offset = (slot.offset + i * slot.elem_size) as i32;
+            #[allow(clippy::cast_possible_wrap)]
+            let src_offset = (i * slot.elem_size) as i32;
+
+            // destination address
+            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+            func.instruction(&Instruction::I32Const(byte_offset));
+            func.instruction(&Instruction::I32Add);
+
+            // load from source (param pointer + element offset)
+            func.instruction(&Instruction::LocalGet(param_local));
+            if src_offset > 0 {
+                func.instruction(&Instruction::I32Const(src_offset));
+                func.instruction(&Instruction::I32Add);
+            }
+            func.instruction(&load_instr);
+
+            // store to destination
+            func.instruction(&store_instr);
+        }
+    }
+
+    // Update the parameter local to point to the callee's copy
+    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+    if slot.offset > 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(slot.offset as i32));
+        func.instruction(&Instruction::I32Add);
+    }
+    func.instruction(&Instruction::LocalSet(param_local));
+}
+
 /// Emits the stack epilogue to restore `__stack_pointer` before exiting.
 ///
 /// ```text
