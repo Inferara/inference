@@ -222,6 +222,10 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 /// memory.fill
 /// ```
 pub(crate) fn emit_stack_prologue(func: &mut Function, layout: &FrameLayout) {
+    debug_assert!(
+        layout.total_size > 0,
+        "emit_stack_prologue called with zero-size frame; memory.fill would trap per WASM spec"
+    );
     cov_mark::hit!(wasm_codegen_emit_stack_prologue);
     #[allow(clippy::cast_possible_wrap)]
     let frame_size = layout.total_size as i32;

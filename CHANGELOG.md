@@ -27,13 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgrade shadowing detection from `debug_assert!` to `assert!` in `pre_scan_locals` — fires in release builds for parameter, constant, and variable name collisions in `locals_map`
 - Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies will be pre-registered when loop lowering is implemented
 - Replace silent `if let ArgumentType::Argument` skip with exhaustive `match` covering `SelfReference`, `IgnoreArgument`, and `Type` variants, each with an explicit `todo!()`
+- Add fixed-size array support with linear memory allocation ([#148])
+  - Shadow stack with `__stack_pointer` mutable global, downward growth from 64KB page top
+  - New `memory.rs` module: `FrameLayout`, `ArraySlot`, prologue/epilogue, param copy, load/store helpers
+  - Array literal lowering: `let arr: [i32; 3] = [1, 2, 3];` stores elements in linear memory
+  - Array index read: `arr[i]` loads elements via computed address (base + index * elem_size)
+  - Array index write: `arr[i] = value;` stores elements via computed address
+  - Array parameter copy-on-entry: value semantics — callee copies data into own frame, cannot mutate caller's array
+  - Unrolled copy for small arrays (N <= 16), `memory.copy` for larger arrays
+  - Element-wise uzumaki expansion: `let arr: [i32; 3] = @;` stores per-element `i32.uzumaki`
+  - Zero-initialization of all array memory via `memory.fill` in function prologue
+  - Conditional Memory/Global/Export sections — only emitted when functions use arrays
+  - Sign-appropriate load/store for sub-i32 types (i8→load8_s, u8/bool→load8_u, etc.)
+  - 16-byte frame alignment matching LLVM/Rust WASM convention
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
   - `lower_assign_statement()` emits `lower_expression(rhs)` + `LocalSet` for identifier targets
   - Mutable function parameters (`fn f(mut a: i32)`) supported
   - Number literal type propagation in assignments: `x = 42;` where `x: i64` correctly infers `42` as `i64`
-  - Non-identifier targets (member access, array index) deferred to compound type support
+  - Array index assignment targets (`arr[i] = value`) now supported via memory store instructions
 - Add conditional statement lowering (`if`/`else`) to WebAssembly codegen ([#144])
   - `if`/`else` lowered to WASM structured control flow (`If`/`Else`/`End` with `BlockType::Empty`)
   - `pre_scan_locals` recurses into both if and else arms to declare locals upfront (WASM requirement)
@@ -86,8 +99,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Formal verification implications for Rocq translation
   - Empirical comparison: Inference vs rustc release vs rustc debug vs Soroban
 
+### Type Checker
+
+- Add `resolve_custom_type()` to `SymbolTable` to fix `Custom` vs `Struct`/`Enum` type resolution mismatch ([#148])
+  - Resolves `TypeInfoKind::Custom(name)` to `Struct(name)` or `Enum(name)` at function registration time
+  - Recurses into array element types (handles `[MyStruct; 3]`)
+  - Called at 9 sites throughout the type checker
+- Add argument type validation at all function/method call sites ([#148])
+  - Associated functions, instance methods, and free functions all validate argument types against parameter signatures
+  - Uses plain `!=` (PartialEq) instead of compatibility shim
+- Add i64 array element type propagation ([#148])
+  - Propagates element type from `[i64; N]` annotation to number literals in array initializers
+- Add array element assignment mutability check ([#148])
+  - `arr[i] = value` requires `arr` to be declared `mut`
+  - `extract_root_array_name` resolves root identifier from nested index access expressions
+- Remove dead code: `types_equal` function, `is_compatible_with` method, `param_names` field from `FuncInfo`
+- Add `find_enclosing_variable_name()` to `TypedContext` for walking AST parent chain to enclosing variable
+
 ### Testing
 
+- Add 5 array test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#148])
+  - `array_literal.inf`: i32/i64/bool/u8 array literals and empty array
+  - `array_index.inf`: literal index, variable index, sum array, multiple element types
+  - `array_assign.inf`: element assignment, swap, variable index, multiple types
+  - `array_params.inf`: pass-by-value copy semantics, multiple arrays, large array copy
+  - `array_nondet.inf`: arrays in forall/exists blocks, element-wise uzumaki
+- Add type-checker tests for array type validation ([#148])
+  - 6 tests for array size/element type mismatches at function call sites
+  - 9 tests for array element assignment mutability checks
+  - 6 type equality tests replacing old compatibility tests
+  - i64/u64 array literal type inference tests
 - Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime
 - Add `arith_overflow` test module with 8 functions covering two's-complement wrapping arithmetic: i32/i64/u32 overflow and underflow, multiplication overflow, and negation of MIN (8 Wasmtime execution assertions)
 - Add `expr_deep_nesting` test module with 5 functions verifying 8+ level expression nesting: left-associative addition chain, mixed arithmetic in nested groups, boolean connectives over nested comparisons, function calls embedded in expressions, and chained unary negation (6 Wasmtime execution assertions)

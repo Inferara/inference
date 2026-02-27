@@ -505,14 +505,18 @@ impl Compiler {
                         .expect("Argument must have type info");
                     if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                         let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz * length;
+                        let byte_count = elem_sz
+                            .checked_mul(*length)
+                            .expect("Array byte count overflow: element size * length exceeds u32::MAX");
                         let slot = ArraySlot {
                             offset: current_offset,
                             elem_size: elem_sz,
                             length: *length,
                         };
                         array_offsets.insert(arg.name(), slot);
-                        current_offset += byte_count;
+                        current_offset = current_offset
+                            .checked_add(byte_count)
+                            .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
                     }
                 }
             }
@@ -524,8 +528,16 @@ impl Compiler {
             return None;
         }
 
+        let total_size = align_to_frame(current_offset);
+        #[allow(clippy::cast_sign_loss)]
+        let max_frame = STACK_POINTER_INIT as u32;
+        assert!(
+            total_size <= max_frame,
+            "Frame size ({total_size} bytes) exceeds available stack memory ({max_frame} bytes)"
+        );
+
         Some(FrameLayout {
-            total_size: align_to_frame(current_offset),
+            total_size,
             array_offsets,
             frame_ptr_local: frame_ptr_local_idx,
         })
@@ -554,14 +566,18 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                         let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz * length;
+                        let byte_count = elem_sz
+                            .checked_mul(*length)
+                            .expect("Array byte count overflow: element size * length exceeds u32::MAX");
                         let slot = ArraySlot {
                             offset: *current_offset,
                             elem_size: elem_sz,
                             length: *length,
                         };
                         array_offsets.insert(var_def.name(), slot);
-                        *current_offset += byte_count;
+                        *current_offset = current_offset
+                            .checked_add(byte_count)
+                            .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
                     }
                 }
                 Statement::Block(inner_block) => {

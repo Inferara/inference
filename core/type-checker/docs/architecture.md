@@ -292,6 +292,28 @@ This is a form of **bidirectional type checking**: information flows from the de
 
 **Current limitation**: Range validation is not yet performed. A literal that is out of range for the declared type (for example `let a: i8 = 200;`) will compile without error. The out-of-range value is silently truncated during WASM instruction emission. Range checking is tracked separately and will be addressed in a future pass.
 
+#### Array Element Type Propagation
+
+Arrays extend this pattern. When an array literal initializes a variable with an explicit array type annotation, the type checker propagates the element type onto all numeric literals in the array:
+
+```rust
+// Source:  let arr: [i8; 3] = [10, 20, 30];
+
+// Array type: TypeInfo { kind: Array(Box::new(Number(I8)), 3) }
+
+// After propagation (before inference):
+//   ctx.set_node_typeinfo(literal_10.id, Number(I8))
+//   ctx.set_node_typeinfo(literal_20.id, Number(I8))
+//   ctx.set_node_typeinfo(literal_30.id, Number(I8))
+
+// After codegen, each element is emitted with the correct width:
+//   10 → i32.const 10 (sub-i32 convention for i8)
+//   20 → i32.const 20
+//   30 → i32.const 30
+```
+
+This ensures that array elements with sub-i32 types are correctly represented in WASM output.
+
 ## Symbol Table Design
 
 ### Scope Tree Structure
@@ -404,6 +426,66 @@ pub enum TypeInfoKind {
     Qualified(String),          // Qualified identifier
     Spec(String),               // Specification type
 }
+```
+
+### Custom Type Resolution
+
+When a type is declared using a custom name (like a struct or enum), the type checker must resolve the name to determine whether it refers to a `Struct`, `Enum`, or something else. This is handled by the `resolve_custom_type()` method in the symbol table.
+
+**Why is resolution needed?** When constructing `TypeInfo` from an AST `Type`, the parser may create `TypeInfoKind::Custom(name)` because the type definition hasn't been processed yet. During variable definition, function parameter registration, and function call validation, we need to resolve these custom names to their actual definitions.
+
+**Resolution Algorithm**:
+
+```rust
+pub fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
+    match &ti.kind {
+        TypeInfoKind::Custom(name) => {
+            if self.lookup_struct(name).is_some() {
+                ti.kind = TypeInfoKind::Struct(name.clone());
+            } else if self.lookup_enum(name).is_some() {
+                ti.kind = TypeInfoKind::Enum(name.clone());
+            }
+            // Falls through to Custom if not found (forward reference)
+            ti
+        }
+        TypeInfoKind::Array(elem, size) => {
+            // Recursively resolve element types
+            let resolved_elem = self.resolve_custom_type(*elem.clone());
+            ti.kind = TypeInfoKind::Array(Box::new(resolved_elem), *size);
+            ti
+        }
+        _ => ti,  // Other types need no resolution
+    }
+}
+```
+
+**When is it called?**
+- During function parameter registration (Phase 4)
+- During function call validation (Phase 5)
+- When registering variable and constant definitions
+
+**Example**:
+
+```rust
+// Define a struct
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+// Use in array type
+fn test(coords: [Point; 10]) {
+    // ...
+}
+
+// Process:
+// 1. AST Type -> TypeInfo::Custom("Point")
+// 2. Lookup "Point" -> Found StructInfo
+// 3. Resolution -> TypeInfo::Struct("Point")
+// 4. Argument validation: signature expects Struct("Point"), argument has Struct("Point") ✓
+```
+
+**Forward References**: If a custom type name is not found in the symbol table, resolution falls back to leaving it as `Custom(name)`. This handles forward references in nested modules and allows the compiler to report a more precise error later (during later phases that expect a resolved type).
 ```
 
 ### SimpleTypeKind in the AST
@@ -566,6 +648,74 @@ MethodInfo {
 }
 ```
 
+## Argument Type Validation
+
+When a function or method is called, the type checker validates that each argument matches the corresponding parameter type. This is essential for catching type mismatches early.
+
+**Validation Process**:
+
+1. Look up the function signature (parameter types, return type, type parameters)
+2. For each argument in the call:
+   - Infer the argument's type
+   - Compare it against the corresponding parameter type
+   - If types don't match, record a type mismatch error with detailed context
+
+**Example**:
+
+```rust
+fn add(x: i32, y: i32) -> i32 {
+    return x + y;
+}
+
+fn test() {
+    add(1, 2);      // OK: both i32
+    add(1, true);   // Error: arg[1] type mismatch (expected i32, found bool)
+    add(1);         // Error: missing required argument
+}
+```
+
+**Error Information**:
+
+When a type mismatch is detected in a function argument, the error includes:
+- Expected type (from the parameter signature)
+- Found type (from argument inference)
+- Argument index (position in parameter list, 0-based)
+- Argument name (automatically generated as `arg0`, `arg1`, etc.)
+- Function or method name
+- Source location of the call
+
+```rust
+TypeCheckError::TypeMismatch {
+    expected: TypeInfo { kind: Number(I32) },
+    found: TypeInfo { kind: Bool },
+    context: TypeMismatchContext::MethodArgument {
+        type_name: "Counter".to_string(),
+        method_name: "set_value".to_string(),
+        arg_name: "arg0".to_string(),
+        arg_index: 0,
+    },
+    location: Location { /* ... */ },
+}
+```
+
+**With Generic Types**:
+
+For generic functions, type parameters are substituted before comparison:
+
+```rust
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn test() {
+    // T inferred as i32 from call argument
+    let result = identity(42);      // T = i32, arg: i32 ✓
+    let result = identity(true);    // T = bool, arg: bool ✓
+}
+```
+
+The substitution happens during type parameter inference, so the argument validation sees the concrete types, not the generic type variables.
+
 ## Error Recovery Strategy
 
 The type checker continues after errors to collect multiple issues:
@@ -727,6 +877,44 @@ The `validate_type()` method no longer needs symbol table lookups for primitive 
 **Rationale**: Profiling showed that primitive types dominate typical Inference programs. The previous design using `Rc<SimpleType>` created unnecessary allocations and indirections. The new design using `SimpleTypeKind` eliminates these costs while maintaining type safety. The conversion overhead to `TypeInfoKind` is negligible compared to the memory and cache benefits.
 
 **Impact on Type Checking**: The validate_type method no longer needs to look up primitive types in the symbol table. The pattern match on `Type::Simple(_)` immediately recognizes these as valid builtin types, simplifying the validation logic.
+
+## Array Assignment Validation
+
+When an assignment targets an array index (e.g., `arr[i] = x;`), the type checker validates that the array itself is mutable. This requires extracting the root array name from nested index access expressions.
+
+**Root Array Name Extraction**:
+
+```rust
+fn extract_root_array_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.clone()),
+        Expression::ArrayIndexAccess(access) => {
+            // Recursively extract from nested accesses: arr[i][j] -> arr
+            Self::extract_root_array_name(&access.array.borrow())
+        }
+        _ => None,  // Non-identifier bases (function calls, etc.)
+    }
+}
+```
+
+**Assignment Validation Process**:
+
+1. When an `AssignStatement` is encountered, check the left-hand side expression
+2. If it's an `ArrayIndexAccess`, extract the root array name
+3. Look up the variable in the symbol table to check if it's mutable
+4. If the variable is immutable, report `AssignToImmutable` error
+
+**Example**:
+
+```rust
+// Source code
+let arr: [i32; 10] = [0; 10];
+arr[0] = 42;  // Error: cannot assign to immutable array
+
+let mut arr: [i32; 10] = [0; 10];
+arr[0] = 42;  // OK: array is mutable
+arr[1][0] = 42;  // Error: arr[1] is an i32, not an array
+```
 
 ## Testing Strategy
 

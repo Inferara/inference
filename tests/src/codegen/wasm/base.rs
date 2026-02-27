@@ -1674,6 +1674,283 @@ mod base_codegen_tests {
             .expect("i64_array_read should not trap");
         assert_eq!(result, 200, "arr[1] should be 200 (i64)");
     }
+
+    #[test]
+    fn array_i8_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn i8_array_sum() -> i8 {
+                let arr: [i8; 3] = [-1, 0, 1];
+                return arr[0] + arr[1] + arr[2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("i8 array WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "i8_array_sum")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(result, 0, "i8 array: -1 + 0 + 1 = 0");
+    }
+
+    #[test]
+    fn array_u8_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn u8_array_max() -> u8 {
+                let arr: [u8; 3] = [0, 128, 255];
+                return arr[2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("u8 array WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "u8_array_max")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(result, 255, "u8 array: arr[2] should be 255 (zero-extended)");
+    }
+
+    #[test]
+    fn array_i16_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn i16_array_negative() -> i16 {
+                let arr: [i16; 2] = [-1000, 1000];
+                return arr[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("i16 array WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "i16_array_negative")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, -1000,
+            "i16 array: arr[0] should be -1000 (sign-extended)"
+        );
+    }
+
+    #[test]
+    fn array_u16_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn u16_array_large() -> u16 {
+                let arr: [u16; 2] = [0, 65535];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("u16 array WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "u16_array_large")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 65535,
+            "u16 array: arr[1] should be 65535 (zero-extended)"
+        );
+    }
+
+    #[test]
+    fn array_i64_assign_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn i64_write_read() -> i64 {
+                let mut arr: [i64; 2] = [5000000000, 0];
+                arr[1] = arr[0] + arr[0];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("i64 array assign WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "i64_write_read")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 10_000_000_000i64,
+            "i64 array: arr[1] should be 10000000000"
+        );
+    }
+
+    #[test]
+    fn array_i64_param_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn sum_i64(arr: [i64; 2]) -> i64 {
+                return arr[0] + arr[1];
+            }
+            pub fn call_sum_i64() -> i64 {
+                let data: [i64; 2] = [1000000000, 2000000000];
+                return sum_i64(data);
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("i64 array param WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "call_sum_i64")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 3_000_000_000i64,
+            "i64 array param: sum should be 3000000000"
+        );
+    }
+
+    #[test]
+    fn array_u32_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn u32_array_large() -> u32 {
+                let arr: [u32; 2] = [0, 4294967295];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("u32 array WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "u32_array_large")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(result, -1, "u32::MAX bit-reinterpreted as i32 is -1");
+    }
+
+    #[test]
+    fn array_large_param_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn sum_large(arr: [i32; 20]) -> i32 {
+                return arr[0] + arr[9] + arr[19];
+            }
+            pub fn call_sum_large() -> i32 {
+                let data: [i32; 20] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+                return sum_large(data);
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("large array param WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_sum_large")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result,
+            1 + 10 + 20,
+            "large array: arr[0] + arr[9] + arr[19] = 31"
+        );
+    }
+
+    #[test]
+    fn array_mixed_types_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn mixed_arrays() -> i32 {
+                let flags: [bool; 2] = [true, false];
+                let nums: [i32; 2] = [100, 200];
+                if flags[0] {
+                    return nums[1];
+                }
+                return 0;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("mixed arrays WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "mixed_arrays")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 200,
+            "mixed arrays: flags[0] is true, so return nums[1] = 200"
+        );
+    }
+
+    #[test]
+    fn array_mut_param_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        let source = r#"
+            pub fn double_first(mut arr: [i32; 3]) -> i32 {
+                arr[0] = arr[0] + arr[0];
+                return arr[0];
+            }
+            pub fn call_double() -> i32 {
+                let data: [i32; 3] = [21, 0, 0];
+                return double_first(data);
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("mut param WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_double")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 42,
+            "mut param: double_first([21, 0, 0]) should return 42"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
