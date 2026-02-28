@@ -59,6 +59,8 @@ The frame layout computation:
 
 Frame alignment is 16 bytes, matching the LLVM and Rust WASM convention. A function with a single `[bool; 3]` array (3 bytes raw) gets a 16-byte frame. A function with `[i64; 3]` (24 bytes raw) gets a 32-byte frame.
 
+Each array within the frame is aligned to its element type's natural alignment — the same convention used by LLVM, Rust, and BasicCABI. A `[bool; 3]` (1-byte elements) followed by a `[i32; 2]` (4-byte elements) gets 1 byte of padding inserted between them so the i32 array starts at a 4-byte-aligned offset. The padding bytes are automatically zeroed by `memory.fill` in the prologue. This makes the `MemArg` alignment hints in load/store instructions truthful, which allows runtimes to use optimized aligned load paths where available.
+
 The frame pointer is stored in a synthetic WASM local named `__frame_ptr`. This local is added during the local pre-scan phase alongside the user's declared locals.
 
 ## Function Prologue and Epilogue
@@ -219,7 +221,27 @@ i32.store8               ;; 1 byte at offset 3
 
 ## Array Index Read
 
-Reading `arr[i]` computes the element address as `base + index * elem_size` and emits a load:
+Reading `arr[i]` emits a load instruction. The exact instruction sequence depends on whether the index is zero, a non-zero compile-time constant, or a runtime expression.
+
+**Zero index** (`arr[0]`) — the base pointer is the element address; no offset computation:
+
+```wat
+;; return arr[0]  where arr: [i32; 3]
+local.get $arr            ;; push base pointer (i32)
+i32.load                  ;; load i32 directly at base address
+```
+
+**Constant non-zero index** (`arr[1]`, `arr[2]`, ...) — the byte offset is folded at compile time:
+
+```wat
+;; return arr[1]  where arr: [i32; 3]
+local.get $arr            ;; push base pointer (i32)
+i32.const 4               ;; compile-time offset = 1 * elem_size
+i32.add                   ;; address = base + 4
+i32.load                  ;; load i32 from computed address
+```
+
+**Variable index** (`arr[i]`) — offset computed at runtime:
 
 ```wat
 ;; return arr[i]  where arr: [i32; 3]
@@ -230,8 +252,6 @@ i32.mul
 i32.add                   ;; address = base + index * 4
 i32.load                  ;; load i32 from computed address
 ```
-
-For constant indices, the same code is emitted with `i32.const` instead of `local.get`. A future optimization could fold constant-index access to `frame_ptr + constant_offset`, eliminating the multiply.
 
 ### Load Instruction Selection
 
@@ -253,15 +273,37 @@ This distinction matters: an `i8` value of `-1` is stored as `0xFF`. When loaded
 
 ## Array Index Write
 
-Writing `arr[i] = value` computes the address the same way and emits a store:
+Writing `arr[i] = value` emits a store instruction using the same three-case index specialization as array index read.
+
+**Zero index** (`arr[0] = x`) — no offset computation:
 
 ```wat
 ;; arr[0] = 42  where arr: [i32; 3]
 local.get $arr            ;; push base pointer
-i32.const 0               ;; push index
+i32.const 42              ;; push value
+i32.store                 ;; store i32 at base address
+```
+
+**Constant non-zero index** (`arr[N] = x`) — offset folded at compile time:
+
+```wat
+;; arr[1] = 42  where arr: [i32; 3]
+local.get $arr            ;; push base pointer
+i32.const 4               ;; compile-time offset = 1 * elem_size
+i32.add                   ;; address = base + 4
+i32.const 42              ;; push value
+i32.store                 ;; store i32 at computed address
+```
+
+**Variable index** (`arr[i] = x`) — offset computed at runtime:
+
+```wat
+;; arr[i] = 42  where arr: [i32; 3]
+local.get $arr            ;; push base pointer
+local.get $i              ;; push index
 i32.const 4               ;; element size
 i32.mul
-i32.add                   ;; address = base + 0 * 4
+i32.add                   ;; address = base + index * 4
 i32.const 42              ;; push value
 i32.store                 ;; store i32 at computed address
 ```
@@ -502,8 +544,6 @@ A future implementation, gated on `BuildProfile`, will add bounds checking in De
 5. **No constant arrays**: `const ARR: [i32; 3] = [1, 2, 3]` is not handled and would panic at codegen time.
 
 6. **Single memory page**: Linear memory is limited to 64 KB (`maximum: 1`). Sufficient for current use cases but will need expansion for heap allocation or large programs.
-
-7. **Packed layout without alignment padding**: Arrays are packed sequentially in the frame without per-type alignment padding between arrays. WASM tolerates misaligned access but some runtimes may impose performance penalties.
 
 ## Current Implementation
 

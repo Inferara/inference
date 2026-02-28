@@ -78,8 +78,8 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to_frame, element_size,
-    emit_array_param_copy, emit_stack_epilogue, emit_stack_prologue,
+    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to, align_to_frame,
+    element_size, emit_array_param_copy, emit_stack_epilogue, emit_stack_prologue,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -508,13 +508,14 @@ impl Compiler {
                         let byte_count = elem_sz
                             .checked_mul(*length)
                             .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                        let aligned_offset = align_to(current_offset, elem_sz);
                         let slot = ArraySlot {
-                            offset: current_offset,
+                            offset: aligned_offset,
                             elem_size: elem_sz,
                             length: *length,
                         };
                         array_offsets.insert(arg.name(), slot);
-                        current_offset = current_offset
+                        current_offset = aligned_offset
                             .checked_add(byte_count)
                             .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
                     }
@@ -544,12 +545,9 @@ impl Compiler {
     /// Recursively walks a block collecting array variable declarations into the
     /// frame layout offset map.
     ///
-    /// NOTE: Arrays are packed sequentially without per-element-type alignment padding.
-    /// This means a bool array (1-byte elements) followed by an i32 array (4-byte elements)
-    /// may result in the i32 array starting at a non-4-byte-aligned offset. WASM tolerates
-    /// misaligned access (alignment in `MemArg` is a hint, not enforced), so this is correct
-    /// but may be suboptimal on some runtimes. A future improvement could insert alignment
-    /// padding between arrays of different element sizes.
+    /// Each array's offset is aligned to its element type's natural alignment
+    /// (e.g., 4 bytes for i32, 8 bytes for i64). This matches the LLVM/Rust/BasicCABI
+    /// convention and makes `MemArg` alignment hints truthful.
     fn collect_array_slots(
         block: &BlockType,
         ctx: &TypedContext,
@@ -567,13 +565,14 @@ impl Compiler {
                         let byte_count = elem_sz
                             .checked_mul(*length)
                             .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                        let aligned_offset = align_to(*current_offset, elem_sz);
                         let slot = ArraySlot {
-                            offset: *current_offset,
+                            offset: aligned_offset,
                             elem_size: elem_sz,
                             length: *length,
                         };
                         array_offsets.insert(var_def.name(), slot);
-                        *current_offset = current_offset
+                        *current_offset = aligned_offset
                             .checked_add(byte_count)
                             .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
                     }
@@ -1103,13 +1102,7 @@ impl Compiler {
 
         self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
 
-        // TODO(#148): For constant indices, compute byte offset at compile time
-        // instead of emitting runtime multiplication.
-        self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
-        #[allow(clippy::cast_possible_wrap)]
-        func.instruction(&Instruction::I32Const(elem_sz as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Add);
+        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx, func, locals_map, frame_layout);
 
         self.lower_expression(
             &assign_stmt.right.borrow(),
@@ -1262,16 +1255,39 @@ impl Compiler {
 
         self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
 
-        // TODO(#148): For constant indices, compute byte offset at compile time
-        // instead of emitting runtime multiplication.
-        self.lower_expression(&aiae.index.borrow(), ctx, func, locals_map, frame_layout);
-        #[allow(clippy::cast_possible_wrap)]
-        func.instruction(&Instruction::I32Const(elem_sz as i32));
-        func.instruction(&Instruction::I32Mul);
-        func.instruction(&Instruction::I32Add);
+        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx, func, locals_map, frame_layout);
 
         let load_instr = memory::load_instruction(&elem_type_info.kind);
         func.instruction(&load_instr);
+    }
+
+    /// Emits the byte-offset computation for an array index expression.
+    ///
+    /// When the index is a compile-time constant number literal, the byte offset is
+    /// pre-computed and emitted as a single `i32.const` + `i32.add` (or nothing at all
+    /// when the offset is zero). For dynamic indices the runtime `i32.mul` + `i32.add`
+    /// sequence is emitted.
+    fn emit_index_offset(
+        &self,
+        index_expr: &Expression,
+        elem_sz: u32,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
+    ) {
+        if let Some(byte_offset) = try_const_index_byte_offset(index_expr, elem_sz) {
+            if byte_offset != 0 {
+                func.instruction(&Instruction::I32Const(byte_offset));
+                func.instruction(&Instruction::I32Add);
+            }
+        } else {
+            self.lower_expression(index_expr, ctx, func, locals_map, frame_layout);
+            #[allow(clippy::cast_possible_wrap)]
+            func.instruction(&Instruction::I32Const(elem_sz as i32));
+            func.instruction(&Instruction::I32Mul);
+            func.instruction(&Instruction::I32Add);
+        }
     }
 
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
@@ -2022,5 +2038,21 @@ mod tests {
             shift += 7;
         }
         (result, bytes.len())
+    }
+}
+
+/// Returns the pre-computed byte offset when `index_expr` is a constant number literal,
+/// or `None` when the index is dynamic.
+///
+/// The returned `i32` equals `literal_value * elem_sz`, which can be used directly as
+/// an `i32.const` operand to skip the runtime multiply-and-add sequence.
+fn try_const_index_byte_offset(index_expr: &Expression, elem_sz: u32) -> Option<i32> {
+    if let Expression::Literal(Literal::Number(num_lit)) = index_expr {
+        let index_val = num_lit.value.parse::<i32>().ok()?;
+        #[allow(clippy::cast_possible_wrap)]
+        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
+        Some(byte_offset)
+    } else {
+        None
     }
 }

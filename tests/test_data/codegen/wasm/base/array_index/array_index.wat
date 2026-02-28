@@ -44,10 +44,6 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.load
     local.get $__frame_ptr
     i32.const 16
@@ -89,9 +85,7 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 2
-    i32.const 4
-    i32.mul
+    i32.const 8
     i32.add
     i32.load
     local.get $__frame_ptr
@@ -134,9 +128,7 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     i32.load
     local.get $__frame_ptr
@@ -224,10 +216,6 @@
     local.get $__frame_ptr
     local.set $flags
     local.get $flags
-    i32.const 0
-    i32.const 1
-    i32.mul
-    i32.add
     i32.load8_u
     if ;; label = @1
       i32.const 1
@@ -279,8 +267,6 @@
     local.set $flags
     local.get $flags
     i32.const 1
-    i32.const 1
-    i32.mul
     i32.add
     i32.load8_u
     if ;; label = @1

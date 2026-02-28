@@ -25,14 +25,16 @@ Before instruction emission, `compute_frame_layout()` walks the entire function 
 
 1. Allocate space for array-typed **parameters** (copy space for callee)
 2. Collect array variable declarations (nested arbitrarily in blocks, `if`, `loop`)
-3. Assign byte offsets to each array within the frame
+3. Align each array offset to element type's natural alignment (e.g., 4 bytes for i32, 8 bytes for i64)
 4. Compute total frame size, aligned to 16 bytes
 5. Allocate a synthetic WASM local `__frame_ptr` to hold the frame base address
 
 ```
-+----------- (frame pointer + frame size)
-| Array 2  |  offset = 8, length = 2, elem_size = 4 (i32)
-+----------- (frame pointer + 8)
++----------- (frame pointer + 12)
+| Array 2  |  offset = 4, length = 2, elem_size = 4 (i32)
++----------- (frame pointer + 4)
+| padding  |  1 byte (align i32 to 4-byte boundary)
++----------- (frame pointer + 3)
 | Array 1  |  offset = 0, length = 3, elem_size = 1 (bool)
 +----------- (frame pointer)
 ```
@@ -132,6 +134,12 @@ This module contains all memory-related helpers:
 
 ### `compiler.rs` Additions
 
+#### Local Registration for Arrays
+
+During the `pre_scan_locals()` phase (which walks all statements before instruction emission), array variables are registered as **i32 WASM locals**, identical to any other scalar variable. The type-checker sets `TypeInfoKind::Array(...)` on the variable node, and `pre_scan_locals` treats it as a non-i64 type and assigns an `i32` local.
+
+Later, during instruction emission, when an array literal is initialized, `lower_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
+
 #### `compute_frame_layout()`
 
 ```rust
@@ -151,6 +159,8 @@ Returns `None` if no arrays are present (no frame needed).
 3. Sum byte sizes and align to 16 bytes
 4. Return `FrameLayout` or `None`
 
+**Important**: This phase allocates a **synthetic `__frame_ptr` local** (separate from array variable locals) to hold the frame base address. This local is used internally for all frame addressing and is not visible to source code.
+
 #### `lower_array_index_access()`
 
 ```rust
@@ -164,18 +174,35 @@ fn lower_array_index_access(
 )
 ```
 
-Lowers `arr[i]` to a load instruction sequence:
+Lowers `arr[i]` (read access) to a load instruction sequence. The emitted instructions depend on whether the index is zero, a non-zero compile-time constant, or a runtime expression:
 
+**Zero index** (`arr[0]`) — no offset computation:
 ```wasm
-<lower array expr>      ;; push base pointer (i32)
-<lower index expr>      ;; push index (i32)
+<lower array expr>      ;; push base pointer
+i32.load / i64.load / ... ;; load element at base address
+```
+
+**Constant non-zero index** (`arr[N]`) — offset folded at compile time:
+```wasm
+<lower array expr>      ;; push base pointer
+i32.const <N * elem_size>
+i32.add                 ;; address = base + compile-time-constant
+i32.load / i64.load / ... ;; load element
+```
+
+**Variable index** (`arr[i]`) — offset computed at runtime:
+```wasm
+<lower array expr>      ;; push base pointer
+<lower index expr>      ;; push i32 index
 i32.const <elem_size>
 i32.mul                 ;; byte_offset = index * elem_size
 i32.add                 ;; address = base + byte_offset
 i32.load / i64.load / ... ;; load element
 ```
 
-**Type dispatch**: The type-checker sets the node's type info to the **element type**, not the array type. We query this to select the correct load instruction.
+**What "<lower array expr>" does**: For an identifier like `arr`, this emits `local.get $arr`, which loads the i32 pointer from the array variable's local. That pointer is the base address of the array data in linear memory.
+
+**Type dispatch**: The type-checker sets the node's type info to the **element type**, not the array type. We query this to select the correct load instruction (e.g., `i32.load8_s` for `i8` elements).
 
 #### `lower_array_index_write()`
 
@@ -191,14 +218,31 @@ fn lower_array_index_write(
 )
 ```
 
-Lowers `arr[i] = value` to:
+Lowers `arr[i] = value` using the same three-case index specialization as `lower_array_index_access()`:
 
+**Zero index** (`arr[0] = x`):
+```wasm
+<lower array expr>      ;; push base pointer
+<lower right side>      ;; push value
+i32.store / i64.store / ... ;; store at base address
+```
+
+**Constant non-zero index** (`arr[N] = x`):
+```wasm
+<lower array expr>      ;; push base pointer
+i32.const <N * elem_size>
+i32.add                 ;; address = base + compile-time-constant
+<lower right side>      ;; push value
+i32.store / i64.store / ... ;; store element
+```
+
+**Variable index** (`arr[i] = x`):
 ```wasm
 <lower array expr>      ;; push base pointer
 <lower index expr>      ;; push index
 i32.const <elem_size>
 i32.mul
-i32.add                 ;; address computed
+i32.add                 ;; address computed at runtime
 <lower right side>      ;; push value
 i32.store / i64.store / ... ;; store element
 ```
@@ -261,6 +305,48 @@ let x: i32 = arr[1];            // arr[1] has TypeInfoKind::Number(I32)
                                 // arr itself (if passed to fn) has TypeInfoKind::Array(i32, 3)
 ```
 
+## Array Variables as WASM Locals
+
+Each array variable (whether declared with `let` or passed as a parameter) becomes a **WASM local variable** of type `i32`. This local holds a **pointer** to the array's data in linear memory, not the data itself.
+
+**Example compilation**:
+
+```inference
+let arr: [i32; 3] = [10, 20, 30];
+let x: i32 = arr[0];
+```
+
+Becomes:
+
+```wasm
+(local $arr i32)          ;; local for the pointer
+(local $x i32)            ;; local for the i32 result
+(local $__frame_ptr i32)  ;; synthetic frame pointer
+
+;; Prologue: allocate frame
+...
+(local.set $__frame_ptr ...)
+
+;; Initialize array: store elements at frame + offset
+(local.get $__frame_ptr)
+(i32.const 0)
+(i32.add)
+(i32.const 10)
+(i32.store)  ;; arr[0] = 10
+...
+
+;; Push array pointer to local
+(local.get $__frame_ptr)
+(local.set $arr)  ;; arr now holds pointer
+
+;; Read arr[0]: index is zero, so no offset computation (constant-index folding)
+(local.get $arr)
+(i32.load)       ;; load arr[0] directly at base address
+(local.set $x)
+```
+
+**Key insight**: The variable `arr` itself is just an `i32` local; the actual array data is stored in linear memory at the address held by that local.
+
 ## Sub-i32 Element Types
 
 Arrays of small types (`bool`, `i8`, `u8`, `i16`, `u16`) are stored as-is in memory, not promoted to i32:
@@ -275,15 +361,17 @@ This matches Rust/LLVM conventions and is memory-efficient.
 
 All frames are aligned to 16 bytes (matching LLVM/Rust WASM). This is:
 
-- Not required by WASM (memory access has no alignment enforcement)
+- Not required by WASM (alignment in `MemArg` is a hint per spec section 4.5.4 — misaligned access must succeed)
 - A convention for consistency with other compilers
 - Applied after computing total array sizes
+
+Each array within a frame is aligned to its element type's natural alignment, matching the LLVM/Rust/BasicCABI convention. For example, a `[bool; 3]` array (1-byte elements) followed by a `[i32; 2]` array (4-byte elements) will have 1 byte of padding inserted so the i32 array starts at offset 4 (a 4-byte boundary). This makes `MemArg` alignment hints truthful and enables better hardware optimization on runtimes that use alignment hints for instruction selection (e.g., SSE-aligned loads on x86). Padding bytes are automatically zeroed by the `memory.fill` in the prologue.
 
 Example:
 
 ```
-Arrays:  bool (1 byte) + i32 (4 bytes) = 5 bytes
-Aligned: (5 + 15) & ~15 = 16 bytes
+Arrays:  [bool; 3] (3 bytes) + 1 byte padding + [i32; 2] (8 bytes) = 12 bytes
+Aligned: (12 + 15) & ~15 = 16 bytes
 ```
 
 ## Copy-on-Entry for Array Parameters
@@ -350,27 +438,44 @@ The helpers in `memory.rs` select WASM instructions based on element type and si
 
 WASM does not enforce alignment; these hints assist runtimes with optimization.
 
-## Constant Index Optimization (TODO)
+## Constant Index Folding
 
-Currently, array index access always emits:
+Array index access is specialized based on whether the index is a compile-time constant.
+
+**Case 1 — Index is zero (`arr[0]`)**:
+
+No offset computation at all. The base pointer already points to the first element:
 
 ```wasm
-<base_ptr>
-<index>
+<lower array expr>      ;; push base pointer
+i32.load / i64.load / ...  ;; load element at address = base
+```
+
+**Case 2 — Index is a non-zero constant (`arr[N]`)**:
+
+The byte offset `N * elem_size` is computed at compile time and folded into a single `i32.const`:
+
+```wasm
+<lower array expr>      ;; push base pointer
+i32.const <N * elem_size>
+i32.add                 ;; address = base + (compile-time constant)
+i32.load / i64.load / ...  ;; load element
+```
+
+**Case 3 — Index is a runtime variable (`arr[i]`)**:
+
+The offset is computed at runtime using a multiply:
+
+```wasm
+<lower array expr>      ;; push base pointer
+<lower index expr>      ;; push i32 index
 i32.const <elem_size>
-i32.mul
-i32.add
+i32.mul                 ;; byte_offset = index * elem_size (runtime)
+i32.add                 ;; address = base + byte_offset
+i32.load / i64.load / ...  ;; load element
 ```
 
-Future optimization: Detect constant indices at compile time and emit:
-
-```wasm
-<base_ptr>
-i32.const <base_offset + constant_index * elem_size>
-i32.add
-```
-
-Tracked in issue #148.
+The same three-case specialization applies to array index writes (`arr[i] = x`): zero-index emits no offset instruction, constant non-zero index folds to a single `i32.const`, and variable index uses runtime multiply.
 
 ## Known Limitations
 
@@ -438,11 +543,9 @@ pub fn get_array() -> i32 {
   (i32.const 30)
   (i32.store)              ;; arr[2] = 30
 
-  ;; Read arr[1]
-  (local.get 0)            ;; frame
-  (i32.const 1)            ;; index
-  (i32.const 4)            ;; elem_size
-  (i32.mul)                ;; byte_offset = 4
+  ;; Read arr[1]: constant index 1 folded to 1*4=4 at compile time
+  (local.get 0)            ;; frame (base pointer)
+  (i32.const 4)            ;; compile-time offset = 1 * elem_size
   (i32.add)                ;; address = frame + 4
   (i32.load)               ;; load element (value 20 on stack)
 

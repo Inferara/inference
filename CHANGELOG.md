@@ -28,8 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies will be pre-registered when loop lowering is implemented
 - Replace silent `if let ArgumentType::Argument` skip with exhaustive `match` covering `SelfReference`, `IgnoreArgument`, and `Type` variants, each with an explicit `todo!()`
 - Add fixed-size array support with linear memory allocation ([#148])
-  - Shadow stack with `__stack_pointer` mutable global, downward growth from 64KB page top
-  - New `memory.rs` module: `FrameLayout`, `ArraySlot`, prologue/epilogue, param copy, load/store helpers
+  - Shadow stack with `__stack_pointer` mutable global, stack-first layout matching Rust/Zig convention
+  - Stack-first: stack at address 0 grows downward, overflow traps via WASM OOB — no explicit guard needed
+  - New `memory.rs` module: `PAGE_SIZE`, `STACK_SIZE`, `STACK_POINTER_INIT` constants, `FrameLayout`, `ArraySlot`, prologue/epilogue, param copy, load/store helpers
   - Array literal lowering: `let arr: [i32; 3] = [1, 2, 3];` stores elements in linear memory
   - Array index read: `arr[i]` loads elements via computed address (base + index * elem_size)
   - Array index write: `arr[i] = value;` stores elements via computed address
@@ -40,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Conditional Memory/Global/Export sections — only emitted when functions use arrays
   - Sign-appropriate load/store for sub-i32 types (i8→load8_s, u8/bool→load8_u, etc.)
   - 16-byte frame alignment matching LLVM/Rust WASM convention
+  - Per-type alignment padding: each array within a frame is aligned to its element type's natural alignment (1/2/4/8 bytes), matching LLVM/Rust/BasicCABI convention; padding bytes zeroed by prologue `memory.fill`
+  - Constant-index folding: `arr[0]` emits no offset computation (load/store directly at base); `arr[N]` for constant N folds `N * elem_size` to a single compile-time `i32.const`; variable-index access uses runtime multiply
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -129,6 +132,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 9 tests for array element assignment mutability checks
   - 6 type equality tests replacing old compatibility tests
   - i64/u64 array literal type inference tests
+- Add 10 inline execution tests for array element types: i8, u8, i16, u16, u32, i64, large array params (N > 16), mixed-type arrays, mutable parameters ([#148])
+- Add runtime stack overflow trap test: two 32KB frames in 64KB stack verified to trap at runtime via Wasmtime ([#148])
 - Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime
 - Add `arith_overflow` test module with 8 functions covering two's-complement wrapping arithmetic: i32/i64/u32 overflow and underflow, multiplication overflow, and negation of MIN (8 Wasmtime execution assertions)
 - Add `expr_deep_nesting` test module with 5 functions verifying 8+ level expression nesting: left-associative addition chain, mixed arithmetic in nested groups, boolean connectives over nested comparisons, function calls embedded in expressions, and chained unary negation (6 Wasmtime execution assertions)
@@ -419,3 +424,4 @@ Initial tagged release.
 [#142]: https://github.com/Inferara/inference/pull/142
 [#144]: https://github.com/Inferara/inference/pull/144
 [#146]: https://github.com/Inferara/inference/pull/146
+[#148]: https://github.com/Inferara/inference/pull/148

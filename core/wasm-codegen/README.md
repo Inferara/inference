@@ -282,12 +282,21 @@ Test data includes:
 - `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with loops (planned)
   and recursive patterns
 - `algo_recursive_math.inf` - Various mathematical algorithms using recursion and arithmetic
-- `arrays.inf` - Fixed-size array literals, indexing (read), initialization with uzumaki,
-  and nested block scoping; validated against `inf_wasmparser` and executed via wasmtime
-- `arrays_exec.inf` - Array execution tests verifying element access, frame allocation,
-  and correct value retrieval
-- `arrays_params.inf` - Array-typed function parameters, copy-on-entry semantics, and
-  verification that callee mutations don't affect caller's array (value semantics)
+- `array_literal.inf` - Fixed-size array literal declarations with i32 and bool element types,
+  including single-element and multi-array cases; validated against `inf_wasmparser` and
+  executed via wasmtime
+- `array_index.inf` - Array index read access (both constant and variable indices) with i32
+  and bool arrays, including reading array elements for use in conditions; validated and
+  executed via wasmtime
+- `array_assign.inf` - Array element write operations including simple writes, multiple
+  assignments, element swapping, writes with computed indices, and bool array mutations;
+  validated and executed via wasmtime
+- `array_params.inf` - Array-typed function parameters, copy-on-entry semantics, value
+  semantics verification (callee mutations don't affect caller's array), multi-parameter
+  functions, and bool array parameters; validated and executed via wasmtime
+- `array_nondet.inf` - Arrays inside non-deterministic blocks (forall, exists) and
+  non-deterministic array initialization (`@`) inside blocks; validated against `inf_wasmparser`
+  (non-det modules skip WAT comparison)
 
 ## Related Resources
 

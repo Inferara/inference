@@ -1953,6 +1953,75 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn array_alignment_padding_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+        // Test 1: [bool; 3] (3 bytes) + [i32; 2] (8 bytes) - 1 byte padding between them
+        // Verify both arrays are read/written correctly across the padding boundary.
+        let source_bool_i32 = r#"
+            pub fn bool_then_i32() -> i32 {
+                let flags: [bool; 3] = [true, false, true];
+                let nums: [i32; 2] = [1000, 2000];
+                let mut result: i32 = nums[0] + nums[1];
+                if flags[0] {
+                    result = result + 1;
+                }
+                if flags[2] {
+                    result = result + 2;
+                }
+                return result;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source_bool_i32);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("bool_then_i32 WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "bool_then_i32")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result,
+            1000 + 2000 + 1 + 2,
+            "bool_then_i32: 1000 + 2000 + 1 (flags[0]) + 2 (flags[2]) = 3003"
+        );
+
+        // Test 2: [bool; 1] (1 byte) + [i64; 1] (8 bytes) - 7 bytes padding between them
+        // Verify the i64 value is read correctly even with large padding gap.
+        let source_bool_i64 = r#"
+            pub fn bool_then_i64() -> i64 {
+                let flag: [bool; 1] = [true];
+                let big: [i64; 1] = [9999999999];
+                let zero: i64 = 0;
+                if flag[0] {
+                    return big[0];
+                }
+                return zero;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source_bool_i64);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("bool_then_i64 WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "bool_then_i64")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result,
+            9_999_999_999i64,
+            "bool_then_i64: flag is true, return big[0] = 9999999999"
+        );
+    }
+
+    #[test]
     fn stack_overflow_traps_at_runtime() {
         use wasmtime::{Engine, Module, Store, TypedFunc};
         let zeros = vec!["0"; 8200].join(", ");

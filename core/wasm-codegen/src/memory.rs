@@ -107,10 +107,20 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
     }
 }
 
+/// Rounds `offset` up to the nearest multiple of `alignment`.
+///
+/// Used to align array offsets within a frame to their element type's
+/// natural alignment, matching LLVM/Rust convention.
+#[must_use = "returns the aligned offset"]
+pub(crate) fn align_to(offset: u32, alignment: u32) -> u32 {
+    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    (offset + alignment - 1) & !(alignment - 1)
+}
+
 /// Rounds `size` up to the nearest multiple of [`FRAME_ALIGNMENT`].
 #[must_use = "returns the aligned size"]
 pub(crate) fn align_to_frame(size: u32) -> u32 {
-    (size + FRAME_ALIGNMENT - 1) & !(FRAME_ALIGNMENT - 1)
+    align_to(size, FRAME_ALIGNMENT)
 }
 
 /// Selects the appropriate WASM store instruction based on an `ArraySlot`'s element size.
@@ -522,5 +532,29 @@ mod tests {
     #[test]
     fn natural_alignment_8_byte() {
         assert_eq!(natural_alignment(&TypeInfoKind::Number(NumberType::I64)), 3);
+    }
+
+    #[test]
+    fn align_to_identity() {
+        assert_eq!(align_to(0, 4), 0);
+        assert_eq!(align_to(4, 4), 4);
+        assert_eq!(align_to(8, 8), 8);
+    }
+
+    #[test]
+    fn align_to_rounds_up() {
+        assert_eq!(align_to(1, 4), 4);
+        assert_eq!(align_to(3, 4), 4);
+        assert_eq!(align_to(5, 8), 8);
+        assert_eq!(align_to(7, 8), 8);
+        assert_eq!(align_to(9, 4), 12);
+    }
+
+    #[test]
+    fn align_to_one_byte() {
+        assert_eq!(align_to(0, 1), 0);
+        assert_eq!(align_to(1, 1), 1);
+        assert_eq!(align_to(7, 1), 7);
+        assert_eq!(align_to(100, 1), 100);
     }
 }

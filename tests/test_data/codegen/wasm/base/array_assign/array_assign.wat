@@ -42,17 +42,9 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.const 42
     i32.store
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.load
     local.get $__frame_ptr
     i32.const 16
@@ -94,43 +86,27 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.const 10
     i32.store
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     i32.const 20
     i32.store
     local.get $arr
-    i32.const 2
-    i32.const 4
-    i32.mul
+    i32.const 8
     i32.add
     i32.const 30
     i32.store
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.load
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     i32.load
     i32.add
     local.get $arr
-    i32.const 2
-    i32.const 4
-    i32.mul
+    i32.const 8
     i32.add
     i32.load
     i32.add
@@ -169,43 +145,25 @@
     local.get $__frame_ptr
     local.set $arr
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.load
     local.set $tmp
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     i32.load
     i32.store
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     local.get $tmp
     i32.store
     local.get $arr
-    i32.const 0
-    i32.const 4
-    i32.mul
-    i32.add
     i32.load
     i32.const 10
     i32.mul
     local.get $arr
-    i32.const 1
     i32.const 4
-    i32.mul
     i32.add
     i32.load
     i32.add
@@ -258,9 +216,7 @@
     i32.const 99
     i32.store
     local.get $arr
-    i32.const 2
-    i32.const 4
-    i32.mul
+    i32.const 8
     i32.add
     i32.load
     local.get $__frame_ptr
@@ -303,30 +259,18 @@
     local.get $__frame_ptr
     local.set $flags
     local.get $flags
-    i32.const 0
-    i32.const 1
-    i32.mul
-    i32.add
     i32.const 1
     i32.store8
     local.get $flags
     i32.const 2
-    i32.const 1
-    i32.mul
     i32.add
     i32.const 1
     i32.store8
     local.get $flags
-    i32.const 0
-    i32.const 1
-    i32.mul
-    i32.add
     i32.load8_u
     if ;; label = @1
       local.get $flags
       i32.const 2
-      i32.const 1
-      i32.mul
       i32.add
       i32.load8_u
       if ;; label = @2
