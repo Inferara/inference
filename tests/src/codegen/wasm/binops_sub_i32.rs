@@ -135,7 +135,6 @@ mod regenerate {
             .join("codegen")
             .join("wasm")
             .join("binops_sub_i32")
-            .join("binops_sub_i32")
     }
 
     #[test]

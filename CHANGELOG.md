@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 16-byte frame alignment matching LLVM/Rust WASM convention
   - Per-type alignment padding: each array within a frame is aligned to its element type's natural alignment (1/2/4/8 bytes), matching LLVM/Rust/BasicCABI convention; padding bytes zeroed by prologue `memory.fill`
   - Constant-index folding: `arr[0]` emits no offset computation (load/store directly at base); `arr[N]` for constant N folds `N * elem_size` to a single compile-time `i32.const`; variable-index access uses runtime multiply
+  - Array return types via sret (struct-return) calling convention matching Rust/Zig: hidden `$sret` parameter at index 0, void WASM return, caller allocates destination in its own frame
+  - Three sret return expression cases: identifier (`return arr` → `memory.copy`), array literal (`return [1,2,3]` → element-wise stores), function call (`return inner()` → zero-copy sret forwarding)
+  - Sub-i32 narrowing after arithmetic: signed types use shift-left/arithmetic-shift-right, unsigned types use AND mask; skipped for comparisons, Mod, Shr, bitwise ops
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -116,6 +119,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add array element assignment mutability check ([#148])
   - `arr[i] = value` requires `arr` to be declared `mut`
   - `extract_root_array_name` resolves root identifier from nested index access expressions
+- Add `ArrayReturnCallInExpressionPosition` error: rejects array-returning function calls in unsupported positions ([#148])
+  - Only `let x = foo()` and `return foo()` are permitted for sret calls
+  - Standalone calls, argument positions, index access, and assignment RHS all rejected with clear diagnostic
+  - Guards at 6 sites: Statement::Expression, ArrayIndexAccess, 3 argument validation loops, Statement::Assign
 - Remove dead code: `types_equal` function, `is_compatible_with` method, `param_names` field from `FuncInfo`
 - Add `find_enclosing_variable_name()` to `TypedContext` for walking AST parent chain to enclosing variable
 
@@ -132,6 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 9 tests for array element assignment mutability checks
   - 6 type equality tests replacing old compatibility tests
   - i64/u64 array literal type inference tests
+- Add 7 sret execution tests: literal return, variable return, chained forwarding, value semantics, sub-i32, i64, sret with params ([#148])
+- Add 7 type-checker tests for `ArrayReturnCallInExpressionPosition`: let binding, return forwarding, standalone, argument, index access, assignment, non-array standalone ([#148])
 - Add 10 inline execution tests for array element types: i8, u8, i16, u16, u32, i64, large array params (N > 16), mixed-type arrays, mutable parameters ([#148])
 - Add runtime stack overflow trap test: two 32KB frames in 64KB stack verified to trap at runtime via Wasmtime ([#148])
 - Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime

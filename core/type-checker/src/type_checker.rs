@@ -18,8 +18,8 @@ use anyhow::bail;
 use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::nodes::{
     ArgumentType, Definition, Directive, Expression, FunctionDefinition, Identifier, Literal,
-    Location, ModuleDefinition, OperatorKind, SimpleTypeKind, Statement, Type, UnaryOperatorKind,
-    UseDirective, Visibility,
+    Location, ModuleDefinition, OperatorKind, SimpleTypeKind, Statement, Type, TypeArray,
+    UnaryOperatorKind, UseDirective, Visibility,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -330,7 +330,8 @@ impl TypeChecker {
                                 return_type,
                                 function_definition.type_parameters.as_ref(),
                             );
-                            ctx.set_node_typeinfo(return_type.id(), TypeInfo::new(return_type));
+                            let return_type_info = TypeInfo::new(return_type);
+                            ctx.set_node_typeinfo(return_type.id(), return_type_info);
                         }
                         // Register function even if parameter validation had errors
                         // to allow error recovery and prevent spurious UndefinedFunction errors
@@ -431,7 +432,8 @@ impl TypeChecker {
 
         match ty {
             Type::Array(type_array) => {
-                self.validate_type(&type_array.element_type, type_parameters)
+                self.validate_type(&type_array.element_type, type_parameters);
+                self.validate_array_size(type_array);
             }
             Type::Simple(_) => {
                 // SimpleTypeKind only contains primitive builtin types - always valid.
@@ -471,6 +473,25 @@ impl TypeChecker {
                     self.push_error_dedup(TypeCheckError::UnknownType {
                         name: identifier.name.clone(),
                         location: identifier.location,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Validates that an array type annotation has a valid size (positive, fits in u32).
+    ///
+    /// Reports `InvalidArraySize` if the size is zero (sentinel from parse failure)
+    /// or if the literal text cannot be parsed as a positive u32.
+    fn validate_array_size(&mut self, type_array: &TypeArray) {
+        if let Expression::Literal(Literal::Number(num_lit)) = &type_array.size {
+            let size_str = &num_lit.value;
+            match size_str.parse::<u32>() {
+                Ok(1..) => {}
+                Ok(0) | Err(_) => {
+                    self.push_error_dedup(TypeCheckError::InvalidArraySize {
+                        size: size_str.clone(),
+                        location: num_lit.location,
                     });
                 }
             }
@@ -632,6 +653,11 @@ impl TypeChecker {
                     && let Expression::Literal(Literal::Number(num_lit)) = &*right_expr
                 {
                     ctx.set_node_typeinfo(num_lit.id, target.clone());
+                    self.validate_literal_range(
+                        &num_lit.value,
+                        &target.kind,
+                        num_lit.location,
+                    );
                 }
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
                     if let Some(target) = &target_type {
@@ -643,6 +669,17 @@ impl TypeChecker {
                         });
                     }
                 } else {
+                    if let Expression::FunctionCall(fce) = &*right_expr
+                        && let Some(sig) =
+                            self.symbol_table.lookup_function(&fce.name())
+                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                    {
+                        self.errors.push(
+                            TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                location: fce.location,
+                            },
+                        );
+                    }
                     let value_type = self.infer_expression(&right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
@@ -665,6 +702,15 @@ impl TypeChecker {
             }
             Statement::Expression(expression) => {
                 self.infer_expression(expression, ctx);
+                if let Expression::FunctionCall(fce) = expression
+                    && let Some(sig) = self.symbol_table.lookup_function(&fce.name())
+                    && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                {
+                    self.errors
+                        .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            location: fce.location,
+                        });
+                }
             }
             Statement::Return(return_statement) => {
                 if matches!(
@@ -739,10 +785,18 @@ impl TypeChecker {
                 let target_type = self
                     .symbol_table
                     .resolve_custom_type(TypeInfo::new(&variable_definition_statement.ty));
+                if let Type::Array(type_array) = &variable_definition_statement.ty {
+                    self.validate_array_size(type_array);
+                }
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Literal(Literal::Number(num_lit)) = &*expr_ref {
                         ctx.set_node_typeinfo(num_lit.id, target_type.clone());
+                        self.validate_literal_range(
+                            &num_lit.value,
+                            &target_type.kind,
+                            num_lit.location,
+                        );
                     }
                     if let Expression::Literal(Literal::Array(array_lit)) = &*expr_ref
                         && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
@@ -753,6 +807,11 @@ impl TypeChecker {
                                 &*element.borrow()
                             {
                                 ctx.set_node_typeinfo(num_lit.id, (**elem_type).clone());
+                                self.validate_literal_range(
+                                    &num_lit.value,
+                                    &elem_type.kind,
+                                    num_lit.location,
+                                );
                             }
                         }
                     }
@@ -828,6 +887,13 @@ impl TypeChecker {
                         location: constant_definition.location,
                     });
                 }
+                if let Literal::Number(num_lit) = &constant_definition.value {
+                    self.validate_literal_range(
+                        &num_lit.value,
+                        &constant_type.kind,
+                        num_lit.location,
+                    );
+                }
                 ctx.set_node_typeinfo(constant_definition.value.id(), constant_type.clone());
                 ctx.set_node_typeinfo(constant_definition.id, constant_type);
             }
@@ -842,6 +908,18 @@ impl TypeChecker {
     ) -> Option<TypeInfo> {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
+                if let Expression::FunctionCall(inner_fce) =
+                    &*array_index_access_expression.array.borrow()
+                    && let Some(inner_sig) =
+                        self.symbol_table.lookup_function(&inner_fce.name())
+                    && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                {
+                    self.errors.push(
+                        TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            location: array_index_access_expression.location,
+                        },
+                    );
+                }
                 if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
                     Some(type_info.clone())
                 } else if let Some(array_type) =
@@ -849,12 +927,22 @@ impl TypeChecker {
                 {
                     if let Some(index_type) =
                         self.infer_expression(&array_index_access_expression.index.borrow(), ctx)
-                        && !index_type.is_number()
                     {
-                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
-                            found: index_type,
-                            location: array_index_access_expression.location,
-                        });
+                        if !index_type.is_number() {
+                            self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                                found: index_type,
+                                location: array_index_access_expression.location,
+                            });
+                        } else if matches!(
+                            index_type.kind,
+                            TypeInfoKind::Number(NumberType::I64)
+                                | TypeInfoKind::Number(NumberType::U64)
+                        ) {
+                            self.errors.push(TypeCheckError::ArrayIndex64Bit {
+                                found: index_type,
+                                location: array_index_access_expression.location,
+                            });
+                        }
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -1107,6 +1195,22 @@ impl TypeChecker {
 
                             if let Some(arguments) = &function_call_expression.arguments {
                                 for (i, arg) in arguments.iter().enumerate() {
+                                    if let Expression::Literal(Literal::Array(_)) =
+                                        &*arg.1.borrow()
+                                    {
+                                        self.errors
+                                            .push(TypeCheckError::ArrayLiteralAsArgument {
+                                                location: arg.1.borrow().location(),
+                                            });
+                                    }
+                                    if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                                        && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
+                                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                                    {
+                                        self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                            location: inner_fce.location,
+                                        });
+                                    }
                                     let arg_type =
                                         self.infer_expression(&arg.1.borrow(), ctx);
                                     if let Some(arg_type) = arg_type
@@ -1215,6 +1319,22 @@ impl TypeChecker {
 
                                 if let Some(arguments) = &function_call_expression.arguments {
                                     for (i, arg) in arguments.iter().enumerate() {
+                                        if let Expression::Literal(Literal::Array(_)) =
+                                            &*arg.1.borrow()
+                                        {
+                                            self.errors
+                                                .push(TypeCheckError::ArrayLiteralAsArgument {
+                                                    location: arg.1.borrow().location(),
+                                                });
+                                        }
+                                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                                            && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
+                                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                                        {
+                                            self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                                location: inner_fce.location,
+                                            });
+                                        }
                                         let arg_type =
                                             self.infer_expression(&arg.1.borrow(), ctx);
                                         if let Some(arg_type) = arg_type
@@ -1382,6 +1502,23 @@ impl TypeChecker {
                 // Infer argument types and validate against parameter types
                 if let Some(arguments) = &function_call_expression.arguments {
                     for (i, arg) in arguments.iter().enumerate() {
+                        if let Expression::Literal(Literal::Array(_)) = &*arg.1.borrow() {
+                            self.errors
+                                .push(TypeCheckError::ArrayLiteralAsArgument {
+                                    location: arg.1.borrow().location(),
+                                });
+                        }
+                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                            && let Some(inner_sig) =
+                                self.symbol_table.lookup_function(&inner_fce.name())
+                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        {
+                            self.errors.push(
+                                TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                    location: inner_fce.location,
+                                },
+                            );
+                        }
                         let arg_type = self.infer_expression(&arg.1.borrow(), ctx);
                         if let Some(arg_type) = arg_type
                             && i < signature.param_types.len()
@@ -2151,6 +2288,46 @@ impl TypeChecker {
                 Self::extract_root_array_name(&access.array.borrow())
             }
             _ => None,
+        }
+    }
+
+    /// Validates that a numeric literal value fits within the target type's range.
+    ///
+    /// Pushes a `LiteralOutOfRange` error if the value exceeds the bounds of
+    /// the target type. Silently returns if the target type is not a numeric type.
+    /// If the literal is too large to parse as i128, it is guaranteed out of range
+    /// for any Inference integer type and is reported as such.
+    fn validate_literal_range(
+        &mut self,
+        value: &str,
+        target_kind: &TypeInfoKind,
+        location: Location,
+    ) {
+        let TypeInfoKind::Number(number_type) = target_kind else {
+            return;
+        };
+        let (type_name, min, max): (&str, i128, i128) = match number_type {
+            NumberType::I8 => ("i8", i128::from(i8::MIN), i128::from(i8::MAX)),
+            NumberType::I16 => ("i16", i128::from(i16::MIN), i128::from(i16::MAX)),
+            NumberType::I32 => ("i32", i128::from(i32::MIN), i128::from(i32::MAX)),
+            NumberType::I64 => ("i64", i128::from(i64::MIN), i128::from(i64::MAX)),
+            NumberType::U8 => ("u8", i128::from(u8::MIN), i128::from(u8::MAX)),
+            NumberType::U16 => ("u16", i128::from(u16::MIN), i128::from(u16::MAX)),
+            NumberType::U32 => ("u32", i128::from(u32::MIN), i128::from(u32::MAX)),
+            NumberType::U64 => ("u64", i128::from(u64::MIN), i128::from(u64::MAX)),
+        };
+        let out_of_range = match value.parse::<i128>() {
+            Ok(parsed) => parsed < min || parsed > max,
+            Err(_) => true,
+        };
+        if out_of_range {
+            self.errors.push(TypeCheckError::LiteralOutOfRange {
+                value: value.to_string(),
+                type_name: type_name.to_string(),
+                min,
+                max,
+                location,
+            });
         }
     }
 

@@ -210,6 +210,48 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
     }
 }
 
+/// Emits sub-i32 narrowing instructions to truncate an i32 value to the
+/// width of a sub-i32 type after arithmetic operations.
+///
+/// - Signed (i8, i16): shift-left then arithmetic-shift-right (sign-extend)
+/// - Unsigned (u8, u16): AND with bitmask (zero-extend)
+/// - i32/u32/i64/u64/bool: no-op, returns false
+///
+/// Returns `true` if narrowing instructions were emitted.
+pub(crate) fn emit_sub_i32_narrowing(func: &mut Function, kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Number(NumberType::I8) => {
+            // Sign-extend from 8 bits: (x << 24) >>s 24
+            func.instruction(&Instruction::I32Const(24));
+            func.instruction(&Instruction::I32Shl);
+            func.instruction(&Instruction::I32Const(24));
+            func.instruction(&Instruction::I32ShrS);
+            true
+        }
+        TypeInfoKind::Number(NumberType::I16) => {
+            // Sign-extend from 16 bits: (x << 16) >>s 16
+            func.instruction(&Instruction::I32Const(16));
+            func.instruction(&Instruction::I32Shl);
+            func.instruction(&Instruction::I32Const(16));
+            func.instruction(&Instruction::I32ShrS);
+            true
+        }
+        TypeInfoKind::Number(NumberType::U8) => {
+            // Zero-extend from 8 bits: x & 0xFF
+            func.instruction(&Instruction::I32Const(0xFF));
+            func.instruction(&Instruction::I32And);
+            true
+        }
+        TypeInfoKind::Number(NumberType::U16) => {
+            // Zero-extend from 16 bits: x & 0xFFFF
+            func.instruction(&Instruction::I32Const(0xFFFF));
+            func.instruction(&Instruction::I32And);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Returns the natural alignment exponent for an element type.
 ///
 /// WASM encodes alignment as `log2(byte_alignment)`:
@@ -386,6 +428,52 @@ pub(crate) fn emit_array_param_copy(
     func.instruction(&Instruction::LocalSet(param_local));
 }
 
+/// Emits a `memory.copy` from a source pointer to the sret destination.
+///
+/// Used in `return arr` inside an sret function: copies the array data from
+/// the callee's frame slot to the caller-provided sret pointer.
+///
+/// ```text
+/// local.get $sret
+/// local.get $source
+/// i32.const <byte_size>
+/// memory.copy
+/// ```
+pub(crate) fn emit_sret_copy(
+    func: &mut Function,
+    sret_local: u32,
+    source_local: u32,
+    byte_size: u32,
+) {
+    func.instruction(&Instruction::LocalGet(sret_local));
+    func.instruction(&Instruction::LocalGet(source_local));
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(byte_size as i32));
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: MEMORY_INDEX,
+        dst_mem: MEMORY_INDEX,
+    });
+}
+
+/// Emits the address computation `sret + byte_offset` onto the WASM stack.
+///
+/// Used when writing individual elements to the sret destination (e.g., for
+/// `return [1, 2, 3]` in an sret function).
+///
+/// ```text
+/// local.get $sret
+/// i32.const <byte_offset>   ;; omitted when offset is 0
+/// i32.add                   ;; omitted when offset is 0
+/// ```
+pub(crate) fn emit_sret_element_addr(func: &mut Function, sret_local: u32, byte_offset: u32) {
+    func.instruction(&Instruction::LocalGet(sret_local));
+    if byte_offset > 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(byte_offset as i32));
+        func.instruction(&Instruction::I32Add);
+    }
+}
+
 /// Emits the stack epilogue to restore `__stack_pointer` before exiting.
 ///
 /// ```text
@@ -556,5 +644,68 @@ mod tests {
         assert_eq!(align_to(1, 1), 1);
         assert_eq!(align_to(7, 1), 7);
         assert_eq!(align_to(100, 1), 100);
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_i8() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::I8));
+        assert!(emitted, "should emit narrowing for i8");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_i16() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::I16));
+        assert!(emitted, "should emit narrowing for i16");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_u8() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::U8));
+        assert!(emitted, "should emit narrowing for u8");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_u16() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::U16));
+        assert!(emitted, "should emit narrowing for u16");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_i32_noop() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::I32));
+        assert!(!emitted, "should not emit narrowing for i32");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_u32_noop() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::U32));
+        assert!(!emitted, "should not emit narrowing for u32");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_i64_noop() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::I64));
+        assert!(!emitted, "should not emit narrowing for i64");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_u64_noop() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Number(NumberType::U64));
+        assert!(!emitted, "should not emit narrowing for u64");
+    }
+
+    #[test]
+    fn emit_sub_i32_narrowing_bool_noop() {
+        let mut func = Function::new(vec![]);
+        let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Bool);
+        assert!(!emitted, "should not emit narrowing for bool");
     }
 }

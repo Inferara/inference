@@ -79,8 +79,11 @@ use wasm_encoder::{
 
 use crate::memory::{
     self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to, align_to_frame,
-    element_size, emit_array_param_copy, emit_stack_epilogue, emit_stack_prologue,
+    element_size, emit_array_param_copy, emit_sret_copy, emit_sret_element_addr,
+    emit_stack_epilogue, emit_stack_prologue,
 };
+
+use inference_type_checker::type_info::TypeInfo;
 
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
@@ -93,6 +96,17 @@ const ASSUME_OPCODE: u8 = 0x3c;
 const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
+
+/// Metadata about a function that returns an array type.
+///
+/// Populated during `build_func_name_to_idx` so that callers and callees
+/// know the sret calling convention parameters at code generation time.
+#[derive(Debug, Clone)]
+struct ArrayReturnInfo {
+    elem_kind: TypeInfoKind,
+    elem_size: u32,
+    length: u32,
+}
 
 /// WASM compiler for generating WebAssembly binary from typed AST.
 ///
@@ -137,6 +151,16 @@ pub(crate) struct Compiler {
     /// Sticky flag: set to `true` when any function requires linear memory (e.g. arrays).
     /// Once set, the module emits Memory and Global sections in `finish()`.
     has_memory: bool,
+    /// Maps function names to their array return type metadata.
+    ///
+    /// Populated by `build_func_name_to_idx` for functions whose return type is
+    /// `Type::Array`. Used during code generation to apply the sret calling convention.
+    func_array_returns: FxHashMap<String, ArrayReturnInfo>,
+    /// Name of the function currently being compiled.
+    ///
+    /// Set at the start of `visit_function_definition` and read during
+    /// `lower_statement` to look up sret info for return statements.
+    current_fn_name: String,
 }
 
 impl Compiler {
@@ -158,6 +182,8 @@ impl Compiler {
             module_name: module_name.to_string(),
             func_name_to_idx: FxHashMap::default(),
             has_memory: false,
+            func_array_returns: FxHashMap::default(),
+            current_fn_name: String::new(),
         }
     }
 
@@ -173,8 +199,24 @@ impl Compiler {
     pub(crate) fn build_func_name_to_idx(&mut self, funcs: &[Rc<FunctionDefinition>]) {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, func_def) in funcs.iter().enumerate() {
+            let fn_name = func_def.name();
             self.func_name_to_idx
-                .insert(func_def.name(), idx as u32 + self.func_idx);
+                .insert(fn_name.clone(), idx as u32 + self.func_idx);
+
+            if let Some(Type::Array(_)) = &func_def.returns {
+                let return_type_info = TypeInfo::new(func_def.returns.as_ref().unwrap());
+                if let TypeInfoKind::Array(ref elem_type, length) = return_type_info.kind {
+                    let elem_sz = element_size(&elem_type.kind);
+                    self.func_array_returns.insert(
+                        fn_name,
+                        ArrayReturnInfo {
+                            elem_kind: elem_type.kind.clone(),
+                            elem_size: elem_sz,
+                            length,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -240,16 +282,33 @@ impl Compiler {
         ctx: &TypedContext,
     ) {
         let fn_name = function_definition.name();
-        let results: Vec<ValType> = function_definition
-            .returns
-            .as_ref()
-            .and_then(Self::val_type_from_type)
-            .into_iter()
-            .collect();
+        self.current_fn_name.clone_from(&fn_name);
+
+        let is_array_return = self.func_array_returns.contains_key(&fn_name);
+
+        // Compute WASM results: sret functions have void WASM return.
+        let results: Vec<ValType> = if is_array_return {
+            vec![]
+        } else {
+            function_definition
+                .returns
+                .as_ref()
+                .and_then(Self::val_type_from_type)
+                .into_iter()
+                .collect()
+        };
 
         let mut params: Vec<ValType> = vec![];
         let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
         let mut local_idx: u32 = 0;
+
+        // sret calling convention: hidden first parameter holds the caller-provided
+        // destination pointer where the callee writes its return array.
+        if is_array_return {
+            params.push(ValType::I32);
+            locals_map.insert("sret".to_string(), (0, ValType::I32));
+            local_idx = 1;
+        }
 
         if let Some(arguments) = &function_definition.arguments {
             for arg_type in arguments {
@@ -282,12 +341,20 @@ impl Compiler {
         }
 
         let param_count = local_idx;
-        let has_return_value = !results.is_empty();
+        // has_return_value tracks whether the function conceptually returns a value,
+        // which for sret functions is true even though the WASM return is void.
+        let has_return_value = is_array_return
+            || !results.is_empty();
 
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
         self.functions.push(type_idx);
+
+        // sret functions require linear memory for the caller-side frame slots.
+        if is_array_return {
+            self.has_memory = true;
+        }
 
         let is_main = fn_name == "main";
         let should_export = function_definition.visibility == Visibility::Public && !is_main;
@@ -722,6 +789,13 @@ impl Compiler {
                 }
             },
             Statement::Expression(expression) => {
+                // The type checker rejects standalone calls to array-returning
+                // functions, so this path should be unreachable.
+                assert!(
+                    !matches!(&expression, Expression::FunctionCall(fce)
+                        if self.func_array_returns.contains_key(&fce.name())),
+                    "standalone call to array-returning function should have been rejected by the type checker",
+                );
                 self.lower_expression(&expression, ctx, func, locals_map, frame_layout);
                 let expr_produces_value = ctx
                     .get_node_typeinfo(expression.id())
@@ -740,13 +814,27 @@ impl Compiler {
                 self.lower_assign_statement(&assign_statement, ctx, func, locals_map, frame_layout);
             }
             Statement::Return(return_statement) => {
-                self.lower_expression(
-                    &return_statement.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                let sret_local = locals_map.get("sret").map(|(idx, _)| *idx);
+                if let Some(sret_idx) = sret_local {
+                    if let Err(e) = self.lower_sret_return(
+                        &return_statement.expression.borrow(),
+                        sret_idx,
+                        ctx,
+                        func,
+                        locals_map,
+                        frame_layout,
+                    ) {
+                        panic!("sret return lowering failed: {e}");
+                    }
+                } else {
+                    self.lower_expression(
+                        &return_statement.expression.borrow(),
+                        ctx,
+                        func,
+                        locals_map,
+                        frame_layout,
+                    );
+                }
                 if let Some(layout) = frame_layout {
                     emit_stack_epilogue(func, layout);
                 }
@@ -774,8 +862,123 @@ impl Compiler {
                     Some(expr_ref) => {
                         let expr = expr_ref.borrow();
                         let local_idx = *local_idx;
-                        self.lower_expression(&expr, ctx, func, locals_map, frame_layout);
-                        func.instruction(&Instruction::LocalSet(local_idx));
+
+                        let var_type_info =
+                            ctx.get_node_typeinfo(variable_definition_statement.id);
+                        let is_array_type = matches!(
+                            var_type_info.as_ref().map(|ti| &ti.kind),
+                            Some(TypeInfoKind::Array(_, _))
+                        );
+
+                        // Detect sret call: `let b: [T; N] = foo();` where foo returns array
+                        let is_sret_call = is_array_type
+                            && matches!(&*expr, Expression::FunctionCall(fce) if
+                                self.func_array_returns.contains_key(&fce.name()));
+
+                        // Detect array-to-array copy: `let b: [T; N] = a;`
+                        let is_array_copy = is_array_type
+                            && matches!(&*expr, Expression::Identifier(_));
+
+                        if is_sret_call {
+                            let layout =
+                                frame_layout.expect("Array variable requires frame layout");
+                            let dest_name = variable_definition_statement.name();
+                            let dest_slot = layout
+                                .array_offsets
+                                .get(&dest_name)
+                                .expect("Destination array not in frame layout");
+
+                            if let Expression::FunctionCall(fce) = &*expr {
+                                // Push sret pointer: frame_ptr + dest_slot.offset
+                                func.instruction(&Instruction::LocalGet(
+                                    layout.frame_ptr_local,
+                                ));
+                                if dest_slot.offset > 0 {
+                                    #[allow(clippy::cast_possible_wrap)]
+                                    func.instruction(&Instruction::I32Const(
+                                        dest_slot.offset as i32,
+                                    ));
+                                    func.instruction(&Instruction::I32Add);
+                                }
+                                // Push regular arguments
+                                if let Some(arguments) = &fce.arguments {
+                                    for (_label, expr_ref) in arguments {
+                                        self.lower_expression(
+                                            &expr_ref.borrow(),
+                                            ctx,
+                                            func,
+                                            locals_map,
+                                            frame_layout,
+                                        );
+                                    }
+                                }
+                                let callee_name = fce.name();
+                                let func_idx = self
+                                    .func_name_to_idx
+                                    .get(&callee_name)
+                                    .copied()
+                                    .expect("sret callee must be in func_name_to_idx");
+                                func.instruction(&Instruction::Call(func_idx));
+                            }
+
+                            // Set local to point to destination slot
+                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                            if dest_slot.offset > 0 {
+                                #[allow(clippy::cast_possible_wrap)]
+                                func.instruction(&Instruction::I32Const(
+                                    dest_slot.offset as i32,
+                                ));
+                                func.instruction(&Instruction::I32Add);
+                            }
+                            func.instruction(&Instruction::LocalSet(local_idx));
+                        } else if is_array_copy {
+                            cov_mark::hit!(wasm_codegen_emit_array_copy);
+                            let layout =
+                                frame_layout.expect("Array variable requires frame layout");
+                            let dest_name = variable_definition_statement.name();
+                            let dest_slot = layout
+                                .array_offsets
+                                .get(&dest_name)
+                                .expect("Destination array not in frame layout");
+                            let byte_size = dest_slot.elem_size * dest_slot.length;
+
+                            // dest = frame_ptr + dest_slot.offset
+                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                            if dest_slot.offset > 0 {
+                                #[allow(clippy::cast_possible_wrap)]
+                                func.instruction(&Instruction::I32Const(
+                                    dest_slot.offset as i32,
+                                ));
+                                func.instruction(&Instruction::I32Add);
+                            }
+                            // src = lower_expression(identifier) -> source pointer
+                            self.lower_expression(
+                                &expr, ctx, func, locals_map, frame_layout,
+                            );
+                            // byte count
+                            #[allow(clippy::cast_possible_wrap)]
+                            func.instruction(&Instruction::I32Const(byte_size as i32));
+                            func.instruction(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
+
+                            // Set local to point to destination slot
+                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                            if dest_slot.offset > 0 {
+                                #[allow(clippy::cast_possible_wrap)]
+                                func.instruction(&Instruction::I32Const(
+                                    dest_slot.offset as i32,
+                                ));
+                                func.instruction(&Instruction::I32Add);
+                            }
+                            func.instruction(&Instruction::LocalSet(local_idx));
+                        } else {
+                            self.lower_expression(
+                                &expr, ctx, func, locals_map, frame_layout,
+                            );
+                            func.instruction(&Instruction::LocalSet(local_idx));
+                        }
                     }
                 }
             }
@@ -872,6 +1075,7 @@ impl Compiler {
                                 the type-checker should have caught undefined functions"
                         )
                     }
+                    Err(e) => panic!("function call lowering failed: {e}"),
                 }
             }
             Expression::Struct(_struct_expression) => todo!(),
@@ -980,13 +1184,14 @@ impl Compiler {
 
         cov_mark::hit!(wasm_codegen_emit_function_call);
 
+        let func_name = fce.name();
+
         if let Some(arguments) = &fce.arguments {
             for (_label, expr_ref) in arguments {
                 self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map, frame_layout);
             }
         }
 
-        let func_name = fce.name();
         let func_idx = self
             .func_name_to_idx
             .get(&func_name)
@@ -1062,6 +1267,90 @@ impl Compiler {
             }
             _ => todo!("Assignment to non-identifier targets (member access) not yet supported"),
         }
+    }
+
+    /// Lowers the return expression in an sret function.
+    ///
+    /// Instead of pushing a value onto the WASM stack, the return data is written
+    /// to the caller-provided sret pointer. Three cases are handled:
+    ///
+    /// - **Identifier**: `return arr` -- `memory.copy` from source to sret
+    /// - **Array literal**: `return [1,2,3]` -- write elements directly to sret
+    /// - **Function call**: `return inner()` -- forward sret to the inner call (zero-copy)
+    ///
+    /// After writing, the caller emits the epilogue and `Return` instruction.
+    fn lower_sret_return(
+        &self,
+        return_expr: &Expression,
+        sret_idx: u32,
+        ctx: &TypedContext,
+        func: &mut Function,
+        locals_map: &FxHashMap<String, (u32, ValType)>,
+        frame_layout: Option<&FrameLayout>,
+    ) -> Result<(), CodegenError> {
+        let return_info = self
+            .func_array_returns
+            .get(&self.current_fn_name)
+            .expect("sret function must have ArrayReturnInfo");
+        let byte_size = return_info.elem_size * return_info.length;
+
+        match return_expr {
+            Expression::Identifier(identifier) => {
+                let (source_local, _) = locals_map
+                    .get(&identifier.name)
+                    .expect("Return identifier not found in locals_map");
+                emit_sret_copy(func, sret_idx, *source_local, byte_size);
+            }
+            Expression::Literal(Literal::Array(array_literal)) => {
+                let store_instr = memory::store_instruction(&return_info.elem_kind);
+                if let Some(elements) = &array_literal.elements {
+                    for (i, elem_ref) in elements.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let byte_offset = (i as u32) * return_info.elem_size;
+                        emit_sret_element_addr(func, sret_idx, byte_offset);
+                        self.lower_expression(
+                            &elem_ref.borrow(),
+                            ctx,
+                            func,
+                            locals_map,
+                            frame_layout,
+                        );
+                        func.instruction(&store_instr);
+                    }
+                }
+            }
+            Expression::FunctionCall(fce) => {
+                let callee_name = fce.name();
+                if self.func_array_returns.contains_key(&callee_name) {
+                    // Zero-copy sret forwarding: pass our sret pointer to the inner call
+                    func.instruction(&Instruction::LocalGet(sret_idx));
+                    if let Some(arguments) = &fce.arguments {
+                        for (_label, expr_ref) in arguments {
+                            self.lower_expression(
+                                &expr_ref.borrow(),
+                                ctx,
+                                func,
+                                locals_map,
+                                frame_layout,
+                            );
+                        }
+                    }
+                    let func_idx = self
+                        .func_name_to_idx
+                        .get(&callee_name)
+                        .copied()
+                        .expect("Forwarded sret callee must be in func_name_to_idx");
+                    func.instruction(&Instruction::Call(func_idx));
+                } else {
+                    return Err(CodegenError::UnsupportedSretReturnExpression);
+                }
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedSretReturnExpression);
+            }
+        }
+
+        Ok(())
     }
 
     /// Lowers an array index assignment (`arr[i] = value`) to WASM store instructions.
@@ -1550,6 +1839,26 @@ impl Compiler {
         };
 
         func.instruction(&instruction);
+
+        // Narrow sub-i32 results for operations that can overflow the type's bit width.
+        // Skip: comparisons (return bool), Mod (result always fits in type),
+        // Shr (produces narrower result), And/Or (logical bool operators).
+        // Div is NOT skipped: signed MIN / -1 overflows (e.g. i8(-128) / i8(-1) = 128).
+        if !matches!(
+            be.operator,
+            OperatorKind::Eq
+                | OperatorKind::Ne
+                | OperatorKind::Lt
+                | OperatorKind::Le
+                | OperatorKind::Gt
+                | OperatorKind::Ge
+                | OperatorKind::Mod
+                | OperatorKind::And
+                | OperatorKind::Or
+                | OperatorKind::Shr
+        ) {
+            memory::emit_sub_i32_narrowing(func, &left_type_info.kind);
+        }
     }
 
     /// Lowers a prefix unary expression to WASM stack instructions.
@@ -1595,6 +1904,7 @@ impl Compiler {
                     func.instruction(&Instruction::I64Sub);
                 } else {
                     func.instruction(&Instruction::I32Sub);
+                    memory::emit_sub_i32_narrowing(func, &type_info.kind);
                 }
             }
             UnaryOperatorKind::Not => {
@@ -1623,6 +1933,7 @@ impl Compiler {
                 } else {
                     func.instruction(&Instruction::I32Const(-1));
                     func.instruction(&Instruction::I32Xor);
+                    memory::emit_sub_i32_narrowing(func, &type_info.kind);
                 }
             }
         }

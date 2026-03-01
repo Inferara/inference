@@ -477,13 +477,155 @@ i32.load / i64.load / ...  ;; load element
 
 The same three-case specialization applies to array index writes (`arr[i] = x`): zero-index emits no offset instruction, constant non-zero index folds to a single `i32.const`, and variable index uses runtime multiply.
 
+## Array Return Types (sret Calling Convention)
+
+Functions that return array types use the **sret** (struct-return) calling convention. Returning a raw pointer to the callee's stack frame would produce a dangling pointer — the frame is freed in the epilogue before the caller can read the data. The sret convention avoids this by letting the caller own the destination storage.
+
+### The Problem
+
+```inference
+pub fn make_array() -> [i32; 3] {
+    return [10, 20, 30];
+}
+```
+
+A naive implementation would return an `i32` pointer into `make_array`'s frame. But the epilogue restores `__stack_pointer` before the function returns, so that memory is immediately reusable by the next call. Any read by the caller would be a use-after-return.
+
+### The sret Solution
+
+The caller allocates space in its **own** frame and passes a pointer to that space as a hidden first argument. The callee writes its return data to that pointer before returning. The WASM return type becomes `void`.
+
+```
+; Inference source:                   ; WASM signature:
+fn foo() -> [i32; 3]                  func $foo (param $sret i32) ;; no result
+```
+
+- The hidden `$sret` parameter is always inserted at **index 0**.
+- All user-defined parameters shift up by one (index 1, 2, ...).
+- This transformation is applied at `build_func_name_to_idx` time and stored in `func_array_returns`.
+
+### WASM Signature Example
+
+```inference
+pub fn double_elements(arr: [i32; 3]) -> [i32; 3] {
+    return [arr[0] * 2, arr[1] * 2, arr[2] * 2];
+}
+```
+
+Compiles to:
+
+```wasm
+;; WASM type: (param i32 i32) (result)
+;;             ^sret  ^arr
+(func $double_elements (param $sret i32) (param $arr i32)
+  ;; Write each element to sret destination:
+  local.get $sret
+  i32.const 0     ;; byte offset for element 0
+  i32.add
+  ...             ;; compute arr[0] * 2
+  i32.store
+
+  local.get $sret
+  i32.const 4     ;; byte offset for element 1
+  i32.add
+  ...
+  i32.store
+
+  ;; Epilogue + return (no value pushed)
+)
+```
+
+### Three Return Cases
+
+`lower_sret_return()` handles three forms of return expression:
+
+**1. Identifier** (`return arr`):
+
+Uses `memory.copy` to copy the source array's data to the sret destination:
+
+```wasm
+local.get $sret     ;; destination
+local.get $arr      ;; source (pointer to callee's frame copy)
+i32.const 12        ;; byte_size = length * elem_size
+memory.copy
+```
+
+**2. Array literal** (`return [1, 2, 3]`):
+
+Writes each element directly to the sret destination with individual stores:
+
+```wasm
+local.get $sret
+i32.const 0         ;; byte offset for element 0
+i32.add
+i32.const 1
+i32.store
+
+local.get $sret
+i32.const 4
+i32.add
+i32.const 2
+i32.store
+;; ... and so on
+```
+
+**3. Chained function call** (`return inner(x)`):
+
+Forwards the sret pointer to the inner call — zero-copy:
+
+```wasm
+local.get $sret     ;; pass our sret as inner's sret arg
+<lower user args>
+call $inner
+```
+
+This works correctly only when `inner` is also an sret function (returns an array of the same type). A non-sret callee in this position causes a compile-time panic.
+
+### Standalone sret Calls
+
+When an sret function is called as a standalone statement (result discarded), the caller has no destination frame slot. The compiler injects a dummy pointer (`i32.const 0`) as the sret argument. Address 0 is valid in the stack-first layout because the stack fills the entire 64 KB page, so the write is safe (it overwrites the very bottom of the stack) and the value is immediately discarded.
+
+```wasm
+i32.const 0         ;; dummy sret destination
+<lower user args>
+call $foo           ;; result written to address 0, then ignored
+```
+
+### Caller Side: `let b: [i32; 3] = foo()`
+
+When the result is captured, the caller allocates space in its own frame for `b`, then passes a pointer to that slot as the sret argument:
+
+```wasm
+local.get $__frame_ptr
+i32.const <b_offset>    ;; offset of b in caller's frame
+i32.add                 ;; sret destination pointer
+<lower user args>
+call $foo               ;; foo writes into caller's frame
+;; After call: set local b to point to caller's frame slot
+local.get $__frame_ptr
+i32.const <b_offset>
+i32.add
+local.set $b
+```
+
+### `ArrayReturnInfo` and `func_array_returns`
+
+```rust
+struct ArrayReturnInfo {
+    elem_kind: TypeInfoKind,  // element type kind (for store instruction selection)
+    elem_size: u32,           // bytes per element
+    length: u32,              // number of elements
+}
+```
+
+`func_array_returns: FxHashMap<String, ArrayReturnInfo>` is populated during `build_func_name_to_idx` (before any code emission) so that both callers and callees see consistent sret metadata.
+
 ## Known Limitations
 
 1. **Nested arrays**: `[[i32; 3]; 2]` not yet supported (type-checker restriction)
 2. **Array member types**: Structs/custom types as array elements not yet supported
 3. **Partial initialization**: `let arr: [i32; 5] = [1, 2, _, _, _];` not yet supported (would require optional elements or sparse initialization)
-4. **Mutable array parameters**: Parameters are immutable by default; tracking mutable parameters is future work
-5. **Recursion with arrays**: Functions using arrays cannot currently recurse (no stack overflow protection, analysis pass needed)
+4. **Recursion with arrays**: Functions using arrays cannot currently recurse (no stack overflow protection, analysis pass needed)
 
 ## Cov Mark Coverage
 
