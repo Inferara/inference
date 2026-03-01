@@ -280,8 +280,9 @@ fn natural_alignment(elem_type: &TypeInfoKind) -> u32 {
 /// (SP goes "below 0"), the result is a large unsigned value (e.g., `0xFFFFFFF0`).
 /// The subsequent `memory.fill` uses this wrapped value as the destination address,
 /// which fails the WASM bounds check (`addr + size > mem_size`) and traps. This is
-/// the mechanism behind the stack-first "free trap" — the `memory.fill` instruction
-/// MUST remain immediately after the sub for this protection to hold.
+/// the mechanism behind the stack-first "free trap" — the computed (possibly wrapped)
+/// stack pointer value must be used as the destination for `memory.fill` without being
+/// modified or bounds-checked first for this protection to hold.
 ///
 /// **Optimization opportunity**: When all array elements are explicitly initialized
 /// (e.g., `let arr: [i32; 3] = [1, 2, 3]`), the `memory.fill` is redundant since

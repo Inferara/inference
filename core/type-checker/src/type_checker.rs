@@ -483,6 +483,9 @@ impl TypeChecker {
     ///
     /// Reports `InvalidArraySize` if the size is zero (sentinel from parse failure)
     /// or if the literal text cannot be parsed as a positive u32.
+    ///
+    /// Only handles numeric literal sizes. Non-literal sizes (e.g., `[i32; CONST]`)
+    /// are silently skipped because the grammar restricts array sizes to literals.
     fn validate_array_size(&mut self, type_array: &TypeArray) {
         if let Expression::Literal(Literal::Number(num_lit)) = &type_array.size {
             let size_str = &num_lit.value;
