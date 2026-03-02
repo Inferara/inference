@@ -101,7 +101,7 @@ impl<'a> Builder<'a> {
                 }
             }
 
-            self.arena.alloc_source_file(SourceFileData {
+            self.arena.source_files.alloc(SourceFileData {
                 location,
                 source,
                 defs,
@@ -160,7 +160,7 @@ impl<'a> Builder<'a> {
             defs.push(def_id);
         }
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Spec {
                 name,
@@ -181,7 +181,7 @@ impl<'a> Builder<'a> {
             .map(|segment| self.build_identifier(&segment, code))
             .collect();
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Enum {
                 name,
@@ -224,16 +224,16 @@ impl<'a> Builder<'a> {
 
     fn create_error_definition(&mut self, node: &Node, code: &[u8]) -> DefId {
         let location = Self::get_location(node, code);
-        let name = self.arena.alloc_ident(Ident {
+        let name = self.arena.idents.alloc(Ident {
             location,
             name: "<error>".to_string(),
         });
-        let body = self.arena.alloc_block(BlockData {
+        let body = self.arena.blocks.alloc(BlockData {
             location,
             block_kind: BlockKind::Regular,
             stmts: vec![],
         });
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Function {
                 name,
@@ -264,7 +264,7 @@ impl<'a> Builder<'a> {
             .map(|segment| self.build_function_definition(&segment, code))
             .collect();
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Struct {
                 name,
@@ -289,7 +289,7 @@ impl<'a> Builder<'a> {
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
         let value = self.build_literal(&node.child_by_field_name("value").unwrap(), code);
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Constant {
                 name,
@@ -332,16 +332,16 @@ impl<'a> Builder<'a> {
                 "Missing function name at {}",
                 Self::get_location(node, code)
             ));
-            let placeholder_name = self.arena.alloc_ident(Ident {
+            let placeholder_name = self.arena.idents.alloc(Ident {
                 location,
                 name: "<error>".to_string(),
             });
-            let placeholder_body = self.arena.alloc_block(BlockData {
+            let placeholder_body = self.arena.blocks.alloc(BlockData {
                 location,
                 block_kind: BlockKind::Regular,
                 stmts: vec![],
             });
-            return self.arena.alloc_def(DefData {
+            return self.arena.defs.alloc(DefData {
                 location,
                 kind: Def::Function {
                     name: placeholder_name,
@@ -362,14 +362,14 @@ impl<'a> Builder<'a> {
                 "Missing function body at {}",
                 Self::get_location(node, code)
             ));
-            self.arena.alloc_block(BlockData {
+            self.arena.blocks.alloc(BlockData {
                 location,
                 block_kind: BlockKind::Regular,
                 stmts: vec![],
             })
         };
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::Function {
                 name,
@@ -398,7 +398,7 @@ impl<'a> Builder<'a> {
             returns = Some(self.build_type(&returns_node, code));
         }
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::ExternFunction {
                 name,
@@ -415,7 +415,7 @@ impl<'a> Builder<'a> {
         let ty = self.build_type(&node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
 
-        self.arena.alloc_def(DefData {
+        self.arena.defs.alloc(DefData {
             location,
             kind: Def::TypeAlias {
                 name,
@@ -479,7 +479,7 @@ impl<'a> Builder<'a> {
                     .child_by_field_name("body")
                     .map(|body_node| self.build_block_statements(&body_node, code))
                     .unwrap_or_default();
-                self.arena.alloc_block(BlockData {
+                self.arena.blocks.alloc(BlockData {
                     location,
                     block_kind: BlockKind::Assume,
                     stmts,
@@ -490,7 +490,7 @@ impl<'a> Builder<'a> {
                     .child_by_field_name("body")
                     .map(|body_node| self.build_block_statements(&body_node, code))
                     .unwrap_or_default();
-                self.arena.alloc_block(BlockData {
+                self.arena.blocks.alloc(BlockData {
                     location,
                     block_kind: BlockKind::Forall,
                     stmts,
@@ -501,7 +501,7 @@ impl<'a> Builder<'a> {
                     .child_by_field_name("body")
                     .map(|body_node| self.build_block_statements(&body_node, code))
                     .unwrap_or_default();
-                self.arena.alloc_block(BlockData {
+                self.arena.blocks.alloc(BlockData {
                     location,
                     block_kind: BlockKind::Exists,
                     stmts,
@@ -512,7 +512,7 @@ impl<'a> Builder<'a> {
                     .child_by_field_name("body")
                     .map(|body_node| self.build_block_statements(&body_node, code))
                     .unwrap_or_default();
-                self.arena.alloc_block(BlockData {
+                self.arena.blocks.alloc(BlockData {
                     location,
                     block_kind: BlockKind::Unique,
                     stmts,
@@ -520,7 +520,7 @@ impl<'a> Builder<'a> {
             }
             "block" => {
                 let stmts = self.build_block_statements(node, code);
-                self.arena.alloc_block(BlockData {
+                self.arena.blocks.alloc(BlockData {
                     location,
                     block_kind: BlockKind::Regular,
                     stmts,
@@ -547,7 +547,7 @@ impl<'a> Builder<'a> {
 
     fn create_error_block(&mut self, node: &Node, code: &[u8]) -> BlockId {
         let location = Self::get_location(node, code);
-        self.arena.alloc_block(BlockData {
+        self.arena.blocks.alloc(BlockData {
             location,
             block_kind: BlockKind::Regular,
             stmts: vec![],
@@ -577,14 +577,14 @@ impl<'a> Builder<'a> {
                     .build_expression(&node.child_by_field_name("left").unwrap(), code);
                 let right = self
                     .build_expression(&node.child_by_field_name("right").unwrap(), code);
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Assign { left, right },
                 })
             }
             "block" | "forall_block" | "assume_block" | "exists_block" | "unique_block" => {
                 let block_id = self.build_block(node, code);
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Block(block_id),
                 })
@@ -592,7 +592,7 @@ impl<'a> Builder<'a> {
             "expression_statement" => {
                 if let Some(expr_node) = node.child(0) {
                     let expr_id = self.build_expression(&expr_node, code);
-                    self.arena.alloc_stmt(StmtData {
+                    self.arena.stmts.alloc(StmtData {
                         location,
                         kind: Stmt::Expr(expr_id),
                     })
@@ -604,12 +604,12 @@ impl<'a> Builder<'a> {
                 let expr_id = if let Some(expr_node) = node.child_by_field_name("expression") {
                     self.build_expression(&expr_node, code)
                 } else {
-                    self.arena.alloc_expr(ExprData {
+                    self.arena.exprs.alloc(ExprData {
                         location,
                         kind: Expr::UnitLiteral,
                     })
                 };
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Return { expr: expr_id },
                 })
@@ -625,13 +625,13 @@ impl<'a> Builder<'a> {
                         "Missing loop body at {}",
                         Self::get_location(node, code)
                     ));
-                    self.arena.alloc_block(BlockData {
+                    self.arena.blocks.alloc(BlockData {
                         location,
                         block_kind: BlockKind::Regular,
                         stmts: vec![],
                     })
                 };
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Loop { condition, body },
                 })
@@ -654,7 +654,7 @@ impl<'a> Builder<'a> {
                         "Missing if body at {}",
                         Self::get_location(node, code)
                     ));
-                    self.arena.alloc_block(BlockData {
+                    self.arena.blocks.alloc(BlockData {
                         location,
                         block_kind: BlockKind::Regular,
                         stmts: vec![],
@@ -663,7 +663,7 @@ impl<'a> Builder<'a> {
                 let else_block = node
                     .child_by_field_name("else_arm")
                     .map(|n| self.build_block(&n, code));
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::If {
                         condition,
@@ -680,7 +680,7 @@ impl<'a> Builder<'a> {
                 let value = node
                     .child_by_field_name("value")
                     .map(|n| self.build_expression(&n, code));
-                let stmt_id = self.arena.alloc_stmt(StmtData {
+                let stmt_id = self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::VarDef {
                         name,
@@ -689,37 +689,31 @@ impl<'a> Builder<'a> {
                         is_mut,
                     },
                 });
-                if let Some(val_expr_id) = value {
-                    self.arena.record_parent(
-                        NodeId::Expr(val_expr_id),
-                        NodeId::Stmt(stmt_id),
-                    );
-                }
                 stmt_id
             }
             "type_definition_statement" => {
                 let ty = self.build_type(&node.child_by_field_name("type").unwrap(), code);
                 let name =
                     self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::TypeDef { name, ty },
                 })
             }
             "assert_statement" => {
                 let expr_id = self.build_expression(&node.child(1).unwrap(), code);
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Assert { expr: expr_id },
                 })
             }
-            "break_statement" => self.arena.alloc_stmt(StmtData {
+            "break_statement" => self.arena.stmts.alloc(StmtData {
                 location,
                 kind: Stmt::Break,
             }),
             "constant_definition" => {
                 let def_id = self.build_constant_definition(node, code);
-                self.arena.alloc_stmt(StmtData {
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::ConstDef(def_id),
                 })
@@ -746,7 +740,7 @@ impl<'a> Builder<'a> {
     fn create_error_statement(&mut self, node: &Node, code: &[u8]) -> StmtId {
         let location = Self::get_location(node, code);
         let error_expr = self.create_error_expr(node, code);
-        self.arena.alloc_stmt(StmtData {
+        self.arena.stmts.alloc(StmtData {
             location,
             kind: Stmt::Expr(error_expr),
         })
@@ -754,11 +748,11 @@ impl<'a> Builder<'a> {
 
     fn create_error_expr(&mut self, node: &Node, code: &[u8]) -> ExprId {
         let location = Self::get_location(node, code);
-        let error_ident = self.arena.alloc_ident(Ident {
+        let error_ident = self.arena.idents.alloc(Ident {
             location,
             name: "<error>".to_string(),
         });
-        self.arena.alloc_expr(ExprData {
+        self.arena.exprs.alloc(ExprData {
             location,
             kind: Expr::Identifier(error_ident),
         })
@@ -772,14 +766,14 @@ impl<'a> Builder<'a> {
                 self.collect_errors(node, code);
                 let array = self.build_expression(&node.named_child(0).unwrap(), code);
                 let index = self.build_expression(&node.named_child(1).unwrap(), code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::ArrayIndexAccess { array, index },
                 })
             }
             "generic_name" | "qualified_name" | "type" => {
                 let type_id = self.build_type(node, code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::Type(type_id),
                 })
@@ -790,7 +784,7 @@ impl<'a> Builder<'a> {
                     self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
                 let name =
                     self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::MemberAccess { expr, name },
                 })
@@ -801,7 +795,7 @@ impl<'a> Builder<'a> {
                     self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
                 let name =
                     self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::TypeMemberAccess { expr, name },
                 })
@@ -822,7 +816,7 @@ impl<'a> Builder<'a> {
                     "unary_bitnot" => UnaryOperatorKind::BitNot,
                     other => unreachable!("Unexpected unary operator node: {other}"),
                 };
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::PrefixUnary { expr: inner, op },
                 })
@@ -830,7 +824,7 @@ impl<'a> Builder<'a> {
             "parenthesized_expression" => {
                 self.collect_errors(node, code);
                 let inner = self.build_expression(&node.child(1).unwrap(), code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::Parenthesized { expr: inner },
                 })
@@ -842,14 +836,14 @@ impl<'a> Builder<'a> {
             | "unit_literal" => self.build_literal(node, code),
             "uzumaki_keyword" => {
                 self.collect_errors(node, code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::Uzumaki,
                 })
             }
             "identifier" => {
                 let ident_id = self.build_identifier(node, code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::Identifier(ident_id),
                 })
@@ -915,7 +909,7 @@ impl<'a> Builder<'a> {
                 .collect();
         }
 
-        self.arena.alloc_expr(ExprData {
+        self.arena.exprs.alloc(ExprData {
             location,
             kind: Expr::FunctionCall {
                 function,
@@ -959,7 +953,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        self.arena.alloc_expr(ExprData {
+        self.arena.exprs.alloc(ExprData {
             location,
             kind: Expr::StructLiteral { name, fields },
         })
@@ -1002,7 +996,7 @@ impl<'a> Builder<'a> {
         };
         let right = self.build_expression(&node.child_by_field_name("right").unwrap(), code);
 
-        self.arena.alloc_expr(ExprData {
+        self.arena.exprs.alloc(ExprData {
             location,
             kind: Expr::Binary { left, right, op },
         })
@@ -1018,7 +1012,7 @@ impl<'a> Builder<'a> {
                 for child in node.named_children(&mut cursor) {
                     elements.push(self.build_expression(&child, code));
                 }
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::ArrayLiteral { elements },
                 })
@@ -1038,7 +1032,7 @@ impl<'a> Builder<'a> {
                         false
                     }
                 };
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::BoolLiteral { value },
                 })
@@ -1046,7 +1040,7 @@ impl<'a> Builder<'a> {
             "string_literal" => {
                 self.collect_errors(node, code);
                 let value = node.utf8_text(code).unwrap().to_string();
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::StringLiteral { value },
                 })
@@ -1054,14 +1048,14 @@ impl<'a> Builder<'a> {
             "number_literal" => {
                 self.collect_errors(node, code);
                 let value = node.utf8_text(code).unwrap().to_string();
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::NumberLiteral { value },
                 })
             }
             "unit_literal" => {
                 self.collect_errors(node, code);
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::UnitLiteral,
                 })
@@ -1072,7 +1066,7 @@ impl<'a> Builder<'a> {
                     node.kind(),
                     Self::get_location(node, code)
                 ));
-                self.arena.alloc_expr(ExprData {
+                self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::UnitLiteral,
                 })
@@ -1090,43 +1084,43 @@ impl<'a> Builder<'a> {
         let location = Self::get_location(node, code);
         let node_kind = node.kind();
         match node_kind {
-            "type_unit" => self.arena.alloc_type(TypeData {
+            "type_unit" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::Unit),
             }),
-            "type_bool" => self.arena.alloc_type(TypeData {
+            "type_bool" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::Bool),
             }),
-            "type_i8" => self.arena.alloc_type(TypeData {
+            "type_i8" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::I8),
             }),
-            "type_i16" => self.arena.alloc_type(TypeData {
+            "type_i16" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::I16),
             }),
-            "type_i32" => self.arena.alloc_type(TypeData {
+            "type_i32" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::I32),
             }),
-            "type_i64" => self.arena.alloc_type(TypeData {
+            "type_i64" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::I64),
             }),
-            "type_u8" => self.arena.alloc_type(TypeData {
+            "type_u8" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::U8),
             }),
-            "type_u16" => self.arena.alloc_type(TypeData {
+            "type_u16" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::U16),
             }),
-            "type_u32" => self.arena.alloc_type(TypeData {
+            "type_u32" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::U32),
             }),
-            "type_u64" => self.arena.alloc_type(TypeData {
+            "type_u64" => self.arena.types.alloc(TypeData {
                 location,
                 kind: TypeNode::Simple(SimpleTypeKind::U64),
             }),
@@ -1135,7 +1129,7 @@ impl<'a> Builder<'a> {
                 let element = self.build_type(&node.child_by_field_name("type").unwrap(), code);
                 let length_node = node.child_by_field_name("length").unwrap();
                 let size = self.build_expression(&length_node, code);
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Array { element, size },
                 })
@@ -1150,7 +1144,7 @@ impl<'a> Builder<'a> {
                     .children_by_field_name("type", &mut cursor)
                     .map(|segment| self.build_identifier(&segment, code))
                     .collect();
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Generic { base, params },
                 })
@@ -1161,7 +1155,7 @@ impl<'a> Builder<'a> {
                     self.build_identifier(&node.child_by_field_name("alias").unwrap(), code);
                 let name =
                     self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Qualified { alias, name },
                 })
@@ -1172,7 +1166,7 @@ impl<'a> Builder<'a> {
                     self.build_identifier(&node.child_by_field_name("qualifier").unwrap(), code);
                 let name =
                     self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::QualifiedName { qualifier, name },
                 })
@@ -1187,7 +1181,7 @@ impl<'a> Builder<'a> {
                 let ret = node
                     .child_by_field_name("returns")
                     .map(|returns_type_node| self.build_type(&returns_type_node, code));
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Function {
                         params,
@@ -1197,7 +1191,7 @@ impl<'a> Builder<'a> {
             }
             "identifier" => {
                 let ident_id = self.build_identifier(node, code);
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Custom(ident_id),
                 })
@@ -1208,7 +1202,7 @@ impl<'a> Builder<'a> {
                     "Syntax error in type at {}",
                     Self::get_location(node, code)
                 ));
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Simple(SimpleTypeKind::Unit),
                 })
@@ -1219,7 +1213,7 @@ impl<'a> Builder<'a> {
                     node_kind,
                     Self::get_location(node, code)
                 ));
-                self.arena.alloc_type(TypeData {
+                self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Simple(SimpleTypeKind::Unit),
                 })
@@ -1231,7 +1225,7 @@ impl<'a> Builder<'a> {
         self.collect_errors(node, code);
         let location = Self::get_location(node, code);
         let name = node.utf8_text(code).unwrap().to_string();
-        self.arena.alloc_ident(Ident { location, name })
+        self.arena.idents.alloc(Ident { location, name })
     }
 
     #[allow(clippy::cast_possible_truncation)]

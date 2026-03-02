@@ -1,7 +1,7 @@
 use inference_ast::{
     arena::AstArena,
     builder::Builder,
-    ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId},
+    ids::{BlockId, DefId, ExprId, StmtId},
     nodes::{
         ArgKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind,
     },

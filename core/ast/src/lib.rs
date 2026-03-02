@@ -17,6 +17,8 @@ pub mod builder;
 pub mod errors;
 pub mod extern_prelude;
 pub mod ids;
+#[allow(clippy::pedantic)]
+pub mod la_arena;
 pub mod nodes;
 mod nodes_impl;
 pub mod parser_context;

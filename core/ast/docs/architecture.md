@@ -7,26 +7,25 @@ This document explains the design principles and implementation details of the a
 1. [Design Philosophy](#design-philosophy)
 2. [Arena-Based Storage](#arena-based-storage)
 3. [Node Identification](#node-identification)
-4. [Parent-Child Relationships](#parent-child-relationships)
-5. [Memory Layout](#memory-layout)
-6. [Tree Traversal Algorithms](#tree-traversal-algorithms)
+4. [Memory Layout](#memory-layout)
+5. [Tree Traversal Algorithms](#tree-traversal-algorithms)
 
 ## Design Philosophy
 
 The AST implementation follows three core principles:
 
 ### 1. Single Source of Truth
-All AST nodes are stored in a single `Arena` structure. This eliminates:
+All AST nodes are stored in a single `AstArena` structure. This eliminates:
 - Scattered ownership across the tree
 - Complex lifetime annotations
 - Borrow checker conflicts during tree manipulation
 
 ### 2. ID-Based References
-Nodes reference each other by `u32` IDs rather than pointers or `Rc` references. Benefits:
+Nodes reference each other by typed indices (`Idx<T>` from `la_arena`) rather than pointers or `Rc` references. Benefits:
 - No reference cycles or memory leaks
 - Trivial to serialize/deserialize
 - Cache-friendly for small node graphs
-- Thread-safe sharing (IDs are Copy)
+- Thread-safe sharing (indices are `Copy`)
 
 ### 3. Optimized for Compiler Workloads
 Compilers predominantly perform:
@@ -38,273 +37,120 @@ The arena is optimized for these access patterns.
 
 ## Arena-Based Storage
 
-The `Arena` struct contains three hash maps:
+`AstArena` stores all nodes in seven typed `la_arena::Arena<T>` fields:
 
 ```rust
-pub struct Arena {
-    pub(crate) nodes: FxHashMap<u32, AstNode>,
-    pub(crate) parent_map: FxHashMap<u32, u32>,
-    pub(crate) children_map: FxHashMap<u32, Vec<u32>>,
+pub struct AstArena {
+    pub source_files : Arena<SourceFileData>,
+    pub defs         : Arena<DefData>,
+    pub stmts        : Arena<StmtData>,
+    pub exprs        : Arena<ExprData>,
+    pub types        : Arena<TypeData>,
+    pub blocks       : Arena<BlockData>,
+    pub idents       : Arena<Ident>,
 }
 ```
 
 ### Node Storage
 
 ```
-┌─────────────────────────────────────┐
-│ nodes: FxHashMap<u32, AstNode>     │
-├─────────┬───────────────────────────┤
-│ ID      │ Node                      │
-├─────────┼───────────────────────────┤
-│ 1       │ SourceFile { ... }        │
-│ 2       │ FunctionDefinition { ... }│
-│ 3       │ Block { ... }             │
-│ 4       │ ReturnStatement { ... }   │
-│ 5       │ NumberLiteral { ... }     │
-└─────────┴───────────────────────────┘
+┌─────────────────────────────────────────┐
+│ exprs: Arena<ExprData>                  │
+├─────────────────┬───────────────────────┤
+│ Idx<ExprData>   │ ExprData              │
+├─────────────────┼───────────────────────┤
+│ idx(0)          │ ExprData { Binary }   │
+│ idx(1)          │ ExprData { Literal }  │
+│ idx(2)          │ ExprData { Call }     │
+└─────────────────┴───────────────────────┘
 ```
 
-Every node has a unique, non-zero ID. Zero is reserved as a sentinel value meaning "no node".
+Every allocation returns a typed `Idx<T>` index, which is the only reference to that node.
 
-### Parent Map
+### Allocation API
 
-Maps child ID to parent ID for O(1) upward traversal:
+```rust
+// Builder-side allocation
+let expr_id: ExprId = arena.exprs.alloc(ExprData { location, kind });
+let stmt_id: StmtId = arena.stmts.alloc(StmtData { location, kind });
 
-```
-┌─────────────────────────────────────┐
-│ parent_map: FxHashMap<u32, u32>    │
-├─────────┬───────────────────────────┤
-│ Child   │ Parent                    │
-├─────────┼───────────────────────────┤
-│ 2       │ 1  (Function → SourceFile)│
-│ 3       │ 2  (Block → Function)     │
-│ 4       │ 3  (Return → Block)       │
-│ 5       │ 4  (Number → Return)      │
-└─────────┴───────────────────────────┘
-```
-
-Root nodes (like `SourceFile`) are not present in `parent_map`. Querying their parent returns `None`.
-
-### Children Map
-
-Maps parent ID to list of child IDs for O(1) children list retrieval:
-
-```
-┌──────────────────────────────────────────┐
-│ children_map: FxHashMap<u32, Vec<u32>>  │
-├─────────┬────────────────────────────────┤
-│ Parent  │ Children                       │
-├─────────┼────────────────────────────────┤
-│ 1       │ [2]  (SourceFile has Function) │
-│ 2       │ [3]  (Function has Block)      │
-│ 3       │ [4]  (Block has Return)        │
-│ 4       │ [5]  (Return has Number)       │
-└─────────┴────────────────────────────────┘
+// Consumer-side access — O(1)
+let expr_data: &ExprData = &arena[expr_id];
+let stmt_data: &StmtData = &arena[stmt_id];
 ```
 
 ## Node Identification
 
-### ID Assignment
+### Typed Index Aliases
 
-IDs are assigned sequentially during AST construction by `Builder` using an atomic counter (Issue #86):
+Each arena category has a corresponding type alias over `la_arena::Idx<T>`:
 
 ```rust
-impl Builder {
-    /// Generate a unique node ID using an atomic counter.
-    ///
-    /// Uses a global atomic counter to ensure unique IDs across all AST nodes.
-    /// Starting from 1 (0 is reserved as invalid/uninitialized).
-    fn get_node_id() -> u32 {
-        static COUNTER: AtomicU32 = AtomicU32::new(1);
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    }
-}
+pub type SourceFileId = Idx<SourceFileData>;
+pub type DefId        = Idx<DefData>;
+pub type StmtId       = Idx<StmtData>;
+pub type ExprId       = Idx<ExprData>;
+pub type TypeId       = Idx<TypeData>;
+pub type BlockId      = Idx<BlockData>;
+pub type IdentId      = Idx<Ident>;
 ```
 
-**Why Atomic Counter (Issue #86)**:
-
-The previous implementation used UUID-based ID generation (`uuid::Uuid::new_v4().as_u128() as u32`), which had several drawbacks:
-- Non-deterministic IDs made debugging harder
-- Truncating 128-bit UUIDs to 32-bit risked collisions
-- Random ordering made testing and debugging less predictable
-
-The atomic counter approach provides:
-- **Deterministic ordering**: Earlier nodes have lower IDs, matching parse order
-- **Sequential allocation**: IDs start at 1 and increment monotonically
-- **Thread-safe**: `AtomicU32` with relaxed ordering is safe for concurrent access
-- **Better debugging**: ID correlates with parse order, making AST inspection easier
-- **No collisions**: Guaranteed unique IDs up to 4 billion nodes
-- **Zero is reserved**: ID 0 represents invalid/uninitialized nodes
+Because `Idx<T>` is parameterized over the node type, using an `ExprId` to index `arena.defs` is a compile-time type error. This eliminates a whole class of bugs present in untyped ID schemes.
 
 ### ID Invariants
 
-The system maintains these invariants:
+1. **Type-checked**: An `Idx<ExprData>` can only index `arena.exprs`
+2. **Unique per category**: Each call to `arena.exprs.alloc()` returns a distinct `ExprId`
+3. **ID stability**: Once assigned, indices never change
+4. **Sequential allocation**: Indices are assigned in allocation order
 
-1. **Non-zero IDs**: No node has ID 0
-2. **Unique IDs**: Each node has a distinct ID
-3. **ID stability**: Once assigned, IDs never change
-4. **Sequential allocation**: IDs increase during construction
+### NodeId Enum
 
-### AstNode Enum
-
-All node types are wrapped in the `AstNode` enum:
+The `NodeId` enum wraps any typed ID for use in heterogeneous contexts (such as storing type annotations keyed by AST node):
 
 ```rust
-pub enum AstNode {
-    Ast(Ast),
-    Directive(Directive),
-    Definition(Definition),
-    BlockType(BlockType),
-    Statement(Statement),
-    Expression(Expression),
-    Literal(Literal),
-    Type(Type),
-    ArgumentType(ArgumentType),
-    Misc(Misc),
+pub enum NodeId {
+    SourceFile(SourceFileId),
+    Def(DefId),
+    Stmt(StmtId),
+    Expr(ExprId),
+    Type(TypeId),
+    Block(BlockId),
+    Ident(IdentId),
 }
 ```
 
-This enum provides uniform access to `id()` and `location()` methods regardless of node type.
+### Node Type System
 
-## Parent-Child Relationships
-
-### Adding Nodes
-
-When building the tree, `add_node()` records both the node and its parent-child relationship:
-
-```rust
-pub fn add_node(&mut self, node: AstNode, parent_id: u32) {
-    let id = node.id();
-
-    // Store the node itself
-    self.nodes.insert(id, node);
-
-    // Record parent-child relationship (unless it's a root)
-    if parent_id != u32::MAX {
-        self.parent_map.insert(id, parent_id);
-        self.children_map.entry(parent_id).or_default().push(id);
-    }
-}
-```
-
-The sentinel value `u32::MAX` indicates a root node (no parent).
-
-### Tree Structure Example
-
-For this source code:
-
-```inference
-fn add(a: i32, b: i32) -> i32 {
-    return a + b;
-}
-```
-
-The tree structure looks like:
+Each arena category uses a two-level structure: a wrapper struct that holds `location` plus a flat `kind` enum:
 
 ```
-┌─────────────────────┐
-│ SourceFile (ID: 1)  │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ FunctionDef (ID: 2) │
-│ name: "add"         │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Block (ID: 3)       │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Return (ID: 4)      │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│ Binary (ID: 5)      │
-│ operator: Add       │
-└──────────┬──────────┘
-           │
-      ┌────┴────┐
-      ▼         ▼
-┌─────────┐ ┌─────────┐
-│ Ident   │ │ Ident   │
-│ (ID: 6) │ │ (ID: 7) │
-│ "a"     │ │ "b"     │
-└─────────┘ └─────────┘
+ExprData  { location: Location, kind: Expr     }
+StmtData  { location: Location, kind: Stmt     }
+DefData   { location: Location, kind: Def      }
+TypeData  { location: Location, kind: TypeNode }
 ```
 
-### Parent Queries
+Blocks and identifiers are simpler:
 
-Finding a node's parent is O(1):
-
-```rust
-pub fn find_parent_node(&self, id: u32) -> Option<u32> {
-    self.parent_map.get(&id).copied()
-}
+```
+BlockData { location: Location, block_kind: BlockKind, stmts: Vec<StmtId> }
+Ident     { location: Location, name: String }
 ```
 
-Walking up to the root:
+The top-level source file node stores the entire source string:
 
-```rust
-let mut current_id = node_id;
-while let Some(parent_id) = arena.find_parent_node(current_id) {
-    println!("Parent: {}", parent_id);
-    current_id = parent_id;
-}
-// current_id is now the root
+```
+SourceFileData { location: Location, source: String, defs: Vec<DefId>, directives: Vec<Directive> }
 ```
 
-### Children Queries
-
-Finding a node's children is O(1) for the list lookup:
-
-```rust
-pub fn list_nodes_children(&self, id: u32) -> Vec<AstNode> {
-    self.children_map
-        .get(&id)
-        .map(|children| {
-            children
-                .iter()
-                .filter_map(|child_id| self.nodes.get(child_id).cloned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-```
+Node kinds (`Expr`, `Stmt`, `Def`, `TypeNode`) are plain enums. References between nodes use typed IDs: for example, `Expr::Binary { left: ExprId, right: ExprId, op: OperatorKind }`.
 
 ## Memory Layout
 
-### Before Optimization (Issue #69)
-
-Each `Location` contained a full source string copy:
+### Location (per node) — Copy type
 
 ```rust
-// Old Location (per node)
-struct Location {
-    source: String,          // ~24 bytes + heap allocation
-    offset_start: u32,       // 4 bytes
-    offset_end: u32,         // 4 bytes
-    start_line: u32,         // 4 bytes
-    start_column: u32,       // 4 bytes
-    end_line: u32,           // 4 bytes
-    end_column: u32,         // 4 bytes
-}
-// Total: ~52 bytes per node + N heap allocations
-```
-
-For a 1000-node AST with 10KB source:
-- Memory overhead: 52 bytes × 1000 = 52KB
-- Heap allocations: 1000 strings × 10KB = ~10MB
-- **Total: ~10MB overhead**
-
-### After Optimization
-
-```rust
-// New Location (per node) - Copy type
 #[derive(Copy)]
 struct Location {
     offset_start: u32,       // 4 bytes
@@ -315,173 +161,109 @@ struct Location {
     end_column: u32,         // 4 bytes
 }
 // Total: 24 bytes per node (no heap allocations)
-
-// Source stored once
-struct SourceFile {
-    source: String,          // ~24 bytes + 1 heap allocation
-    // ... other fields
-}
 ```
 
-For the same 1000-node AST:
+Source text is stored once per file in `SourceFileData.source` and retrieved by byte-offset slicing. See [Location Optimization](location.md) for details.
+
+For a 1000-node AST with 10KB source:
 - Memory overhead: 24 bytes × 1000 = 24KB
 - Heap allocations: 1 string × 10KB = 10KB
-- **Total: ~34KB overhead (98% reduction)**
+- **Total: ~34KB overhead**
 
 ### Cache Efficiency
 
-Stack-allocated `Location` (24 bytes) fits in L1 cache lines (typically 64 bytes). This means:
+Stack-allocated `Location` (24 bytes) fits in L1 cache lines (typically 64 bytes):
 - 2-3 locations per cache line
 - No pointer chasing to heap
 - Improved CPU cache utilization during traversal
 
 ## Tree Traversal Algorithms
 
-### Depth-First Search
+### Structural Traversal (Primary Pattern)
 
-Traversing all descendants of a node:
+The recommended way to traverse the AST is to follow typed IDs structurally, starting from `source_files`:
+
+```
+source_files[i]              SourceFileData
+  .defs[j]                   DefId → DefData
+    .kind = Def::Function
+      .body                  BlockId → BlockData
+        .stmts[k]            StmtId → StmtData
+          .kind = Stmt::Return
+            .expr            ExprId → ExprData
+```
 
 ```rust
-pub fn get_children_cmp<F>(&self, id: u32, comparator: F) -> Vec<AstNode>
-where
-    F: Fn(&AstNode) -> bool,
-{
-    let mut result = Vec::new();
-    let mut stack: Vec<AstNode> = Vec::new();
+use inference_ast::nodes::{Def, Stmt, Expr, OperatorKind};
 
-    if let Some(root_node) = self.find_node(id) {
-        stack.push(root_node);
-    }
-
-    while let Some(current_node) = stack.pop() {
-        if comparator(&current_node) {
-            result.push(current_node.clone());
+for sf in arena.source_files() {
+    for &def_id in &sf.defs {
+        if let Def::Function { body, .. } = &arena[def_id].kind {
+            for &stmt_id in &arena[*body].stmts {
+                if let Stmt::Return { expr } = arena[stmt_id].kind {
+                    if let Expr::Binary { op, .. } = &arena[expr].kind {
+                        if *op == OperatorKind::Add {
+                            println!("Found an addition at {}", arena[expr].location);
+                        }
+                    }
+                }
+            }
         }
-        stack.extend(
-            self.list_nodes_children(current_node.id())
-                .into_iter()
-                .filter(|child| comparator(child)),
-        );
     }
-
-    result
 }
 ```
 
 ### Finding Source File Ancestor
 
-Walking up the tree to find the enclosing `SourceFile`:
+For `Def` nodes, `find_source_file_for_def` searches the `defs` lists of all source files. For other nodes, `find_source_file_for_node` uses byte-offset matching: it checks whether the node's byte offsets fall within each `SourceFileData`'s source string.
 
 ```rust
-pub fn find_source_file_for_node(&self, node_id: u32) -> Option<u32> {
-    let node = self.nodes.get(&node_id)?;
+// For any node type
+let sf_id = arena.find_source_file_for_node(NodeId::Stmt(stmt_id));
 
-    // Early return if this is already a SourceFile
-    if matches!(node, AstNode::Ast(Ast::SourceFile(_))) {
-        return Some(node_id);
-    }
-
-    // Walk up parent chain
-    let mut current_id = node_id;
-    while let Some(parent_id) = self.parent_map.get(&current_id).copied() {
-        current_id = parent_id;
-    }
-
-    // Check if the root is a SourceFile
-    let root_node = self.nodes.get(&current_id)?;
-    if matches!(root_node, AstNode::Ast(Ast::SourceFile(_))) {
-        Some(current_id)
-    } else {
-        None
-    }
-}
+// More direct path when you have a DefId
+let sf_id = arena.find_source_file_for_def(def_id);
 ```
 
-Complexity: O(d) where d is tree depth, typically < 20 for well-formed code.
+Complexity: O(n) where n is the number of source files (typically 1 for single-file compilation).
 
 ### Filtered Iteration
 
-Finding all nodes of a specific type:
+When searching across all definitions, iterate `source_files → defs`:
 
 ```rust
-// Private helper — call arena.functions(), arena.list_type_definitions(), or arena.filter_nodes() instead.
-fn list_nodes_cmp<'a, T, F>(&'a self, cmp: F) -> impl Iterator<Item = T> + 'a
-where
-    F: Fn(&AstNode) -> Option<T> + 'a,
-{
-    let mut ids: Vec<u32> = self.nodes.keys().copied().collect();
-    ids.sort_unstable();
-    ids.into_iter()
-        .filter_map(move |id| self.nodes.get(&id).and_then(&cmp))
+// Find all struct names
+for sf in arena.source_files() {
+    for &def_id in &sf.defs {
+        if let Def::Struct { name, .. } = &arena[def_id].kind {
+            println!("Struct: {}", arena.ident_name(*name));
+        }
+    }
 }
-
-// Usage via public wrapper: find all functions in source order
-let functions = arena.functions();  // internally calls list_nodes_cmp
 ```
 
 ## AST Construction Details
 
-### Builder State Machine Simplification (Issue #50)
-
-Prior to Issue #50, the Builder used a typestate pattern with `InitState` and `CompleteState` to enforce correct API usage at compile time:
+### Builder API
 
 ```rust
-// Old API (before Issue #50)
-pub struct Builder<'a, S> {
-    arena: Arena,
-    source_code: Vec<(Node<'a>, &'a [u8])>,
-    _state: PhantomData<S>,
-}
-
-let mut builder = Builder::new();  // Builder<InitState>
-builder.add_source_code(...);
-let completed = builder.build_ast()?;  // Builder<CompleteState>
-let arena = completed.arena();
-```
-
-**Why It Was Removed**:
-- Added API complexity without significant safety benefits
-- Required two separate types (`Builder<InitState>` and `Builder<CompleteState>`)
-- Made error handling awkward (had to transform type on error)
-- The arena is immutable after construction anyway
-
-**New Simplified API** (Issue #50):
-
-```rust
-pub struct Builder<'a> {
-    arena: Arena,
-    source_code: Vec<(Node<'a>, &'a [u8])>,
-    errors: Vec<anyhow::Error>,
-}
-
 let mut builder = Builder::new();
-builder.add_source_code(...);
-let arena = builder.build_ast()?;  // Returns Arena directly
+builder.add_source_code(tree.root_node(), source.as_bytes());
+let arena = builder.build_ast()?;
 ```
 
-**Benefits**:
-- Single `Builder` type instead of two
-- Direct `Arena` return - no intermediate `CompletedBuilder` type
-- Error collection integrated into builder state
-- Simpler mental model and API surface
+`Builder` walks the tree-sitter CST and allocates typed AST nodes into the arena. It returns an immutable `AstArena`, or an error if parse errors are present.
 
-### Error Collection During Building (Issue #50)
+### Error Collection During Building
 
-The Builder now collects errors during AST construction:
+The Builder collects errors during AST construction:
 
 ```rust
 impl Builder {
-    fn collect_errors(&mut self, node: &Node, code: &[u8]) {
-        // Collects tree-sitter ERROR nodes
-    }
-
-    pub fn build_ast(&mut self) -> anyhow::Result<Arena> {
-        // ... build nodes ...
+    pub fn build_ast(&mut self) -> anyhow::Result<AstArena> {
+        // build nodes...
 
         if !self.errors.is_empty() {
-            for err in &self.errors {
-                eprintln!("AST Builder Error: {err}");
-            }
             return Err(anyhow::anyhow!("AST building failed due to errors"));
         }
         Ok(self.arena.clone())
@@ -489,131 +271,13 @@ impl Builder {
 }
 ```
 
-Each builder method that processes CST nodes calls `collect_errors()` to identify malformed syntax. If any errors are collected, `build_ast()` prints them and returns an error.
+Each builder method that processes CST nodes calls error collection to identify malformed syntax. If any errors are collected, `build_ast()` returns an error.
 
-### Primitive Type Representation (Issue #50)
+### Visibility Parsing
 
-Prior to Issue #50, primitive types were represented using a `SimpleType` struct with a string field:
-
-```rust
-// Old representation (before Issue #50)
-pub struct SimpleType {
-    pub id: u32,
-    pub location: Location,
-    pub name: String,  // "i32", "bool", "unit", etc.
-}
-
-// Type checking required string comparisons
-fn is_unit_type(ty: &Type) -> bool {
-    match ty {
-        Type::Simple(simple) => simple.name == "unit",  // FIXME: string comparison
-        _ => false,
-    }
-}
-```
-
-**Problems with String-Based Approach**:
-- String comparisons are slower than enum matching
-- Typos in string literals could cause bugs ("i32" vs "I32")
-- No compile-time exhaustiveness checking
-- Inconsistent with type-checker layer (`TypeInfoKind` uses enums)
-- Every primitive type check requires string allocation/comparison
-
-**New Enum-Based Approach** (Issue #50):
+The AST builder extracts visibility modifiers from the tree-sitter CST during node construction:
 
 ```rust
-// Efficient enum representation
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum SimpleTypeKind {
-    Unit,
-    Bool,
-    I8,
-    I16,
-    I32,
-    I64,
-    U8,
-    U16,
-    U32,
-    U64,
-}
-
-// Type enum directly wraps the kind (no heap allocation)
-pub enum Type {
-    Simple(SimpleTypeKind),  // Copy type, no Rc needed
-    Array(Rc<TypeArray>),
-    Generic(Rc<GenericType>),
-    // ...
-}
-
-// Fast enum-based type checking
-fn is_unit_type(ty: &Type) -> bool {
-    matches!(ty, Type::Simple(SimpleTypeKind::Unit))
-}
-```
-
-**Special Macro Support for `@skip` Variants**:
-
-Since `SimpleTypeKind` is a Copy enum without `id` or `location` fields, the `ast_enum!` macro was extended with `@skip` support:
-
-```rust
-ast_enum! {
-    pub enum Type {
-        @skip Simple(SimpleTypeKind),  // No id/location - returns u32::MAX sentinel
-        Array(Rc<TypeArray>),
-        Generic(Rc<GenericType>),
-        // ...
-    }
-}
-
-// Macro generates:
-impl Type {
-    pub fn id(&self) -> u32 {
-        match self {
-            Type::Simple(_) => u32::MAX,  // Sentinel "no ID" value
-            Type::Array(n) => n.id,
-            // ...
-        }
-    }
-}
-```
-
-The `@skip` annotation tells the macro to return `u32::MAX` (sentinel value) for `id()` and `Location::default()` for `location()`. Code that performs ID-based lookups must treat `u32::MAX` as invalid.
-
-**Benefits**:
-- **Performance**: Enum matching is faster than string comparison
-- **Type safety**: Compiler catches typos and ensures exhaustiveness
-- **Memory efficiency**: `SimpleTypeKind` is Copy (no heap allocation)
-- **Consistency**: Aligns with type-checker's `TypeInfoKind` enum design
-- **Maintainability**: Adding new primitives requires updating enum, not strings throughout codebase
-
-**Conversion to Type Checker Layer**:
-
-```rust
-// core/type-checker/src/type_info.rs
-pub fn type_kind_from_simple_type_kind(kind: SimpleTypeKind) -> TypeInfoKind {
-    match kind {
-        SimpleTypeKind::Unit => TypeInfoKind::Unit,
-        SimpleTypeKind::Bool => TypeInfoKind::Bool,
-        SimpleTypeKind::I8 => TypeInfoKind::I8,
-        SimpleTypeKind::I16 => TypeInfoKind::I16,
-        SimpleTypeKind::I32 => TypeInfoKind::I32,
-        SimpleTypeKind::I64 => TypeInfoKind::I64,
-        SimpleTypeKind::U8 => TypeInfoKind::U8,
-        SimpleTypeKind::U16 => TypeInfoKind::U16,
-        SimpleTypeKind::U32 => TypeInfoKind::U32,
-        SimpleTypeKind::U64 => TypeInfoKind::U64,
-    }
-}
-```
-
-### Visibility Parsing (Issue #86)
-
-The AST builder extracts visibility modifiers from the tree-sitter CST (Concrete Syntax Tree) during node construction:
-
-```rust
-/// Extracts visibility modifier from a definition CST node.
-/// Returns `Visibility::Public` if a "visibility" child field is present,
-/// otherwise returns `Visibility::Private` (the default).
 fn get_visibility(node: &Node) -> Visibility {
     node.child_by_field_name("visibility")
         .map(|_| Visibility::Public)
@@ -621,68 +285,22 @@ fn get_visibility(node: &Node) -> Visibility {
 }
 ```
 
-**How It Works**:
-
-1. Tree-sitter grammar defines a `visibility` field for definition nodes
-2. Builder checks for presence of this field during parsing
-3. If present, the definition is marked `Public`
-4. If absent, defaults to `Private`
-
-**Supported Definitions**:
-- `FunctionDefinition` - `pub fn name() { ... }`
-- `StructDefinition` - `pub struct Name { ... }`
-- `EnumDefinition` - `pub enum Name { ... }`
-- `ConstantDefinition` - `pub const NAME: Type = value;`
-- `TypeDefinition` - `pub type Alias = Type;`
-- `ModuleDefinition` - `pub mod name { ... }`
-
-**Example Parsing**:
-
-```inference
-pub fn public_function() -> i32 { 42 }  // Visibility::Public
-fn private_function() -> i32 { 0 }       // Visibility::Private
-```
-
-Tree-sitter produces:
-```
-function_definition [
-  visibility: "pub"     // Visibility field present
-  name: "public_function"
-  ...
-]
-
-function_definition [
-  // No visibility field
-  name: "private_function"
-  ...
-]
-```
-
-The builder queries the CST node for the `visibility` field and sets the appropriate `Visibility` enum value.
-
-**Design Rationale**:
-
-This approach provides:
-- **Simplicity**: Single function handles all definition types
-- **Consistency**: All definitions use the same visibility logic
-- **Default safety**: Missing visibility defaults to private (principle of least privilege)
-- **Grammar alignment**: Directly maps tree-sitter fields to AST properties
+Supported definitions: `FunctionDefinition`, `StructDefinition`, `EnumDefinition`, `ConstantDefinition`, `TypeDefinition`, `ModuleDefinition`.
 
 ## Design Trade-offs
 
 ### Pros
 
 - **Simple ownership**: Arena owns everything, no lifetime parameters
-- **Fast lookups**: O(1) node, parent, and children access
+- **Fast lookups**: O(1) node access via typed indices
 - **Memory efficient**: Compact Location, single source storage
-- **Type safe**: Exhaustive enum matching catches missing cases
-- **Debuggable**: Sequential IDs make debugging easier
+- **Type safe**: `Idx<T>` parameterization catches index mismatches at compile time
+- **No parent map overhead**: No hash map maintenance during construction
 
 ### Cons
 
 - **No mutations**: Changing the tree structure after construction is complex
-- **Memory overhead**: Hash maps have load factor overhead (~1.5x capacity)
-- **Cloning cost**: Accessing nodes requires cloning (mitigated by `Rc` wrapping)
+- **No upward traversal**: There are no parent pointers; callers pass context down explicitly or use structural search
 - **No cross-arena references**: Can't easily merge or split arenas
 
 ### When This Design Works Well
@@ -690,24 +308,7 @@ This approach provides:
 - Immutable ASTs (compiler phases don't modify structure)
 - Single-threaded processing (or read-only parallel access)
 - Moderate tree sizes (< 1 million nodes)
-- Frequent parent/child queries
-
-### When to Consider Alternatives
-
-- Incremental compilation (need partial tree updates)
-- Large ASTs (> 10 million nodes)
-- Heavy structural mutations (tree rewriting passes)
-- Multi-threaded tree construction
-
-## Future Optimizations
-
-Potential improvements for consideration:
-
-1. **Interned strings**: Use string interning for identifiers
-2. **Bump allocator**: Replace FxHashMap with bump-allocated nodes
-3. **Compressed IDs**: Use 16-bit IDs for small ASTs
-4. **Node pooling**: Reuse node structures across compilations
-5. **Lazy source loading**: mmap source files for large inputs
+- Predominantly downward traversal
 
 ## Related Documentation
 

@@ -11,7 +11,7 @@ use crate::{
 use inference_ast::{
     arena::AstArena,
     ids::{DefId, NodeId},
-    nodes::{Location, SourceFileData, Stmt},
+    nodes::{Location, SourceFileData},
 };
 use rustc_hash::FxHashMap;
 
@@ -80,24 +80,6 @@ impl TypedContext {
 
     pub(crate) fn set_node_typeinfo(&mut self, node_id: NodeId, type_info: TypeInfo) {
         self.node_types.insert(node_id, type_info);
-    }
-
-    /// Walks the parent chain from `node_id` up to the nearest `Stmt::VarDef`
-    /// and returns the variable name.
-    ///
-    /// Used by the codegen pass to find the enclosing variable name for array
-    /// literals and uzumaki expressions.
-    #[must_use = "returns the enclosing variable name without side effects"]
-    pub fn find_enclosing_variable_name(&self, node_id: NodeId) -> Option<String> {
-        let mut current = node_id;
-        loop {
-            if let NodeId::Stmt(stmt_id) = current {
-                if let Stmt::VarDef { name, .. } = &self.arena[stmt_id].kind {
-                    return Some(self.arena[*name].name.clone());
-                }
-            }
-            current = self.arena.find_parent(current)?;
-        }
     }
 
     fn is_node_type<T>(&self, node_id: NodeId, type_checker: T) -> bool

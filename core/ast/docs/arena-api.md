@@ -57,7 +57,7 @@ This creates nodes for:
 
 ### Typed Indices
 
-Every node category has its own index type. Each index is a 4-byte `Copy` newtype around `u32`:
+Every node category has its own index type, defined as a type alias over `la_arena::Idx<T>`:
 
 | Index type | Targets | Example use |
 |-----------|---------|-------------|
@@ -69,9 +69,9 @@ Every node category has its own index type. Each index is a 4-byte `Copy` newtyp
 | `BlockId` | `arena.blocks` | `{ … }` bodies |
 | `IdentId` | `arena.idents` | Identifiers and names |
 
-The type system prevents using an `ExprId` to index `defs`. Mismatches are caught at compile time.
+The type system prevents using an `ExprId` to index `defs`. Because `Idx<T>` is parameterized over the node type, mismatches are caught at compile time.
 
-The `NodeId` enum wraps any typed ID for use in the parent/children maps, where you need to refer to nodes of mixed categories:
+The `NodeId` enum wraps any typed ID for use in heterogeneous contexts, such as type annotation storage:
 
 ```rust
 pub enum NodeId {
@@ -275,38 +275,6 @@ for sf in arena.source_files() {
 
 This approach is efficient because it follows the natural tree structure and only visits nodes you actually need.
 
-### Finding a Node's Parent
-
-```rust
-use inference_ast::ids::NodeId;
-
-let parent_id = arena.find_parent(NodeId::Stmt(stmt_id));
-
-match parent_id {
-    Some(NodeId::Block(block_id)) => {
-        println!("Statement lives in block {:?}", block_id);
-    }
-    Some(other) => println!("Parent is {:?}", other),
-    None => println!("This is a root node or has no recorded parent"),
-}
-```
-
-The builder does not record parent-child relationships automatically. Parent relationships must be recorded explicitly with `arena.record_parent(child, parent)` during construction. If you need parent traversal in analysis passes, record the relationships during your own traversal.
-
-### Getting Direct Children
-
-```rust
-let children: &[NodeId] = arena.children(NodeId::Block(block_id));
-
-for child_id in children {
-    if let Some(loc) = arena.node_location(*child_id) {
-        println!("Child at {}", loc);
-    }
-}
-```
-
-Returns a slice of `NodeId` values. The slice is empty if no children have been recorded.
-
 ### Walking Up to a Source File
 
 ```rust
@@ -320,7 +288,7 @@ if let Some(id) = sf_id {
 }
 ```
 
-For `Def` nodes, delegates to `find_source_file_for_def`, which searches the source files' `defs` lists. For other nodes, walks the parent chain or falls back to byte-offset matching.
+For `Def` nodes, delegates to `find_source_file_for_def`, which searches the source files' `defs` lists. For other nodes, uses byte-offset matching against all source files.
 
 ## Source Text Retrieval
 
@@ -620,36 +588,6 @@ fn emit_function(arena: &AstArena, def_id: DefId) -> String {
 }
 ```
 
-### Pattern 5: Finding Enclosing Context via Parent Chain
-
-```rust
-use inference_ast::arena::AstArena;
-use inference_ast::ids::{NodeId, DefId};
-use inference_ast::nodes::Def;
-
-fn find_enclosing_function(arena: &AstArena, mut node_id: NodeId) -> Option<DefId> {
-    loop {
-        match node_id {
-            NodeId::Def(def_id) => {
-                if matches!(arena[def_id].kind, Def::Function { .. }) {
-                    return Some(def_id);
-                }
-            }
-            _ => {}
-        }
-
-        node_id = arena.find_parent(node_id)?;
-    }
-}
-
-// Usage — requires parent relationships to have been recorded
-if let Some(def_id) = find_enclosing_function(&arena, NodeId::Expr(expr_id)) {
-    println!("Expression is inside function: {}", arena.def_name(def_id));
-}
-```
-
-Note: The `Builder` does not record parent-child relationships during parsing. If your analysis pass needs `find_parent`, record the relationships explicitly during your own traversal of the arena.
-
 ## Error Handling
 
 ### Dealing with Option Values
@@ -786,7 +724,7 @@ Use `function_def_ids()` instead of manually filtering all defs when you need al
 
 **Possible causes:**
 1. The node ID is out of range — validate with `node_location`
-2. The source file cannot be determined — the node has no parent chain leading to a `Def`, and its byte offsets do not fall within any `SourceFileData`
+2. The source file cannot be determined — the node's byte offsets do not fall within any `SourceFileData`
 3. Byte offsets are outside the source string — this indicates a builder bug
 
 **Diagnostic:**
@@ -803,12 +741,6 @@ if arena.node_location(node_id).is_none() {
     eprintln!("Byte offsets fall outside source string");
 }
 ```
-
-### Issue: `find_parent` always returns `None`
-
-**Cause:** The `Builder` does not record parent-child relationships during parsing. `find_parent` only returns `Some` for relationships that have been explicitly recorded via `record_parent`.
-
-**Solution:** If your analysis pass requires parent traversal, walk the tree structurally and record the relationships you need, or restructure your traversal to pass context down explicitly.
 
 ### Issue: Slow traversal
 

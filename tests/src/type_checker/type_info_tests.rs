@@ -783,7 +783,7 @@ mod type_info_from_ast {
     }
 
     fn alloc_ident(arena: &mut AstArena, name: &str) -> inference_ast::ids::IdentId {
-        arena.alloc_ident(Ident {
+        arena.idents.alloc(Ident {
             location: dummy_location(),
             name: name.to_string(),
         })
@@ -803,7 +803,7 @@ mod type_info_from_ast {
             "u64" => SimpleTypeKind::U64,
             _ => panic!("Unknown simple type kind: {}", name),
         };
-        arena.alloc_type(TypeData {
+        arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Simple(kind),
         })
@@ -813,7 +813,7 @@ mod type_info_from_ast {
         arena: &mut AstArena,
         value: &str,
     ) -> inference_ast::ids::ExprId {
-        arena.alloc_expr(ExprData {
+        arena.exprs.alloc(ExprData {
             location: dummy_location(),
             kind: Expr::NumberLiteral {
                 value: value.to_string(),
@@ -842,7 +842,7 @@ mod type_info_from_ast {
     fn test_new_from_string_custom_type() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "string");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -883,7 +883,7 @@ mod type_info_from_ast {
     fn test_new_from_custom_type() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "MyCustomType");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -897,7 +897,7 @@ mod type_info_from_ast {
         let base_id = alloc_ident(&mut arena, "Container");
         let param_t = alloc_ident(&mut arena, "T");
         let param_u = alloc_ident(&mut arena, "U");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Generic {
                 base: base_id,
@@ -914,7 +914,7 @@ mod type_info_from_ast {
         let mut arena = AstArena::default();
         let qualifier_id = alloc_ident(&mut arena, "std");
         let name_id = alloc_ident(&mut arena, "Vec");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::QualifiedName {
                 qualifier: qualifier_id,
@@ -930,7 +930,7 @@ mod type_info_from_ast {
         let mut arena = AstArena::default();
         let alias_id = alloc_ident(&mut arena, "Module");
         let name_id = alloc_ident(&mut arena, "Type");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Qualified {
                 alias: alias_id,
@@ -946,7 +946,7 @@ mod type_info_from_ast {
         let mut arena = AstArena::default();
         let elem_ty = alloc_simple_type(&mut arena, "i32");
         let size_expr = alloc_number_literal_expr(&mut arena, "10");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Array {
                 element: elem_ty,
@@ -968,7 +968,7 @@ mod type_info_from_ast {
         let mut arena = AstArena::default();
         let inner_elem_ty = alloc_simple_type(&mut arena, "bool");
         let inner_size = alloc_number_literal_expr(&mut arena, "5");
-        let inner_array_ty = arena.alloc_type(TypeData {
+        let inner_array_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Array {
                 element: inner_elem_ty,
@@ -976,7 +976,7 @@ mod type_info_from_ast {
             },
         });
         let outer_size = alloc_number_literal_expr(&mut arena, "3");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Array {
                 element: inner_array_ty,
@@ -1001,7 +1001,7 @@ mod type_info_from_ast {
     #[test]
     fn test_new_from_function_type_no_params_no_return() {
         let mut arena = AstArena::default();
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Function {
                 params: vec![],
@@ -1024,11 +1024,11 @@ mod type_info_from_ast {
         let param_i32 = alloc_simple_type(&mut arena, "i32");
         let param_bool = alloc_simple_type(&mut arena, "bool");
         let ret_ident = alloc_ident(&mut arena, "string");
-        let ret_ty = arena.alloc_type(TypeData {
+        let ret_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ret_ident),
         });
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Function {
                 params: vec![param_i32, param_bool],
@@ -1049,7 +1049,7 @@ mod type_info_from_ast {
     fn test_new_from_custom_identifier() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "Point");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -1219,7 +1219,7 @@ mod type_info_with_type_params {
     }
 
     fn alloc_ident(arena: &mut AstArena, name: &str) -> inference_ast::ids::IdentId {
-        arena.alloc_ident(Ident {
+        arena.idents.alloc(Ident {
             location: dummy_location(),
             name: name.to_string(),
         })
@@ -1239,7 +1239,7 @@ mod type_info_with_type_params {
             "u64" => SimpleTypeKind::U64,
             _ => panic!("Unknown simple type kind: {}", name),
         };
-        arena.alloc_type(TypeData {
+        arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Simple(kind),
         })
@@ -1249,7 +1249,7 @@ mod type_info_with_type_params {
         arena: &mut AstArena,
         value: &str,
     ) -> inference_ast::ids::ExprId {
-        arena.alloc_expr(ExprData {
+        arena.exprs.alloc(ExprData {
             location: dummy_location(),
             kind: Expr::NumberLiteral {
                 value: value.to_string(),
@@ -1261,7 +1261,7 @@ mod type_info_with_type_params {
     fn test_custom_type_becomes_generic_when_in_type_params_list() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "T");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -1275,7 +1275,7 @@ mod type_info_with_type_params {
     fn test_custom_type_stays_custom_when_not_in_type_params_list() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "T");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -1289,7 +1289,7 @@ mod type_info_with_type_params {
     fn test_custom_type_becomes_generic_when_in_params() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "T");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -1303,7 +1303,7 @@ mod type_info_with_type_params {
     fn test_custom_type_stays_custom_when_not_in_params() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "MyStruct");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });
@@ -1317,12 +1317,12 @@ mod type_info_with_type_params {
     fn test_array_element_becomes_generic() {
         let mut arena = AstArena::default();
         let elem_ident = alloc_ident(&mut arena, "T");
-        let elem_ty = arena.alloc_type(TypeData {
+        let elem_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(elem_ident),
         });
         let size_expr = alloc_number_literal_expr(&mut arena, "5");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Array {
                 element: elem_ty,
@@ -1344,16 +1344,16 @@ mod type_info_with_type_params {
     fn test_function_params_become_generic() {
         let mut arena = AstArena::default();
         let param_ident = alloc_ident(&mut arena, "T");
-        let param_ty = arena.alloc_type(TypeData {
+        let param_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(param_ident),
         });
         let ret_ident = alloc_ident(&mut arena, "U");
-        let ret_ty = arena.alloc_type(TypeData {
+        let ret_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ret_ident),
         });
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Function {
                 params: vec![param_ty],
@@ -1370,12 +1370,12 @@ mod type_info_with_type_params {
     fn test_multiple_type_params_all_resolved() {
         let mut arena = AstArena::default();
         let elem_ident = alloc_ident(&mut arena, "K");
-        let elem_ty = arena.alloc_type(TypeData {
+        let elem_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(elem_ident),
         });
         let size_expr = alloc_number_literal_expr(&mut arena, "10");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Array {
                 element: elem_ty,
@@ -1396,7 +1396,7 @@ mod type_info_with_type_params {
     fn test_empty_type_params_no_generics() {
         let mut arena = AstArena::default();
         let ident_id = alloc_ident(&mut arena, "T");
-        let ty_id = arena.alloc_type(TypeData {
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Custom(ident_id),
         });

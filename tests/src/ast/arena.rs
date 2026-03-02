@@ -3,57 +3,6 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::*;
 use inference_ast::nodes::*;
 
-/// Tests for AstArena's parent-child lookup functionality.
-
-#[test]
-fn test_find_parent_returns_none_when_not_recorded() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let func_ids = arena.function_def_ids();
-    assert_eq!(func_ids.len(), 1);
-    let func_def_id = func_ids[0];
-
-    let parent = arena.find_parent(NodeId::Def(func_def_id));
-    assert!(
-        parent.is_none(),
-        "Builder does not record parent-child relationships; find_parent should return None"
-    );
-}
-
-#[test]
-fn test_find_parent_root_returns_none_for_orphan() {
-    let arena = AstArena::default();
-    let parent = arena.find_parent(NodeId::Def(DefId::from_raw(999)));
-    assert!(
-        parent.is_none(),
-        "Non-existent node should have no parent"
-    );
-}
-
-#[test]
-fn test_children_returns_recorded_children() {
-    let mut arena = AstArena::default();
-    let parent = NodeId::Block(BlockId::from_raw(0));
-    let child1 = NodeId::Stmt(StmtId::from_raw(0));
-    let child2 = NodeId::Stmt(StmtId::from_raw(1));
-    arena.record_parent(child1, parent);
-    arena.record_parent(child2, parent);
-
-    let children = arena.children(parent);
-    assert_eq!(children.len(), 2, "Should have 2 children");
-    assert!(children.contains(&child1));
-    assert!(children.contains(&child2));
-}
-
-#[test]
-fn test_children_empty_for_leaf() {
-    let arena = AstArena::default();
-    let leaf = NodeId::Expr(ExprId::from_raw(999));
-    let children = arena.children(leaf);
-    assert!(children.is_empty(), "Leaf node should have no children");
-}
-
 #[test]
 fn test_source_files_parsed_correctly() {
     let source = r#"fn test() -> i32 { return 42; }"#;
@@ -353,26 +302,6 @@ fn test_empty_arena_function_def_ids() {
     );
 }
 
-#[test]
-fn test_empty_arena_find_parent() {
-    let arena = AstArena::default();
-    let result = arena.find_parent(NodeId::Def(DefId::from_raw(0)));
-    assert!(
-        result.is_none(),
-        "Empty arena should return None for parent lookup"
-    );
-}
-
-#[test]
-fn test_empty_arena_children() {
-    let arena = AstArena::default();
-    let children = arena.children(NodeId::Def(DefId::from_raw(0)));
-    assert!(
-        children.is_empty(),
-        "Empty arena should return no children"
-    );
-}
-
 /// Tests for AstArena::clone() functionality
 
 #[test]
@@ -412,7 +341,7 @@ fn test_location_default_via_struct() {
 #[test]
 fn test_alloc_and_index_expr() {
     let mut arena = AstArena::default();
-    let id = arena.alloc_expr(ExprData {
+    let id = arena.exprs.alloc(ExprData {
         location: Location::default(),
         kind: Expr::NumberLiteral {
             value: "42".to_string(),
@@ -424,30 +353,11 @@ fn test_alloc_and_index_expr() {
 #[test]
 fn test_alloc_and_index_ident() {
     let mut arena = AstArena::default();
-    let id = arena.alloc_ident(Ident {
+    let id = arena.idents.alloc(Ident {
         location: Location::default(),
         name: "foo".to_string(),
     });
     assert_eq!(arena[id].name, "foo");
-}
-
-#[test]
-fn test_record_parent_creates_relationship() {
-    let mut arena = AstArena::default();
-    let parent = NodeId::Block(BlockId::from_raw(0));
-    let child = NodeId::Stmt(StmtId::from_raw(0));
-    arena.record_parent(child, parent);
-
-    assert_eq!(
-        arena.find_parent(child),
-        Some(parent),
-        "Child should have parent"
-    );
-    assert_eq!(
-        arena.find_parent(parent),
-        None,
-        "Root node should have no parent"
-    );
 }
 
 /// Tests for function with return type and arguments

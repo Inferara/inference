@@ -151,18 +151,18 @@ mod tests {
     }
 
     fn alloc_ident(arena: &mut AstArena, name: &str) -> IdentId {
-        arena.alloc_ident(Ident {
+        arena.idents.alloc(Ident {
             location: dummy_location(),
             name: name.to_string(),
         })
     }
 
     fn alloc_break_block(arena: &mut AstArena) -> BlockId {
-        let break_stmt = arena.alloc_stmt(StmtData {
+        let break_stmt = arena.stmts.alloc(StmtData {
             location: dummy_location(),
             kind: Stmt::Break,
         });
-        arena.alloc_block(BlockData {
+        arena.blocks.alloc(BlockData {
             location: dummy_location(),
             block_kind: BlockKind::Regular,
             stmts: vec![break_stmt],
@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn alloc_unit_type(arena: &mut AstArena) -> TypeId {
-        arena.alloc_type(TypeData {
+        arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Simple(SimpleTypeKind::Unit),
         })
@@ -179,7 +179,7 @@ mod tests {
     fn alloc_function_with_break(arena: &mut AstArena, name: &str) -> DefId {
         let name_id = alloc_ident(arena, name);
         let body_id = alloc_break_block(arena);
-        arena.alloc_def(DefData {
+        arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Function {
                 name: name_id,
@@ -209,7 +209,7 @@ mod tests {
         let method_a = alloc_function_with_break(&mut arena, "method_a");
         let method_b = alloc_function_with_break(&mut arena, "method_b");
         let struct_name = alloc_ident(&mut arena, "Foo");
-        let struct_def = arena.alloc_def(DefData {
+        let struct_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Struct {
                 name: struct_name,
@@ -230,7 +230,7 @@ mod tests {
         let mut arena = AstArena::default();
         let check_fn = alloc_function_with_break(&mut arena, "check");
         let spec_name = alloc_ident(&mut arena, "MySpec");
-        let spec_def = arena.alloc_def(DefData {
+        let spec_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Spec {
                 name: spec_name,
@@ -250,7 +250,7 @@ mod tests {
         let mut arena = AstArena::default();
         let method = alloc_function_with_break(&mut arena, "method");
         let inner_struct_name = alloc_ident(&mut arena, "Inner");
-        let inner_struct = arena.alloc_def(DefData {
+        let inner_struct = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Struct {
                 name: inner_struct_name,
@@ -260,7 +260,7 @@ mod tests {
             },
         });
         let spec_name = alloc_ident(&mut arena, "MySpec");
-        let spec_def = arena.alloc_def(DefData {
+        let spec_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Spec {
                 name: spec_name,
@@ -283,7 +283,7 @@ mod tests {
         let mut arena = AstArena::default();
         let helper = alloc_function_with_break(&mut arena, "helper");
         let module_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.alloc_def(DefData {
+        let module_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Module {
                 name: module_name,
@@ -303,7 +303,7 @@ mod tests {
         let mut arena = AstArena::default();
         let method = alloc_function_with_break(&mut arena, "method");
         let bar_name = alloc_ident(&mut arena, "Bar");
-        let inner_struct = arena.alloc_def(DefData {
+        let inner_struct = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Struct {
                 name: bar_name,
@@ -313,7 +313,7 @@ mod tests {
             },
         });
         let module_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.alloc_def(DefData {
+        let module_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Module {
                 name: module_name,
@@ -335,7 +335,7 @@ mod tests {
     fn for_each_function_body_skips_module_without_body() {
         let mut arena = AstArena::default();
         let module_name = alloc_ident(&mut arena, "external_mod");
-        let module_def = arena.alloc_def(DefData {
+        let module_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Module {
                 name: module_name,
@@ -354,7 +354,7 @@ mod tests {
     fn for_each_function_body_skips_non_function_definitions() {
         let mut arena = AstArena::default();
         let color_name = alloc_ident(&mut arena, "Color");
-        let enum_def = arena.alloc_def(DefData {
+        let enum_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Enum {
                 name: color_name,
@@ -364,13 +364,13 @@ mod tests {
         });
         let max_name = alloc_ident(&mut arena, "MAX");
         let i32_type = alloc_unit_type(&mut arena);
-        let value_expr = arena.alloc_expr(ExprData {
+        let value_expr = arena.exprs.alloc(ExprData {
             location: dummy_location(),
             kind: Expr::NumberLiteral {
                 value: "42".to_string(),
             },
         });
-        let const_def = arena.alloc_def(DefData {
+        let const_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Constant {
                 name: max_name,
@@ -381,7 +381,7 @@ mod tests {
         });
         let alias_name = alloc_ident(&mut arena, "Alias");
         let alias_type = alloc_unit_type(&mut arena);
-        let type_def = arena.alloc_def(DefData {
+        let type_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::TypeAlias {
                 name: alias_name,
@@ -406,7 +406,7 @@ mod tests {
 
         let struct_method = alloc_function_with_break(&mut arena, "method");
         let foo_name = alloc_ident(&mut arena, "Foo");
-        let struct_def = arena.alloc_def(DefData {
+        let struct_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Struct {
                 name: foo_name,
@@ -418,7 +418,7 @@ mod tests {
 
         let spec_check = alloc_function_with_break(&mut arena, "check");
         let spec_name = alloc_ident(&mut arena, "MySpec");
-        let spec_def = arena.alloc_def(DefData {
+        let spec_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Spec {
                 name: spec_name,
@@ -429,7 +429,7 @@ mod tests {
 
         let mod_helper = alloc_function_with_break(&mut arena, "helper");
         let utils_name = alloc_ident(&mut arena, "utils");
-        let module_def = arena.alloc_def(DefData {
+        let module_def = arena.defs.alloc(DefData {
             location: dummy_location(),
             kind: Def::Module {
                 name: utils_name,

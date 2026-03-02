@@ -152,29 +152,29 @@ pub fn get_node_source(&self, node_id: NodeId) -> Option<&str> {
     let sf_id = self.find_source_file_for_node(node_id)?;
 
     // 3. Slice the source using byte offsets
-    self.source_files[sf_id.index()].source.get(start..end)
+    self[sf_id].source.get(start..end)
 }
 ```
 
 `find_source_file_for_node` works as follows:
 - For `NodeId::SourceFile(id)`: returns `Some(id)` immediately
 - For `NodeId::Def(def_id)`: delegates to `find_source_file_for_def`, which searches the `defs` lists of all source files (including nested methods inside structs)
-- For other nodes: walks the parent chain looking for a `Def` or `SourceFile` ancestor; falls back to byte-offset matching against all source file lengths
+- For other nodes: uses byte-offset matching against all source files
 
 ### Node Location Retrieval
 
-`node_location` dispatches on the `NodeId` variant and reads from the corresponding `Vec`:
+`node_location` dispatches on the `NodeId` variant and reads from the corresponding arena:
 
 ```rust
 pub fn node_location(&self, node_id: NodeId) -> Option<Location> {
     match node_id {
-        NodeId::SourceFile(id) => self.source_files.get(id.index()).map(|n| n.location),
-        NodeId::Def(id)        => self.defs.get(id.index()).map(|n| n.location),
-        NodeId::Stmt(id)       => self.stmts.get(id.index()).map(|n| n.location),
-        NodeId::Expr(id)       => self.exprs.get(id.index()).map(|n| n.location),
-        NodeId::Type(id)       => self.types.get(id.index()).map(|n| n.location),
-        NodeId::Block(id)      => self.blocks.get(id.index()).map(|n| n.location),
-        NodeId::Ident(id)      => self.idents.get(id.index()).map(|n| n.location),
+        NodeId::SourceFile(id) => self.source_files.get(id).map(|n| n.location),
+        NodeId::Def(id)        => self.defs.get(id).map(|n| n.location),
+        NodeId::Stmt(id)       => self.stmts.get(id).map(|n| n.location),
+        NodeId::Expr(id)       => self.exprs.get(id).map(|n| n.location),
+        NodeId::Type(id)       => self.types.get(id).map(|n| n.location),
+        NodeId::Block(id)      => self.blocks.get(id).map(|n| n.location),
+        NodeId::Ident(id)      => self.idents.get(id).map(|n| n.location),
     }
 }
 ```
@@ -183,9 +183,9 @@ Returns `None` only if the index is out of range.
 
 ### Complexity Analysis
 
-- **`node_location`**: O(1) — single `Vec::get` call
+- **`node_location`**: O(1) — single arena lookup
 - **`find_source_file_for_def`**: O(d × n) worst case, where d is nesting depth and n is number of defs; in practice O(n) for shallow hierarchies
-- **`find_source_file_for_node` (non-def)**: O(p) where p is parent-chain length, typically < 20
+- **`find_source_file_for_node` (non-def)**: O(n) — byte-offset matching across all source files
 - **`get_node_source` slice**: O(1) after the source file is found
 
 For compiler workloads, the total cost is negligible compared to type-checking or code generation.

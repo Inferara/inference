@@ -671,7 +671,7 @@ impl Compiler {
                         );
                     }
                 }
-                self.lower_expression(arena, expr_id, ctx);
+                self.lower_expression(arena, expr_id, ctx, None);
                 let expr_produces_value = ctx
                     .get_node_typeinfo(NodeId::Expr(expr_id))
                     .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
@@ -689,7 +689,7 @@ impl Compiler {
                         panic!("sret return lowering failed: {e}");
                     }
                 } else {
-                    self.lower_expression(arena, expr, ctx);
+                    self.lower_expression(arena, expr, ctx, None);
                 }
                 if let (Some(layout), Some(func)) =
                     (&self.frame_layout, &mut self.func)
@@ -766,7 +766,7 @@ impl Compiler {
                                 ctx,
                             );
                         } else {
-                            self.lower_expression(arena, val_expr_id, ctx);
+                            self.lower_expression(arena, val_expr_id, ctx, Some(&var_name));
                             self.func().instruction(&Instruction::LocalSet(local_idx));
                         }
                     }
@@ -779,7 +779,7 @@ impl Compiler {
                 if let Def::Constant { name, value, .. } = &arena[const_def_id].kind {
                     let const_name = arena[*name].name.clone();
                     let value = *value;
-                    self.lower_expression(arena, value, ctx);
+                    self.lower_expression(arena, value, ctx, None);
                     let (local_idx, _) = self.locals_map
                         .get(&const_name)
                         .expect("Local not found in pre-scan");
@@ -830,7 +830,7 @@ impl Compiler {
             }
             // Push regular arguments
             for (_label, arg_expr_id) in &args {
-                self.lower_expression(arena, *arg_expr_id, ctx);
+                self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
             let callee_name = self
                 .resolve_callee_name(arena, function)
@@ -879,7 +879,7 @@ impl Compiler {
             self.func().instruction(&Instruction::I32Add);
         }
         // src = lower_expression(identifier) -> source pointer
-        self.lower_expression(arena, val_expr_id, ctx);
+        self.lower_expression(arena, val_expr_id, ctx, None);
         // byte count
         #[allow(clippy::cast_possible_wrap)]
         self.func().instruction(&Instruction::I32Const(byte_size as i32));
@@ -944,6 +944,7 @@ impl Compiler {
         arena: &AstArena,
         expr_id: ExprId,
         ctx: &TypedContext,
+        enclosing_var_name: Option<&str>,
     ) {
         let expr_kind = arena[expr_id].kind.clone();
         match expr_kind {
@@ -984,12 +985,17 @@ impl Compiler {
             }
             Expr::Parenthesized { expr } => {
                 cov_mark::hit!(wasm_codegen_emit_parenthesized_expression);
-                self.lower_expression(arena, expr, ctx);
+                self.lower_expression(arena, expr, ctx, enclosing_var_name);
             }
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
+                let var_name = enclosing_var_name.unwrap_or_else(|| {
+                    panic!(
+                        "Array literal (expr_id={expr_id:?}) has no enclosing variable name"
+                    )
+                });
                 let elements = elements.clone();
-                self.lower_array_literal(arena, expr_id, &elements, ctx);
+                self.lower_array_literal(arena, &elements, var_name, ctx);
             }
             Expr::BoolLiteral { value } => {
                 self.func().instruction(&Instruction::I32Const(i32::from(value)));
@@ -1012,7 +1018,12 @@ impl Compiler {
                 if let Some(type_info) = ctx.get_node_typeinfo(node_id) {
                     if let TypeInfoKind::Array(ref elem_type, length) = type_info.kind {
                         cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
-                        self.lower_array_uzumaki(arena, node_id, elem_type, length, ctx);
+                        let var_name = enclosing_var_name.unwrap_or_else(|| {
+                            panic!(
+                                "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
+                            )
+                        });
+                        self.lower_array_uzumaki(arena, elem_type, length, var_name);
                         return;
                     }
                 }
@@ -1056,7 +1067,7 @@ impl Compiler {
 
         let args_copy: Vec<_> = call_args.iter().map(|(l, e)| (*l, *e)).collect();
         for (_label, arg_expr_id) in &args_copy {
-            self.lower_expression(arena, *arg_expr_id, ctx);
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
         }
 
         let func_idx = self
@@ -1085,7 +1096,7 @@ impl Compiler {
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                self.lower_expression(arena, right, ctx);
+                self.lower_expression(arena, right, ctx, None);
                 self.func().instruction(&Instruction::LocalSet(local_idx));
             }
             Expr::ArrayIndexAccess { array, index } => {
@@ -1128,7 +1139,7 @@ impl Compiler {
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = (i as u32) * elem_size;
                     emit_sret_element_addr(self.func(), sret_idx, byte_offset);
-                    self.lower_expression(arena, *element_id, ctx);
+                    self.lower_expression(arena, *element_id, ctx, None);
                     self.func().instruction(&store_instr);
                 }
             }
@@ -1144,7 +1155,7 @@ impl Compiler {
                     // Zero-copy sret forwarding
                     self.func().instruction(&Instruction::LocalGet(sret_idx));
                     for (_label, arg_expr_id) in &args {
-                        self.lower_expression(arena, *arg_expr_id, ctx);
+                        self.lower_expression(arena, *arg_expr_id, ctx, None);
                     }
                     let func_idx = self
                         .func_name_to_idx
@@ -1182,9 +1193,9 @@ impl Compiler {
         let elem_sz = memory::element_size(&elem_type_info.kind);
         let store_instr = memory::store_instruction(&elem_type_info.kind);
 
-        self.lower_expression(arena, array_expr_id, ctx);
+        self.lower_expression(arena, array_expr_id, ctx, None);
         self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
-        self.lower_expression(arena, right_expr_id, ctx);
+        self.lower_expression(arena, right_expr_id, ctx, None);
 
         self.func().instruction(&store_instr);
     }
@@ -1200,7 +1211,7 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
-        self.lower_expression(arena, condition, ctx);
+        self.lower_expression(arena, condition, ctx, None);
         self.func().instruction(&Instruction::If(WasmBlockType::Empty));
         self.loop_ctx.wasm_block_depth += 1;
 
@@ -1244,7 +1255,7 @@ impl Compiler {
 
         if let Some(cond_expr_id) = condition {
             cov_mark::hit!(wasm_codegen_emit_loop_conditional);
-            self.lower_expression(arena, cond_expr_id, ctx);
+            self.lower_expression(arena, cond_expr_id, ctx, None);
             self.func().instruction(&Instruction::I32Eqz);
             self.func().instruction(&Instruction::BrIf(1));
         } else {
@@ -1298,7 +1309,7 @@ impl Compiler {
         let elem_sz = memory::element_size(&elem_type_info.kind);
         let load_instr = memory::load_instruction(&elem_type_info.kind);
 
-        self.lower_expression(arena, array_expr_id, ctx);
+        self.lower_expression(arena, array_expr_id, ctx, None);
         self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
 
         self.func().instruction(&load_instr);
@@ -1318,7 +1329,7 @@ impl Compiler {
                 self.func().instruction(&Instruction::I32Add);
             }
         } else {
-            self.lower_expression(arena, index_expr_id, ctx);
+            self.lower_expression(arena, index_expr_id, ctx, None);
             #[allow(clippy::cast_possible_wrap)]
             self.func().instruction(&Instruction::I32Const(elem_sz as i32));
             self.func().instruction(&Instruction::I32Mul);
@@ -1330,21 +1341,18 @@ impl Compiler {
     fn lower_array_uzumaki(
         &mut self,
         _arena: &AstArena,
-        uzumaki_node_id: NodeId,
         elem_type: &TypeInfo,
         length: u32,
-        ctx: &TypedContext,
+        enclosing_var_name: &str,
     ) {
-        let parent_var_name = ctx
-            .find_enclosing_variable_name(uzumaki_node_id)
-            .expect("Array uzumaki must have an enclosing variable definition");
+        let parent_var_name = enclosing_var_name;
 
         let layout = self.frame_layout.as_ref()
             .expect("Array uzumaki requires a frame layout (function must have arrays)");
 
         let slot = layout
             .array_offsets
-            .get(&parent_var_name)
+            .get(parent_var_name)
             .unwrap_or_else(|| {
                 panic!(
                     "Array variable '{parent_var_name}' not found in frame layout offsets"
@@ -1393,8 +1401,8 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
-        self.lower_expression(arena, left, ctx);
-        self.lower_expression(arena, right, ctx);
+        self.lower_expression(arena, left, ctx, None);
+        self.lower_expression(arena, right, ctx, None);
 
         let left_type_info = ctx
             .get_node_typeinfo(NodeId::Expr(left))
@@ -1526,7 +1534,7 @@ impl Compiler {
                 } else {
                     self.func().instruction(&Instruction::I32Const(0));
                 }
-                self.lower_expression(arena, inner_expr_id, ctx);
+                self.lower_expression(arena, inner_expr_id, ctx, None);
                 if is_i64 {
                     self.func().instruction(&Instruction::I64Sub);
                 } else {
@@ -1536,12 +1544,12 @@ impl Compiler {
             }
             UnaryOperatorKind::Not => {
                 cov_mark::hit!(wasm_codegen_emit_unary_not);
-                self.lower_expression(arena, inner_expr_id, ctx);
+                self.lower_expression(arena, inner_expr_id, ctx, None);
                 self.func().instruction(&Instruction::I32Eqz);
             }
             UnaryOperatorKind::BitNot => {
                 cov_mark::hit!(wasm_codegen_emit_unary_bitnot);
-                self.lower_expression(arena, inner_expr_id, ctx);
+                self.lower_expression(arena, inner_expr_id, ctx, None);
                 if is_i64 {
                     self.func().instruction(&Instruction::I64Const(-1));
                     self.func().instruction(&Instruction::I64Xor);
@@ -1615,18 +1623,11 @@ impl Compiler {
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
-        expr_id: ExprId,
         elements: &[ExprId],
+        enclosing_var_name: &str,
         ctx: &TypedContext,
     ) {
-        let parent_var_name = ctx
-            .find_enclosing_variable_name(NodeId::Expr(expr_id))
-            .unwrap_or_else(|| {
-                panic!(
-                    "Array literal (expr_id={:?}) has no enclosing VariableDefinitionStatement",
-                    expr_id
-                )
-            });
+        let parent_var_name = enclosing_var_name;
 
         let Some(ref layout) = self.frame_layout else {
             self.func().instruction(&Instruction::I32Const(0));
@@ -1635,7 +1636,7 @@ impl Compiler {
 
         let slot = layout
             .array_offsets
-            .get(&parent_var_name)
+            .get(parent_var_name)
             .unwrap_or_else(|| {
                 panic!(
                     "Array variable '{parent_var_name}' not found in frame layout offsets"
@@ -1665,7 +1666,7 @@ impl Compiler {
             #[allow(clippy::cast_possible_wrap)]
             self.func().instruction(&Instruction::I32Const(byte_offset as i32));
             self.func().instruction(&Instruction::I32Add);
-            self.lower_expression(arena, element_id, ctx);
+            self.lower_expression(arena, element_id, ctx, None);
             self.func().instruction(&store_instr);
         }
 
