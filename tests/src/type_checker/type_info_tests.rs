@@ -1333,3 +1333,117 @@ mod type_info_with_type_params {
         assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
     }
 }
+
+mod type_equality {
+    use super::*;
+
+    #[test]
+    fn identical_types_are_equal() {
+        let ti = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec![],
+        };
+        assert_eq!(ti, ti);
+    }
+
+    #[test]
+    fn different_number_types_not_equal() {
+        let i32_type = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec![],
+        };
+        let i64_type = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I64),
+            type_params: vec![],
+        };
+        assert_ne!(i32_type, i64_type);
+    }
+
+    #[test]
+    fn arrays_same_size_are_equal() {
+        let arr_a = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                5,
+            ),
+            type_params: vec![],
+        };
+        let arr_b = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                5,
+            ),
+            type_params: vec![],
+        };
+        assert_eq!(arr_a, arr_b);
+    }
+
+    #[test]
+    fn arrays_different_size_not_equal() {
+        let arr_3 = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                3,
+            ),
+            type_params: vec![],
+        };
+        let arr_5 = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                5,
+            ),
+            type_params: vec![],
+        };
+        assert_ne!(arr_3, arr_5);
+    }
+
+    #[test]
+    fn arrays_different_element_type_not_equal() {
+        let arr_i32 = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                3,
+            ),
+            type_params: vec![],
+        };
+        let arr_i64 = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I64),
+                    type_params: vec![],
+                }),
+                3,
+            ),
+            type_params: vec![],
+        };
+        assert_ne!(arr_i32, arr_i64);
+    }
+
+    #[test]
+    fn bool_not_equal_to_i32() {
+        let bool_type = TypeInfo {
+            kind: TypeInfoKind::Bool,
+            type_params: vec![],
+        };
+        let i32_type = TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec![],
+        };
+        assert_ne!(bool_type, i32_type);
+    }
+}

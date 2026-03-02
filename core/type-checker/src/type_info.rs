@@ -101,10 +101,7 @@
 //! - Queryable: `is_signed()` method for signedness checks
 
 use core::fmt;
-use std::{
-    fmt::{Display, Formatter},
-    panic,
-};
+use std::fmt::{Display, Formatter};
 
 use inference_ast::nodes::{Expression, Literal, SimpleTypeKind, Type};
 use rustc_hash::FxHashMap;
@@ -579,10 +576,11 @@ impl TypeInfo {
 
 /// Extracts the array size from an expression.
 ///
-/// Panics if the size expression is not a numeric literal.
+/// Returns 0 as a sentinel for invalid sizes (overflow, non-literal).
+/// The type checker validates array sizes and reports proper diagnostics.
 fn extract_array_size(size_expr: Expression) -> u32 {
     if let Expression::Literal(Literal::Number(num_lit)) = size_expr {
-        return num_lit.value.parse::<u32>().unwrap();
+        return num_lit.value.parse::<u32>().unwrap_or(0);
     }
     if let Expression::Identifier(identifier) = size_expr {
         todo!(
@@ -590,5 +588,5 @@ fn extract_array_size(size_expr: Expression) -> u32 {
             identifier.name
         );
     }
-    panic!("Array size must be a numeric literal");
+    0
 }

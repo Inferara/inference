@@ -35,6 +35,10 @@
     local.get $a
     local.get $b
     i32.add
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
     return
     unreachable
   )
@@ -42,6 +46,10 @@
     local.get $a
     local.get $b
     i32.sub
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
     return
     unreachable
   )
@@ -49,6 +57,10 @@
     local.get $a
     local.get $b
     i32.mul
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
     return
     unreachable
   )
@@ -56,6 +68,10 @@
     local.get $a
     local.get $b
     i32.div_s
+    i32.const 24
+    i32.shl
+    i32.const 24
+    i32.shr_s
     return
     unreachable
   )
@@ -70,6 +86,8 @@
     local.get $a
     local.get $b
     i32.add
+    i32.const 255
+    i32.and
     return
     unreachable
   )
@@ -77,6 +95,8 @@
     local.get $a
     local.get $b
     i32.div_u
+    i32.const 255
+    i32.and
     return
     unreachable
   )
@@ -98,6 +118,10 @@
     local.get $a
     local.get $b
     i32.add
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
     return
     unreachable
   )
@@ -105,6 +129,10 @@
     local.get $a
     local.get $b
     i32.div_s
+    i32.const 16
+    i32.shl
+    i32.const 16
+    i32.shr_s
     return
     unreachable
   )
@@ -119,6 +147,8 @@
     local.get $a
     local.get $b
     i32.add
+    i32.const 65535
+    i32.and
     return
     unreachable
   )
@@ -126,6 +156,8 @@
     local.get $a
     local.get $b
     i32.div_u
+    i32.const 65535
+    i32.and
     return
     unreachable
   )

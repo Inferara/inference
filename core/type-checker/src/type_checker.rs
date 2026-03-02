@@ -18,8 +18,8 @@ use anyhow::bail;
 use inference_ast::extern_prelude::ExternPrelude;
 use inference_ast::nodes::{
     ArgumentType, Definition, Directive, Expression, FunctionDefinition, Identifier, Literal,
-    Location, ModuleDefinition, OperatorKind, SimpleTypeKind, Statement, Type, UnaryOperatorKind,
-    UseDirective, Visibility,
+    Location, ModuleDefinition, OperatorKind, SimpleTypeKind, Statement, Type, TypeArray,
+    UnaryOperatorKind, UseDirective, Visibility,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -158,8 +158,8 @@ impl TypeChecker {
 
                             let param_types: Vec<TypeInfo> = method
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -179,8 +179,8 @@ impl TypeChecker {
 
                             let type_params: Vec<String> = method
                                 .type_parameters
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .map(|p| p.name())
                                 .collect();
@@ -262,7 +262,9 @@ impl TypeChecker {
             for definition in &sf.definitions {
                 match definition {
                     Definition::Constant(constant_definition) => {
-                        let const_type = TypeInfo::new(&constant_definition.ty);
+                        let const_type = self
+                            .symbol_table
+                            .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
                             const_type.clone(),
@@ -278,7 +280,7 @@ impl TypeChecker {
                         ctx.set_node_typeinfo(constant_definition.value.id(), const_type);
                     }
                     Definition::Function(function_definition) => {
-                        for param in function_definition.arguments.as_ref().unwrap_or(&vec![]) {
+                        for param in function_definition.arguments.as_deref().unwrap_or(&[]) {
                             match param {
                                 ArgumentType::SelfReference(self_ref) => {
                                     self.errors.push(TypeCheckError::SelfReferenceInFunction {
@@ -328,7 +330,8 @@ impl TypeChecker {
                                 return_type,
                                 function_definition.type_parameters.as_ref(),
                             );
-                            ctx.set_node_typeinfo(return_type.id(), TypeInfo::new(return_type));
+                            let return_type_info = TypeInfo::new(return_type);
+                            ctx.set_node_typeinfo(return_type.id(), return_type_info);
                         }
                         // Register function even if parameter validation had errors
                         // to allow error recovery and prevent spurious UndefinedFunction errors
@@ -336,15 +339,15 @@ impl TypeChecker {
                             &function_definition.name(),
                             function_definition
                                 .type_parameters
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .map(|param| param.name())
                                 .collect::<Vec<_>>(),
                             &function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -375,8 +378,8 @@ impl TypeChecker {
                             vec![],
                             &external_function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -429,7 +432,8 @@ impl TypeChecker {
 
         match ty {
             Type::Array(type_array) => {
-                self.validate_type(&type_array.element_type, type_parameters)
+                self.validate_type(&type_array.element_type, type_parameters);
+                self.validate_array_size(type_array);
             }
             Type::Simple(_) => {
                 // SimpleTypeKind only contains primitive builtin types - always valid.
@@ -475,6 +479,28 @@ impl TypeChecker {
         }
     }
 
+    /// Validates that an array type annotation has a valid size (positive, fits in u32).
+    ///
+    /// Reports `InvalidArraySize` if the size is zero (sentinel from parse failure)
+    /// or if the literal text cannot be parsed as a positive u32.
+    ///
+    /// Only handles numeric literal sizes. Non-literal sizes (e.g., `[i32; CONST]`)
+    /// are silently skipped because the grammar restricts array sizes to literals.
+    fn validate_array_size(&mut self, type_array: &TypeArray) {
+        if let Expression::Literal(Literal::Number(num_lit)) = &type_array.size {
+            let size_str = &num_lit.value;
+            match size_str.parse::<u32>() {
+                Ok(1..) => {}
+                Ok(0) | Err(_) => {
+                    self.push_error_dedup(TypeCheckError::InvalidArraySize {
+                        size: size_str.clone(),
+                        location: num_lit.location,
+                    });
+                }
+            }
+        }
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     fn infer_variables(
         &mut self,
@@ -494,7 +520,9 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
-                        let arg_type = TypeInfo::new_with_type_params(&arg.ty, &type_param_names);
+                        let arg_type = self.symbol_table.resolve_custom_type(
+                            TypeInfo::new_with_type_params(&arg.ty, &type_param_names),
+                        );
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &arg.name(),
                             arg_type,
@@ -544,9 +572,11 @@ impl TypeChecker {
             for argument in arguments {
                 match argument {
                     ArgumentType::Argument(arg) => {
+                        let arg_type =
+                            self.symbol_table.resolve_custom_type(TypeInfo::new(&arg.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &arg.name(),
-                            TypeInfo::new(&arg.ty),
+                            arg_type,
                             arg.is_mut,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
@@ -608,6 +638,16 @@ impl TypeChecker {
                             name: identifier.name.clone(),
                             location: assign_statement.location,
                         });
+                    } else if let Expression::ArrayIndexAccess(access) = &*left_expr
+                        && let Some(name) =
+                            Self::extract_root_array_name(&access.array.borrow())
+                        && let Some(false) =
+                            self.symbol_table.lookup_variable_is_mut(&name)
+                    {
+                        self.errors.push(TypeCheckError::AssignToImmutable {
+                            name,
+                            location: assign_statement.location,
+                        });
                     }
                 }
                 let target_type = self.infer_expression(&assign_statement.left.borrow(), ctx);
@@ -616,6 +656,11 @@ impl TypeChecker {
                     && let Expression::Literal(Literal::Number(num_lit)) = &*right_expr
                 {
                     ctx.set_node_typeinfo(num_lit.id, target.clone());
+                    self.validate_literal_range(
+                        &num_lit.value,
+                        &target.kind,
+                        num_lit.location,
+                    );
                 }
                 if let Expression::Uzumaki(uzumaki_rc) = &*right_expr {
                     if let Some(target) = &target_type {
@@ -627,6 +672,17 @@ impl TypeChecker {
                         });
                     }
                 } else {
+                    if let Expression::FunctionCall(fce) = &*right_expr
+                        && let Some(sig) =
+                            self.symbol_table.lookup_function(&fce.name())
+                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                    {
+                        self.errors.push(
+                            TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                location: fce.location,
+                            },
+                        );
+                    }
                     let value_type = self.infer_expression(&right_expr, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
@@ -649,6 +705,15 @@ impl TypeChecker {
             }
             Statement::Expression(expression) => {
                 self.infer_expression(expression, ctx);
+                if let Expression::FunctionCall(fce) = expression
+                    && let Some(sig) = self.symbol_table.lookup_function(&fce.name())
+                    && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                {
+                    self.errors
+                        .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            location: fce.location,
+                        });
+                }
             }
             Statement::Return(return_statement) => {
                 if matches!(
@@ -720,16 +785,43 @@ impl TypeChecker {
                 }
             }
             Statement::VariableDefinition(variable_definition_statement) => {
-                let target_type = TypeInfo::new(&variable_definition_statement.ty);
+                let target_type = self
+                    .symbol_table
+                    .resolve_custom_type(TypeInfo::new(&variable_definition_statement.ty));
+                if let Type::Array(type_array) = &variable_definition_statement.ty {
+                    self.validate_array_size(type_array);
+                }
                 if let Some(initial_value) = variable_definition_statement.value.as_ref() {
                     let mut expr_ref = initial_value.borrow_mut();
                     if let Expression::Literal(Literal::Number(num_lit)) = &*expr_ref {
                         ctx.set_node_typeinfo(num_lit.id, target_type.clone());
+                        self.validate_literal_range(
+                            &num_lit.value,
+                            &target_type.kind,
+                            num_lit.location,
+                        );
+                    }
+                    if let Expression::Literal(Literal::Array(array_lit)) = &*expr_ref
+                        && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
+                        && let Some(elements) = &array_lit.elements
+                    {
+                        for element in elements {
+                            if let Expression::Literal(Literal::Number(num_lit)) =
+                                &*element.borrow()
+                            {
+                                ctx.set_node_typeinfo(num_lit.id, (**elem_type).clone());
+                                self.validate_literal_range(
+                                    &num_lit.value,
+                                    &elem_type.kind,
+                                    num_lit.location,
+                                );
+                            }
+                        }
                     }
                     if let Expression::Uzumaki(uzumaki_rc) = &mut *expr_ref {
                         ctx.set_node_typeinfo(uzumaki_rc.id, target_type.clone());
                     } else if let Some(init_type) = self.infer_expression(&expr_ref, ctx)
-                        && init_type != TypeInfo::new(&variable_definition_statement.ty)
+                        && self.symbol_table.resolve_custom_type(init_type.clone()) != target_type
                     {
                         self.errors.push(TypeCheckError::TypeMismatch {
                             expected: target_type.clone(),
@@ -741,7 +833,7 @@ impl TypeChecker {
                 }
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &variable_definition_statement.name(),
-                    TypeInfo::new(&variable_definition_statement.ty),
+                    target_type.clone(),
                     variable_definition_statement.is_mut,
                 ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
@@ -783,7 +875,9 @@ impl TypeChecker {
                 }
             }
             Statement::ConstantDefinition(constant_definition) => {
-                let constant_type = TypeInfo::new(&constant_definition.ty);
+                let constant_type = self
+                    .symbol_table
+                    .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                 if let Err(err) = self.symbol_table.push_variable_to_scope(
                     &constant_definition.name(),
                     constant_type.clone(),
@@ -795,6 +889,13 @@ impl TypeChecker {
                         reason: Some(err.to_string()),
                         location: constant_definition.location,
                     });
+                }
+                if let Literal::Number(num_lit) = &constant_definition.value {
+                    self.validate_literal_range(
+                        &num_lit.value,
+                        &constant_type.kind,
+                        num_lit.location,
+                    );
                 }
                 ctx.set_node_typeinfo(constant_definition.value.id(), constant_type.clone());
                 ctx.set_node_typeinfo(constant_definition.id, constant_type);
@@ -810,6 +911,18 @@ impl TypeChecker {
     ) -> Option<TypeInfo> {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
+                if let Expression::FunctionCall(inner_fce) =
+                    &*array_index_access_expression.array.borrow()
+                    && let Some(inner_sig) =
+                        self.symbol_table.lookup_function(&inner_fce.name())
+                    && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                {
+                    self.errors.push(
+                        TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            location: array_index_access_expression.location,
+                        },
+                    );
+                }
                 if let Some(type_info) = ctx.get_node_typeinfo(array_index_access_expression.id) {
                     Some(type_info.clone())
                 } else if let Some(array_type) =
@@ -817,12 +930,22 @@ impl TypeChecker {
                 {
                     if let Some(index_type) =
                         self.infer_expression(&array_index_access_expression.index.borrow(), ctx)
-                        && !index_type.is_number()
                     {
-                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
-                            found: index_type,
-                            location: array_index_access_expression.location,
-                        });
+                        if !index_type.is_number() {
+                            self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                                found: index_type,
+                                location: array_index_access_expression.location,
+                            });
+                        } else if matches!(
+                            index_type.kind,
+                            TypeInfoKind::Number(NumberType::I64)
+                                | TypeInfoKind::Number(NumberType::U64)
+                        ) {
+                            self.errors.push(TypeCheckError::ArrayIndex64Bit {
+                                found: index_type,
+                                location: array_index_access_expression.location,
+                            });
+                        }
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -1074,8 +1197,42 @@ impl TypeChecker {
                             }
 
                             if let Some(arguments) = &function_call_expression.arguments {
-                                for arg in arguments {
-                                    self.infer_expression(&arg.1.borrow(), ctx);
+                                for (i, arg) in arguments.iter().enumerate() {
+                                    if let Expression::Literal(Literal::Array(_)) =
+                                        &*arg.1.borrow()
+                                    {
+                                        self.errors
+                                            .push(TypeCheckError::ArrayLiteralAsArgument {
+                                                location: arg.1.borrow().location(),
+                                            });
+                                    }
+                                    if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                                        && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
+                                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                                    {
+                                        self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                            location: inner_fce.location,
+                                        });
+                                    }
+                                    let arg_type =
+                                        self.infer_expression(&arg.1.borrow(), ctx);
+                                    if let Some(arg_type) = arg_type
+                                        && i < signature.param_types.len()
+                                        && arg_type != signature.param_types[i]
+                                    {
+                                        let arg_name = format!("arg{i}");
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: signature.param_types[i].clone(),
+                                            found: arg_type,
+                                            context: TypeMismatchContext::MethodArgument {
+                                                type_name: type_name.clone(),
+                                                method_name: method_name.clone(),
+                                                arg_name,
+                                                arg_index: i,
+                                            },
+                                            location: function_call_expression.location,
+                                        });
+                                    }
                                 }
                             }
 
@@ -1164,8 +1321,42 @@ impl TypeChecker {
                                 }
 
                                 if let Some(arguments) = &function_call_expression.arguments {
-                                    for arg in arguments {
-                                        self.infer_expression(&arg.1.borrow(), ctx);
+                                    for (i, arg) in arguments.iter().enumerate() {
+                                        if let Expression::Literal(Literal::Array(_)) =
+                                            &*arg.1.borrow()
+                                        {
+                                            self.errors
+                                                .push(TypeCheckError::ArrayLiteralAsArgument {
+                                                    location: arg.1.borrow().location(),
+                                                });
+                                        }
+                                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                                            && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
+                                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                                        {
+                                            self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                                location: inner_fce.location,
+                                            });
+                                        }
+                                        let arg_type =
+                                            self.infer_expression(&arg.1.borrow(), ctx);
+                                        if let Some(arg_type) = arg_type
+                                            && i < signature.param_types.len()
+                                            && arg_type != signature.param_types[i]
+                                        {
+                                            let arg_name = format!("arg{i}");
+                                            self.errors.push(TypeCheckError::TypeMismatch {
+                                                expected: signature.param_types[i].clone(),
+                                                found: arg_type,
+                                                context: TypeMismatchContext::MethodArgument {
+                                                    type_name: type_name.clone(),
+                                                    method_name: method_name.clone(),
+                                                    arg_name,
+                                                    arg_index: i,
+                                                },
+                                                location: function_call_expression.location,
+                                            });
+                                        }
                                     }
                                 }
 
@@ -1311,10 +1502,46 @@ impl TypeChecker {
                 // Apply substitution to return type
                 let return_type = signature.return_type.substitute(&substitutions);
 
-                // Infer argument types
+                // Infer argument types and validate against parameter types
                 if let Some(arguments) = &function_call_expression.arguments {
-                    for arg in arguments {
-                        self.infer_expression(&arg.1.borrow(), ctx);
+                    for (i, arg) in arguments.iter().enumerate() {
+                        if let Expression::Literal(Literal::Array(_)) = &*arg.1.borrow() {
+                            self.errors
+                                .push(TypeCheckError::ArrayLiteralAsArgument {
+                                    location: arg.1.borrow().location(),
+                                });
+                        }
+                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                            && let Some(inner_sig) =
+                                self.symbol_table.lookup_function(&inner_fce.name())
+                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        {
+                            self.errors.push(
+                                TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                    location: inner_fce.location,
+                                },
+                            );
+                        }
+                        let arg_type = self.infer_expression(&arg.1.borrow(), ctx);
+                        if let Some(arg_type) = arg_type
+                            && i < signature.param_types.len()
+                        {
+                            let expected =
+                                signature.param_types[i].substitute(&substitutions);
+                            if arg_type != expected {
+                                let arg_name = format!("arg{i}");
+                                self.errors.push(TypeCheckError::TypeMismatch {
+                                    expected,
+                                    found: arg_type,
+                                    context: TypeMismatchContext::FunctionArgument {
+                                        function_name: function_call_expression.name(),
+                                        arg_name,
+                                        arg_index: i,
+                                    },
+                                    location: function_call_expression.location,
+                                });
+                            }
+                        }
                     }
                 }
 
@@ -1568,60 +1795,6 @@ impl TypeChecker {
         }
     }
 
-    #[allow(dead_code)]
-    fn types_equal(left: &Type, right: &Type) -> bool {
-        match (left, right) {
-            (Type::Simple(left), Type::Simple(right)) => left == right,
-            (Type::Array(left), Type::Array(right)) => {
-                Self::types_equal(&left.element_type, &right.element_type)
-            }
-            (Type::Generic(left), Type::Generic(right)) => {
-                left.base.name() == right.base.name() && left.parameters == right.parameters
-            }
-            (Type::Qualified(left), Type::Qualified(right)) => left.name() == right.name(),
-            (Type::QualifiedName(left), Type::QualifiedName(right)) => {
-                left.qualifier() == right.qualifier() && left.name() == right.name()
-            }
-            (Type::Custom(left), Type::Custom(right)) => left.name() == right.name(),
-            (Type::Function(left), Type::Function(right)) => {
-                let left_has_return_type = left.returns.is_some();
-                let right_has_return_type = right.returns.is_some();
-                if left_has_return_type != right_has_return_type {
-                    return false;
-                }
-                if left_has_return_type
-                    && let (Some(left_return_type), Some(right_return_type)) =
-                        (&left.returns, &right.returns)
-                    && !Self::types_equal(left_return_type, right_return_type)
-                {
-                    return false;
-                }
-                let left_has_parameters = left.parameters.is_some();
-                let right_has_parameters = right.parameters.is_some();
-                if left_has_parameters != right_has_parameters {
-                    return false;
-                }
-                if left_has_parameters
-                    && let (Some(left_parameters), Some(right_parameters)) =
-                        (&left.parameters, &right.parameters)
-                {
-                    if left_parameters.len() != right_parameters.len() {
-                        return false;
-                    }
-                    for (left_param, right_param) in
-                        left_parameters.iter().zip(right_parameters.iter())
-                    {
-                        if !Self::types_equal(left_param, right_param) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// Process a module definition.
     ///
     /// Creates a new scope for the module and processes all definitions within it.
@@ -1717,9 +1890,12 @@ impl TypeChecker {
                         self.infer_variables(function_definition.clone(), ctx);
                     }
                     Definition::Constant(constant_definition) => {
+                        let const_type = self
+                            .symbol_table
+                            .resolve_custom_type(TypeInfo::new(&constant_definition.ty));
                         if let Err(err) = self.symbol_table.push_variable_to_scope(
                             &constant_definition.name(),
-                            TypeInfo::new(&constant_definition.ty),
+                            const_type,
                             false,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
@@ -1736,8 +1912,8 @@ impl TypeChecker {
                             vec![],
                             &external_function_definition
                                 .arguments
-                                .as_ref()
-                                .unwrap_or(&vec![])
+                                .as_deref()
+                                .unwrap_or(&[])
                                 .iter()
                                 .filter_map(|param| match param {
                                     ArgumentType::SelfReference(_) => None,
@@ -2102,6 +2278,60 @@ impl TypeChecker {
         }
 
         substitutions
+    }
+
+    /// Extracts the root identifier name from a potentially nested array index
+    /// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
+    /// also returns `Some("arr")`. Returns `None` for non-identifier bases
+    /// (e.g., function calls).
+    fn extract_root_array_name(expr: &Expression) -> Option<String> {
+        match expr {
+            Expression::Identifier(id) => Some(id.name.clone()),
+            Expression::ArrayIndexAccess(access) => {
+                Self::extract_root_array_name(&access.array.borrow())
+            }
+            _ => None,
+        }
+    }
+
+    /// Validates that a numeric literal value fits within the target type's range.
+    ///
+    /// Pushes a `LiteralOutOfRange` error if the value exceeds the bounds of
+    /// the target type. Silently returns if the target type is not a numeric type.
+    /// If the literal is too large to parse as i128, it is guaranteed out of range
+    /// for any Inference integer type and is reported as such.
+    fn validate_literal_range(
+        &mut self,
+        value: &str,
+        target_kind: &TypeInfoKind,
+        location: Location,
+    ) {
+        let TypeInfoKind::Number(number_type) = target_kind else {
+            return;
+        };
+        let (type_name, min, max): (&str, i128, i128) = match number_type {
+            NumberType::I8 => ("i8", i128::from(i8::MIN), i128::from(i8::MAX)),
+            NumberType::I16 => ("i16", i128::from(i16::MIN), i128::from(i16::MAX)),
+            NumberType::I32 => ("i32", i128::from(i32::MIN), i128::from(i32::MAX)),
+            NumberType::I64 => ("i64", i128::from(i64::MIN), i128::from(i64::MAX)),
+            NumberType::U8 => ("u8", i128::from(u8::MIN), i128::from(u8::MAX)),
+            NumberType::U16 => ("u16", i128::from(u16::MIN), i128::from(u16::MAX)),
+            NumberType::U32 => ("u32", i128::from(u32::MIN), i128::from(u32::MAX)),
+            NumberType::U64 => ("u64", i128::from(u64::MIN), i128::from(u64::MAX)),
+        };
+        let out_of_range = match value.parse::<i128>() {
+            Ok(parsed) => parsed < min || parsed > max,
+            Err(_) => true,
+        };
+        if out_of_range {
+            self.errors.push(TypeCheckError::LiteralOutOfRange {
+                value: value.to_string(),
+                type_name: type_name.to_string(),
+                min,
+                max,
+                location,
+            });
+        }
     }
 
     /// Push an error, deduplicating errors for the same unknown type/function/identifier.

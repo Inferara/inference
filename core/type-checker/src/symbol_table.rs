@@ -24,7 +24,7 @@ use std::rc::{Rc, Weak};
 
 use anyhow::bail;
 
-use crate::type_info::TypeInfo;
+use crate::type_info::{TypeInfo, TypeInfoKind};
 use inference_ast::arena::Arena;
 use inference_ast::nodes::{
     ArgumentType, Definition, Location, ModuleDefinition, SimpleTypeKind, Type, Visibility,
@@ -594,6 +594,30 @@ impl SymbolTable {
         }
     }
 
+    /// Resolve `TypeInfoKind::Custom(name)` to `Struct(name)` or `Enum(name)`
+    /// by looking up the name in the symbol table. Falls through to `Custom`
+    /// if the name is not found (e.g., forward references in nested modules).
+    /// Recurses into array element types.
+    #[must_use = "returns the resolved type; discarding it loses the resolution"]
+    pub(crate) fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
+        match &ti.kind {
+            TypeInfoKind::Custom(name) => {
+                if self.lookup_struct(name).is_some() {
+                    ti.kind = TypeInfoKind::Struct(name.clone());
+                } else if self.lookup_enum(name).is_some() {
+                    ti.kind = TypeInfoKind::Enum(name.clone());
+                }
+                ti
+            }
+            TypeInfoKind::Array(elem, size) => {
+                let resolved_elem = self.resolve_custom_type(*elem.clone());
+                ti.kind = TypeInfoKind::Array(Box::new(resolved_elem), *size);
+                ti
+            }
+            _ => ti,
+        }
+    }
+
     pub(crate) fn register_function(
         &mut self,
         name: &str,
@@ -621,15 +645,22 @@ impl SymbolTable {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
             // Use type_params when constructing TypeInfo so that
-            // type parameters like T, U are recognized as Generic types
+            // type parameters like T, U are recognized as Generic types.
+            // Then resolve Custom(name) to Struct(name) or Enum(name)
+            // using the symbol table, so that parameter types match
+            // inferred argument types without a compatibility shim.
             let sig = FuncInfo {
                 name: name.to_string(),
                 type_params: type_params.clone(),
                 param_types: param_types
                     .iter()
-                    .map(|t| TypeInfo::new_with_type_params(t, &type_params))
+                    .map(|t| {
+                        let ti = TypeInfo::new_with_type_params(t, &type_params);
+                        self.resolve_custom_type(ti)
+                    })
                     .collect(),
-                return_type: TypeInfo::new_with_type_params(return_type, &type_params),
+                return_type: self
+                    .resolve_custom_type(TypeInfo::new_with_type_params(return_type, &type_params)),
                 visibility,
                 definition_scope_id: scope_id,
             };
@@ -922,8 +953,8 @@ impl SymbolTable {
                     .unwrap_or_default();
                 let param_types: Vec<_> = f
                     .arguments
-                    .as_ref()
-                    .unwrap_or(&vec![])
+                    .as_deref()
+                    .unwrap_or(&[])
                     .iter()
                     .filter_map(|a| match a {
                         ArgumentType::Argument(arg) => Some(arg.ty.clone()),

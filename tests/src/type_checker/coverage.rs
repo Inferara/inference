@@ -353,14 +353,21 @@ mod expression_coverage {
     }
 
     #[test]
-    fn test_array_literal_empty() {
+    fn test_array_literal_empty_rejected() {
         let source = r#"fn test() -> i32 { let arr: [i32; 0] = []; return 42; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_ok(),
-            "Empty array literal should work, got: {:?}",
-            result.err()
+            result.is_err(),
+            "Array with size 0 should be rejected"
         );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("invalid array size"),
+                "Error should mention invalid array size: {}",
+                error_msg
+            );
+        }
     }
 
     #[test]

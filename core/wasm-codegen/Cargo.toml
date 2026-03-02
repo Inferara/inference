@@ -14,3 +14,8 @@ anyhow.workspace = true
 rustc-hash.workspace = true
 cov-mark.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+inf-wasmparser.workspace = true
+wasmprinter = "0.245.1"
+cov-mark = { workspace = true, features = ["enable"] }

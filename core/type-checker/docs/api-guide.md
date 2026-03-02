@@ -124,7 +124,23 @@ Concretely:
 //                                                       ^--- i32 default applies
 ```
 
-When querying number literal nodes, always use the type info from the `TypedContext` rather than assuming `i32`. The stored type reflects the full declared Inference type, not just the underlying WASM representation.
+#### Array element type propagation
+
+When an array literal is the initializer of a variable definition with an explicit array type annotation, the type checker propagates the element type onto each numeric literal in the array:
+
+```rust
+// Source:  let arr: [i8; 3] = [10, 20, 30];
+//
+// After type checking:
+//   typed_context.get_node_typeinfo(literal_10_id) → TypeInfo { kind: Number(I8) }
+//   typed_context.get_node_typeinfo(literal_20_id) → TypeInfo { kind: Number(I8) }
+//   typed_context.get_node_typeinfo(literal_30_id) → TypeInfo { kind: Number(I8) }
+//                                                    ^--- element type was propagated
+```
+
+This ensures that array element literals in the code generator receive the correct type context, allowing the codegen to emit the correct WASM instructions for each element.
+
+When querying number literal nodes (especially those within arrays), always use the type info from the `TypedContext` rather than assuming `i32`. The stored type reflects the full declared Inference type, not just the underlying WASM representation.
 
 ### Getting Function Definitions
 
@@ -420,6 +436,50 @@ match error {
 ```
 
 ## Advanced Patterns
+
+### Working with Custom Type Resolution (Arrays and Structs)
+
+When a type is declared with a custom name (e.g., a struct or enum), the type checker must resolve the name to its concrete type definition. This is particularly important for array types, where element types can be custom types.
+
+```rust
+use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
+
+// The symbol table provides a method to resolve custom types
+let resolved_type = symbol_table.resolve_custom_type(type_info);
+
+match &resolved_type.kind {
+    TypeInfoKind::Struct(name) => {
+        println!("Resolved to struct: {}", name);
+    }
+    TypeInfoKind::Enum(name) => {
+        println!("Resolved to enum: {}", name);
+    }
+    TypeInfoKind::Array(elem_type, size) => {
+        // If the element type is custom, resolve it too
+        let resolved_elem = symbol_table.resolve_custom_type((**elem_type).clone());
+        println!("Array of {} with size {}", resolved_elem, size);
+    }
+    _ => println!("Other type"),
+}
+```
+
+This is used internally to ensure that custom types in function parameters match inferred argument types exactly, without needing a compatibility shim.
+
+### Finding Enclosing Variable Definitions
+
+When processing expressions, you sometimes need to find which variable definition encloses a given node. The `TypedContext` provides a method to walk the parent chain:
+
+```rust
+// Find the enclosing variable definition for a node
+if let Some(var_name) = typed_context.find_enclosing_variable_name(node_id) {
+    println!("This expression is inside variable `{}`", var_name);
+}
+```
+
+This is useful when:
+- Tracking which variables are referenced within expressions
+- Collecting type information about the context where an expression appears
+- Building scope-aware diagnostics
 
 ### Verifying All Expressions Have Types
 

@@ -313,6 +313,29 @@ Test organization:
 - Detailed error messages with context and location information
 - Precise source locations for all errors
 
+### Fixed-Size Array Support (Issue #148)
+
+**Array Type Resolution**:
+- Custom type names (structs and enums) are now resolved to their concrete definitions
+- `resolve_custom_type()` method in symbol table handles resolution recursively for array element types
+- Array types with custom element types (e.g., `[MyStruct; 10]`) are fully supported
+- Forward references are handled gracefully (custom types fall through to `Custom` variant if not found)
+
+**Array Element Type Propagation**:
+- When an array literal initializes a variable with explicit array type annotation, element types are propagated to all numeric literals in the array
+- Enables the code generator to emit correct WASM instructions for each element
+- Example: `let arr: [i8; 3] = [10, 20, 30];` propagates `i8` type to all three literals
+
+**Array Assignment Validation**:
+- Assignment to array indices (e.g., `arr[i] = x;`) now validates immutability
+- Extracting the root array name from nested index expressions (e.g., `arr[i][j]`)
+- Proper error reporting when assigning to immutable array elements
+
+**Argument Type Validation**:
+- Function and method calls now validate argument types against parameter signatures
+- Type mismatches in arguments produce detailed error messages with argument index and name
+- Works with generic type parameters and custom types
+
 ## Implementation Details
 
 ### Symbol Table

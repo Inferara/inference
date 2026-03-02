@@ -423,6 +423,54 @@ pub enum TypeCheckError {
     /// Use `let mut` to declare a mutable binding.
     #[error("{location}: cannot assign to immutable variable `{name}`")]
     AssignToImmutable { name: String, location: Location },
+
+    /// Numeric literal value is outside the valid range for the target type.
+    ///
+    /// For example, `let x: u8 = 256` or `let y: i8 = 200`.
+    #[error(
+        "{location}: literal `{value}` is out of range for type `{type_name}` (valid range: {min}..={max})"
+    )]
+    LiteralOutOfRange {
+        value: String,
+        type_name: String,
+        min: i128,
+        max: i128,
+        location: Location,
+    },
+
+    /// Array literal passed directly as a function argument.
+    ///
+    /// Array literals must be assigned to a variable before passing to functions
+    /// because the codegen requires a named variable for frame slot allocation.
+    #[error(
+        "{location}: array literals cannot be passed directly as function arguments; assign to a variable first"
+    )]
+    ArrayLiteralAsArgument { location: Location },
+
+    /// Array-returning function call used in an unsupported expression position.
+    ///
+    /// Array-returning functions use the sret calling convention, which requires
+    /// the caller to provide a destination pointer. They can only appear in
+    /// variable definitions (`let x = foo()`) or return statements (`return foo()`).
+    #[error(
+        "{location}: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+    )]
+    ArrayReturnCallInExpressionPosition { location: Location },
+
+    /// Array index expression uses a 64-bit integer type.
+    ///
+    /// WASM array indexing uses `i32.mul` for address computation, so the index
+    /// must be a 32-bit (or sub-32-bit) integer type.
+    #[error("{location}: array index must be a 32-bit integer type, found `{found}`")]
+    ArrayIndex64Bit { found: TypeInfo, location: Location },
+
+    /// Array size is invalid: zero, negative, or exceeds `u32::MAX`.
+    ///
+    /// Array sizes must be positive integer literals that fit in 32 bits.
+    #[error(
+        "{location}: invalid array size `{size}`; must be a positive integer that fits in 32 bits"
+    )]
+    InvalidArraySize { size: String, location: Location },
 }
 
 impl TypeCheckError {
@@ -463,7 +511,12 @@ impl TypeCheckError {
             | TypeCheckError::PrivateAccessViolation { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
-            | TypeCheckError::AssignToImmutable { location, .. } => location,
+            | TypeCheckError::AssignToImmutable { location, .. }
+            | TypeCheckError::LiteralOutOfRange { location, .. }
+            | TypeCheckError::ArrayLiteralAsArgument { location, .. }
+            | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
+            | TypeCheckError::ArrayIndex64Bit { location, .. }
+            | TypeCheckError::InvalidArraySize { location, .. } => location,
         }
     }
 }
@@ -1048,6 +1101,82 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: cannot assign to immutable variable `x`"
+        );
+    }
+
+    #[test]
+    fn display_literal_out_of_range() {
+        let err = TypeCheckError::LiteralOutOfRange {
+            value: "200".to_string(),
+            type_name: "i8".to_string(),
+            min: -128,
+            max: 127,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: literal `200` is out of range for type `i8` (valid range: -128..=127)"
+        );
+    }
+
+    #[test]
+    fn display_array_literal_as_argument() {
+        let err = TypeCheckError::ArrayLiteralAsArgument {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array literals cannot be passed directly as function arguments; assign to a variable first"
+        );
+    }
+
+    #[test]
+    fn display_array_return_call_in_expression_position() {
+        let err = TypeCheckError::ArrayReturnCallInExpressionPosition {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+        );
+    }
+
+    #[test]
+    fn display_array_index_64bit() {
+        let err = TypeCheckError::ArrayIndex64Bit {
+            found: TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            },
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array index must be a 32-bit integer type, found `i64`"
+        );
+    }
+
+    #[test]
+    fn display_invalid_array_size_overflow() {
+        let err = TypeCheckError::InvalidArraySize {
+            size: "999999999999999999".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: invalid array size `999999999999999999`; must be a positive integer that fits in 32 bits"
+        );
+    }
+
+    #[test]
+    fn display_invalid_array_size_zero() {
+        let err = TypeCheckError::InvalidArraySize {
+            size: "0".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: invalid array size `0`; must be a positive integer that fits in 32 bits"
         );
     }
 }
