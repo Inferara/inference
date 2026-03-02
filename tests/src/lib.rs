@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+mod analysis;
 mod ast;
 mod codegen;
 mod type_checker;

@@ -44,10 +44,10 @@
 //! ```
 //!
 //! The parser uses tree-sitter for concrete syntax tree (CST) construction,
-//! then transforms it into a typed AST stored in an [`Arena`]. The arena provides
+//! then transforms it into a typed AST stored in an [`AstArena`]. The arena provides
 //! O(1) node lookup and maintains parent-child relationships for efficient traversal.
 //!
-//! [`Arena`]: inference_ast::arena::Arena
+//! [`AstArena`]: inference_ast::arena::AstArena
 //!
 //! ### Phase 2: Type Check
 //!
@@ -75,9 +75,8 @@
 //!
 //! ### Phase 3: Analyze
 //!
-//! Performs semantic analysis on the typed AST. This phase is currently under
-//! active development (WIP) and serves as a placeholder for future semantic
-//! analysis passes.
+//! Performs semantic analysis on the typed AST. Uses a Rule-based architecture where each check is
+//! an independent struct implementing the `Rule` trait.
 //!
 //! ```rust,no_run
 //! use inference::{parse, type_check, analyze};
@@ -88,8 +87,6 @@
 //! analyze(&typed_context)?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
-//!
-//! **Status**: Work in progress. Currently returns `Ok(())` without performing checks.
 //!
 //! ### Phase 4: Codegen
 //!
@@ -154,7 +151,7 @@
 //! │                                               └─────────────┘
 //! └─────────────────────────────────────────────────────────────┘
 //!          ↓              ↓              ↓              ↓
-//!   inference_ast  type_checker  (WIP)  wasm_codegen  wasm_to_v
+//!   inference_ast  type_checker  analysis  wasm_codegen  wasm_to_v
 //! ```
 //!
 //! ## Error Handling
@@ -231,8 +228,8 @@
 //!
 //! - **Single-file support**: Multi-file compilation is not yet implemented.
 //!   The AST expects a single source file as input.
-//! - **Analyze phase**: The semantic analysis phase is work-in-progress and
-//!   currently returns `Ok(())` without performing any checks.
+//! - **Analyze phase**: The semantic analysis phase currently covers loop
+//!   control flow validation. Additional analyses are planned for future releases.
 //!
 //! ## CLI Tools
 //!
@@ -247,7 +244,7 @@
 //!
 //! ### Internal Crates
 //!
-//! - [`inference_ast::arena::Arena`] - Arena-based AST storage
+//! - [`inference_ast::arena::AstArena`] - Arena-based AST storage
 //! - [`inference_ast::builder::Builder`] - AST construction from tree-sitter CST
 //! - [`inference_type_checker::TypeCheckerBuilder`] - Type checking entry point
 //! - [`inference_type_checker::typed_context::TypedContext`] - Type information storage
@@ -260,7 +257,7 @@
 //! - [Inference Book](https://github.com/Inferara/book)
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
 
-use inference_ast::{arena::Arena, builder::Builder};
+use inference_ast::{arena::AstArena, builder::Builder};
 use inference_type_checker::typed_context::TypedContext;
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
@@ -270,9 +267,9 @@ use inference_type_checker::typed_context::TypedContext;
 /// 2. Parses the source code into a Concrete Syntax Tree (CST)
 /// 3. Transforms the CST into an arena-based AST using [`Builder`]
 ///
-/// The resulting [`Arena`] stores all AST nodes with unique IDs and maintains
+/// The resulting [`AstArena`] stores all AST nodes with unique IDs and maintains
 /// parent-child relationships for efficient traversal. Root nodes are
-/// [`SourceFile`] nodes that represent the top-level compilation unit.
+/// [`SourceFileData`] entries that represent the top-level compilation unit.
 ///
 /// # Examples
 ///
@@ -301,10 +298,10 @@ use inference_type_checker::typed_context::TypedContext;
 /// let source = "fn factorial(n: i32) -> i32 { return n; }";
 /// let arena = parse(source)?;
 ///
-/// // Access parsed functions
-/// let functions = arena.functions();
-/// assert_eq!(functions.len(), 1);
-/// assert_eq!(functions[0].name.name, "factorial");
+/// // Access parsed function definitions
+/// let func_ids = arena.function_def_ids();
+/// assert_eq!(func_ids.len(), 1);
+/// assert_eq!(arena.def_name(func_ids[0]), "factorial");
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -323,8 +320,8 @@ use inference_type_checker::typed_context::TypedContext;
 /// "#;
 ///
 /// let arena = parse(source)?;
-/// let functions = arena.functions();
-/// assert_eq!(functions.len(), 1);
+/// let func_ids = arena.function_def_ids();
+/// assert_eq!(func_ids.len(), 1);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -344,10 +341,10 @@ use inference_type_checker::typed_context::TypedContext;
 /// into the tree-sitter parser. This indicates a critical setup issue with the
 /// `tree-sitter-inference` dependency and should never occur in normal operation.
 ///
-/// [`SourceFile`]: inference_ast::nodes::SourceFile
+/// [`SourceFileData`]: inference_ast::nodes::SourceFileData
 /// [`Builder`]: inference_ast::builder::Builder
-/// [`Arena`]: inference_ast::arena::Arena
-pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
+/// [`AstArena`]: inference_ast::arena::AstArena
+pub fn parse(source_code: &str) -> anyhow::Result<AstArena> {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -398,8 +395,8 @@ pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
 /// let typed_context = type_check(arena)?;
 ///
 /// // The typed context now contains type information for all nodes
-/// let functions = typed_context.functions();
-/// assert_eq!(functions.len(), 1);
+/// let func_ids = typed_context.function_def_ids();
+/// assert_eq!(func_ids.len(), 1);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -476,7 +473,7 @@ pub fn parse(source_code: &str) -> anyhow::Result<Arena> {
 ///
 /// [`TypeInfo`]: inference_type_checker::type_info::TypeInfo
 /// [`TypedContext`]: inference_type_checker::typed_context::TypedContext
-pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
+pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
     let type_checker_builder =
         inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?;
     Ok(type_checker_builder.typed_context())
@@ -484,19 +481,18 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 
 /// Performs semantic analysis on the typed AST.
 ///
-/// This function is currently a placeholder for future semantic analysis passes.
-/// Planned analyses include:
+/// This function runs control flow analysis passes on the typed AST,
+/// validating invariants that go beyond type correctness. Currently includes:
+///
+/// - **Loop control flow validation**: Ensures `break` appears only inside loops
+///   and not inside non-deterministic blocks, `return` does not appear inside
+///   loops, and infinite loops contain a `break` statement.
+///
+/// Future analyses will include:
 /// - Dead code detection
 /// - Unused variable warnings
 /// - Unreachable code analysis
-/// - Control flow validation
 /// - Initialization checking
-///
-/// # Current Status
-///
-/// **Work in Progress**: This phase is under active development and currently
-/// returns `Ok(())` without performing any checks. Once implemented, it will
-/// provide additional semantic guarantees beyond type correctness.
 ///
 /// # Examples
 ///
@@ -506,28 +502,23 @@ pub fn type_check(arena: Arena) -> anyhow::Result<TypedContext> {
 /// let source = r#"fn main() { return 0; }"#;
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-///
-/// // Currently a no-op, but will perform semantic checks in the future
 /// analyze(&typed_context)?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
 /// # Errors
 ///
-/// Currently always returns `Ok(())`. Future implementations will return errors
-/// for semantic violations that are not type errors, such as:
-/// - Use of uninitialized variables
-/// - Unreachable code paths
-/// - Dead code that should be removed
-/// - Control flow violations (e.g., missing return statements)
-/// - Infinite loops without break conditions
+/// Returns an error if any control flow violations are found, such as:
+/// - `break` statement outside a loop body
+/// - `break` statement inside a non-deterministic block
+/// - `return` statement inside a loop body
+/// - Infinite loop without a `break` statement
 ///
 /// # Parameters
 ///
 /// - `typed_context`: The typed AST context from [`type_check`]
-pub fn analyze(_: &TypedContext) -> anyhow::Result<()> {
-    // todo!("Type analysis not yet implemented");
-    Ok(())
+pub fn analyze(typed_context: &TypedContext) -> anyhow::Result<()> {
+    inference_analysis::analyze(typed_context).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)
@@ -691,9 +682,7 @@ pub fn codegen(
 /// - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 /// - [`inference_wasm_to_v_translator`] for implementation details
 pub fn wasm_to_v(mod_name: &str, wasm: &[u8]) -> anyhow::Result<String> {
-    if let Ok(v) =
-        inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm)
-    {
+    if let Ok(v) = inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm) {
         Ok(v)
     } else {
         Err(anyhow::anyhow!("Error translating WebAssembly to V"))

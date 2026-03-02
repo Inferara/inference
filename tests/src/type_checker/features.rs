@@ -924,46 +924,43 @@ mod generics_tests {
 
     #[test]
     fn test_generic_function_parsing() {
-        // First test that the AST parses the T' syntax correctly
-        use inference_ast::nodes::{ArgumentType, AstNode, Definition, Type};
+        use crate::utils::find_function_by_name;
+        use inference_ast::nodes::{ArgKind, Def, TypeNode};
+
         let source = r#"fn identity T'(x: T) -> T { return x; }"#;
         let arena = build_ast(source.to_string());
 
-        let funcs =
-            arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Function(_))));
-        assert_eq!(funcs.len(), 1, "Expected 1 function definition");
+        let def_id = find_function_by_name(&arena, "identity")
+            .expect("Should find function 'identity'");
 
-        if let AstNode::Definition(Definition::Function(func)) = &funcs[0] {
-            // Check type_parameters
-            assert!(
-                func.type_parameters.is_some(),
-                "Function should have type_parameters"
-            );
-            let type_params = func.type_parameters.as_ref().unwrap();
+        if let Def::Function {
+            type_params, args, ..
+        } = &arena[def_id].kind
+        {
             assert_eq!(type_params.len(), 1, "Expected 1 type parameter");
             assert_eq!(
-                type_params[0].name(),
-                "T",
+                arena[type_params[0]].name, "T",
                 "Type parameter should be named 'T'"
             );
 
-            // Check argument type
-            let args = func.arguments.as_ref().expect("Function should have args");
             assert_eq!(args.len(), 1, "Expected 1 argument");
-            if let ArgumentType::Argument(arg) = &args[0] {
-                // The type of x should be T - check what variant it is
-                match &arg.ty {
-                    Type::Custom(ident) => {
-                        assert_eq!(ident.name(), "T", "Argument type should be T");
+            if let ArgKind::Named { ty, .. } = &args[0].kind {
+                match &arena[*ty].kind {
+                    TypeNode::Custom(ident_id) => {
+                        assert_eq!(arena[*ident_id].name, "T", "Argument type should be T");
                     }
-                    Type::Simple(simple) => {
+                    TypeNode::Simple(simple) => {
                         panic!("T was parsed as Simple({simple:?}) instead of Custom");
                     }
                     other => {
                         panic!("Unexpected type variant for T: {:?}", other);
                     }
                 }
+            } else {
+                panic!("Expected Named argument");
             }
+        } else {
+            panic!("Expected Function definition");
         }
     }
 
@@ -983,7 +980,8 @@ mod generics_tests {
     fn test_identity_function_with_explicit_type() {
         // Test parsing of function call with type arguments
         // First, let's check if the parser supports explicit type args on calls
-        use inference_ast::nodes::{AstNode, Definition, Expression, Statement};
+        use crate::utils::collect_all_exprs;
+        use inference_ast::nodes::Expr;
         let source = r#"
             fn identity T'(x: T) -> T {
                 return x;
@@ -994,17 +992,17 @@ mod generics_tests {
         "#;
         let arena = build_ast(source.to_string());
 
-        // Find the function call expression
-        let func_calls = arena
-            .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::FunctionCall(_))));
+        // Find function call expressions via arena traversal
+        let func_call_ids =
+            collect_all_exprs(&arena, &|e| matches!(e, Expr::FunctionCall { .. }));
 
-        // Check that there are two function calls: one for identity(42) in test()
-        // If this fails, print debug info
-        if !func_calls.is_empty()
-            && let AstNode::Expression(Expression::FunctionCall(call)) = &func_calls[0]
-        {
-            println!("Function call name: '{}'", call.name());
-            println!("Type parameters: {:?}", call.type_parameters);
+        // Check that there is at least one function call
+        if let Some(&call_id) = func_call_ids.first() {
+            if let Expr::FunctionCall { function, .. } = &arena[call_id].kind {
+                if let Expr::Identifier(ident_id) = &arena[*function].kind {
+                    println!("Function call name: '{}'", arena[*ident_id].name);
+                }
+            }
         }
 
         // Type checking should work with type inference

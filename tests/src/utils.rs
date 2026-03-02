@@ -1,7 +1,10 @@
 use inference_ast::{
-    arena::Arena,
+    arena::AstArena,
     builder::Builder,
-    nodes::{AstNode, Definition, Expression, OperatorKind, Statement, Type, UnaryOperatorKind},
+    ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId},
+    nodes::{
+        ArgKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind,
+    },
 };
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
@@ -11,12 +14,12 @@ pub(crate) fn get_test_data_path() -> std::path::PathBuf {
     manifest_dir.join("test_data")
 }
 
-pub(crate) fn build_ast(source_code: String) -> Arena {
+pub(crate) fn build_ast(source_code: String) -> AstArena {
     try_build_ast(source_code)
         .expect("Failed to build AST - check for syntax errors in the test source")
 }
 
-pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<Arena> {
+pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<AstArena> {
     let inference_language = tree_sitter_inference::language();
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -217,9 +220,7 @@ pub(crate) fn assert_wasms_modules_equivalence(expected: &[u8], actual: &[u8]) {
     }
 }
 
-pub(crate) fn parse_simple_type(type_name: &str) -> Option<inference_ast::nodes::SimpleTypeKind> {
-    use inference_ast::nodes::SimpleTypeKind;
-
+pub(crate) fn parse_simple_type(type_name: &str) -> Option<SimpleTypeKind> {
     match type_name {
         "unit" => Some(SimpleTypeKind::Unit),
         "bool" => Some(SimpleTypeKind::Bool),
@@ -235,185 +236,346 @@ pub(crate) fn parse_simple_type(type_name: &str) -> Option<inference_ast::nodes:
     }
 }
 
-/// Asserts that a single binary expression with the expected operator exists in the AST.
-///
-/// Filters all binary expressions from the arena and verifies:
-/// - Exactly one binary expression is found
-/// - The operator matches the expected kind
-///
-/// # Panics
-/// Panics if no binary expression is found or if the operator doesn't match.
-pub(crate) fn assert_single_binary_op(arena: &Arena, expected: OperatorKind) {
-    let binary_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
+/// Helper to collect all function DefIds from an arena.
+pub(crate) fn collect_function_def_ids(arena: &AstArena) -> Vec<DefId> {
+    arena.function_def_ids()
+}
+
+/// Helper to find a function DefId by name.
+pub(crate) fn find_function_by_name<'a>(arena: &'a AstArena, name: &str) -> Option<DefId> {
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            if let Def::Function { name: name_id, .. } = &arena[def_id].kind {
+                if arena[*name_id].name == name {
+                    return Some(def_id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Collects all expression IDs of a given kind from a block recursively.
+pub(crate) fn collect_exprs_matching(
+    arena: &AstArena,
+    block_id: inference_ast::ids::BlockId,
+    predicate: &dyn Fn(&Expr) -> bool,
+) -> Vec<ExprId> {
+    let mut results = Vec::new();
+    let block = &arena[block_id];
+    for &stmt_id in &block.stmts {
+        collect_exprs_from_stmt(arena, stmt_id, predicate, &mut results);
+    }
+    results
+}
+
+fn collect_exprs_from_stmt(
+    arena: &AstArena,
+    stmt_id: StmtId,
+    predicate: &dyn Fn(&Expr) -> bool,
+    results: &mut Vec<ExprId>,
+) {
+    match &arena[stmt_id].kind {
+        Stmt::Return { expr } => collect_exprs_from_expr(arena, *expr, predicate, results),
+        Stmt::Expr(expr_id) => collect_exprs_from_expr(arena, *expr_id, predicate, results),
+        Stmt::Assign { left, right } => {
+            collect_exprs_from_expr(arena, *left, predicate, results);
+            collect_exprs_from_expr(arena, *right, predicate, results);
+        }
+        Stmt::VarDef { value, .. } => {
+            if let Some(val) = value {
+                collect_exprs_from_expr(arena, *val, predicate, results);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_exprs_from_expr(arena, *condition, predicate, results);
+            let then_exprs = collect_exprs_matching(arena, *then_block, predicate);
+            results.extend(then_exprs);
+            if let Some(else_id) = else_block {
+                let else_exprs = collect_exprs_matching(arena, *else_id, predicate);
+                results.extend(else_exprs);
+            }
+        }
+        Stmt::Loop { condition, body } => {
+            if let Some(cond) = condition {
+                collect_exprs_from_expr(arena, *cond, predicate, results);
+            }
+            let body_exprs = collect_exprs_matching(arena, *body, predicate);
+            results.extend(body_exprs);
+        }
+        Stmt::Block(block_id) => {
+            let inner_exprs = collect_exprs_matching(arena, *block_id, predicate);
+            results.extend(inner_exprs);
+        }
+        Stmt::Assert { expr } => collect_exprs_from_expr(arena, *expr, predicate, results),
+        Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => {}
+    }
+}
+
+fn collect_exprs_from_expr(
+    arena: &AstArena,
+    expr_id: ExprId,
+    predicate: &dyn Fn(&Expr) -> bool,
+    results: &mut Vec<ExprId>,
+) {
+    let expr = &arena[expr_id].kind;
+    if predicate(expr) {
+        results.push(expr_id);
+    }
+    match expr {
+        Expr::Binary { left, right, .. } => {
+            collect_exprs_from_expr(arena, *left, predicate, results);
+            collect_exprs_from_expr(arena, *right, predicate, results);
+        }
+        Expr::PrefixUnary { expr, .. } => {
+            collect_exprs_from_expr(arena, *expr, predicate, results);
+        }
+        Expr::Parenthesized { expr } => {
+            collect_exprs_from_expr(arena, *expr, predicate, results);
+        }
+        Expr::FunctionCall { function, args, .. } => {
+            collect_exprs_from_expr(arena, *function, predicate, results);
+            for (_, arg_expr) in args {
+                collect_exprs_from_expr(arena, *arg_expr, predicate, results);
+            }
+        }
+        Expr::ArrayIndexAccess { array, index } => {
+            collect_exprs_from_expr(arena, *array, predicate, results);
+            collect_exprs_from_expr(arena, *index, predicate, results);
+        }
+        Expr::MemberAccess { expr, .. } | Expr::TypeMemberAccess { expr, .. } => {
+            collect_exprs_from_expr(arena, *expr, predicate, results);
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for (_, field_expr) in fields {
+                collect_exprs_from_expr(arena, *field_expr, predicate, results);
+            }
+        }
+        Expr::ArrayLiteral { elements } => {
+            for &elem in elements {
+                collect_exprs_from_expr(arena, elem, predicate, results);
+            }
+        }
+        Expr::Identifier(_)
+        | Expr::NumberLiteral { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::StringLiteral { .. }
+        | Expr::UnitLiteral
+        | Expr::Uzumaki
+        | Expr::Type(_) => {}
+    }
+}
+
+/// Asserts that a single binary expression with the expected operator exists in the function body.
+pub(crate) fn assert_single_binary_op(arena: &AstArena, expected: OperatorKind) {
+    let func_ids = arena.function_def_ids();
+    let mut binary_count = 0;
+    let mut found_op = None;
+
+    for def_id in &func_ids {
+        if let Def::Function { body, .. } = &arena[*def_id].kind {
+            let exprs = collect_exprs_matching(arena, *body, &|e| matches!(e, Expr::Binary { .. }));
+            for expr_id in &exprs {
+                if let Expr::Binary { op, .. } = &arena[*expr_id].kind {
+                    binary_count += 1;
+                    found_op = Some(op.clone());
+                }
+            }
+        }
+    }
 
     assert_eq!(
-        binary_exprs.len(),
-        1,
-        "Expected 1 binary expression, found {}",
-        binary_exprs.len()
+        binary_count, 1,
+        "Expected 1 binary expression, found {binary_count}"
     );
 
-    if let AstNode::Expression(Expression::Binary(bin_expr)) = &binary_exprs[0] {
-        assert_eq!(
-            bin_expr.operator, expected,
-            "Expected operator {:?}, found {:?}",
-            expected, bin_expr.operator
-        );
-    } else {
-        panic!("Expected binary expression");
-    }
+    assert_eq!(
+        found_op.as_ref(),
+        Some(&expected),
+        "Expected operator {expected:?}, found {found_op:?}"
+    );
 }
 
 /// Asserts that a single prefix unary expression with the expected operator exists in the AST.
-///
-/// # Panics
-/// Panics if no unary expression is found or if the operator doesn't match.
-pub(crate) fn assert_single_unary_op(arena: &Arena, expected: UnaryOperatorKind) {
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
+pub(crate) fn assert_single_unary_op(arena: &AstArena, expected: UnaryOperatorKind) {
+    let func_ids = arena.function_def_ids();
+    let mut unary_count = 0;
+    let mut found_op = None;
+
+    for def_id in &func_ids {
+        if let Def::Function { body, .. } = &arena[*def_id].kind {
+            let exprs = collect_exprs_matching(arena, *body, &|e| {
+                matches!(e, Expr::PrefixUnary { .. })
+            });
+            for expr_id in &exprs {
+                if let Expr::PrefixUnary { op, .. } = &arena[*expr_id].kind {
+                    unary_count += 1;
+                    found_op = Some(op.clone());
+                }
+            }
+        }
+    }
 
     assert_eq!(
-        prefix_exprs.len(),
-        1,
-        "Expected 1 prefix unary expression, found {}",
-        prefix_exprs.len()
+        unary_count, 1,
+        "Expected 1 prefix unary expression, found {unary_count}"
     );
 
-    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
-        assert_eq!(
-            unary_expr.operator, expected,
-            "Expected operator {:?}, found {:?}",
-            expected, unary_expr.operator
-        );
-    } else {
-        panic!("Expected prefix unary expression");
-    }
+    assert_eq!(
+        found_op.as_ref(),
+        Some(&expected),
+        "Expected operator {expected:?}, found {found_op:?}"
+    );
 }
 
 /// Asserts function signature properties.
-///
-/// Verifies:
-/// - Function name matches expected
-/// - Parameter count matches (if `param_count` is provided)
-/// - Return type presence matches `has_return`
-///
-/// # Panics
-/// Panics if no function is found or if the signature doesn't match expectations.
 pub(crate) fn assert_function_signature(
-    arena: &Arena,
+    arena: &AstArena,
     name: &str,
     param_count: Option<usize>,
     has_return: bool,
 ) {
-    let functions = arena.functions();
-    assert!(!functions.is_empty(), "Expected at least 1 function");
+    let def_id = find_function_by_name(arena, name)
+        .unwrap_or_else(|| panic!("Expected function named '{name}'"));
 
-    let func = functions.iter().find(|f| f.name.name == name);
-    let func = func.unwrap_or_else(|| panic!("Expected function named '{name}'"));
-
-    if let Some(expected_count) = param_count {
-        let actual_count = func.arguments.as_ref().map_or(0, Vec::len);
-        assert_eq!(
-            actual_count, expected_count,
-            "Function '{}' expected {} parameters, found {}",
-            name, expected_count, actual_count
-        );
-    }
-
-    assert_eq!(
-        func.returns.is_some(),
-        has_return,
-        "Function '{}' return type: expected {}, found {}",
-        name,
-        if has_return { "present" } else { "absent" },
-        if func.returns.is_some() {
-            "present"
-        } else {
-            "absent"
+    if let Def::Function {
+        args, returns, ..
+    } = &arena[def_id].kind
+    {
+        if let Some(expected_count) = param_count {
+            assert_eq!(
+                args.len(),
+                expected_count,
+                "Function '{name}' expected {expected_count} parameters, found {}",
+                args.len()
+            );
         }
-    );
+
+        let has_ret = returns.map_or(false, |ty_id| !arena[ty_id].kind.is_unit_type());
+        assert_eq!(
+            has_ret || returns.is_some() && !has_return,
+            has_return || returns.is_some() && !has_return,
+            "Function '{name}' return type mismatch"
+        );
+        // Simpler check: returns.is_some() is what the old code tested
+        assert_eq!(
+            returns.is_some(),
+            has_return,
+            "Function '{}' return type: expected {}, found {}",
+            name,
+            if has_return { "present" } else { "absent" },
+            if returns.is_some() { "present" } else { "absent" }
+        );
+    } else {
+        panic!("DefId does not point to a function");
+    }
 }
 
 /// Asserts that a single constant definition with expected name exists.
-///
-/// # Panics
-/// Panics if no constant with the expected name is found.
-pub(crate) fn assert_constant_def(arena: &Arena, name: &str) {
-    let const_defs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Constant(_))));
-
-    assert!(
-        !const_defs.is_empty(),
-        "Expected at least 1 constant definition"
-    );
-
-    let found = const_defs.iter().any(|node| {
-        if let AstNode::Definition(Definition::Constant(c)) = node {
-            c.name.name == name
-        } else {
-            false
-        }
+pub(crate) fn assert_constant_def(arena: &AstArena, name: &str) {
+    let found = arena.source_files().iter().any(|sf| {
+        sf.defs.iter().any(|&def_id| {
+            if let Def::Constant {
+                name: name_id, ..
+            } = &arena[def_id].kind
+            {
+                arena[*name_id].name == name
+            } else {
+                false
+            }
+        })
     });
-
     assert!(found, "Expected constant named '{name}'");
 }
 
 /// Asserts that a single variable definition with expected name exists.
-///
-/// # Panics
-/// Panics if no variable definition with the expected name is found.
-pub(crate) fn assert_variable_def(arena: &Arena, name: &str) {
-    let var_defs = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-
-    assert!(
-        !var_defs.is_empty(),
-        "Expected at least 1 variable definition"
-    );
-
-    let found = var_defs.iter().any(|node| {
-        if let AstNode::Statement(Statement::VariableDefinition(v)) = node {
-            v.name.name == name
+pub(crate) fn assert_variable_def(arena: &AstArena, name: &str) {
+    let func_ids = arena.function_def_ids();
+    let found = func_ids.iter().any(|&def_id| {
+        if let Def::Function { body, .. } = &arena[def_id].kind {
+            block_contains_var_def(arena, *body, name)
         } else {
             false
         }
     });
-
     assert!(found, "Expected variable named '{name}'");
 }
 
-/// Asserts that a struct definition with expected name and field count exists.
-///
-/// # Panics
-/// Panics if no struct with the expected name is found.
-pub(crate) fn assert_struct_def(arena: &Arena, name: &str, field_count: Option<usize>) {
-    let structs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
-
-    assert!(!structs.is_empty(), "Expected at least 1 struct definition");
-
-    let struct_def = structs.iter().find_map(|node| {
-        if let AstNode::Definition(Definition::Struct(s)) = node
-            && s.name.name == name
-        {
-            return Some(s);
+fn block_contains_var_def(
+    arena: &AstArena,
+    block_id: inference_ast::ids::BlockId,
+    name: &str,
+) -> bool {
+    let block = &arena[block_id];
+    for &stmt_id in &block.stmts {
+        match &arena[stmt_id].kind {
+            Stmt::VarDef {
+                name: name_id, ..
+            } => {
+                if arena[*name_id].name == name {
+                    return true;
+                }
+            }
+            Stmt::Block(inner) => {
+                if block_contains_var_def(arena, *inner, name) {
+                    return true;
+                }
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                if block_contains_var_def(arena, *then_block, name) {
+                    return true;
+                }
+                if let Some(else_id) = else_block {
+                    if block_contains_var_def(arena, *else_id, name) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Loop { body, .. } => {
+                if block_contains_var_def(arena, *body, name) {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        None
-    });
-
-    let struct_def = struct_def.unwrap_or_else(|| panic!("Expected struct named '{name}'"));
-
-    if let Some(expected_count) = field_count {
-        assert_eq!(
-            struct_def.fields.len(),
-            expected_count,
-            "Struct '{}' expected {} fields, found {}",
-            name,
-            expected_count,
-            struct_def.fields.len()
-        );
     }
+    false
+}
+
+/// Asserts that a struct definition with expected name and field count exists.
+pub(crate) fn assert_struct_def(arena: &AstArena, name: &str, field_count: Option<usize>) {
+    let mut found = false;
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            if let Def::Struct {
+                name: name_id,
+                fields,
+                ..
+            } = &arena[def_id].kind
+            {
+                if arena[*name_id].name == name {
+                    found = true;
+                    if let Some(expected_count) = field_count {
+                        assert_eq!(
+                            fields.len(),
+                            expected_count,
+                            "Struct '{name}' expected {expected_count} fields, found {}",
+                            fields.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(found, "Expected struct named '{name}'");
 }
 
 /// Attempt to generate WAT from WASM bytes and write to disk.
@@ -449,62 +611,167 @@ pub(crate) fn assert_wat_equivalence(wasm_bytes: &[u8], module_path: &str, test_
 }
 
 /// Asserts that an enum definition with expected name and variant count exists.
-///
-/// # Panics
-/// Panics if no enum with the expected name is found.
-pub(crate) fn assert_enum_def(arena: &Arena, name: &str, variant_count: Option<usize>) {
-    let enums = arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Enum(_))));
-
-    assert!(!enums.is_empty(), "Expected at least 1 enum definition");
-
-    let enum_def = enums.iter().find_map(|node| {
-        if let AstNode::Definition(Definition::Enum(e)) = node
-            && e.name.name == name
-        {
-            return Some(e);
+pub(crate) fn assert_enum_def(arena: &AstArena, name: &str, variant_count: Option<usize>) {
+    let mut found = false;
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            if let Def::Enum {
+                name: name_id,
+                variants,
+                ..
+            } = &arena[def_id].kind
+            {
+                if arena[*name_id].name == name {
+                    found = true;
+                    if let Some(expected_count) = variant_count {
+                        assert_eq!(
+                            variants.len(),
+                            expected_count,
+                            "Enum '{name}' expected {expected_count} variants, found {}",
+                            variants.len()
+                        );
+                    }
+                }
+            }
         }
-        None
-    });
+    }
+    assert!(found, "Expected enum named '{name}'");
+}
 
-    let enum_def = enum_def.unwrap_or_else(|| panic!("Expected enum named '{name}'"));
+/// Collects all expression IDs matching a predicate across ALL function bodies in the arena.
+pub(crate) fn collect_all_exprs(
+    arena: &AstArena,
+    predicate: &dyn Fn(&Expr) -> bool,
+) -> Vec<ExprId> {
+    let mut results = Vec::new();
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            collect_exprs_from_def(arena, def_id, predicate, &mut results);
+        }
+    }
+    results
+}
 
-    if let Some(expected_count) = variant_count {
-        assert_eq!(
-            enum_def.variants.len(),
-            expected_count,
-            "Enum '{}' expected {} variants, found {}",
-            name,
-            expected_count,
-            enum_def.variants.len()
-        );
+fn collect_exprs_from_def(
+    arena: &AstArena,
+    def_id: DefId,
+    predicate: &dyn Fn(&Expr) -> bool,
+    results: &mut Vec<ExprId>,
+) {
+    match &arena[def_id].kind {
+        Def::Function { body, .. } => {
+            let exprs = collect_exprs_matching(arena, *body, predicate);
+            results.extend(exprs);
+        }
+        Def::Struct { methods, .. } => {
+            for &method_id in methods {
+                collect_exprs_from_def(arena, method_id, predicate, results);
+            }
+        }
+        Def::Spec { defs, .. } => {
+            for &inner_def in defs {
+                collect_exprs_from_def(arena, inner_def, predicate, results);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collects all statement IDs matching a predicate across ALL function bodies in the arena.
+pub(crate) fn collect_all_stmts(
+    arena: &AstArena,
+    predicate: &dyn Fn(&Stmt) -> bool,
+) -> Vec<StmtId> {
+    let mut results = Vec::new();
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            collect_stmts_from_def(arena, def_id, predicate, &mut results);
+        }
+    }
+    results
+}
+
+fn collect_stmts_from_def(
+    arena: &AstArena,
+    def_id: DefId,
+    predicate: &dyn Fn(&Stmt) -> bool,
+    results: &mut Vec<StmtId>,
+) {
+    match &arena[def_id].kind {
+        Def::Function { body, .. } => {
+            collect_stmts_from_block(arena, *body, predicate, results);
+        }
+        Def::Struct { methods, .. } => {
+            for &method_id in methods {
+                collect_stmts_from_def(arena, method_id, predicate, results);
+            }
+        }
+        Def::Spec { defs, .. } => {
+            for &inner_def in defs {
+                collect_stmts_from_def(arena, inner_def, predicate, results);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_stmts_from_block(
+    arena: &AstArena,
+    block_id: BlockId,
+    predicate: &dyn Fn(&Stmt) -> bool,
+    results: &mut Vec<StmtId>,
+) {
+    let block = &arena[block_id];
+    for &stmt_id in &block.stmts {
+        let stmt = &arena[stmt_id].kind;
+        if predicate(stmt) {
+            results.push(stmt_id);
+        }
+        match stmt {
+            Stmt::Block(inner) => collect_stmts_from_block(arena, *inner, predicate, results),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_stmts_from_block(arena, *then_block, predicate, results);
+                if let Some(else_id) = else_block {
+                    collect_stmts_from_block(arena, *else_id, predicate, results);
+                }
+            }
+            Stmt::Loop { body, .. } => {
+                collect_stmts_from_block(arena, *body, predicate, results);
+            }
+            _ => {}
+        }
     }
 }
 
 /// Asserts that a function return type is a specific simple type.
-///
-/// # Panics
-/// Panics if the function is not found or doesn't have the expected return type.
 pub(crate) fn assert_function_returns_simple_type(
-    arena: &Arena,
+    arena: &AstArena,
     func_name: &str,
-    expected_type: inference_ast::nodes::SimpleTypeKind,
+    expected_type: SimpleTypeKind,
 ) {
-    let functions = arena.functions();
-    let func = functions
-        .iter()
-        .find(|f| f.name.name == func_name)
+    let def_id = find_function_by_name(arena, func_name)
         .unwrap_or_else(|| panic!("Expected function named '{func_name}'"));
 
-    if let Some(Type::Simple(kind)) = &func.returns {
-        assert_eq!(
-            *kind, expected_type,
-            "Function '{}' expected return type {:?}, found {:?}",
-            func_name, expected_type, kind
-        );
+    if let Def::Function { returns, .. } = &arena[def_id].kind {
+        let returns = returns.unwrap_or_else(|| {
+            panic!("Function '{func_name}' should have a return type");
+        });
+        if let TypeNode::Simple(kind) = &arena[returns].kind {
+            assert_eq!(
+                *kind, expected_type,
+                "Function '{func_name}' expected return type {expected_type:?}, found {kind:?}"
+            );
+        } else {
+            panic!(
+                "Function '{func_name}' expected simple return type {expected_type:?}, but found {:?}",
+                arena[returns].kind
+            );
+        }
     } else {
-        panic!(
-            "Function '{}' expected simple return type {:?}, but found {:?}",
-            func_name, expected_type, func.returns
-        );
+        panic!("DefId does not point to a function");
     }
 }

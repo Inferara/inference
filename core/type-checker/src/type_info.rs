@@ -23,87 +23,13 @@
 //! - Type parameters: Unbound type variables that can be substituted
 //! - Generic arrays: `[T; N]` where `T` is a type parameter
 //! - Generic functions: Functions with type parameters
-//!
-//! ## Type Representation
-//!
-//! The type checker uses [`TypeInfo`] as its primary type representation:
-//!
-//! ```ignore
-//! pub struct TypeInfo {
-//!     pub kind: TypeInfoKind,      // The actual type
-//!     pub type_params: Vec<String>, // Generic type parameters (if any)
-//! }
-//! ```
-//!
-//! The [`TypeInfoKind`] enum discriminates between different type categories:
-//! - `Unit`, `Bool`, `String` - Primitive non-numeric types
-//! - `Number(NumberType)` - Numeric types with size and signedness
-//! - `Array(Box<TypeInfo>, u32)` - Arrays with element type and size
-//! - `Struct(String)`, `Enum(String)` - Named user-defined types
-//! - `Generic(String)` - Unbound type parameters
-//! - And more...
-//!
-//! ## Type Conversion from AST
-//!
-//! Primitive builtin types in the AST use `Type::Simple(SimpleTypeKind)`, a
-//! lightweight enum without heap allocation. The [`TypeInfo::new`] method converts
-//! these to [`TypeInfoKind`] variants through direct pattern matching for efficient
-//! type checking.
-//!
-//! The conversion process:
-//! 1. AST parser creates `Type::Simple(SimpleTypeKind::I32)` (stack-allocated enum)
-//! 2. Type checker calls `TypeInfo::new(&ast_type)`
-//! 3. Pattern match on `Type::Simple(kind)` calls `type_kind_from_simple_type_kind(kind)`
-//! 4. Returns `TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), type_params: [] }`
-//!
-//! This design provides zero-allocation type representation in the AST while enabling
-//! rich semantic information in the type checker.
-//!
-//! ## Generic Type Handling
-//!
-//! Generic types use [`TypeInfoKind::Generic`] for unbound type parameters:
-//!
-//! ```ignore
-//! // Generic function: fn identity<T>(x: T) -> T
-//! let param_type = TypeInfo {
-//!     kind: TypeInfoKind::Generic("T".to_string()),
-//!     type_params: vec![],
-//! };
-//! ```
-//!
-//! The [`TypeInfo::substitute`] method replaces type parameters with concrete types:
-//!
-//! ```ignore
-//! // Call: identity(42) where 42: i32
-//! let substitutions = hashmap! {
-//!     "T".to_string() => TypeInfo { kind: TypeInfoKind::Number(NumberType::I32), ... }
-//! };
-//! let concrete_type = param_type.substitute(&substitutions);
-//! // Result: TypeInfo { kind: Number(I32), ... }
-//! ```
-//!
-//! ## Number Type Representation
-//!
-//! The [`NumberType`] enum provides a type-safe representation of numeric types:
-//!
-//! ```ignore
-//! pub enum NumberType {
-//!     I8, I16, I32, I64,  // Signed integers
-//!     U8, U16, U32, U64,  // Unsigned integers
-//! }
-//! ```
-//!
-//! Benefits:
-//! - Type-safe: only valid numeric types can exist
-//! - Efficient: enum discriminant comparison
-//! - Exhaustive: compiler enforces handling all cases
-//! - Introspectable: `ALL` constant for iteration
-//! - Queryable: `is_signed()` method for signedness checks
 
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use inference_ast::nodes::{Expression, Literal, SimpleTypeKind, Type};
+use inference_ast::arena::AstArena;
+use inference_ast::ids::TypeId;
+use inference_ast::nodes::{Expr, SimpleTypeKind, TypeNode};
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Hash)]
@@ -120,9 +46,6 @@ pub enum NumberType {
 
 impl NumberType {
     /// All numeric type variants for iteration.
-    ///
-    /// Use this constant to enumerate all supported numeric types without
-    /// hardcoding the list in multiple places.
     pub const ALL: &'static [NumberType] = &[
         NumberType::I8,
         NumberType::I16,
@@ -135,8 +58,6 @@ impl NumberType {
     ];
 
     /// Returns the canonical lowercase string representation of this numeric type.
-    ///
-    /// This is the source-code representation (e.g., "i32", "u64").
     #[must_use = "returns the string representation without modifying self"]
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -163,10 +84,6 @@ impl NumberType {
 impl std::str::FromStr for NumberType {
     type Err = ();
 
-    /// Parses a string into a `NumberType` (case-insensitive).
-    ///
-    /// Returns `Ok(NumberType)` if the string matches a known numeric type,
-    /// or `Err(())` if no match is found.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .iter()
@@ -177,49 +94,20 @@ impl std::str::FromStr for NumberType {
 }
 
 /// Discriminates the semantic category of a [`TypeInfo`] value.
-///
-/// Variants mirror the type system of the Inference language.
-/// See the module-level documentation for the full hierarchy.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum TypeInfoKind {
-    /// The unit type `unit` — the implicit return type of void functions.
     Unit,
-    /// The boolean type `bool`.
     Bool,
-    /// The string type `string` (UTF-8, partial support).
     String,
-    /// A numeric integer type (signed or unsigned, 8–64 bit).
     Number(NumberType),
-    /// A user-defined type referenced by name that has not yet been resolved
-    /// to a struct or enum entry in the symbol table.
-    ///
-    /// After type registration this should have been replaced by
-    /// [`Struct`](TypeInfoKind::Struct) or [`Enum`](TypeInfoKind::Enum).
     Custom(String),
-    /// A fixed-size array: element type and element count.
     Array(Box<TypeInfo>, u32),
-    /// An unresolved generic type parameter (e.g. `T` in `fn foo<T>(x: T) -> T`).
-    ///
-    /// Replaced by a concrete type after type-parameter substitution.
     Generic(String),
-    /// A two-segment qualified type name (`module::Type`) from the source.
     QualifiedName(String),
-    /// A single-segment qualified type reference carrying an alias prefix.
     Qualified(String),
-    /// A function type. The inner string takes one of three forms depending on
-    /// how the function was referenced:
-    ///
-    /// - `"FunctionName"` — a free function referenced by name (from `function_definition.name()`)
-    /// - `"ReceiverType::MethodName"` — a method or type-member access expression
-    /// - `"Function<N, ReturnType>"` — a function-type literal from a `Type::Function` node
-    ///
-    /// Used to annotate function-name expressions in the `TypedContext`.
     Function(String),
-    /// A resolved struct type, carrying the struct's canonical name.
     Struct(String),
-    /// A resolved enum type, carrying the enum's canonical name.
     Enum(String),
-    /// A spec (specification) type, carrying the spec's canonical name.
     Spec(String),
 }
 
@@ -244,11 +132,6 @@ impl Display for TypeInfoKind {
 }
 
 impl TypeInfoKind {
-    /// Non-numeric primitive builtin type names (case-insensitive lookup).
-    ///
-    /// This constant provides the canonical mapping from source-code type names
-    /// to their corresponding `TypeInfoKind` variants for unit, bool, and string.
-    /// Use this to enumerate non-numeric builtins without hardcoding the list.
     pub const NON_NUMERIC_BUILTINS: &'static [(&'static str, TypeInfoKind)] = &[
         ("unit", TypeInfoKind::Unit),
         ("bool", TypeInfoKind::Bool),
@@ -260,13 +143,6 @@ impl TypeInfoKind {
         matches!(self, TypeInfoKind::Number(_))
     }
 
-    /// Returns the canonical lowercase source-code name if this is a primitive builtin type.
-    ///
-    /// Returns `Some("i32")` for `Number(I32)`, `Some("bool")` for `Bool`, etc.
-    /// Returns `None` for compound types like `Array`, `Custom`, `Struct`, etc.
-    ///
-    /// Note: The `Display` impl outputs capitalized names ("Bool", "String") for
-    /// non-numeric builtins, while this method returns lowercase source-code names.
     #[must_use = "returns the builtin name without modifying self"]
     pub fn as_builtin_str(&self) -> Option<&'static str> {
         match self {
@@ -278,10 +154,6 @@ impl TypeInfoKind {
         }
     }
 
-    /// Parses a string into a primitive builtin `TypeInfoKind` (case-insensitive).
-    ///
-    /// Accepts type names like "i32", "I32", "bool", "BOOL", "string", "unit", etc.
-    /// Returns `None` if the string does not match any builtin type.
     #[must_use = "parsing result should be checked; returns None if not a builtin"]
     pub fn from_builtin_str(s: &str) -> Option<Self> {
         if let Ok(number_type) = s.parse::<NumberType>() {
@@ -295,17 +167,9 @@ impl TypeInfoKind {
 }
 
 /// The semantic type of a value expression after type checking.
-///
-/// Produced by [`TypeInfo::new`] from AST [`Type`] nodes and stored in
-/// [`TypedContext`](crate::typed_context::TypedContext) keyed by AST node ID.
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct TypeInfo {
-    /// The concrete type category (e.g. `Number(I32)`, `Struct("Point")`).
     pub kind: TypeInfoKind,
-    /// Names of any unresolved generic type parameters carried by this type
-    /// (e.g. `["T"]` for a value whose type is a generic parameter `T`).
-    ///
-    /// After all type parameters have been substituted this will be empty.
     pub type_params: Vec<String>,
 }
 
@@ -334,10 +198,6 @@ impl Display for TypeInfo {
 }
 
 impl TypeInfo {
-    /// Construct a `bool` `TypeInfo` value.
-    ///
-    /// Shorthand for the common case of representing a boolean result,
-    /// for example when checking conditions or logical operator results.
     #[must_use]
     pub fn boolean() -> Self {
         Self {
@@ -354,70 +214,62 @@ impl TypeInfo {
         }
     }
 
-    /// Convert an AST [`Type`] to its semantic `TypeInfo` representation.
-    ///
-    /// Equivalent to `TypeInfo::new_with_type_params(ty, &[])` — use this
-    /// when there are no in-scope generic type parameters to consider.
+    /// Convert an arena-allocated type node to its semantic `TypeInfo` representation.
     #[must_use]
-    pub fn new(ty: &Type) -> Self {
-        Self::new_with_type_params(ty, &[])
+    pub fn from_type_id(arena: &AstArena, ty_id: TypeId) -> Self {
+        Self::from_type_id_with_type_params(arena, ty_id, &[])
     }
 
-    /// Create TypeInfo from an AST Type, with awareness of type parameters.
-    ///
-    /// When `type_param_names` contains "T" and we see type "T", it becomes
-    /// `TypeInfoKind::Generic("T")` instead of `TypeInfoKind::Custom("T")`.
+    /// Create `TypeInfo` from an arena type ID, with awareness of type parameters.
     #[must_use]
-    pub fn new_with_type_params(ty: &Type, type_param_names: &[String]) -> Self {
-        match ty {
-            Type::Simple(simple) => Self {
+    pub fn from_type_id_with_type_params(
+        arena: &AstArena,
+        ty_id: TypeId,
+        type_param_names: &[String],
+    ) -> Self {
+        let type_data = &arena[ty_id];
+        match &type_data.kind {
+            TypeNode::Simple(simple) => Self {
                 kind: Self::type_kind_from_simple_type_kind(simple),
                 type_params: vec![],
             },
-            Type::Generic(generic) => Self {
-                kind: TypeInfoKind::Generic(generic.base.name.clone()),
-                type_params: generic.parameters.iter().map(|p| p.name.clone()).collect(),
+            TypeNode::Generic { base, params } => Self {
+                kind: TypeInfoKind::Generic(arena[*base].name.clone()),
+                type_params: params.iter().map(|p| arena[*p].name.clone()).collect(),
             },
-            Type::QualifiedName(qualified_name) => Self {
+            TypeNode::QualifiedName { qualifier, name } => Self {
                 kind: TypeInfoKind::QualifiedName(format!(
                     "{}::{}",
-                    qualified_name.qualifier(),
-                    qualified_name.name()
+                    arena[*qualifier].name,
+                    arena[*name].name
                 )),
                 type_params: vec![],
             },
-            Type::Qualified(qualified) => Self {
-                kind: TypeInfoKind::Qualified(qualified.name.name.clone()),
+            TypeNode::Qualified { alias: _, name } => Self {
+                kind: TypeInfoKind::Qualified(arena[*name].name.clone()),
                 type_params: vec![],
             },
-            Type::Array(array) => {
-                let size = extract_array_size(array.size.clone());
+            TypeNode::Array { element, size } => {
+                let array_size = extract_array_size_from_arena(arena, *size);
                 Self {
                     kind: TypeInfoKind::Array(
-                        Box::new(Self::new_with_type_params(
-                            &array.element_type,
+                        Box::new(Self::from_type_id_with_type_params(
+                            arena,
+                            *element,
                             type_param_names,
                         )),
-                        size,
+                        array_size,
                     ),
                     type_params: vec![],
                 }
             }
-            Type::Function(func) => {
-                let param_types = func
-                    .parameters
-                    .as_ref()
-                    .map(|params| {
-                        params
-                            .iter()
-                            .map(|p| TypeInfo::new_with_type_params(p, type_param_names))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                let return_type = func
-                    .returns
-                    .as_ref()
-                    .map(|r| TypeInfo::new_with_type_params(r, type_param_names))
+            TypeNode::Function { params, ret } => {
+                let param_types: Vec<TypeInfo> = params
+                    .iter()
+                    .map(|p| TypeInfo::from_type_id_with_type_params(arena, *p, type_param_names))
+                    .collect();
+                let return_type = ret
+                    .map(|r| TypeInfo::from_type_id_with_type_params(arena, r, type_param_names))
                     .unwrap_or_default();
                 Self {
                     kind: TypeInfoKind::Function(format!(
@@ -428,16 +280,16 @@ impl TypeInfo {
                     type_params: vec![],
                 }
             }
-            Type::Custom(custom) => {
-                // Check if this is a declared type parameter
-                if type_param_names.contains(&custom.name) {
+            TypeNode::Custom(ident_id) => {
+                let name = &arena[*ident_id].name;
+                if type_param_names.contains(name) {
                     return Self {
-                        kind: TypeInfoKind::Generic(custom.name.clone()),
+                        kind: TypeInfoKind::Generic(name.clone()),
                         type_params: vec![],
                     };
                 }
                 Self {
-                    kind: Self::type_kind_from_simple_type(&custom.name),
+                    kind: Self::type_kind_from_simple_type(name),
                     type_params: vec![],
                 }
             }
@@ -469,7 +321,6 @@ impl TypeInfo {
         matches!(self.kind, TypeInfoKind::Generic(_))
     }
 
-    /// Returns true if this is a signed integer type (i8, i16, i32, i64).
     #[must_use = "this is a pure check with no side effects"]
     pub fn is_signed_integer(&self) -> bool {
         if let TypeInfoKind::Number(nt) = &self.kind {
@@ -479,11 +330,6 @@ impl TypeInfo {
         }
     }
 
-    /// Substitute type parameters using the given mapping.
-    ///
-    /// If this TypeInfo is a `Generic("T")` and substitutions has `T -> i32`, returns i32.
-    /// For compound types (arrays, functions), recursively substitutes.
-    /// After successful substitution, `type_params` should be empty.
     #[must_use = "substitution returns a new TypeInfo, original is unchanged"]
     pub fn substitute(&self, substitutions: &FxHashMap<String, TypeInfo>) -> TypeInfo {
         match &self.kind {
@@ -501,7 +347,6 @@ impl TypeInfo {
                     type_params: vec![],
                 }
             }
-            // Primitive and named types don't need substitution
             TypeInfoKind::Unit
             | TypeInfoKind::Bool
             | TypeInfoKind::String
@@ -516,13 +361,11 @@ impl TypeInfo {
         }
     }
 
-    /// Check if this type contains any unresolved type parameters.
     #[must_use = "this is a pure check with no side effects"]
     pub fn has_unresolved_params(&self) -> bool {
         match &self.kind {
             TypeInfoKind::Generic(_) => true,
             TypeInfoKind::Array(elem_type, _) => elem_type.has_unresolved_params(),
-            // Primitive and named types have no type parameters
             TypeInfoKind::Unit
             | TypeInfoKind::Bool
             | TypeInfoKind::String
@@ -537,27 +380,11 @@ impl TypeInfo {
         }
     }
 
-    /// Converts a string type name to TypeInfoKind.
-    ///
-    /// Used for `Type::Custom` variants that reference types by name.
-    /// Attempts to match against builtin type names, falling back to Custom.
     fn type_kind_from_simple_type(simple_type_name: &str) -> TypeInfoKind {
         TypeInfoKind::from_builtin_str(simple_type_name)
             .unwrap_or_else(|| TypeInfoKind::Custom(simple_type_name.to_string()))
     }
 
-    /// Converts AST SimpleTypeKind to TypeInfoKind.
-    ///
-    /// This is the efficient path for primitive builtin types. The AST uses
-    /// `Type::Simple(SimpleTypeKind)` for primitives, which are lightweight
-    /// enum values without heap allocation. This method performs the direct
-    /// mapping to the type checker's internal TypeInfoKind representation.
-    ///
-    /// Handles all primitive types:
-    /// - Unit type (implicitly returned by functions without return type)
-    /// - Boolean type
-    /// - Signed integers: i8, i16, i32, i64
-    /// - Unsigned integers: u8, u16, u32, u64
     fn type_kind_from_simple_type_kind(kind: &SimpleTypeKind) -> TypeInfoKind {
         match kind {
             SimpleTypeKind::Unit => TypeInfoKind::Unit,
@@ -574,18 +401,16 @@ impl TypeInfo {
     }
 }
 
-/// Extracts the array size from an expression.
-///
-/// Returns 0 as a sentinel for invalid sizes (overflow, non-literal).
-/// The type checker validates array sizes and reports proper diagnostics.
-fn extract_array_size(size_expr: Expression) -> u32 {
-    if let Expression::Literal(Literal::Number(num_lit)) = size_expr {
-        return num_lit.value.parse::<u32>().unwrap_or(0);
+/// Extracts the array size from an expression stored in the arena.
+fn extract_array_size_from_arena(arena: &AstArena, size_expr_id: inference_ast::ids::ExprId) -> u32 {
+    let expr_data = &arena[size_expr_id];
+    if let Expr::NumberLiteral { value } = &expr_data.kind {
+        return value.parse::<u32>().unwrap_or(0);
     }
-    if let Expression::Identifier(identifier) = size_expr {
+    if let Expr::Identifier(ident_id) = &expr_data.kind {
         todo!(
             "Constant identifiers for array sizes not yet implemented: {}",
-            identifier.name
+            arena[*ident_id].name
         );
     }
     0

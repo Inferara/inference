@@ -4,19 +4,19 @@ Arena-based Abstract Syntax Tree (AST) implementation for the Inference programm
 
 ## Overview
 
-This crate provides a memory-efficient AST representation with O(1) node lookups and parent-child traversal. All AST nodes are stored in a central arena with ID-based references, eliminating the need for raw pointers or lifetime management.
+This crate provides a memory-efficient AST representation using typed arena allocation. All AST nodes are stored in category-specific `Vec`s inside a central `AstArena`, and node references are lightweight `Copy` typed indices (`ExprId`, `StmtId`, `DefId`, etc.). This eliminates raw pointers, reference counting, and lifetime management while remaining safe to share across threads.
 
 ## Key Features
 
-- **Arena-based allocation**: Single centralized storage for all AST nodes with O(1) access
-- **Efficient parent-child lookup**: Hash map-based relationships for constant-time traversal
-- **Zero-copy Location**: Lightweight location tracking with byte offsets and line/column positions
-- **Source text retrieval**: Convenient API to get source code snippets for any node
-- **Type-safe node representation**: Strongly-typed node enums with exhaustive matching
+- **Typed indices**: `ExprId`, `StmtId`, `DefId`, `TypeId`, `BlockId`, `IdentId`, and `SourceFileId` prevent accidentally mixing node categories at compile time
+- **Vec-based storage**: Seven typed `Vec`s provide O(1) index-based lookups with cache-friendly sequential layout
+- **Send + Sync**: No `RefCell`, no `Arc` — the arena can be shared across threads without additional synchronization
+- **Zero-copy locations**: `Location` is a 24-byte `Copy` struct; source text is stored once in `SourceFileData` and retrieved by byte-offset slicing
+- **Parent/child maps**: `FxHashMap<NodeId, NodeId>` and `FxHashMap<NodeId, Vec<NodeId>>` support O(1) upward and downward traversal using the type-erased `NodeId` enum
 
 ## Quick Start
 
-### Building an AST
+### Building an Arena
 
 ```rust
 use inference_ast::builder::Builder;
@@ -35,27 +35,31 @@ let arena = builder.build_ast()?;
 ### Querying the Arena
 
 ```rust
-// Get all functions
-let functions = arena.functions();
-for func in functions {
-    println!("Function: {}", func.name.name);
+// Get all function definition IDs
+let func_ids = arena.function_def_ids();
+for def_id in &func_ids {
+    println!("Function: {}", arena.def_name(*def_id));
 }
 
-// Find any node by ID
-if let Some(node) = arena.find_node(node_id) {
-    // All nodes have id() and location() methods
-    println!("Node ID: {}", node.id());
-    println!("Location: {}:{}", node.location().start_line, node.location().start_column);
+// Index directly into the arena with a typed ID — O(1) Vec access
+let def_data = &arena[func_ids[0]];
+println!("Location: {}:{}", def_data.location.start_line, def_data.location.start_column);
+
+// Match on the node kind
+if let inference_ast::nodes::Def::Function { body, .. } = &def_data.kind {
+    let block = &arena[*body];
+    println!("Statements in body: {}", block.stmts.len());
+}
+
+// Retrieve source text for any node
+let node_id = inference_ast::ids::NodeId::Def(func_ids[0]);
+if let Some(source_text) = arena.get_node_source(node_id) {
+    println!("Source: {}", source_text);
 }
 
 // Find parent of a node
-if let Some(parent_id) = arena.find_parent_node(node_id) {
-    let parent = arena.find_node(parent_id);
-}
-
-// Get source text for a node
-if let Some(source_text) = arena.get_node_source(node_id) {
-    println!("Source: {}", source_text);
+if let Some(parent_id) = arena.find_parent(node_id) {
+    println!("Parent node: {:?}", parent_id);
 }
 ```
 
@@ -63,46 +67,92 @@ if let Some(source_text) = arena.get_node_source(node_id) {
 
 ### Arena Storage
 
-The AST uses a three-tier storage system:
+`AstArena` stores nodes in seven typed `Vec`s plus two maps for tree traversal:
 
-1. **Node Storage** (`nodes: FxHashMap<u32, AstNode>`): Maps node IDs to actual node data
-2. **Parent Map** (`parent_map: FxHashMap<u32, u32>`): Maps child ID to parent ID for upward traversal
-3. **Children Map** (`children_map: FxHashMap<u32, Vec<u32>>`): Maps parent ID to children IDs for downward traversal
+```
+AstArena {
+    source_files : Vec<SourceFileData>   -- indexed by SourceFileId
+    defs         : Vec<DefData>          -- indexed by DefId
+    stmts        : Vec<StmtData>         -- indexed by StmtId
+    exprs        : Vec<ExprData>         -- indexed by ExprId
+    types        : Vec<TypeData>         -- indexed by TypeId
+    blocks       : Vec<BlockData>        -- indexed by BlockId
+    idents       : Vec<Ident>            -- indexed by IdentId
+    parent_map   : FxHashMap<NodeId, NodeId>
+    children_map : FxHashMap<NodeId, Vec<NodeId>>
+}
+```
 
 This design provides:
-- O(1) node lookup by ID
-- O(1) parent lookup
-- O(1) children list lookup (plus O(c) to access child nodes where c is the number of children)
-- O(d) source file lookup where d is tree depth (typically < 20 levels)
+- O(1) node lookup by typed ID (plain `Vec` index)
+- O(1) parent lookup (hash map on `NodeId`)
+- O(1) children list lookup (hash map on `NodeId`)
+- `Send + Sync` without locking (no interior mutability)
+
+### Typed Indices
+
+Every arena category has a dedicated index type generated by the `define_id!` macro:
+
+| Type | Indexes into | Size |
+|------|-------------|------|
+| `SourceFileId` | `source_files` | 4 bytes |
+| `DefId` | `defs` | 4 bytes |
+| `StmtId` | `stmts` | 4 bytes |
+| `ExprId` | `exprs` | 4 bytes |
+| `TypeId` | `types` | 4 bytes |
+| `BlockId` | `blocks` | 4 bytes |
+| `IdentId` | `idents` | 4 bytes |
+
+All typed IDs implement `Copy`, `Eq`, and `Hash`. They are `u32` values wrapped in distinct newtype structs so that an `ExprId` can never accidentally index the `defs` `Vec`.
+
+The `NodeId` enum wraps any of the typed IDs for use in the heterogeneous `parent_map` and `children_map`:
+
+```rust
+pub enum NodeId {
+    SourceFile(SourceFileId),
+    Def(DefId),
+    Stmt(StmtId),
+    Expr(ExprId),
+    Type(TypeId),
+    Block(BlockId),
+    Ident(IdentId),
+}
+```
 
 ### Node Type System
 
-Node types are defined using custom macros that ensure consistency:
-- `ast_node!` macro: Generates struct definitions with required `id` and `location` fields
-- `ast_enum!` macro: Generates enum wrappers with uniform `id()` and `location()` accessors
-- `@skip` annotation: Marks variants (like `SimpleTypeKind`) that are Copy types without ID/location
+Each arena category uses a two-level structure: a wrapper struct that holds `location` plus a flat `kind` enum:
 
-This macro-based approach eliminates boilerplate and ensures all nodes follow the same conventions.
+```
+ExprData  { location: Location, kind: Expr     }
+StmtData  { location: Location, kind: Stmt     }
+DefData   { location: Location, kind: Def      }
+TypeData  { location: Location, kind: TypeNode }
+```
 
-## Documentation
+Blocks and identifiers are simpler:
 
-Detailed documentation is available in the `docs/` directory:
+```
+BlockData { location: Location, block_kind: BlockKind, stmts: Vec<StmtId> }
+Ident     { location: Location, name: String }
+```
 
-- [Architecture Guide](docs/architecture.md) - System design and data structures
-- [Location Optimization](docs/location.md) - Memory-efficient location tracking
-- [Arena API Guide](docs/arena-api.md) - Comprehensive API reference with examples
-- [Node Types](docs/nodes.md) - AST node type reference
+The top-level source file node stores the entire source string:
+
+```
+SourceFileData { location: Location, source: String, defs: Vec<DefId>, directives: Vec<Directive> }
+```
+
+Node kinds (`Expr`, `Stmt`, `Def`, `TypeNode`) are plain enums. References between nodes use typed IDs: for example, `Expr::Binary { left: ExprId, right: ExprId, op: OperatorKind }`.
 
 ## Example: Error Reporting
 
-The AST makes it easy to generate precise error messages:
-
 ```rust
-use inference_ast::nodes::AstNode;
+use inference_ast::arena::AstArena;
+use inference_ast::ids::NodeId;
 
-fn report_error(arena: &Arena, node_id: u32, message: &str) {
-    let node = arena.find_node(node_id).expect("Node not found");
-    let location = node.location();
+fn report_error(arena: &AstArena, node_id: NodeId, message: &str) {
+    let location = arena.node_location(node_id).expect("Node not found");
     let source = arena.get_node_source(node_id).unwrap_or("<unknown>");
 
     eprintln!(
@@ -115,59 +165,59 @@ fn report_error(arena: &Arena, node_id: u32, message: &str) {
 }
 ```
 
-## Testing
+## Documentation
 
-The crate includes comprehensive test coverage:
+Detailed documentation is available in the `docs/` directory:
+
+- [Architecture Guide](docs/architecture.md) - System design and data structures
+- [Location Optimization](docs/location.md) - Memory-efficient location tracking
+- [Arena API Guide](docs/arena-api.md) - Comprehensive API reference with examples
+- [Node Types](docs/nodes.md) - AST node type reference
+
+## Testing
 
 ```bash
 cargo test -p inference-ast
+cargo test -p inference-tests ast
 ```
 
 Test coverage includes:
-- Parent-child relationship integrity
-- Source text retrieval accuracy
-- Edge cases (root nodes, nonexistent IDs, deeply nested structures)
-- Performance characteristics
+- Typed allocation and index access
+- Parent-child relationship recording and lookup
+- Source text retrieval (with and without parent chain)
+- Structural traversal patterns (source files → defs → kinds)
+- Edge cases: empty arena, out-of-range IDs, nodes without a source file
 
-## External Module Support
+## Module Organization
 
-The crate provides utilities for parsing and managing external modules:
-
-```rust
-use inference_ast::extern_prelude::{create_empty_prelude, parse_external_module};
-use std::path::Path;
-
-let mut prelude = create_empty_prelude();
-parse_external_module(Path::new("/path/to/stdlib"), "std", &mut prelude)?;
-
-// Access parsed module
-if let Some(parsed) = prelude.get("std") {
-    let functions = parsed.arena.functions();
-    // ... use stdlib functions for type checking
-}
-```
-
-See `src/extern_prelude.rs` for the complete API.
-
-**Note:** Multi-file parsing via `ParserContext` is a work in progress. Currently, the crate supports single-file compilation with external module resolution through `extern_prelude`.
-
-## Dependencies
-
-- `rustc-hash`: Fast hash maps (FxHashMap) for node storage
-- `tree-sitter`: Parser integration for building AST from source
-- `tree-sitter-inference`: Grammar for the Inference language
-- `anyhow`: Error handling
-- `thiserror`: Structured error types
+| Module | Purpose |
+|--------|---------|
+| `arena` | `AstArena` struct, typed allocators, query methods, source text retrieval |
+| `ids` | `SourceFileId`, `DefId`, `StmtId`, `ExprId`, `TypeId`, `BlockId`, `IdentId`, `NodeId` |
+| `nodes` | All node wrapper structs and kind enums (`Expr`, `Stmt`, `Def`, `TypeNode`, `Location`, …) |
+| `builder` | `Builder` — converts a tree-sitter CST into an `AstArena` |
+| `extern_prelude` | Utilities for parsing external modules (stdlib, prelude) |
+| `parser_context` | Multi-file parsing support |
+| `errors` | Structured error types for parse failures |
 
 ## Performance Characteristics
 
-| Operation | Time Complexity | Notes |
-|-----------|----------------|-------|
-| Node lookup | O(1) | Hash map access |
-| Parent lookup | O(1) | Hash map access |
-| Children list lookup | O(1) | Hash map access |
-| Source file lookup | O(d) | Tree depth, typically < 20 |
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Node lookup by typed ID | O(1) | Direct `Vec` index |
+| Parent lookup | O(1) | `FxHashMap` lookup on `NodeId` |
+| Children list lookup | O(1) | `FxHashMap` lookup on `NodeId` |
+| Iterate children | O(c) | c = number of children |
+| Source file lookup (parent chain) | O(d) | d = tree depth, typically < 20 |
 | Source text retrieval | O(d) + O(1) | Find source file + string slice |
+
+## Dependencies
+
+- `rustc-hash`: Fast hash maps (`FxHashMap`) for parent/children maps
+- `tree-sitter`: Parser integration for building the AST from source
+- `tree-sitter-inference`: Grammar for the Inference language
+- `anyhow`: Error handling
+- `thiserror`: Structured error types
 
 ## Contributing
 
