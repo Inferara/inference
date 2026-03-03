@@ -47,6 +47,10 @@ Typed AST (TypedContext)
    Array index assignment (`arr[i] = value;`) computes the element address and emits a store instruction.
    `if`/`else` statements emit WASM structured `if`/`else`/`end` blocks with
    `BlockType::Empty` because Inference `if` is a statement, not an expression.
+   Loop statements emit the standard WASM `block`+`loop` double-nesting pattern with a
+   `br_if` exit check for conditional loops and `br 0` unconditional back-edge; `break`
+   statements lower to `br <depth>` targeting the enclosing loop's exit block.
+   See [docs/loops-lowering.md](docs/loops-lowering.md).
    Non-void functions emit an `unreachable` instruction before the function `end` to
    satisfy the WASM validator when all paths exit through explicit `return` instructions.
    See [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -201,7 +205,7 @@ The `codegen` function:
 
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
-- **Control flow** - `loop` and `break` statements are not yet implemented (`todo!()`). Assignment statements (`x = value;`) are supported for identifier targets and array index targets; assignments to struct fields (member access) are deferred to struct support.
+- **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets and array index targets; assignments to struct fields (member access) are deferred to struct support.
 - **Expression types** - Limited support for complex expressions (binary operations, structs). Fixed-size arrays with scalar element types are now supported, including array-returning functions via the sret calling convention. Nested arrays, arrays of structs/custom types, partial initialization syntax, and mutable array parameters are not yet implemented. Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
 - **Compound types** - Structs and custom types are not yet implemented
 - **Type system** - Generic types and function types are not yet fully implemented
@@ -227,6 +231,9 @@ Detailed design documents live in `docs/`:
 - [docs/arrays-and-memory.md](docs/arrays-and-memory.md) - Stack allocation and shadow
   stack infrastructure for fixed-size arrays, including frame layout computation, prologue/epilogue
   emission, load/store instruction selection, and copy-on-entry semantics for array parameters.
+- [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
+  lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
+  tracking, and interaction with non-det blocks, if-statements, and array frames.
 
 ## Module Organization
 
@@ -279,7 +286,7 @@ Test data includes:
   operations, prefix unary expressions, conditionals, and recursive function calls
 - `algo_i64_mixed.inf` - Demonstrates i64 operations in context of classic algorithms
   (factorial, fibonacci, GCD) with variable definitions and recursive calls
-- `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with loops (planned)
+- `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with loops
   and recursive patterns
 - `algo_recursive_math.inf` - Various mathematical algorithms using recursion and arithmetic
 - `array_literal.inf` - Fixed-size array literal declarations with i32 and bool element types,
@@ -297,6 +304,20 @@ Test data includes:
 - `array_nondet.inf` - Arrays inside non-deterministic blocks (forall, exists) and
   non-deterministic array initialization (`@`) inside blocks; validated against `inf_wasmparser`
   (non-det modules skip WAT comparison)
+- Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
+  - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
+  - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit
+  - `nested_loop.inf` - Nested conditional and infinite loops with inner break
+  - `loop_with_if.inf` - Conditional loops with if/else bodies
+  - `loop_accumulator.inf` - Accumulator patterns (sum, factorial, power)
+  - `loop_break_early.inf` - Conditional loop with early break from if
+  - `break_nested_if.inf` - Break inside nested if conditions
+  - `void_loop.inf` - Void-returning function with loop
+  - `loop_zero_iters.inf` - Loop with always-false condition (zero iterations)
+  - `loop_with_array.inf` - Loops with array variables (frame layout + prologue/epilogue)
+  - `loop_in_nondet.inf` - Loops inside forall/exists non-deterministic blocks
+  - `nondet_then_break.inf` - Non-det block inside loop followed by break
+  - `loop_return_array.inf` - Early return from loop with active array frame layout
 
 ## Related Resources
 

@@ -25,7 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `OptLevel` is currently metadata only; optimization passes planned for future
 - Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
 - Upgrade shadowing detection from `debug_assert!` to `assert!` in `pre_scan_locals` — fires in release builds for parameter, constant, and variable name collisions in `locals_map`
-- Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies will be pre-registered when loop lowering is implemented
+- Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies are pre-registered before instruction emission
+- Add loop and break statement lowering to WebAssembly codegen ([#152])
+  - Conditional loop (`loop COND { body }`) emits `block`+`loop` with `br_if` exit check and `br 0` back-edge
+  - Infinite loop (`loop { body }`) emits `block`+`loop` with unconditional `br 0` back-edge
+  - Break statement emits `br <depth>` targeting enclosing loop's exit `block`
+  - `LoopContext` tracks `wasm_block_depth` across all structured blocks (loop, if, non-det) for correct `br` depth computation
+  - Nested loops, loops inside non-det blocks, and break inside nested if-statements all compute correct depths
+  - Per-function state refactoring: `func`, `locals_map`, `frame_layout`, `loop_ctx`, `parent_blocks_stack` moved to `Compiler` fields, reset per function in `visit_function_definition`
 - Replace silent `if let ArgumentType::Argument` skip with exhaustive `match` covering `SelfReference`, `IgnoreArgument`, and `Type` variants, each with an explicit `todo!()`
 - Add fixed-size array support with linear memory allocation ([#148])
   - Shadow stack with `__stack_pointer` mutable global, stack-first layout matching Rust/Zig convention
@@ -143,6 +150,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 7 type-checker tests for `ArrayReturnCallInExpressionPosition`: let binding, return forwarding, standalone, argument, index access, assignment, non-array standalone ([#148])
 - Add 10 inline execution tests for array element types: i8, u8, i16, u16, u32, i64, large array params (N > 16), mixed-type arrays, mutable parameters ([#148])
 - Add runtime stack overflow trap test: two 32KB frames in 64KB stack verified to trap at runtime via Wasmtime ([#148])
+- Add 13 loop test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#152])
+  - `simple_loop.inf`, `infinite_loop_break.inf`, `nested_loop.inf`, `loop_with_if.inf`, `loop_accumulator.inf`, `loop_break_early.inf`, `break_nested_if.inf`, `void_loop.inf`, `loop_zero_iters.inf`, `loop_with_array.inf`, `loop_in_nondet.inf`, `nondet_then_break.inf`, `loop_return_array.inf`
+  - Execution tests via Wasmtime for all deterministic fixtures
+  - Coverage marks: `wasm_codegen_emit_loop_statement`, `wasm_codegen_emit_loop_conditional`, `wasm_codegen_emit_loop_infinite`, `wasm_codegen_emit_break`
 - Add execution test for `numeric_literals` verifying MIN/MAX boundary values for all 8 integer types (i8, i16, i32, i64, u8, u16, u32, u64) via Wasmtime
 - Add `arith_overflow` test module with 8 functions covering two's-complement wrapping arithmetic: i32/i64/u32 overflow and underflow, multiplication overflow, and negation of MIN (8 Wasmtime execution assertions)
 - Add `expr_deep_nesting` test module with 5 functions verifying 8+ level expression nesting: left-associative addition chain, mixed arithmetic in nested groups, boolean connectives over nested comparisons, function calls embedded in expressions, and chained unary negation (6 Wasmtime execution assertions)
@@ -434,3 +445,4 @@ Initial tagged release.
 [#144]: https://github.com/Inferara/inference/pull/144
 [#146]: https://github.com/Inferara/inference/pull/146
 [#148]: https://github.com/Inferara/inference/pull/148
+[#152]: https://github.com/Inferara/inference/pull/152
