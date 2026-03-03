@@ -78,8 +78,8 @@ pub(crate) struct ArraySlot {
 
 /// Per-function stack frame layout for array allocations.
 ///
-/// Passed as a parameter to `lower_statement` / `lower_expression` (not stored on
-/// `Compiler`, because frame layout is per-function, not per-module).
+/// Stored on `Compiler` as per-function state: set at the start of
+/// `visit_function_definition` and cleared after the function body is compiled.
 #[derive(Debug)]
 pub(crate) struct FrameLayout {
     /// Total frame size in bytes, rounded up to [`FRAME_ALIGNMENT`].

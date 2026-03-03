@@ -1,0 +1,29 @@
+pub fn break_nested_if(x: i32) -> i32 {
+    let mut result: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 100 {
+        if i > x {
+            if i % 2 == 0 {
+                break;
+            }
+        }
+        result = result + 1;
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn break_double_nested_if() -> i32 {
+    let mut count: i32 = 0;
+    let mut i: i32 = 0;
+    loop {
+        if i >= 10 {
+            if i >= 10 {
+                break;
+            }
+        }
+        count = count + 1;
+        i = i + 1;
+    }
+    return count;
+}

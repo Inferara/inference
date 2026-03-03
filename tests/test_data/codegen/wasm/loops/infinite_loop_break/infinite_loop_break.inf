@@ -1,0 +1,21 @@
+pub fn find_threshold(start: i32) -> i32 {
+    let mut i: i32 = start;
+    loop {
+        if i >= 100 {
+            break;
+        }
+        i = i + 7;
+    }
+    return i;
+}
+
+pub fn first_multiple_of(n: i32, limit: i32) -> i32 {
+    let mut i: i32 = 1;
+    loop {
+        if i * n >= limit {
+            break;
+        }
+        i = i + 1;
+    }
+    return i;
+}

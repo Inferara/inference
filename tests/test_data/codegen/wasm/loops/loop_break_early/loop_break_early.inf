@@ -1,0 +1,12 @@
+pub fn loop_break_early(n: i32) -> i32 {
+    let mut sum: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < n {
+        sum = sum + i;
+        if sum > 10 {
+            break;
+        }
+        i = i + 1;
+    }
+    return sum;
+}
