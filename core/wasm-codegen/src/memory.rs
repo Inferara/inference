@@ -78,8 +78,8 @@ pub(crate) struct ArraySlot {
 
 /// Per-function stack frame layout for array allocations.
 ///
-/// Passed as a parameter to `lower_statement` / `lower_expression` (not stored on
-/// `Compiler`, because frame layout is per-function, not per-module).
+/// Stored on `Compiler` as per-function state: set at the start of
+/// `visit_function_definition` and cleared after the function body is compiled.
 #[derive(Debug)]
 pub(crate) struct FrameLayout {
     /// Total frame size in bytes, rounded up to [`FRAME_ALIGNMENT`].
@@ -113,7 +113,10 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
 /// natural alignment, matching LLVM/Rust convention.
 #[must_use = "returns the aligned offset"]
 pub(crate) fn align_to(offset: u32, alignment: u32) -> u32 {
-    debug_assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    debug_assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     (offset + alignment - 1) & !(alignment - 1)
 }
 
@@ -519,21 +522,18 @@ mod tests {
     #[test]
     fn stack_pointer_init_equals_stack_size() {
         assert_eq!(STACK_SIZE, 65536);
-        assert_eq!(STACK_POINTER_INIT, STACK_SIZE as i32);
+        assert_eq!(STACK_POINTER_INIT, STACK_SIZE.cast_signed());
     }
 
     #[test]
     fn stack_size_fits_in_one_page() {
-        assert!(
-            STACK_SIZE <= PAGE_SIZE,
-            "STACK_SIZE ({STACK_SIZE}) must not exceed PAGE_SIZE ({PAGE_SIZE})"
-        );
+        const _: () = assert!(STACK_SIZE <= PAGE_SIZE);
     }
 
     #[test]
     fn stack_pointer_init_fits_in_i32() {
         assert!(
-            STACK_SIZE <= i32::MAX as u32,
+            i32::try_from(STACK_SIZE).is_ok(),
             "STACK_SIZE must fit in i32 for STACK_POINTER_INIT cast"
         );
     }

@@ -1,0 +1,25 @@
+pub fn count_evens(n: i32) -> i32 {
+    let mut count: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < n {
+        if i % 2 == 0 {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+pub fn abs_sum(n: i32) -> i32 {
+    let mut sum: i32 = 0;
+    let mut i: i32 = 0 - n;
+    loop i <= n {
+        if i < 0 {
+            sum = sum - i;
+        } else {
+            sum = sum + i;
+        }
+        i = i + 1;
+    }
+    return sum;
+}

@@ -1,0 +1,30 @@
+pub fn nested_count() -> i32 {
+    let mut total: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 3 {
+        let mut j: i32 = 0;
+        loop j < 4 {
+            total = total + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+pub fn nested_break() -> i32 {
+    let mut result: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 10 {
+        let mut j: i32 = 0;
+        loop {
+            if j >= 3 {
+                break;
+            }
+            result = result + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return result;
+}

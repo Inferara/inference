@@ -1,6 +1,8 @@
+mod algo_array;
 mod algo_bitwise;
 mod algo_converge;
 mod algo_i64_mixed;
+mod algo_iter;
 mod algo_recursive_math;
 mod arith_overflow;
 mod base;
@@ -16,4 +18,5 @@ mod binops_unary_combos;
 mod binops_u32;
 mod expr_deep_nesting;
 mod inference_wrapper;
+mod loops;
 mod validation;

@@ -1,0 +1,17 @@
+pub fn loop_inside_forall() {
+    forall {
+        let mut i: i32 = 0;
+        loop i < 10 {
+            i = i + 1;
+        }
+    }
+}
+
+pub fn loop_inside_exists() {
+    exists {
+        let mut x: i32 = 0;
+        loop x < 5 {
+            x = x + 1;
+        }
+    }
+}

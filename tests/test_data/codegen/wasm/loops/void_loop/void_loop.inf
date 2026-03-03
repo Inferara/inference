@@ -1,0 +1,6 @@
+pub fn void_loop(n: i32) {
+    let mut i: i32 = 0;
+    loop i < n {
+        i = i + 1;
+    }
+}

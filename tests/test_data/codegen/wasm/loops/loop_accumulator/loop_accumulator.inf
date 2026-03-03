@@ -1,0 +1,29 @@
+pub fn sum_1_to_n(n: i32) -> i32 {
+    let mut sum: i32 = 0;
+    let mut i: i32 = 1;
+    loop i <= n {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn factorial(n: i32) -> i32 {
+    let mut result: i32 = 1;
+    let mut i: i32 = 2;
+    loop i <= n {
+        result = result * i;
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn power(base: i32, exp: i32) -> i32 {
+    let mut result: i32 = 1;
+    let mut i: i32 = 0;
+    loop i < exp {
+        result = result * base;
+        i = i + 1;
+    }
+    return result;
+}

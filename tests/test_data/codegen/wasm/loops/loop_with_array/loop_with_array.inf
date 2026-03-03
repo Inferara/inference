@@ -1,0 +1,20 @@
+pub fn sum_array_elements() -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    let mut sum: i32 = 0;
+    let mut i: i32 = 0;
+    loop i < 4 {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn fill_and_sum(n: i32) -> i32 {
+    let mut arr: [i32; 5] = [0, 0, 0, 0, 0];
+    let mut i: i32 = 0;
+    loop i < 5 {
+        arr[i] = i * n;
+        i = i + 1;
+    }
+    return arr[0] + arr[1] + arr[2] + arr[3] + arr[4];
+}

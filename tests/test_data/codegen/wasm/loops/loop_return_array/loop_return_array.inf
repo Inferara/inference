@@ -1,0 +1,9 @@
+pub fn loop_return_array(n: i32) -> i32 {
+    let arr: [i32; 4] = [10, 20, 30, 40];
+    let mut i: i32 = 0;
+    loop i < 4 {
+        if arr[i] > n { return arr[i]; }
+        i = i + 1;
+    }
+    return 0;
+}

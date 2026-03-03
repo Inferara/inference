@@ -97,6 +97,22 @@ const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
 
+/// Tracks WASM structured control flow depth for loop/break lowering.
+///
+/// WASM `break` (`br`) instructions use relative depth to target enclosing
+/// blocks. This struct maintains the bookkeeping needed to compute correct
+/// `br` depths when lowering Inference `break` statements.
+///
+/// `wasm_block_depth` increments for every WASM structured block opened
+/// (`block`, `loop`, `if`) and `loop_exit_depths` records the depth at
+/// each enclosing loop's exit `block` so that `break` can compute
+/// `br_depth = wasm_block_depth - exit_depth - 1`.
+#[derive(Default)]
+struct LoopContext {
+    wasm_block_depth: u32,
+    loop_exit_depths: Vec<u32>,
+}
+
 /// Metadata about a function that returns an array type.
 ///
 /// Populated during `build_func_name_to_idx` so that callers and callees
@@ -161,6 +177,13 @@ pub(crate) struct Compiler {
     /// Set at the start of `visit_function_definition` and read during
     /// `lower_statement` to look up sret info for return statements.
     current_fn_name: String,
+
+    // Per-function state (set in visit_function_definition, used by lowering methods)
+    func: Option<Function>,
+    locals_map: FxHashMap<String, (u32, ValType)>,
+    frame_layout: Option<FrameLayout>,
+    loop_ctx: LoopContext,
+    parent_blocks_stack: Vec<BlockType>,
 }
 
 impl Compiler {
@@ -184,7 +207,18 @@ impl Compiler {
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             current_fn_name: String::new(),
+            func: None,
+            locals_map: FxHashMap::default(),
+            frame_layout: None,
+            loop_ctx: LoopContext::default(),
+            parent_blocks_stack: Vec::new(),
         }
+    }
+
+    fn func(&mut self) -> &mut Function {
+        self.func
+            .as_mut()
+            .expect("func() called outside function compilation")
     }
 
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
@@ -299,14 +333,17 @@ impl Compiler {
         };
 
         let mut params: Vec<ValType> = vec![];
-        let mut locals_map: FxHashMap<String, (u32, ValType)> = FxHashMap::default();
+        self.locals_map.clear();
+        self.loop_ctx = LoopContext::default();
+        self.parent_blocks_stack.clear();
         let mut local_idx: u32 = 0;
 
         // sret calling convention: hidden first parameter holds the caller-provided
         // destination pointer where the callee writes its return array.
         if is_array_return {
             params.push(ValType::I32);
-            locals_map.insert("sret".to_string(), (0, ValType::I32));
+            self.locals_map
+                .insert("sret".to_string(), (0, ValType::I32));
             local_idx = 1;
         }
 
@@ -318,7 +355,7 @@ impl Compiler {
                         let vt = Self::val_type_from_type(&arg.ty)
                             .expect("Function parameter type must not be unit");
                         params.push(vt);
-                        let prev = locals_map.insert(arg.name(), (local_idx, vt));
+                        let prev = self.locals_map.insert(arg.name(), (local_idx, vt));
                         assert!(
                             prev.is_none(),
                             "parameter `{}` collides with an existing entry in locals_map; \
@@ -343,8 +380,7 @@ impl Compiler {
         let param_count = local_idx;
         // has_return_value tracks whether the function conceptually returns a value,
         // which for sret functions is true even though the WASM return is void.
-        let has_return_value = is_array_return
-            || !results.is_empty();
+        let has_return_value = is_array_return || !results.is_empty();
 
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
@@ -371,25 +407,26 @@ impl Compiler {
         Self::pre_scan_locals(
             &function_definition.body,
             ctx,
-            &mut locals_map,
+            &mut self.locals_map,
             &mut local_idx,
         );
 
         // compute_frame_layout returns None when no arrays exist (or all are zero-length),
         // so frame_layout.is_some() implies total_size > 0.
-        let frame_layout = Self::compute_frame_layout(
+        self.frame_layout = Self::compute_frame_layout(
             &function_definition.body,
             ctx,
             local_idx,
             function_definition.arguments.as_deref(),
         );
 
-        if frame_layout.is_some() {
+        if self.frame_layout.is_some() {
             self.has_memory = true;
         }
 
         let mut local_declarations: Vec<(u32, ValType)> = {
-            let mut sorted_locals: Vec<(u32, ValType)> = locals_map
+            let mut sorted_locals: Vec<(u32, ValType)> = self
+                .locals_map
                 .values()
                 .copied()
                 .filter(|(idx, _)| *idx >= param_count)
@@ -398,14 +435,19 @@ impl Compiler {
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
-        if frame_layout.is_some() {
+        if self.frame_layout.is_some() {
             local_declarations.push((1, ValType::I32));
         }
 
-        let mut func = Function::new(local_declarations);
+        self.func = Some(Function::new(local_declarations));
 
-        if let Some(ref layout) = frame_layout {
-            emit_stack_prologue(&mut func, layout);
+        if let Some(ref layout) = self.frame_layout {
+            emit_stack_prologue(
+                self.func
+                    .as_mut()
+                    .expect("func must be Some during prologue"),
+                layout,
+            );
 
             // Copy-on-entry: for each array-typed parameter, copy the caller's data
             // into the callee's frame to enforce value semantics.
@@ -416,7 +458,8 @@ impl Compiler {
                             .get_node_typeinfo(arg.id)
                             .expect("Argument must have type info");
                         if let TypeInfoKind::Array(elem_type, _length) = &type_info.kind {
-                            let param_local = locals_map
+                            let param_local = self
+                                .locals_map
                                 .get(&arg.name())
                                 .expect("Array parameter must be in locals_map")
                                 .0;
@@ -425,7 +468,9 @@ impl Compiler {
                                 .get(&arg.name())
                                 .expect("Array parameter must have a frame slot");
                             emit_array_param_copy(
-                                &mut func,
+                                self.func
+                                    .as_mut()
+                                    .expect("func must be Some during param copy"),
                                 layout,
                                 slot,
                                 param_local,
@@ -439,30 +484,37 @@ impl Compiler {
 
         self.lower_statement(
             std::iter::once(Statement::Block(function_definition.body.clone())).peekable(),
-            &mut vec![function_definition.body.clone()],
             ctx,
-            &mut func,
-            &locals_map,
-            frame_layout.as_ref(),
         );
 
         if has_return_value {
-            if let Some(ref layout) = frame_layout {
-                emit_stack_epilogue(&mut func, layout);
+            if let Some(ref layout) = self.frame_layout {
+                emit_stack_epilogue(
+                    self.func
+                        .as_mut()
+                        .expect("func must be Some during epilogue"),
+                    layout,
+                );
             }
-            func.instruction(&Instruction::Unreachable);
-        } else if let Some(ref layout) = frame_layout {
-            emit_stack_epilogue(&mut func, layout);
+            self.func().instruction(&Instruction::Unreachable);
+        } else if let Some(ref layout) = self.frame_layout {
+            emit_stack_epilogue(
+                self.func
+                    .as_mut()
+                    .expect("func must be Some during epilogue"),
+                layout,
+            );
         }
 
-        func.instruction(&Instruction::End);
+        self.func().instruction(&Instruction::End);
 
         self.func_names.push((self.func_idx, fn_name.clone()));
-        let mut local_name_entries: Vec<(u32, String)> = locals_map
+        let mut local_name_entries: Vec<(u32, String)> = self
+            .locals_map
             .iter()
             .map(|(name, (idx, _))| (*idx, name.clone()))
             .collect();
-        if let Some(ref layout) = frame_layout {
+        if let Some(ref layout) = self.frame_layout {
             local_name_entries.push((layout.frame_ptr_local, "__frame_ptr".to_string()));
         }
         local_name_entries.sort_by_key(|(idx, _)| *idx);
@@ -470,7 +522,15 @@ impl Compiler {
             self.local_names.push((self.func_idx, local_name_entries));
         }
 
-        self.bodies.push(func);
+        let completed_func = self
+            .func
+            .take()
+            .expect("func must be Some after compilation");
+        self.bodies.push(completed_func);
+        self.frame_layout = None;
+        self.locals_map.clear();
+        self.loop_ctx = LoopContext::default();
+        self.parent_blocks_stack.clear();
         self.func_idx += 1;
     }
 
@@ -572,9 +632,9 @@ impl Compiler {
                         .expect("Argument must have type info");
                     if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                         let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz
-                            .checked_mul(*length)
-                            .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                        let byte_count = elem_sz.checked_mul(*length).expect(
+                            "Array byte count overflow: element size * length exceeds u32::MAX",
+                        );
                         let aligned_offset = align_to(current_offset, elem_sz);
                         let slot = ArraySlot {
                             offset: aligned_offset,
@@ -582,9 +642,9 @@ impl Compiler {
                             length: *length,
                         };
                         array_offsets.insert(arg.name(), slot);
-                        current_offset = aligned_offset
-                            .checked_add(byte_count)
-                            .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
+                        current_offset = aligned_offset.checked_add(byte_count).expect(
+                            "Frame offset overflow: total array allocation exceeds u32::MAX",
+                        );
                     }
                 }
             }
@@ -629,9 +689,9 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                         let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz
-                            .checked_mul(*length)
-                            .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                        let byte_count = elem_sz.checked_mul(*length).expect(
+                            "Array byte count overflow: element size * length exceeds u32::MAX",
+                        );
                         let aligned_offset = align_to(*current_offset, elem_sz);
                         let slot = ArraySlot {
                             offset: aligned_offset,
@@ -639,9 +699,9 @@ impl Compiler {
                             length: *length,
                         };
                         array_offsets.insert(var_def.name(), slot);
-                        *current_offset = aligned_offset
-                            .checked_add(byte_count)
-                            .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
+                        *current_offset = aligned_offset.checked_add(byte_count).expect(
+                            "Frame offset overflow: total array allocation exceeds u32::MAX",
+                        );
                     }
                 }
                 Statement::Block(inner_block) => {
@@ -688,104 +748,75 @@ impl Compiler {
     /// # Parameters
     ///
     /// - `statements_iterator` - Iterator over statements to lower
-    /// - `parent_blocks_stack` - Stack tracking enclosing block contexts
     /// - `ctx` - Typed context for type information lookup
-    /// - `func` - WASM function body being built
-    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
     #[allow(clippy::too_many_lines)]
     fn lower_statement<I: Iterator<Item = Statement>>(
-        &self,
+        &mut self,
         mut statements_iterator: Peekable<I>,
-        parent_blocks_stack: &mut Vec<BlockType>,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
     ) {
         let statement = statements_iterator.next().unwrap();
         match statement {
             Statement::Block(block_type) => match block_type {
                 BlockType::Block(block) => {
-                    parent_blocks_stack.push(BlockType::Block(block.clone()));
+                    self.parent_blocks_stack
+                        .push(BlockType::Block(block.clone()));
                     for stmt in block.statements.clone() {
-                        self.lower_statement(
-                            std::iter::once(stmt).peekable(),
-                            parent_blocks_stack,
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
+                        self.lower_statement(std::iter::once(stmt).peekable(), ctx);
                     }
-                    parent_blocks_stack.pop();
+                    self.parent_blocks_stack.pop();
                 }
                 BlockType::Forall(forall_block) => {
                     cov_mark::hit!(wasm_codegen_emit_forall_block);
-                    self.emit_nondet_block_start(func, FORALL_OPCODE);
-                    parent_blocks_stack.push(BlockType::Forall(forall_block.clone()));
+                    self.emit_nondet_block_start(FORALL_OPCODE);
+                    self.loop_ctx.wasm_block_depth += 1;
+                    self.parent_blocks_stack
+                        .push(BlockType::Forall(forall_block.clone()));
                     for stmt in forall_block.statements.clone() {
-                        self.lower_statement(
-                            std::iter::once(stmt).peekable(),
-                            parent_blocks_stack,
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
+                        self.lower_statement(std::iter::once(stmt).peekable(), ctx);
                     }
-                    self.emit_nondet_block_end(func);
-                    parent_blocks_stack.pop();
+                    self.loop_ctx.wasm_block_depth -= 1;
+                    self.emit_nondet_block_end();
+                    self.parent_blocks_stack.pop();
                 }
                 BlockType::Assume(assume_block) => {
                     cov_mark::hit!(wasm_codegen_emit_assume_block);
-                    self.emit_nondet_block_start(func, ASSUME_OPCODE);
-                    parent_blocks_stack.push(BlockType::Assume(assume_block.clone()));
+                    self.emit_nondet_block_start(ASSUME_OPCODE);
+                    self.loop_ctx.wasm_block_depth += 1;
+                    self.parent_blocks_stack
+                        .push(BlockType::Assume(assume_block.clone()));
                     for stmt in assume_block.statements.clone() {
-                        self.lower_statement(
-                            std::iter::once(stmt).peekable(),
-                            parent_blocks_stack,
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
+                        self.lower_statement(std::iter::once(stmt).peekable(), ctx);
                     }
-                    self.emit_nondet_block_end(func);
-                    parent_blocks_stack.pop();
+                    self.loop_ctx.wasm_block_depth -= 1;
+                    self.emit_nondet_block_end();
+                    self.parent_blocks_stack.pop();
                 }
                 BlockType::Exists(exists_block) => {
                     cov_mark::hit!(wasm_codegen_emit_exists_block);
-                    self.emit_nondet_block_start(func, EXISTS_OPCODE);
-                    parent_blocks_stack.push(BlockType::Exists(exists_block.clone()));
+                    self.emit_nondet_block_start(EXISTS_OPCODE);
+                    self.loop_ctx.wasm_block_depth += 1;
+                    self.parent_blocks_stack
+                        .push(BlockType::Exists(exists_block.clone()));
                     for stmt in exists_block.statements.clone() {
-                        self.lower_statement(
-                            std::iter::once(stmt).peekable(),
-                            parent_blocks_stack,
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
+                        self.lower_statement(std::iter::once(stmt).peekable(), ctx);
                     }
-                    self.emit_nondet_block_end(func);
-                    parent_blocks_stack.pop();
+                    self.loop_ctx.wasm_block_depth -= 1;
+                    self.emit_nondet_block_end();
+                    self.parent_blocks_stack.pop();
                 }
                 BlockType::Unique(unique_block) => {
                     cov_mark::hit!(wasm_codegen_emit_unique_block);
-                    self.emit_nondet_block_start(func, UNIQUE_OPCODE);
-                    parent_blocks_stack.push(BlockType::Unique(unique_block.clone()));
+                    self.emit_nondet_block_start(UNIQUE_OPCODE);
+                    self.loop_ctx.wasm_block_depth += 1;
+                    self.parent_blocks_stack
+                        .push(BlockType::Unique(unique_block.clone()));
                     for stmt in unique_block.statements.clone() {
-                        self.lower_statement(
-                            std::iter::once(stmt).peekable(),
-                            parent_blocks_stack,
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
+                        self.lower_statement(std::iter::once(stmt).peekable(), ctx);
                     }
-                    self.emit_nondet_block_end(func);
-                    parent_blocks_stack.pop();
+                    self.loop_ctx.wasm_block_depth -= 1;
+                    self.emit_nondet_block_end();
+                    self.parent_blocks_stack.pop();
                 }
             },
             Statement::Expression(expression) => {
@@ -796,65 +827,66 @@ impl Compiler {
                         if self.func_array_returns.contains_key(&fce.name())),
                     "standalone call to array-returning function should have been rejected by the type checker",
                 );
-                self.lower_expression(&expression, ctx, func, locals_map, frame_layout);
+                self.lower_expression(&expression, ctx);
                 let expr_produces_value = ctx
                     .get_node_typeinfo(expression.id())
                     .is_some_and(|ti| !matches!(ti.kind, TypeInfoKind::Unit));
                 if expr_produces_value {
                     let is_block_result = statements_iterator.peek().is_none()
-                        && parent_blocks_stack
+                        && self
+                            .parent_blocks_stack
                             .last()
                             .is_some_and(|b| b.is_non_det() && !b.is_void());
                     if !is_block_result {
-                        func.instruction(&Instruction::Drop);
+                        self.func().instruction(&Instruction::Drop);
                     }
                 }
             }
             Statement::Assign(assign_statement) => {
-                self.lower_assign_statement(&assign_statement, ctx, func, locals_map, frame_layout);
+                self.lower_assign_statement(&assign_statement, ctx);
             }
             Statement::Return(return_statement) => {
-                let sret_local = locals_map.get("sret").map(|(idx, _)| *idx);
+                let sret_local = self.locals_map.get("sret").map(|(idx, _)| *idx);
                 if let Some(sret_idx) = sret_local {
-                    if let Err(e) = self.lower_sret_return(
-                        &return_statement.expression.borrow(),
-                        sret_idx,
-                        ctx,
-                        func,
-                        locals_map,
-                        frame_layout,
-                    ) {
+                    if let Err(e) =
+                        self.lower_sret_return(&return_statement.expression.borrow(), sret_idx, ctx)
+                    {
                         panic!("sret return lowering failed: {e}");
                     }
                 } else {
-                    self.lower_expression(
-                        &return_statement.expression.borrow(),
-                        ctx,
-                        func,
-                        locals_map,
-                        frame_layout,
+                    self.lower_expression(&return_statement.expression.borrow(), ctx);
+                }
+                if let Some(ref layout) = self.frame_layout {
+                    emit_stack_epilogue(
+                        self.func
+                            .as_mut()
+                            .expect("func must be Some during epilogue"),
+                        layout,
                     );
                 }
-                if let Some(layout) = frame_layout {
-                    emit_stack_epilogue(func, layout);
-                }
-                func.instruction(&Instruction::Return);
+                self.func().instruction(&Instruction::Return);
             }
-            Statement::Loop(_loop_statement) => todo!(),
-            Statement::Break(_break_statement) => todo!(),
+            Statement::Loop(loop_statement) => {
+                self.lower_loop_statement(&loop_statement, ctx);
+            }
+            Statement::Break(_break_statement) => {
+                cov_mark::hit!(wasm_codegen_emit_break);
+                let exit_depth = self
+                    .loop_ctx
+                    .loop_exit_depths
+                    .last()
+                    .copied()
+                    .expect("break outside loop -- should be caught by analysis pass");
+                let br_depth = self.loop_ctx.wasm_block_depth - exit_depth - 1;
+                self.func().instruction(&Instruction::Br(br_depth));
+            }
             Statement::If(if_statement) => {
-                self.lower_if_statement(
-                    &if_statement,
-                    ctx,
-                    func,
-                    locals_map,
-                    parent_blocks_stack,
-                    frame_layout,
-                );
+                self.lower_if_statement(&if_statement, ctx);
             }
             Statement::VariableDefinition(variable_definition_statement) => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
-                let (local_idx, _) = locals_map
+                let (local_idx, _) = self
+                    .locals_map
                     .get(&variable_definition_statement.name())
                     .expect("Variable local not found in pre-scan");
                 match &variable_definition_statement.value {
@@ -863,8 +895,7 @@ impl Compiler {
                         let expr = expr_ref.borrow();
                         let local_idx = *local_idx;
 
-                        let var_type_info =
-                            ctx.get_node_typeinfo(variable_definition_statement.id);
+                        let var_type_info = ctx.get_node_typeinfo(variable_definition_statement.id);
                         let is_array_type = matches!(
                             var_type_info.as_ref().map(|ti| &ti.kind),
                             Some(TypeInfoKind::Array(_, _))
@@ -876,40 +907,36 @@ impl Compiler {
                                 self.func_array_returns.contains_key(&fce.name()));
 
                         // Detect array-to-array copy: `let b: [T; N] = a;`
-                        let is_array_copy = is_array_type
-                            && matches!(&*expr, Expression::Identifier(_));
+                        let is_array_copy =
+                            is_array_type && matches!(&*expr, Expression::Identifier(_));
 
                         if is_sret_call {
-                            let layout =
-                                frame_layout.expect("Array variable requires frame layout");
+                            let layout = self
+                                .frame_layout
+                                .as_ref()
+                                .expect("Array variable requires frame layout");
                             let dest_name = variable_definition_statement.name();
                             let dest_slot = layout
                                 .array_offsets
                                 .get(&dest_name)
                                 .expect("Destination array not in frame layout");
+                            let frame_ptr_local = layout.frame_ptr_local;
+                            let dest_offset = dest_slot.offset;
 
                             if let Expression::FunctionCall(fce) = &*expr {
                                 // Push sret pointer: frame_ptr + dest_slot.offset
-                                func.instruction(&Instruction::LocalGet(
-                                    layout.frame_ptr_local,
-                                ));
-                                if dest_slot.offset > 0 {
+                                self.func()
+                                    .instruction(&Instruction::LocalGet(frame_ptr_local));
+                                if dest_offset > 0 {
                                     #[allow(clippy::cast_possible_wrap)]
-                                    func.instruction(&Instruction::I32Const(
-                                        dest_slot.offset as i32,
-                                    ));
-                                    func.instruction(&Instruction::I32Add);
+                                    self.func()
+                                        .instruction(&Instruction::I32Const(dest_offset as i32));
+                                    self.func().instruction(&Instruction::I32Add);
                                 }
                                 // Push regular arguments
                                 if let Some(arguments) = &fce.arguments {
                                     for (_label, expr_ref) in arguments {
-                                        self.lower_expression(
-                                            &expr_ref.borrow(),
-                                            ctx,
-                                            func,
-                                            locals_map,
-                                            frame_layout,
-                                        );
+                                        self.lower_expression(&expr_ref.borrow(), ctx);
                                     }
                                 }
                                 let callee_name = fce.name();
@@ -918,66 +945,67 @@ impl Compiler {
                                     .get(&callee_name)
                                     .copied()
                                     .expect("sret callee must be in func_name_to_idx");
-                                func.instruction(&Instruction::Call(func_idx));
+                                self.func().instruction(&Instruction::Call(func_idx));
                             }
 
                             // Set local to point to destination slot
-                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-                            if dest_slot.offset > 0 {
+                            self.func()
+                                .instruction(&Instruction::LocalGet(frame_ptr_local));
+                            if dest_offset > 0 {
                                 #[allow(clippy::cast_possible_wrap)]
-                                func.instruction(&Instruction::I32Const(
-                                    dest_slot.offset as i32,
-                                ));
-                                func.instruction(&Instruction::I32Add);
+                                self.func()
+                                    .instruction(&Instruction::I32Const(dest_offset as i32));
+                                self.func().instruction(&Instruction::I32Add);
                             }
-                            func.instruction(&Instruction::LocalSet(local_idx));
+                            self.func().instruction(&Instruction::LocalSet(local_idx));
                         } else if is_array_copy {
                             cov_mark::hit!(wasm_codegen_emit_array_copy);
-                            let layout =
-                                frame_layout.expect("Array variable requires frame layout");
+                            let layout = self
+                                .frame_layout
+                                .as_ref()
+                                .expect("Array variable requires frame layout");
                             let dest_name = variable_definition_statement.name();
                             let dest_slot = layout
                                 .array_offsets
                                 .get(&dest_name)
                                 .expect("Destination array not in frame layout");
                             let byte_size = dest_slot.elem_size * dest_slot.length;
+                            let frame_ptr_local = layout.frame_ptr_local;
+                            let dest_offset = dest_slot.offset;
 
                             // dest = frame_ptr + dest_slot.offset
-                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-                            if dest_slot.offset > 0 {
+                            self.func()
+                                .instruction(&Instruction::LocalGet(frame_ptr_local));
+                            if dest_offset > 0 {
                                 #[allow(clippy::cast_possible_wrap)]
-                                func.instruction(&Instruction::I32Const(
-                                    dest_slot.offset as i32,
-                                ));
-                                func.instruction(&Instruction::I32Add);
+                                self.func()
+                                    .instruction(&Instruction::I32Const(dest_offset as i32));
+                                self.func().instruction(&Instruction::I32Add);
                             }
                             // src = lower_expression(identifier) -> source pointer
-                            self.lower_expression(
-                                &expr, ctx, func, locals_map, frame_layout,
-                            );
+                            self.lower_expression(&expr, ctx);
                             // byte count
                             #[allow(clippy::cast_possible_wrap)]
-                            func.instruction(&Instruction::I32Const(byte_size as i32));
-                            func.instruction(&Instruction::MemoryCopy {
+                            self.func()
+                                .instruction(&Instruction::I32Const(byte_size as i32));
+                            self.func().instruction(&Instruction::MemoryCopy {
                                 src_mem: 0,
                                 dst_mem: 0,
                             });
 
                             // Set local to point to destination slot
-                            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-                            if dest_slot.offset > 0 {
+                            self.func()
+                                .instruction(&Instruction::LocalGet(frame_ptr_local));
+                            if dest_offset > 0 {
                                 #[allow(clippy::cast_possible_wrap)]
-                                func.instruction(&Instruction::I32Const(
-                                    dest_slot.offset as i32,
-                                ));
-                                func.instruction(&Instruction::I32Add);
+                                self.func()
+                                    .instruction(&Instruction::I32Const(dest_offset as i32));
+                                self.func().instruction(&Instruction::I32Add);
                             }
-                            func.instruction(&Instruction::LocalSet(local_idx));
+                            self.func().instruction(&Instruction::LocalSet(local_idx));
                         } else {
-                            self.lower_expression(
-                                &expr, ctx, func, locals_map, frame_layout,
-                            );
-                            func.instruction(&Instruction::LocalSet(local_idx));
+                            self.lower_expression(&expr, ctx);
+                            self.func().instruction(&Instruction::LocalSet(local_idx));
                         }
                     }
                 }
@@ -986,17 +1014,13 @@ impl Compiler {
             Statement::Assert(_assert_statement) => todo!(),
             Statement::ConstantDefinition(constant_definition) => {
                 cov_mark::hit!(wasm_codegen_emit_constant_definition);
-                self.lower_literal(
-                    &constant_definition.value,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
-                let (local_idx, _) = locals_map
+                self.lower_literal(&constant_definition.value, ctx);
+                let local_idx = self
+                    .locals_map
                     .get(&constant_definition.name())
-                    .expect("Local not found in pre-scan");
-                func.instruction(&Instruction::LocalSet(*local_idx));
+                    .expect("Local not found in pre-scan")
+                    .0;
+                self.func().instruction(&Instruction::LocalSet(local_idx));
             }
         }
     }
@@ -1022,46 +1046,18 @@ impl Compiler {
     ///
     /// - `expression` - AST expression node to lower
     /// - `ctx` - Typed context for type lookups
-    /// - `func` - WASM function body being built
-    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
-    #[allow(clippy::too_many_lines)]
-    fn lower_expression(
-        &self,
-        expression: &Expression,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn lower_expression(&mut self, expression: &Expression, ctx: &TypedContext) {
         match expression {
             Expression::ArrayIndexAccess(array_index_access_expression) => {
-                self.lower_array_index_access(
-                    array_index_access_expression,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_array_index_access(array_index_access_expression, ctx);
             }
             Expression::Binary(binary_expression) => {
-                self.lower_binary_expression(
-                    binary_expression,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_binary_expression(binary_expression, ctx);
             }
             Expression::MemberAccess(_member_access_expression) => todo!(),
             Expression::TypeMemberAccess(_type_member_access_expression) => todo!(),
             Expression::FunctionCall(function_call_expression) => {
-                match self.lower_function_call(
-                    function_call_expression,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                ) {
+                match self.lower_function_call(function_call_expression, ctx) {
                     Ok(()) => {}
                     Err(CodegenError::UnsupportedCalleeKind) => {
                         todo!(
@@ -1080,32 +1076,22 @@ impl Compiler {
             }
             Expression::Struct(_struct_expression) => todo!(),
             Expression::PrefixUnary(prefix_unary_expression) => {
-                self.lower_prefix_unary_expression(
-                    prefix_unary_expression,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_prefix_unary_expression(prefix_unary_expression, ctx);
             }
             Expression::Parenthesized(parenthesized_expression) => {
                 cov_mark::hit!(wasm_codegen_emit_parenthesized_expression);
-                self.lower_expression(
-                    &parenthesized_expression.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_expression(&parenthesized_expression.expression.borrow(), ctx);
             }
             Expression::Literal(literal) => {
-                self.lower_literal(literal, ctx, func, locals_map, frame_layout);
+                self.lower_literal(literal, ctx);
             }
             Expression::Identifier(identifier) => {
-                let (local_idx, _) = locals_map
+                let local_idx = self
+                    .locals_map
                     .get(&identifier.name)
-                    .expect("Variable not found");
-                func.instruction(&Instruction::LocalGet(*local_idx));
+                    .expect("Variable not found")
+                    .0;
+                self.func().instruction(&Instruction::LocalGet(local_idx));
             }
             Expression::Type(_) => todo!(),
             Expression::Uzumaki(uzumaki_expression) => {
@@ -1113,24 +1099,17 @@ impl Compiler {
                     && let TypeInfoKind::Array(ref elem_type, length) = type_info.kind
                 {
                     cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
-                    self.lower_array_uzumaki(
-                        uzumaki_expression.id,
-                        elem_type,
-                        length,
-                        ctx,
-                        func,
-                        frame_layout,
-                    );
+                    self.lower_array_uzumaki(uzumaki_expression.id, elem_type, length, ctx);
                     return;
                 }
                 if ctx.is_node_i32(uzumaki_expression.id) {
                     cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
-                    self.emit_uzumaki(func, UZUMAKI_I32_OPCODE);
+                    self.emit_uzumaki(UZUMAKI_I32_OPCODE);
                     return;
                 }
                 if ctx.is_node_i64(uzumaki_expression.id) {
                     cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
-                    self.emit_uzumaki(func, UZUMAKI_I64_OPCODE);
+                    self.emit_uzumaki(UZUMAKI_I64_OPCODE);
                     return;
                 }
                 panic!("Unsupported Uzumaki expression type: {uzumaki_expression:?}");
@@ -1163,20 +1142,15 @@ impl Compiler {
     ///
     /// - `fce` - Function call expression node
     /// - `ctx` - Typed context for type lookups
-    /// - `func` - WASM function body being built
-    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
     ///
     /// # Errors
     ///
     /// Returns [`CodegenError`] if the callee is not a plain identifier or the
     /// function name is not in the pre-built index map.
     fn lower_function_call(
-        &self,
+        &mut self,
         fce: &inference_ast::nodes::FunctionCallExpression,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
     ) -> Result<(), CodegenError> {
         let Expression::Identifier(_) = &fce.function else {
             return Err(CodegenError::UnsupportedCalleeKind);
@@ -1188,7 +1162,7 @@ impl Compiler {
 
         if let Some(arguments) = &fce.arguments {
             for (_label, expr_ref) in arguments {
-                self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map, frame_layout);
+                self.lower_expression(&expr_ref.borrow(), ctx);
             }
         }
 
@@ -1198,7 +1172,7 @@ impl Compiler {
             .copied()
             .ok_or(CodegenError::UnknownFunction(func_name))?;
 
-        func.instruction(&Instruction::Call(func_idx));
+        self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
     }
 
@@ -1227,43 +1201,21 @@ impl Compiler {
     ///
     /// - `assign_stmt` - The assignment statement AST node to lower
     /// - `ctx` - Typed context for type information lookup
-    /// - `func` - WASM function body being built
-    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
-    /// - `frame_layout` - Stack frame layout for array memory access (may be `None`)
-    fn lower_assign_statement(
-        &self,
-        assign_stmt: &AssignStatement,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn lower_assign_statement(&mut self, assign_stmt: &AssignStatement, ctx: &TypedContext) {
         let left = assign_stmt.left.borrow();
         match &*left {
             Expression::Identifier(identifier) => {
                 cov_mark::hit!(wasm_codegen_emit_assign_identifier);
-                let (local_idx, _) = locals_map
+                let local_idx = self
+                    .locals_map
                     .get(&identifier.name)
-                    .expect("Assignment target variable not found");
-                let local_idx = *local_idx;
-                self.lower_expression(
-                    &assign_stmt.right.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
-                func.instruction(&Instruction::LocalSet(local_idx));
+                    .expect("Assignment target variable not found")
+                    .0;
+                self.lower_expression(&assign_stmt.right.borrow(), ctx);
+                self.func().instruction(&Instruction::LocalSet(local_idx));
             }
             Expression::ArrayIndexAccess(aiae) => {
-                self.lower_array_index_write(
-                    aiae,
-                    assign_stmt,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_array_index_write(aiae, assign_stmt, ctx);
             }
             _ => todo!("Assignment to non-identifier targets (member access) not yet supported"),
         }
@@ -1280,26 +1232,26 @@ impl Compiler {
     ///
     /// After writing, the caller emits the epilogue and `Return` instruction.
     fn lower_sret_return(
-        &self,
+        &mut self,
         return_expr: &Expression,
         sret_idx: u32,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
     ) -> Result<(), CodegenError> {
         let return_info = self
             .func_array_returns
             .get(&self.current_fn_name)
-            .expect("sret function must have ArrayReturnInfo");
+            .expect("sret function must have ArrayReturnInfo")
+            .clone();
         let byte_size = return_info.elem_size * return_info.length;
 
         match return_expr {
             Expression::Identifier(identifier) => {
-                let (source_local, _) = locals_map
+                let source_local = self
+                    .locals_map
                     .get(&identifier.name)
-                    .expect("Return identifier not found in locals_map");
-                emit_sret_copy(func, sret_idx, *source_local, byte_size);
+                    .expect("Return identifier not found in locals_map")
+                    .0;
+                emit_sret_copy(self.func(), sret_idx, source_local, byte_size);
             }
             Expression::Literal(Literal::Array(array_literal)) => {
                 let store_instr = memory::store_instruction(&return_info.elem_kind);
@@ -1307,15 +1259,9 @@ impl Compiler {
                     for (i, elem_ref) in elements.iter().enumerate() {
                         #[allow(clippy::cast_possible_truncation)]
                         let byte_offset = (i as u32) * return_info.elem_size;
-                        emit_sret_element_addr(func, sret_idx, byte_offset);
-                        self.lower_expression(
-                            &elem_ref.borrow(),
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
-                        func.instruction(&store_instr);
+                        emit_sret_element_addr(self.func(), sret_idx, byte_offset);
+                        self.lower_expression(&elem_ref.borrow(), ctx);
+                        self.func().instruction(&store_instr);
                     }
                 }
             }
@@ -1323,16 +1269,10 @@ impl Compiler {
                 let callee_name = fce.name();
                 if self.func_array_returns.contains_key(&callee_name) {
                     // Zero-copy sret forwarding: pass our sret pointer to the inner call
-                    func.instruction(&Instruction::LocalGet(sret_idx));
+                    self.func().instruction(&Instruction::LocalGet(sret_idx));
                     if let Some(arguments) = &fce.arguments {
                         for (_label, expr_ref) in arguments {
-                            self.lower_expression(
-                                &expr_ref.borrow(),
-                                ctx,
-                                func,
-                                locals_map,
-                                frame_layout,
-                            );
+                            self.lower_expression(&expr_ref.borrow(), ctx);
                         }
                     }
                     let func_idx = self
@@ -1340,7 +1280,7 @@ impl Compiler {
                         .get(&callee_name)
                         .copied()
                         .expect("Forwarded sret callee must be in func_name_to_idx");
-                    func.instruction(&Instruction::Call(func_idx));
+                    self.func().instruction(&Instruction::Call(func_idx));
                 } else {
                     return Err(CodegenError::UnsupportedSretReturnExpression);
                 }
@@ -1374,13 +1314,10 @@ impl Compiler {
     /// i32.store / i64.store / ...;; store value at address
     /// ```
     fn lower_array_index_write(
-        &self,
+        &mut self,
         aiae: &inference_ast::nodes::ArrayIndexAccessExpression,
         assign_stmt: &AssignStatement,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_array_index_write);
 
@@ -1389,20 +1326,14 @@ impl Compiler {
             .expect("ArrayIndexAccess must have type info (element type)");
         let elem_sz = memory::element_size(&elem_type_info.kind);
 
-        self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(&aiae.array.borrow(), ctx);
 
-        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx, func, locals_map, frame_layout);
+        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx);
 
-        self.lower_expression(
-            &assign_stmt.right.borrow(),
-            ctx,
-            func,
-            locals_map,
-            frame_layout,
-        );
+        self.lower_expression(&assign_stmt.right.borrow(), ctx);
 
         let store_instr = memory::store_instruction(&elem_type_info.kind);
-        func.instruction(&store_instr);
+        self.func().instruction(&store_instr);
     }
 
     /// Lowers an `if`/`else` statement to WASM structured control flow.
@@ -1434,57 +1365,91 @@ impl Compiler {
     ///
     /// - `if_stmt` - The if statement AST node to lower
     /// - `ctx` - Typed context for type information lookup
-    /// - `func` - WASM function body being built
-    /// - `locals_map` - Map from variable names to (`local_index`, `ValType`)
-    /// - `parent_blocks_stack` - Stack tracking enclosing block contexts (passed through to nested
-    ///   statement lowering)
     fn lower_if_statement(
-        &self,
+        &mut self,
         if_stmt: &inference_ast::nodes::IfStatement,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        parent_blocks_stack: &mut Vec<BlockType>,
-        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
-        self.lower_expression(
-            &if_stmt.condition.borrow(),
-            ctx,
-            func,
-            locals_map,
-            frame_layout,
-        );
-        func.instruction(&Instruction::If(WasmBlockType::Empty));
+        self.lower_expression(&if_stmt.condition.borrow(), ctx);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
 
         for stmt in if_stmt.if_arm.statements() {
-            self.lower_statement(
-                std::iter::once(stmt).peekable(),
-                parent_blocks_stack,
-                ctx,
-                func,
-                locals_map,
-                frame_layout,
-            );
+            self.lower_statement(std::iter::once(stmt).peekable(), ctx);
         }
 
         if let Some(else_arm) = &if_stmt.else_arm {
             cov_mark::hit!(wasm_codegen_emit_if_with_else);
-            func.instruction(&Instruction::Else);
+            self.func().instruction(&Instruction::Else);
             for stmt in else_arm.statements() {
-                self.lower_statement(
-                    std::iter::once(stmt).peekable(),
-                    parent_blocks_stack,
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_statement(std::iter::once(stmt).peekable(), ctx);
             }
         }
 
-        func.instruction(&Instruction::End);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+    }
+
+    /// Lowers a loop statement to WASM structured control flow.
+    ///
+    /// Generates the standard `block`+`loop` double-nesting pattern.
+    /// The outer `block` provides the forward branch target
+    /// for exit (break / condition-false), and the inner `loop` provides the
+    /// backward branch target for continue.
+    ///
+    /// # Conditional loop (`loop condition { body }`)
+    ///
+    /// ```text
+    /// block $exit
+    ///   loop $continue
+    ///     <lower condition>
+    ///     i32.eqz
+    ///     br_if 1              ;; exit when condition is false
+    ///     <lower body>
+    ///     br 0                 ;; unconditional back-edge
+    ///   end
+    /// end
+    /// ```
+    fn lower_loop_statement(
+        &mut self,
+        loop_stmt: &inference_ast::nodes::LoopStatement,
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_loop_statement);
+
+        self.loop_ctx
+            .loop_exit_depths
+            .push(self.loop_ctx.wasm_block_depth);
+
+        self.func()
+            .instruction(&Instruction::Block(WasmBlockType::Empty));
+        self.func()
+            .instruction(&Instruction::Loop(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 2;
+
+        if let Some(condition) = loop_stmt.condition.borrow().as_ref() {
+            cov_mark::hit!(wasm_codegen_emit_loop_conditional);
+            self.lower_expression(condition, ctx);
+            self.func().instruction(&Instruction::I32Eqz);
+            self.func().instruction(&Instruction::BrIf(1));
+        } else {
+            cov_mark::hit!(wasm_codegen_emit_loop_infinite);
+        }
+
+        for stmt in loop_stmt.body.statements() {
+            self.lower_statement(std::iter::once(stmt).peekable(), ctx);
+        }
+
+        self.func().instruction(&Instruction::Br(0));
+
+        self.loop_ctx.wasm_block_depth -= 2;
+        self.func().instruction(&Instruction::End);
+        self.func().instruction(&Instruction::End);
+
+        self.loop_ctx.loop_exit_depths.pop();
     }
 
     /// Returns `true` if `kind` is an unsigned integer type.
@@ -1528,12 +1493,9 @@ impl Compiler {
     /// i32.load / i64.load / ...  ;; load element value
     /// ```
     fn lower_array_index_access(
-        &self,
+        &mut self,
         aiae: &inference_ast::nodes::ArrayIndexAccessExpression,
         ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_array_index_read);
 
@@ -1542,12 +1504,12 @@ impl Compiler {
             .expect("ArrayIndexAccess must have type info (element type)");
         let elem_sz = memory::element_size(&elem_type_info.kind);
 
-        self.lower_expression(&aiae.array.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(&aiae.array.borrow(), ctx);
 
-        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx, func, locals_map, frame_layout);
+        self.emit_index_offset(&aiae.index.borrow(), elem_sz, ctx);
 
         let load_instr = memory::load_instruction(&elem_type_info.kind);
-        func.instruction(&load_instr);
+        self.func().instruction(&load_instr);
     }
 
     /// Emits the byte-offset computation for an array index expression.
@@ -1556,26 +1518,19 @@ impl Compiler {
     /// pre-computed and emitted as a single `i32.const` + `i32.add` (or nothing at all
     /// when the offset is zero). For dynamic indices the runtime `i32.mul` + `i32.add`
     /// sequence is emitted.
-    fn emit_index_offset(
-        &self,
-        index_expr: &Expression,
-        elem_sz: u32,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn emit_index_offset(&mut self, index_expr: &Expression, elem_sz: u32, ctx: &TypedContext) {
         if let Some(byte_offset) = try_const_index_byte_offset(index_expr, elem_sz) {
             if byte_offset != 0 {
-                func.instruction(&Instruction::I32Const(byte_offset));
-                func.instruction(&Instruction::I32Add);
+                self.func().instruction(&Instruction::I32Const(byte_offset));
+                self.func().instruction(&Instruction::I32Add);
             }
         } else {
-            self.lower_expression(index_expr, ctx, func, locals_map, frame_layout);
+            self.lower_expression(index_expr, ctx);
             #[allow(clippy::cast_possible_wrap)]
-            func.instruction(&Instruction::I32Const(elem_sz as i32));
-            func.instruction(&Instruction::I32Mul);
-            func.instruction(&Instruction::I32Add);
+            self.func()
+                .instruction(&Instruction::I32Const(elem_sz as i32));
+            self.func().instruction(&Instruction::I32Mul);
+            self.func().instruction(&Instruction::I32Add);
         }
     }
 
@@ -1615,13 +1570,11 @@ impl Compiler {
     /// i32.add
     /// ```
     fn lower_array_uzumaki(
-        &self,
+        &mut self,
         uzumaki_id: u32,
         elem_type: &inference_type_checker::type_info::TypeInfo,
         length: u32,
         ctx: &TypedContext,
-        func: &mut Function,
-        frame_layout: Option<&FrameLayout>,
     ) {
         // INVARIANT: `lower_array_uzumaki` is only called from `lower_literal` when the
         // AST node is an `Expression::Uzumaki` inside an array variable definition. The
@@ -1632,9 +1585,11 @@ impl Compiler {
             .expect("Array uzumaki must have an enclosing variable definition");
 
         // INVARIANT: `lower_array_uzumaki` is only reachable for array-typed variables.
-        // `compile_function` creates a `FrameLayout` whenever `pre_scan_locals` discovers
+        // `visit_function_definition` creates a `FrameLayout` whenever `pre_scan_locals` discovers
         // array locals, and array uzumaki nodes can only appear inside such variables.
-        let layout = frame_layout
+        let layout = self
+            .frame_layout
+            .as_ref()
             .expect("Array uzumaki requires a frame layout (function must have arrays)");
 
         // INVARIANT: `compute_frame_layout` scans the same AST nodes as `lower_literal`,
@@ -1644,9 +1599,7 @@ impl Compiler {
             .array_offsets
             .get(&parent_var_name)
             .unwrap_or_else(|| {
-                panic!(
-                    "Array variable '{parent_var_name}' not found in frame layout offsets"
-                )
+                panic!("Array variable '{parent_var_name}' not found in frame layout offsets")
             });
 
         let uzumaki_opcode = if Self::is_i64_type(&elem_type.kind) {
@@ -1656,22 +1609,28 @@ impl Compiler {
         };
 
         let store_instr = memory::store_instruction_from_slot(slot);
+        let frame_ptr_local = layout.frame_ptr_local;
+        let slot_offset = slot.offset;
+        let slot_elem_size = slot.elem_size;
 
         for i in 0..length {
             #[allow(clippy::cast_possible_wrap)]
-            let byte_offset = (slot.offset + i * slot.elem_size) as i32;
-            func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-            func.instruction(&Instruction::I32Const(byte_offset));
-            func.instruction(&Instruction::I32Add);
-            self.emit_uzumaki(func, uzumaki_opcode);
-            func.instruction(&store_instr);
+            let byte_offset = (slot_offset + i * slot_elem_size) as i32;
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func().instruction(&Instruction::I32Const(byte_offset));
+            self.func().instruction(&Instruction::I32Add);
+            self.emit_uzumaki(uzumaki_opcode);
+            self.func().instruction(&store_instr);
         }
 
-        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-        if slot.offset > 0 {
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if slot_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            func.instruction(&Instruction::I32Const(slot.offset as i32));
-            func.instruction(&Instruction::I32Add);
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
         }
     }
 
@@ -1703,18 +1662,11 @@ impl Compiler {
     ///   (the positive result does not fit in the signed range).
     /// - `i32.rem_s` / `i64.rem_s` with `(MIN, -1)` do **not** trap (the remainder is 0).
     #[allow(clippy::too_many_lines)]
-    fn lower_binary_expression(
-        &self,
-        be: &BinaryExpression,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn lower_binary_expression(&mut self, be: &BinaryExpression, ctx: &TypedContext) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
-        self.lower_expression(&be.left.borrow(), ctx, func, locals_map, frame_layout);
-        self.lower_expression(&be.right.borrow(), ctx, func, locals_map, frame_layout);
+        self.lower_expression(&be.left.borrow(), ctx);
+        self.lower_expression(&be.right.borrow(), ctx);
 
         let left_type_info = ctx
             .get_node_typeinfo(be.left.borrow().id())
@@ -1838,7 +1790,7 @@ impl Compiler {
             }
         };
 
-        func.instruction(&instruction);
+        self.func().instruction(&instruction);
 
         // Narrow sub-i32 results for operations that can overflow the type's bit width.
         // Skip: comparisons (return bool), Mod (result always fits in type),
@@ -1857,7 +1809,7 @@ impl Compiler {
                 | OperatorKind::Or
                 | OperatorKind::Shr
         ) {
-            memory::emit_sub_i32_narrowing(func, &left_type_info.kind);
+            memory::emit_sub_i32_narrowing(self.func(), &left_type_info.kind);
         }
     }
 
@@ -1870,14 +1822,7 @@ impl Compiler {
     /// - `Not` (`!x`): `[lower(x), I32Eqz]` — inverts boolean (0→1, 1→0) using WASM test op.
     /// - `BitNot` (`~x`): `[lower(x), -1_const, Xor]` — `x ^ -1` inverts all bits;
     ///   works identically for i32 and i64.
-    fn lower_prefix_unary_expression(
-        &self,
-        pue: &PrefixUnaryExpression,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn lower_prefix_unary_expression(&mut self, pue: &PrefixUnaryExpression, ctx: &TypedContext) {
         cov_mark::hit!(wasm_codegen_emit_prefix_unary_expression);
 
         let type_info = ctx
@@ -1889,51 +1834,33 @@ impl Compiler {
             UnaryOperatorKind::Neg => {
                 cov_mark::hit!(wasm_codegen_emit_unary_neg);
                 if is_i64 {
-                    func.instruction(&Instruction::I64Const(0));
+                    self.func().instruction(&Instruction::I64Const(0));
                 } else {
-                    func.instruction(&Instruction::I32Const(0));
+                    self.func().instruction(&Instruction::I32Const(0));
                 }
-                self.lower_expression(
-                    &pue.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_expression(&pue.expression.borrow(), ctx);
                 if is_i64 {
-                    func.instruction(&Instruction::I64Sub);
+                    self.func().instruction(&Instruction::I64Sub);
                 } else {
-                    func.instruction(&Instruction::I32Sub);
-                    memory::emit_sub_i32_narrowing(func, &type_info.kind);
+                    self.func().instruction(&Instruction::I32Sub);
+                    memory::emit_sub_i32_narrowing(self.func(), &type_info.kind);
                 }
             }
             UnaryOperatorKind::Not => {
                 cov_mark::hit!(wasm_codegen_emit_unary_not);
-                self.lower_expression(
-                    &pue.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
-                func.instruction(&Instruction::I32Eqz);
+                self.lower_expression(&pue.expression.borrow(), ctx);
+                self.func().instruction(&Instruction::I32Eqz);
             }
             UnaryOperatorKind::BitNot => {
                 cov_mark::hit!(wasm_codegen_emit_unary_bitnot);
-                self.lower_expression(
-                    &pue.expression.borrow(),
-                    ctx,
-                    func,
-                    locals_map,
-                    frame_layout,
-                );
+                self.lower_expression(&pue.expression.borrow(), ctx);
                 if is_i64 {
-                    func.instruction(&Instruction::I64Const(-1));
-                    func.instruction(&Instruction::I64Xor);
+                    self.func().instruction(&Instruction::I64Const(-1));
+                    self.func().instruction(&Instruction::I64Xor);
                 } else {
-                    func.instruction(&Instruction::I32Const(-1));
-                    func.instruction(&Instruction::I32Xor);
-                    memory::emit_sub_i32_narrowing(func, &type_info.kind);
+                    self.func().instruction(&Instruction::I32Const(-1));
+                    self.func().instruction(&Instruction::I32Xor);
+                    memory::emit_sub_i32_narrowing(self.func(), &type_info.kind);
                 }
             }
         }
@@ -1953,16 +1880,8 @@ impl Compiler {
     ///
     /// - `literal` - AST literal node to convert
     /// - `ctx` - Typed context for type lookups
-    /// - `func` - WASM function body being built
     #[allow(clippy::too_many_lines)]
-    fn lower_literal(
-        &self,
-        literal: &Literal,
-        ctx: &TypedContext,
-        func: &mut Function,
-        locals_map: &FxHashMap<String, (u32, ValType)>,
-        frame_layout: Option<&FrameLayout>,
-    ) {
+    fn lower_literal(&mut self, literal: &Literal, ctx: &TypedContext) {
         match literal {
             Literal::Array(array_literal) => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
@@ -1979,9 +1898,11 @@ impl Compiler {
                         )
                     });
 
-                let Some(layout) = frame_layout else {
-                    func.instruction(&Instruction::I32Const(0));
-                    return;
+                let Some(ref layout) = self.frame_layout else {
+                    unreachable!(
+                        "array literal exists but frame_layout is None; \
+                         compute_frame_layout should have allocated a frame"
+                    );
                 };
 
                 // INVARIANT: `compute_frame_layout` scans the same AST nodes as
@@ -1998,44 +1919,51 @@ impl Compiler {
                     });
 
                 if slot.length == 0 {
-                    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-                    if slot.offset > 0 {
+                    let frame_ptr_local = layout.frame_ptr_local;
+                    let slot_offset = slot.offset;
+                    self.func()
+                        .instruction(&Instruction::LocalGet(frame_ptr_local));
+                    if slot_offset > 0 {
                         #[allow(clippy::cast_possible_wrap)]
-                        func.instruction(&Instruction::I32Const(slot.offset as i32));
-                        func.instruction(&Instruction::I32Add);
+                        self.func()
+                            .instruction(&Instruction::I32Const(slot_offset as i32));
+                        self.func().instruction(&Instruction::I32Add);
                     }
                     return;
                 }
 
+                let store_instr = memory::store_instruction_from_slot(slot);
+                let frame_ptr_local = layout.frame_ptr_local;
+                let slot_offset = slot.offset;
+                let slot_elem_size = slot.elem_size;
+
                 if let Some(elements) = &array_literal.elements {
-                    let store_instr = memory::store_instruction_from_slot(slot);
                     for (i, elem_ref) in elements.iter().enumerate() {
                         #[allow(clippy::cast_possible_truncation)]
-                        let byte_offset = slot.offset + (i as u32) * slot.elem_size;
-                        func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+                        let byte_offset = slot_offset + (i as u32) * slot_elem_size;
+                        self.func()
+                            .instruction(&Instruction::LocalGet(frame_ptr_local));
                         #[allow(clippy::cast_possible_wrap)]
-                        func.instruction(&Instruction::I32Const(byte_offset as i32));
-                        func.instruction(&Instruction::I32Add);
-                        self.lower_expression(
-                            &elem_ref.borrow(),
-                            ctx,
-                            func,
-                            locals_map,
-                            frame_layout,
-                        );
-                        func.instruction(&store_instr);
+                        self.func()
+                            .instruction(&Instruction::I32Const(byte_offset as i32));
+                        self.func().instruction(&Instruction::I32Add);
+                        self.lower_expression(&elem_ref.borrow(), ctx);
+                        self.func().instruction(&store_instr);
                     }
                 }
 
-                func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
-                if slot.offset > 0 {
+                self.func()
+                    .instruction(&Instruction::LocalGet(frame_ptr_local));
+                if slot_offset > 0 {
                     #[allow(clippy::cast_possible_wrap)]
-                    func.instruction(&Instruction::I32Const(slot.offset as i32));
-                    func.instruction(&Instruction::I32Add);
+                    self.func()
+                        .instruction(&Instruction::I32Const(slot_offset as i32));
+                    self.func().instruction(&Instruction::I32Add);
                 }
             }
             Literal::Bool(bool_literal) => {
-                func.instruction(&Instruction::I32Const(i32::from(bool_literal.value)));
+                self.func()
+                    .instruction(&Instruction::I32Const(i32::from(bool_literal.value)));
             }
             Literal::String(_string_literal) => todo!(),
             Literal::Number(number_literal) => {
@@ -2048,7 +1976,7 @@ impl Compiler {
                             .value
                             .parse::<i32>()
                             .expect("Failed to parse signed 32-bit integer literal");
-                        func.instruction(&Instruction::I32Const(val));
+                        self.func().instruction(&Instruction::I32Const(val));
                     }
                     TypeInfoKind::Number(NumberType::U8) => {
                         let val = i32::from(
@@ -2057,7 +1985,7 @@ impl Compiler {
                                 .parse::<u8>()
                                 .expect("Failed to parse unsigned 8-bit integer literal"),
                         );
-                        func.instruction(&Instruction::I32Const(val));
+                        self.func().instruction(&Instruction::I32Const(val));
                     }
                     TypeInfoKind::Number(NumberType::U16) => {
                         let val = i32::from(
@@ -2066,7 +1994,7 @@ impl Compiler {
                                 .parse::<u16>()
                                 .expect("Failed to parse unsigned 16-bit integer literal"),
                         );
-                        func.instruction(&Instruction::I32Const(val));
+                        self.func().instruction(&Instruction::I32Const(val));
                     }
                     TypeInfoKind::Number(NumberType::U32) => {
                         let val = number_literal
@@ -2074,14 +2002,14 @@ impl Compiler {
                             .parse::<u32>()
                             .expect("Failed to parse unsigned 32-bit integer literal")
                             .cast_signed();
-                        func.instruction(&Instruction::I32Const(val));
+                        self.func().instruction(&Instruction::I32Const(val));
                     }
                     TypeInfoKind::Number(NumberType::I64) => {
                         let val = number_literal
                             .value
                             .parse::<i64>()
                             .expect("Failed to parse signed 64-bit integer literal");
-                        func.instruction(&Instruction::I64Const(val));
+                        self.func().instruction(&Instruction::I64Const(val));
                     }
                     TypeInfoKind::Number(NumberType::U64) => {
                         let val = number_literal
@@ -2089,7 +2017,7 @@ impl Compiler {
                             .parse::<u64>()
                             .expect("Failed to parse unsigned 64-bit integer literal")
                             .cast_signed();
-                        func.instruction(&Instruction::I64Const(val));
+                        self.func().instruction(&Instruction::I64Const(val));
                     }
                     _ => panic!("Unsupported number literal type: {:?}", type_info.kind),
                 }
@@ -2102,17 +2030,15 @@ impl Compiler {
     ///
     /// Writes the custom 0xfc prefix followed by the specific opcode and void block
     /// type (0x40). The block body follows, terminated by `emit_nondet_block_end`.
-    #[allow(clippy::unused_self)]
-    fn emit_nondet_block_start(&self, func: &mut Function, opcode: u8) {
-        func.raw([OPCODE_PREFIX, opcode, BLOCK_TYPE_VOID]);
+    fn emit_nondet_block_start(&mut self, opcode: u8) {
+        self.func().raw([OPCODE_PREFIX, opcode, BLOCK_TYPE_VOID]);
     }
 
     /// Emits the end of a non-deterministic block.
     ///
     /// Writes the standard WASM `end` instruction (0x0b) to close the block.
-    #[allow(clippy::unused_self)]
-    fn emit_nondet_block_end(&self, func: &mut Function) {
-        func.raw([END_OPCODE]);
+    fn emit_nondet_block_end(&mut self) {
+        self.func().raw([END_OPCODE]);
     }
 
     /// Emits a uzumaki (non-deterministic value) instruction.
@@ -2120,9 +2046,8 @@ impl Compiler {
     /// Writes the custom 0xfc prefix followed by the uzumaki opcode.
     /// This is a standalone instruction (not a block) that produces a
     /// non-deterministic value of the corresponding type on the stack.
-    #[allow(clippy::unused_self)]
-    fn emit_uzumaki(&self, func: &mut Function, opcode: u8) {
-        func.raw([OPCODE_PREFIX, opcode]);
+    fn emit_uzumaki(&mut self, opcode: u8) {
+        self.func().raw([OPCODE_PREFIX, opcode]);
     }
 
     /// Returns whether a public `main()` function was compiled.
@@ -2238,6 +2163,22 @@ impl Compiler {
     }
 }
 
+/// Returns the pre-computed byte offset when `index_expr` is a constant number literal,
+/// or `None` when the index is dynamic.
+///
+/// The returned `i32` equals `literal_value * elem_sz`, which can be used directly as
+/// an `i32.const` operand to skip the runtime multiply-and-add sequence.
+fn try_const_index_byte_offset(index_expr: &Expression, elem_sz: u32) -> Option<i32> {
+    if let Expression::Literal(Literal::Number(num_lit)) = index_expr {
+        let index_val = num_lit.value.parse::<i32>().ok()?;
+        #[allow(clippy::cast_possible_wrap)]
+        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
+        Some(byte_offset)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2349,21 +2290,5 @@ mod tests {
             shift += 7;
         }
         (result, bytes.len())
-    }
-}
-
-/// Returns the pre-computed byte offset when `index_expr` is a constant number literal,
-/// or `None` when the index is dynamic.
-///
-/// The returned `i32` equals `literal_value * elem_sz`, which can be used directly as
-/// an `i32.const` operand to skip the runtime multiply-and-add sequence.
-fn try_const_index_byte_offset(index_expr: &Expression, elem_sz: u32) -> Option<i32> {
-    if let Expression::Literal(Literal::Number(num_lit)) = index_expr {
-        let index_val = num_lit.value.parse::<i32>().ok()?;
-        #[allow(clippy::cast_possible_wrap)]
-        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
-        Some(byte_offset)
-    } else {
-        None
     }
 }

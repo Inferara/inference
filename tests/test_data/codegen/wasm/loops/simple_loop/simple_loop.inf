@@ -1,0 +1,14 @@
+pub fn count_to_ten() -> i32 {
+    let mut i: i32 = 0;
+    loop i < 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+pub fn count_down(mut n: i32) -> i32 {
+    loop n > 0 {
+        n = n - 1;
+    }
+    return n;
+}

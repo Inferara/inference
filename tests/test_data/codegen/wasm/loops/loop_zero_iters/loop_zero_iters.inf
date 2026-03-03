@@ -1,0 +1,7 @@
+pub fn loop_zero_iters() -> i32 {
+    let mut x: i32 = 0;
+    loop false {
+        x = 1;
+    }
+    return x;
+}
