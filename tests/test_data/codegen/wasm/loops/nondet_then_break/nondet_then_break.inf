@@ -1,0 +1,12 @@
+pub fn nondet_then_break(n: i32) -> i32 {
+    let mut i: i32 = 0;
+    loop i < n {
+        forall {
+            let mut x: i32 = @;
+            assume { x = x; }
+        }
+        i = i + 1;
+        if i > 5 { break; }
+    }
+    return i;
+}

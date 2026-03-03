@@ -443,7 +443,9 @@ impl Compiler {
 
         if let Some(ref layout) = self.frame_layout {
             emit_stack_prologue(
-                self.func.as_mut().expect("func must be Some during prologue"),
+                self.func
+                    .as_mut()
+                    .expect("func must be Some during prologue"),
                 layout,
             );
 
@@ -488,14 +490,18 @@ impl Compiler {
         if has_return_value {
             if let Some(ref layout) = self.frame_layout {
                 emit_stack_epilogue(
-                    self.func.as_mut().expect("func must be Some during epilogue"),
+                    self.func
+                        .as_mut()
+                        .expect("func must be Some during epilogue"),
                     layout,
                 );
             }
             self.func().instruction(&Instruction::Unreachable);
         } else if let Some(ref layout) = self.frame_layout {
             emit_stack_epilogue(
-                self.func.as_mut().expect("func must be Some during epilogue"),
+                self.func
+                    .as_mut()
+                    .expect("func must be Some during epilogue"),
                 layout,
             );
         }
@@ -852,7 +858,9 @@ impl Compiler {
                 }
                 if let Some(ref layout) = self.frame_layout {
                     emit_stack_epilogue(
-                        self.func.as_mut().expect("func must be Some during epilogue"),
+                        self.func
+                            .as_mut()
+                            .expect("func must be Some during epilogue"),
                         layout,
                     );
                 }
@@ -1193,11 +1201,7 @@ impl Compiler {
     ///
     /// - `assign_stmt` - The assignment statement AST node to lower
     /// - `ctx` - Typed context for type information lookup
-    fn lower_assign_statement(
-        &mut self,
-        assign_stmt: &AssignStatement,
-        ctx: &TypedContext,
-    ) {
+    fn lower_assign_statement(&mut self, assign_stmt: &AssignStatement, ctx: &TypedContext) {
         let left = assign_stmt.left.borrow();
         match &*left {
             Expression::Identifier(identifier) => {
@@ -1514,12 +1518,7 @@ impl Compiler {
     /// pre-computed and emitted as a single `i32.const` + `i32.add` (or nothing at all
     /// when the offset is zero). For dynamic indices the runtime `i32.mul` + `i32.add`
     /// sequence is emitted.
-    fn emit_index_offset(
-        &mut self,
-        index_expr: &Expression,
-        elem_sz: u32,
-        ctx: &TypedContext,
-    ) {
+    fn emit_index_offset(&mut self, index_expr: &Expression, elem_sz: u32, ctx: &TypedContext) {
         if let Some(byte_offset) = try_const_index_byte_offset(index_expr, elem_sz) {
             if byte_offset != 0 {
                 self.func().instruction(&Instruction::I32Const(byte_offset));
@@ -1586,7 +1585,7 @@ impl Compiler {
             .expect("Array uzumaki must have an enclosing variable definition");
 
         // INVARIANT: `lower_array_uzumaki` is only reachable for array-typed variables.
-        // `compile_function` creates a `FrameLayout` whenever `pre_scan_locals` discovers
+        // `visit_function_definition` creates a `FrameLayout` whenever `pre_scan_locals` discovers
         // array locals, and array uzumaki nodes can only appear inside such variables.
         let layout = self
             .frame_layout
@@ -1663,11 +1662,7 @@ impl Compiler {
     ///   (the positive result does not fit in the signed range).
     /// - `i32.rem_s` / `i64.rem_s` with `(MIN, -1)` do **not** trap (the remainder is 0).
     #[allow(clippy::too_many_lines)]
-    fn lower_binary_expression(
-        &mut self,
-        be: &BinaryExpression,
-        ctx: &TypedContext,
-    ) {
+    fn lower_binary_expression(&mut self, be: &BinaryExpression, ctx: &TypedContext) {
         cov_mark::hit!(wasm_codegen_emit_binary_expression);
 
         self.lower_expression(&be.left.borrow(), ctx);
@@ -1827,11 +1822,7 @@ impl Compiler {
     /// - `Not` (`!x`): `[lower(x), I32Eqz]` — inverts boolean (0→1, 1→0) using WASM test op.
     /// - `BitNot` (`~x`): `[lower(x), -1_const, Xor]` — `x ^ -1` inverts all bits;
     ///   works identically for i32 and i64.
-    fn lower_prefix_unary_expression(
-        &mut self,
-        pue: &PrefixUnaryExpression,
-        ctx: &TypedContext,
-    ) {
+    fn lower_prefix_unary_expression(&mut self, pue: &PrefixUnaryExpression, ctx: &TypedContext) {
         cov_mark::hit!(wasm_codegen_emit_prefix_unary_expression);
 
         let type_info = ctx
@@ -2172,6 +2163,22 @@ impl Compiler {
     }
 }
 
+/// Returns the pre-computed byte offset when `index_expr` is a constant number literal,
+/// or `None` when the index is dynamic.
+///
+/// The returned `i32` equals `literal_value * elem_sz`, which can be used directly as
+/// an `i32.const` operand to skip the runtime multiply-and-add sequence.
+fn try_const_index_byte_offset(index_expr: &Expression, elem_sz: u32) -> Option<i32> {
+    if let Expression::Literal(Literal::Number(num_lit)) = index_expr {
+        let index_val = num_lit.value.parse::<i32>().ok()?;
+        #[allow(clippy::cast_possible_wrap)]
+        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
+        Some(byte_offset)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2283,21 +2290,5 @@ mod tests {
             shift += 7;
         }
         (result, bytes.len())
-    }
-}
-
-/// Returns the pre-computed byte offset when `index_expr` is a constant number literal,
-/// or `None` when the index is dynamic.
-///
-/// The returned `i32` equals `literal_value * elem_sz`, which can be used directly as
-/// an `i32.const` operand to skip the runtime multiply-and-add sequence.
-fn try_const_index_byte_offset(index_expr: &Expression, elem_sz: u32) -> Option<i32> {
-    if let Expression::Literal(Literal::Number(num_lit)) = index_expr {
-        let index_val = num_lit.value.parse::<i32>().ok()?;
-        #[allow(clippy::cast_possible_wrap)]
-        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
-        Some(byte_offset)
-    } else {
-        None
     }
 }
