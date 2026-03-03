@@ -1,6 +1,8 @@
+mod algo_array;
 mod algo_bitwise;
 mod algo_converge;
 mod algo_i64_mixed;
+mod algo_iter;
 mod algo_recursive_math;
 mod arith_overflow;
 mod base;

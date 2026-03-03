@@ -1,0 +1,168 @@
+pub fn fibonacci_iter(n: i32) -> i32 {
+    if n <= 0 { return 0; }
+    if n == 1 { return 1; }
+    let mut a: i32 = 0;
+    let mut b: i32 = 1;
+    let mut i: i32 = 2;
+    loop i <= n {
+        let next: i32 = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }
+    return b;
+}
+
+pub fn gcd_iter(a: i32, b: i32) -> i32 {
+    let mut x: i32 = a;
+    let mut y: i32 = b;
+    if x < 0 { x = 0 - x; }
+    if y < 0 { y = 0 - y; }
+    loop y > 0 {
+        let t: i32 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+pub fn is_prime_iter(n: i32) -> i32 {
+    if n <= 1 { return 0; }
+    if n <= 3 { return 1; }
+    if (n % 2) == 0 { return 0; }
+    let mut d: i32 = 3;
+    loop d * d <= n {
+        if (n % d) == 0 { return 0; }
+        d = d + 2;
+    }
+    return 1;
+}
+
+pub fn isqrt(n: i32) -> i32 {
+    if n <= 0 { return 0; }
+    let mut x: i32 = n;
+    let mut y: i32 = (x + 1) / 2;
+    loop y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    return x;
+}
+
+pub fn pow_iter(base: i32, exp: i32) -> i32 {
+    let mut result: i32 = 1;
+    let mut b: i32 = base;
+    let mut e: i32 = exp;
+    loop e > 0 {
+        if (e & 1) == 1 {
+            result = result * b;
+        }
+        b = b * b;
+        e = e >> 1;
+    }
+    return result;
+}
+
+pub fn fibonacci_iter_i64(n: i64) -> i64 {
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    if n <= zero { return zero; }
+    if n == one { return one; }
+    let mut a: i64 = 0;
+    let mut b: i64 = 1;
+    let mut i: i64 = 2;
+    loop i <= n {
+        let next: i64 = a + b;
+        a = b;
+        b = next;
+        i = i + one;
+    }
+    return b;
+}
+
+pub fn gcd_iter_i64(a: i64, b: i64) -> i64 {
+    let zero: i64 = 0;
+    let mut x: i64 = a;
+    let mut y: i64 = b;
+    if x < zero { x = zero - x; }
+    if y < zero { y = zero - y; }
+    loop y > zero {
+        let t: i64 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+pub fn pow_iter_i64(base: i64, exp: i64) -> i64 {
+    let zero: i64 = 0;
+    let one: i64 = 1;
+    let mut result: i64 = 1;
+    let mut b: i64 = base;
+    let mut e: i64 = exp;
+    loop e > zero {
+        if (e & one) == one {
+            result = result * b;
+        }
+        b = b * b;
+        e = e >> one;
+    }
+    return result;
+}
+
+pub fn gcd_u8(a: u8, b: u8) -> u8 {
+    let zero: u8 = 0;
+    let mut x: u8 = a;
+    let mut y: u8 = b;
+    loop y > zero {
+        let t: u8 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+pub fn fibonacci_i16(n: i16) -> i16 {
+    let zero: i16 = 0;
+    let one: i16 = 1;
+    if n <= zero { return zero; }
+    if n == one { return one; }
+    let mut a: i16 = 0;
+    let mut b: i16 = 1;
+    let mut i: i16 = 2;
+    loop i <= n {
+        let next: i16 = a + b;
+        a = b;
+        b = next;
+        i = i + one;
+    }
+    return b;
+}
+
+pub fn pow_u16(base: u16, exp: u16) -> u16 {
+    let zero: u16 = 0;
+    let one: u16 = 1;
+    let mut result: u16 = 1;
+    let mut b: u16 = base;
+    let mut e: u16 = exp;
+    loop e > zero {
+        if (e & one) == one {
+            result = result * b;
+        }
+        b = b * b;
+        e = e >> one;
+    }
+    return result;
+}
+
+pub fn is_prime_bool(n: i32) -> bool {
+    if n <= 1 { return false; }
+    if n <= 3 { return true; }
+    if (n % 2) == 0 { return false; }
+    let mut d: i32 = 3;
+    loop d * d <= n {
+        if (n % d) == 0 { return false; }
+        d = d + 2;
+    }
+    return true;
+}
