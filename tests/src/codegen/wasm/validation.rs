@@ -805,23 +805,36 @@ mod codegen_validation_tests {
     }
 
     #[test]
-    fn uzumaki_as_function_argument_rejected_by_type_checker() {
-        // FIXME: The type-checker does not yet assign TypeInfo to uzumaki (`@`) expressions
-        // in argument position, so `identity(@)` panics during type checking. Once the
-        // type-checker propagates the parameter type into uzumaki in call arguments, this
-        // test should be updated to verify that the generated WASM is valid and that the
-        // uzumaki opcode (0xfc 0x31 for i32) appears before the `call` instruction.
+    fn uzumaki_as_function_argument_produces_valid_wasm() {
         let source = r#"
             fn identity(x: i32) -> i32 { return x; }
             pub fn spec() -> i32 { return identity(@); }
         "#;
-        let arena = crate::utils::build_ast(source.to_string());
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
-        }));
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Uzumaki as function argument WASM is invalid: {e}"));
+        let has_uzumaki_opcode = wasm.windows(2).any(|w| w == [0xfc, 0x31]);
         assert!(
-            result.is_err(),
-            "Type-checker should panic on uzumaki in argument position (known gap)"
+            has_uzumaki_opcode,
+            "WASM should contain i32.uzumaki opcode (0xfc 0x31)"
+        );
+    }
+
+    #[test]
+    fn uzumaki_i64_as_function_argument_produces_valid_wasm() {
+        let source = r#"
+            fn identity_i64(x: i64) -> i64 { return x; }
+            pub fn spec() -> i64 { return identity_i64(@); }
+        "#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("i64 uzumaki as function argument WASM is invalid: {e}"));
+        let has_uzumaki_opcode = wasm.windows(2).any(|w| w == [0xfc, 0x32]);
+        assert!(
+            has_uzumaki_opcode,
+            "WASM should contain i64.uzumaki opcode (0xfc 0x32)"
         );
     }
 

@@ -12,6 +12,7 @@
 //! The type checker continues after encountering errors to collect all issues
 //! before returning. Errors are deduplicated to avoid repeated reports.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use anyhow::bail;
@@ -903,6 +904,67 @@ impl TypeChecker {
         }
     }
 
+    /// Validate and infer types for function call arguments.
+    ///
+    /// This is the shared implementation for argument processing across all three
+    /// call sites: instance methods, associated functions, and free functions.
+    /// It performs codegen-restriction checks (array literal, array uzumaki, sret call),
+    /// uzumaki type propagation, and type mismatch validation.
+    fn validate_and_infer_arguments(
+        &mut self,
+        arguments: &[(Option<Rc<Identifier>>, RefCell<Expression>)],
+        param_types: &[TypeInfo],
+        substitutions: &FxHashMap<String, TypeInfo>,
+        mismatch_location: Location,
+        build_mismatch_context: impl Fn(String, usize) -> TypeMismatchContext,
+        ctx: &mut TypedContext,
+    ) {
+        for (i, arg) in arguments.iter().enumerate() {
+            if let Expression::Literal(Literal::Array(_)) = &*arg.1.borrow() {
+                self.errors
+                    .push(TypeCheckError::ArrayLiteralAsArgument {
+                        location: arg.1.borrow().location(),
+                    });
+            }
+            if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
+                && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
+                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+            {
+                self.errors.push(
+                    TypeCheckError::ArrayReturnCallInExpressionPosition {
+                        location: inner_fce.location,
+                    },
+                );
+            }
+            if let Expression::Uzumaki(uzumaki_rc) = &*arg.1.borrow()
+                && i < param_types.len()
+            {
+                let param_type = param_types[i].substitute(substitutions);
+                if matches!(param_type.kind, TypeInfoKind::Array(_, _)) {
+                    self.errors.push(TypeCheckError::ArrayUzumakiAsArgument {
+                        location: uzumaki_rc.location,
+                    });
+                }
+                ctx.set_node_typeinfo(uzumaki_rc.id, param_type);
+            }
+            let arg_type = self.infer_expression(&arg.1.borrow(), ctx);
+            if let Some(arg_type) = arg_type
+                && i < param_types.len()
+            {
+                let expected = param_types[i].substitute(substitutions);
+                if arg_type != expected {
+                    let arg_name = format!("arg{i}");
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected,
+                        found: arg_type,
+                        context: build_mismatch_context(arg_name, i),
+                        location: mismatch_location,
+                    });
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn infer_expression(
         &mut self,
@@ -1197,43 +1259,26 @@ impl TypeChecker {
                             }
 
                             if let Some(arguments) = &function_call_expression.arguments {
-                                for (i, arg) in arguments.iter().enumerate() {
-                                    if let Expression::Literal(Literal::Array(_)) =
-                                        &*arg.1.borrow()
-                                    {
-                                        self.errors
-                                            .push(TypeCheckError::ArrayLiteralAsArgument {
-                                                location: arg.1.borrow().location(),
-                                            });
-                                    }
-                                    if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
-                                        && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
-                                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
-                                    {
-                                        self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                            location: inner_fce.location,
-                                        });
-                                    }
-                                    let arg_type =
-                                        self.infer_expression(&arg.1.borrow(), ctx);
-                                    if let Some(arg_type) = arg_type
-                                        && i < signature.param_types.len()
-                                        && arg_type != signature.param_types[i]
-                                    {
-                                        let arg_name = format!("arg{i}");
-                                        self.errors.push(TypeCheckError::TypeMismatch {
-                                            expected: signature.param_types[i].clone(),
-                                            found: arg_type,
-                                            context: TypeMismatchContext::MethodArgument {
-                                                type_name: type_name.clone(),
-                                                method_name: method_name.clone(),
-                                                arg_name,
-                                                arg_index: i,
-                                            },
-                                            location: function_call_expression.location,
-                                        });
-                                    }
-                                }
+                                // TODO: populate substitutions when generic methods are supported
+                                let substitutions: FxHashMap<String, TypeInfo> =
+                                    FxHashMap::default();
+                                let tn = type_name.clone();
+                                let mn = method_name.clone();
+                                self.validate_and_infer_arguments(
+                                    arguments,
+                                    &signature.param_types,
+                                    &substitutions,
+                                    function_call_expression.location,
+                                    |arg_name, arg_index| {
+                                        TypeMismatchContext::MethodArgument {
+                                            type_name: tn.clone(),
+                                            method_name: mn.clone(),
+                                            arg_name,
+                                            arg_index,
+                                        }
+                                    },
+                                    ctx,
+                                );
                             }
 
                             ctx.set_node_typeinfo(
@@ -1321,43 +1366,26 @@ impl TypeChecker {
                                 }
 
                                 if let Some(arguments) = &function_call_expression.arguments {
-                                    for (i, arg) in arguments.iter().enumerate() {
-                                        if let Expression::Literal(Literal::Array(_)) =
-                                            &*arg.1.borrow()
-                                        {
-                                            self.errors
-                                                .push(TypeCheckError::ArrayLiteralAsArgument {
-                                                    location: arg.1.borrow().location(),
-                                                });
-                                        }
-                                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
-                                            && let Some(inner_sig) = self.symbol_table.lookup_function(&inner_fce.name())
-                                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
-                                        {
-                                            self.errors.push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                                location: inner_fce.location,
-                                            });
-                                        }
-                                        let arg_type =
-                                            self.infer_expression(&arg.1.borrow(), ctx);
-                                        if let Some(arg_type) = arg_type
-                                            && i < signature.param_types.len()
-                                            && arg_type != signature.param_types[i]
-                                        {
-                                            let arg_name = format!("arg{i}");
-                                            self.errors.push(TypeCheckError::TypeMismatch {
-                                                expected: signature.param_types[i].clone(),
-                                                found: arg_type,
-                                                context: TypeMismatchContext::MethodArgument {
-                                                    type_name: type_name.clone(),
-                                                    method_name: method_name.clone(),
-                                                    arg_name,
-                                                    arg_index: i,
-                                                },
-                                                location: function_call_expression.location,
-                                            });
-                                        }
-                                    }
+                                    // TODO: populate substitutions when generic associated functions are supported
+                                    let substitutions: FxHashMap<String, TypeInfo> =
+                                        FxHashMap::default();
+                                    let tn = type_name.clone();
+                                    let mn = method_name.clone();
+                                    self.validate_and_infer_arguments(
+                                        arguments,
+                                        &signature.param_types,
+                                        &substitutions,
+                                        function_call_expression.location,
+                                        |arg_name, arg_index| {
+                                            TypeMismatchContext::MethodArgument {
+                                                type_name: tn.clone(),
+                                                method_name: mn.clone(),
+                                                arg_name,
+                                                arg_index,
+                                            }
+                                        },
+                                        ctx,
+                                    );
                                 }
 
                                 ctx.set_node_typeinfo(
@@ -1504,45 +1532,19 @@ impl TypeChecker {
 
                 // Infer argument types and validate against parameter types
                 if let Some(arguments) = &function_call_expression.arguments {
-                    for (i, arg) in arguments.iter().enumerate() {
-                        if let Expression::Literal(Literal::Array(_)) = &*arg.1.borrow() {
-                            self.errors
-                                .push(TypeCheckError::ArrayLiteralAsArgument {
-                                    location: arg.1.borrow().location(),
-                                });
-                        }
-                        if let Expression::FunctionCall(inner_fce) = &*arg.1.borrow()
-                            && let Some(inner_sig) =
-                                self.symbol_table.lookup_function(&inner_fce.name())
-                            && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
-                        {
-                            self.errors.push(
-                                TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                    location: inner_fce.location,
-                                },
-                            );
-                        }
-                        let arg_type = self.infer_expression(&arg.1.borrow(), ctx);
-                        if let Some(arg_type) = arg_type
-                            && i < signature.param_types.len()
-                        {
-                            let expected =
-                                signature.param_types[i].substitute(&substitutions);
-                            if arg_type != expected {
-                                let arg_name = format!("arg{i}");
-                                self.errors.push(TypeCheckError::TypeMismatch {
-                                    expected,
-                                    found: arg_type,
-                                    context: TypeMismatchContext::FunctionArgument {
-                                        function_name: function_call_expression.name(),
-                                        arg_name,
-                                        arg_index: i,
-                                    },
-                                    location: function_call_expression.location,
-                                });
-                            }
-                        }
-                    }
+                    let fn_name = function_call_expression.name();
+                    self.validate_and_infer_arguments(
+                        arguments,
+                        &signature.param_types,
+                        &substitutions,
+                        function_call_expression.location,
+                        |arg_name, arg_index| TypeMismatchContext::FunctionArgument {
+                            function_name: fn_name.clone(),
+                            arg_name,
+                            arg_index,
+                        },
+                        ctx,
+                    );
                 }
 
                 ctx.set_node_typeinfo(function_call_expression.id, return_type.clone());

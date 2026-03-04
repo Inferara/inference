@@ -1221,6 +1221,39 @@ mod array_literal_as_argument {
     }
 }
 
+mod array_uzumaki_as_argument {
+    use super::*;
+
+    #[test]
+    fn test_array_uzumaki_as_arg_rejected() {
+        let source = r#"fn process(arr: [i32; 5]) -> i32 { return arr[0]; } pub fn spec() -> i32 { return process(@); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Array uzumaki as argument should be rejected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("array uzumaki (@) cannot be used as a function argument"),
+                "Error should mention array uzumaki: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_scalar_uzumaki_as_arg_accepted() {
+        let source = r#"fn identity(x: i32) -> i32 { return x; } pub fn spec() -> i32 { return identity(@); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Scalar uzumaki as argument should work, got: {:?}",
+            result.err()
+        );
+    }
+}
+
 mod array_index_64bit {
     use super::*;
 

@@ -447,6 +447,15 @@ pub enum TypeCheckError {
     )]
     ArrayLiteralAsArgument { location: Location },
 
+    /// Array uzumaki (@) passed directly as a function argument.
+    ///
+    /// Array uzumaki must be assigned to a variable before passing to functions
+    /// because the codegen requires a named variable for frame slot allocation.
+    #[error(
+        "{location}: array uzumaki (@) cannot be used as a function argument; assign to a variable first"
+    )]
+    ArrayUzumakiAsArgument { location: Location },
+
     /// Array-returning function call used in an unsupported expression position.
     ///
     /// Array-returning functions use the sret calling convention, which requires
@@ -514,6 +523,7 @@ impl TypeCheckError {
             | TypeCheckError::AssignToImmutable { location, .. }
             | TypeCheckError::LiteralOutOfRange { location, .. }
             | TypeCheckError::ArrayLiteralAsArgument { location, .. }
+            | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
             | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. } => location,
@@ -1127,6 +1137,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: array literals cannot be passed directly as function arguments; assign to a variable first"
+        );
+    }
+
+    #[test]
+    fn display_array_uzumaki_as_argument() {
+        let err = TypeCheckError::ArrayUzumakiAsArgument {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array uzumaki (@) cannot be used as a function argument; assign to a variable first"
         );
     }
 
