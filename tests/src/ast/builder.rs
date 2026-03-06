@@ -42,7 +42,7 @@ fn func2() -> i32 {return 2;}
 fn func3(x: i32) -> i32 {return x;}
 "#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
     let definitions = &source_files[0].defs;
@@ -129,7 +129,7 @@ fn test_parse_struct_with_methods() {
     "#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let struct_def = source_files[0].defs.iter().find_map(|&def_id| {
         if let Def::Struct { name, fields, methods, .. } = &arena[def_id].kind {
             Some((name, fields, methods))
@@ -150,7 +150,7 @@ fn test_parse_struct_with_methods() {
 fn test_parse_use_directive_simple() {
     let source = r#"use inference::std;"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
     let directives = &source_files[0].directives;
@@ -163,7 +163,7 @@ fn test_parse_use_directive_with_imports() {
     let arena = build_ast(source.to_string());
     assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let directives = &source_files[0].directives;
     assert_eq!(directives.len(), 1, "Should find 1 use directive");
 }
@@ -173,7 +173,7 @@ fn test_parse_multiple_use_directives() {
     let source = r#"use inference::std;
 use inference::std::types::Address;"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
     let directives = &source_files[0].directives;
@@ -917,7 +917,7 @@ fn test_parse_external_function() {
     let source = r#"external fn sorting_function(Address, Address) -> Address;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let ext_func = source_files[0].defs.iter().find_map(|&def_id| {
         if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
             Some(name)
@@ -934,7 +934,7 @@ fn test_parse_type_alias() {
     let source = r#"type sf = sorting_function;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let type_alias = source_files[0].defs.iter().find_map(|&def_id| {
         if let Def::TypeAlias { name, .. } = &arena[def_id].kind {
             Some(name)

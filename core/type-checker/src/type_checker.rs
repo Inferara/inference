@@ -77,7 +77,6 @@ impl TypeChecker {
         let arena = ctx.arena();
         let all_def_ids: Vec<DefId> = arena
             .source_files()
-            .iter()
             .flat_map(|sf| sf.defs.iter().copied())
             .collect();
         for def_id in all_def_ids {
@@ -117,7 +116,6 @@ impl TypeChecker {
         let arena = ctx.arena();
         let all_def_ids: Vec<DefId> = arena
             .source_files()
-            .iter()
             .flat_map(|sf| sf.defs.iter().copied())
             .collect();
         for def_id in all_def_ids {
@@ -287,7 +285,6 @@ impl TypeChecker {
         let arena = ctx.arena();
         let all_def_ids: Vec<DefId> = arena
             .source_files()
-            .iter()
             .flat_map(|sf| sf.defs.iter().copied())
             .collect();
         for def_id in all_def_ids {
@@ -2049,7 +2046,6 @@ impl TypeChecker {
         let arena = ctx.arena();
         let all_directives: Vec<_> = arena
             .source_files()
-            .iter()
             .flat_map(|sf| sf.directives.iter())
             .cloned()
             .collect();

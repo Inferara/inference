@@ -477,7 +477,7 @@ pub(crate) fn assert_function_signature(
 
 /// Asserts that a single constant definition with expected name exists.
 pub(crate) fn assert_constant_def(arena: &AstArena, name: &str) {
-    let found = arena.source_files().iter().any(|sf| {
+    let found = arena.source_files().any(|sf| {
         sf.defs.iter().any(|&def_id| {
             if let Def::Constant {
                 name: name_id, ..

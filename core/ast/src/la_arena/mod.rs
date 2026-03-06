@@ -301,27 +301,11 @@ impl<T> Arena<T> {
         self.data.shrink_to_fit();
     }
 
-    /// Returns a slice of the arena's data.
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    /// Returns a reference to the value at the given index, or `None` if out of range.
-    pub fn get(&self, idx: Idx<T>) -> Option<&T> {
-        self.data.get(idx.into_raw().0 as usize)
-    }
-
     /// Returns the index of the next value allocated on the arena.
     ///
     /// This method should remain private to make creating invalid `Idx`s harder.
     fn next_idx(&self) -> Idx<T> {
         Idx::from_raw(RawIdx(self.data.len() as u32))
-    }
-}
-
-impl<T> AsMut<[T]> for Arena<T> {
-    fn as_mut(&mut self) -> &mut [T] {
-        self.data.as_mut()
     }
 }
 

@@ -45,8 +45,7 @@ impl TypedContext {
     }
 
     /// Returns all source files in the arena.
-    #[must_use = "returns source files without side effects"]
-    pub fn source_files(&self) -> &[SourceFileData] {
+    pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
         self.arena.source_files()
     }
 

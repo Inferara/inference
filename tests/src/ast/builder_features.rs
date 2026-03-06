@@ -77,7 +77,7 @@ fn test_valid_syntax_is_accepted() {
 fn test_source_file_stores_source_correctly() {
     let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(source_files[0].source, source);
 }
@@ -88,7 +88,7 @@ fn test_source_file_source_with_multiple_definitions() {
 fn add(a: i32, b: i32) -> i32 { return a + b; }
 struct Point { x: i32; y: i32; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(source_files[0].source, source);
 }
@@ -97,7 +97,7 @@ struct Point { x: i32; y: i32; }"#;
 fn test_source_file_source_empty_function() {
     let source = r#"fn empty() {}"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files[0].source, source);
 }
 
@@ -105,7 +105,7 @@ fn test_source_file_source_empty_function() {
 fn test_location_offset_extracts_function_definition() {
     let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     assert_eq!(source_file.defs.len(), 1);
@@ -119,7 +119,7 @@ fn test_location_offset_extracts_function_definition() {
 fn test_location_offset_extracts_identifier() {
     let source = r#"fn my_function() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -137,7 +137,7 @@ fn test_location_offset_extracts_identifier() {
 fn test_location_offset_extracts_struct_definition() {
     let source = r#"struct Point { x: i32; y: i32; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -159,7 +159,7 @@ fn test_location_offset_extracts_struct_definition() {
 fn test_location_offset_extracts_struct_fields() {
     let source = r#"struct Point { x: i32; y: i32; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -184,7 +184,7 @@ fn test_location_offset_extracts_struct_fields() {
 fn test_location_offset_extracts_constant_definition() {
     let source = r#"const MAX_VALUE: i32 = 100;"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -206,7 +206,7 @@ fn test_location_offset_extracts_constant_definition() {
 fn test_location_offset_extracts_enum_definition() {
     let source = r#"enum Color { Red, Green, Blue }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -242,7 +242,7 @@ fn test_location_offset_extracts_multiple_definitions() {
     let source = r#"const X: i32 = 10;
 fn compute(n: i32) -> i32 { return n * 2; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     assert_eq!(source_file.defs.len(), 2);
@@ -273,7 +273,7 @@ fn test_location_offset_extracts_function_arguments() {
     let source =
         r#"fn add(first_arg: i32, second_arg: i32) -> i32 { return first_arg + second_arg; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -306,7 +306,7 @@ fn test_location_offset_extracts_function_arguments() {
 fn test_location_offset_extracts_use_directive() {
     let source = r#"use inference::std::collections;"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     assert_eq!(source_file.directives.len(), 1);
@@ -323,7 +323,7 @@ fn   spaced_function  ( ) -> i32 {
     return 42;
 }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     assert_eq!(source_file.source, source);
@@ -343,7 +343,7 @@ fn   spaced_function  ( ) -> i32 {
 fn test_location_offset_extracts_external_function() {
     let source = r#"external fn print_value(i32);"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -365,7 +365,7 @@ fn test_location_offset_extracts_external_function() {
 fn test_location_offset_extracts_type_alias() {
     let source = r#"type MyInt = i32;"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
@@ -387,7 +387,7 @@ fn test_location_offset_extracts_type_alias() {
 fn test_source_file_location_covers_entire_source() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     let loc = source_file.location;
@@ -402,7 +402,7 @@ fn test_source_file_location_covers_entire_source() {
 fn test_location_offset_extracts_nested_expressions() {
     let source = r#"fn calc() -> i32 { return (1 + 2) * 3; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let source_file = &source_files[0];
 
     assert_eq!(source_file.source, source);
@@ -637,7 +637,7 @@ fn test_parse_self_reference_in_method() {
     }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { methods, .. } = &arena[def_id].kind {
         assert_eq!(methods.len(), 1);
@@ -731,7 +731,7 @@ fn test_parse_external_function_with_return() {
     let source = r#"external fn get_value() -> i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::ExternFunction { returns, .. } = &arena[def_id].kind {
         assert!(returns.is_some(), "Should have return type");
@@ -745,7 +745,7 @@ fn test_parse_external_function_basic() {
     let source = r#"external fn do_something();"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
         assert_eq!(arena[*name].name, "do_something");
@@ -787,7 +787,7 @@ fn test_parse_public_struct_visibility() {
     let source = r#"pub struct PublicStruct { x: i32; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Public, "Struct should have Public visibility");
@@ -801,7 +801,7 @@ fn test_parse_private_struct_visibility() {
     let source = r#"struct PrivateStruct { x: i32; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
@@ -813,7 +813,7 @@ fn test_parse_public_enum_visibility() {
     let source = r#"pub enum PublicEnum { A, B, C }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Enum { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Public, "Enum should have Public visibility");
@@ -825,7 +825,7 @@ fn test_parse_private_enum_visibility() {
     let source = r#"enum PrivateEnum { X, Y, Z }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Enum { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
@@ -837,7 +837,7 @@ fn test_parse_public_constant_visibility() {
     let source = r#"pub const MAX_VALUE: i32 = 100;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Constant { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Public);
@@ -849,7 +849,7 @@ fn test_parse_private_constant_visibility() {
     let source = r#"const MIN_VALUE: i32 = 0;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Constant { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
@@ -861,7 +861,7 @@ fn test_parse_public_type_alias_visibility() {
     let source = r#"pub type MyInt = i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::TypeAlias { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Public);
@@ -873,7 +873,7 @@ fn test_parse_private_type_alias_visibility() {
     let source = r#"type LocalInt = i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::TypeAlias { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
@@ -891,7 +891,7 @@ pub const PUBLIC_CONST: i32 = 1;
 const PRIVATE_CONST: i32 = 2;
 "#;
     let arena = build_ast(source.to_string());
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(source_files[0].defs.len(), 6);
 
@@ -945,7 +945,7 @@ fn test_parse_external_function_visibility_private() {
     let source = r#"external fn extern_func() -> i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::ExternFunction { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);
@@ -957,7 +957,7 @@ fn test_parse_spec_definition_visibility_private() {
     let source = r#"spec MySpec { fn verify() -> bool { return true; } }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Spec { vis, .. } = &arena[def_id].kind {
         assert_eq!(*vis, Visibility::Private);

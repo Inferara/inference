@@ -224,7 +224,7 @@ fn test_parse_constant_type_i32_is_simple() {
     let source = r#"const MAX: i32 = 100;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Constant { ty, .. } = &arena[def_id].kind {
         if let TypeNode::Simple(kind) = &arena[*ty].kind {
@@ -240,7 +240,7 @@ fn test_parse_constant_type_bool_is_simple() {
     let source = r#"const FLAG: bool = true;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Constant { ty, .. } = &arena[def_id].kind {
         if let TypeNode::Simple(kind) = &arena[*ty].kind {
@@ -256,7 +256,7 @@ fn test_parse_struct_field_type_i32_is_simple() {
     let source = r#"struct Point { x: i32; y: i32; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { fields, .. } = &arena[def_id].kind {
         assert_eq!(fields.len(), 2);
@@ -275,7 +275,7 @@ fn test_parse_struct_field_type_bool_is_simple() {
     let source = r#"struct Flags { a: bool; b: bool; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { fields, .. } = &arena[def_id].kind {
         assert_eq!(fields.len(), 2);
@@ -424,7 +424,7 @@ fn test_external_function_return_type_is_simple() {
     let source = r#"external fn get_value() -> i64;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::ExternFunction { returns, .. } = &arena[def_id].kind {
         let ret_ty = returns.expect("Should have return type");
@@ -443,7 +443,7 @@ fn test_type_alias_to_primitive_is_simple() {
     let source = r#"type MyInt = i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::TypeAlias { ty, .. } = &arena[def_id].kind {
         if let TypeNode::Simple(kind) = &arena[*ty].kind {
@@ -507,7 +507,7 @@ fn test_mixed_simple_and_custom_types_in_struct() {
     let source = r#"struct Mixed { x: i32; name: String; flag: bool; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { fields, .. } = &arena[def_id].kind {
         assert_eq!(fields.len(), 3);

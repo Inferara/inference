@@ -8,7 +8,7 @@ fn test_source_files_parsed_correctly() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1, "Should have 1 source file");
     assert_eq!(
         source_files[0].source, source,
@@ -61,7 +61,7 @@ fn test_source_file_defs_include_all_definitions() {
     let source = r#"const A: i32 = 1; const B: i32 = 2; fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(
         source_files[0].defs.len(),
@@ -75,7 +75,7 @@ fn test_struct_definition_has_fields_and_methods() {
     let source = r#"struct Point { x: i32; y: i32; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(source_files[0].defs.len(), 1);
 
@@ -175,7 +175,7 @@ fn test_source_file_source_text() {
     let source = r#"fn main() -> i32 { return 0; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(
         source_files[0].source, source,
@@ -201,7 +201,7 @@ fn test_constant_definition_structure() {
     let source = r#"const X: i32 = 42;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files[0].defs.len(), 1);
 
     let def_id = source_files[0].defs[0];
@@ -219,7 +219,7 @@ fn test_type_alias_definition() {
     let source = r#"type MyInt = i32;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files[0].defs.len(), 1);
 
     let def_id = source_files[0].defs[0];
@@ -238,7 +238,7 @@ type MyBool = bool;
 type MyArray = [i32; 10];"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let type_aliases: Vec<&DefData> = source_files[0]
         .defs
         .iter()
@@ -253,7 +253,7 @@ fn test_no_type_aliases_when_only_functions() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let type_aliases: Vec<&DefData> = source_files[0]
         .defs
         .iter()
@@ -271,7 +271,7 @@ fn test() -> i32 { return X; }
 type MyBool = bool;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files[0].defs.len(), 4, "Should have 4 total definitions");
 
     let type_alias_count = source_files[0]
@@ -288,7 +288,7 @@ type MyBool = bool;"#;
 fn test_empty_arena_source_files() {
     let arena = AstArena::default();
     assert!(
-        arena.source_files().is_empty(),
+        arena.source_files().len() == 0,
         "Empty arena should return no source files"
     );
 }
@@ -412,7 +412,7 @@ fn test_directives_parsed() {
     let source = r#"use inference::std;"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
     assert_eq!(source_files[0].directives.len(), 1);
 }

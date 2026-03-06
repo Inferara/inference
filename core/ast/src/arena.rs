@@ -96,17 +96,17 @@ impl std::ops::Index<IdentId> for AstArena {
 // ---------------------------------------------------------------------------
 
 impl AstArena {
-    /// Returns the source location of any node, or `None` if the ID is out of range.
+    /// Returns the source location of any node.
     #[must_use]
-    pub fn node_location(&self, node_id: NodeId) -> Option<Location> {
+    pub fn node_location(&self, node_id: NodeId) -> Location {
         match node_id {
-            NodeId::SourceFile(id) => self.source_files.get(id).map(|n| n.location),
-            NodeId::Def(id) => self.defs.get(id).map(|n| n.location),
-            NodeId::Stmt(id) => self.stmts.get(id).map(|n| n.location),
-            NodeId::Expr(id) => self.exprs.get(id).map(|n| n.location),
-            NodeId::Type(id) => self.types.get(id).map(|n| n.location),
-            NodeId::Block(id) => self.blocks.get(id).map(|n| n.location),
-            NodeId::Ident(id) => self.idents.get(id).map(|n| n.location),
+            NodeId::SourceFile(id) => self.source_files[id].location,
+            NodeId::Def(id) => self.defs[id].location,
+            NodeId::Stmt(id) => self.stmts[id].location,
+            NodeId::Expr(id) => self.exprs[id].location,
+            NodeId::Type(id) => self.types[id].location,
+            NodeId::Block(id) => self.blocks[id].location,
+            NodeId::Ident(id) => self.idents[id].location,
         }
     }
 
@@ -160,7 +160,7 @@ impl AstArena {
             NodeId::SourceFile(id) => Some(id),
             NodeId::Def(def_id) => self.find_source_file_for_def(def_id),
             _ => {
-                let location = self.node_location(node_id)?;
+                let location = self.node_location(node_id);
                 self.find_source_file_by_offset(location)
             }
         }
@@ -178,11 +178,11 @@ impl AstArena {
 
     /// Returns the source text of a node by slicing its source file.
     ///
-    /// Returns `None` if the node ID is invalid, the source file cannot be
-    /// determined, or the byte offsets fall outside the source text.
+    /// Returns `None` if the source file cannot be determined or the byte
+    /// offsets fall outside the source text.
     #[must_use]
     pub fn get_node_source(&self, node_id: NodeId) -> Option<&str> {
-        let location = self.node_location(node_id)?;
+        let location = self.node_location(node_id);
         let start = location.offset_start as usize;
         let end = location.offset_end as usize;
         if start > end {
@@ -199,9 +199,8 @@ impl AstArena {
 
 impl AstArena {
     /// Returns all source file data entries.
-    #[must_use]
-    pub fn source_files(&self) -> &[SourceFileData] {
-        self.source_files.as_slice()
+    pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
+        self.source_files.values()
     }
 
     /// Iterates over all source file IDs.
@@ -213,7 +212,7 @@ impl AstArena {
     #[must_use]
     pub fn function_def_ids(&self) -> Vec<DefId> {
         let mut result = Vec::new();
-        for sf in self.source_files.as_slice() {
+        for sf in self.source_files.values() {
             for &def_id in &sf.defs {
                 if matches!(self[def_id].kind, Def::Function { .. }) {
                     result.push(def_id);
@@ -249,7 +248,6 @@ impl AstArena {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::idx_from_u32;
     use crate::nodes::{BlockKind, Expr, Stmt, Visibility};
 
     #[test]
@@ -291,16 +289,7 @@ mod tests {
                 value: "42".to_string(),
             },
         });
-        assert_eq!(arena.node_location(NodeId::Expr(id)), Some(loc));
-    }
-
-    #[test]
-    fn node_location_returns_none_for_invalid_id() {
-        let arena = AstArena::default();
-        assert_eq!(
-            arena.node_location(NodeId::Expr(idx_from_u32::<ExprData>(999))),
-            None
-        );
+        assert_eq!(arena.node_location(NodeId::Expr(id)), loc);
     }
 
     #[test]

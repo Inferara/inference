@@ -110,7 +110,7 @@ pub fn codegen(
         todo!("Multi-file support not yet implemented");
     }
 
-    if !typed_context.source_files().is_empty() {
+    if typed_context.source_files().len() != 0 {
         traverse_t_ast_with_compiler(typed_context, &mut compiler);
     }
 
