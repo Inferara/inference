@@ -31,16 +31,16 @@ mod algo_array_tests {
         cov_mark::check_count!(wasm_codegen_emit_if_statement, 8);
         cov_mark::check_count!(wasm_codegen_emit_if_with_else, 1);
         cov_mark::check_count!(wasm_codegen_emit_function_params, 6);
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 42);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 45);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 1);
         cov_mark::check_count!(wasm_codegen_emit_loop_statement, 13);
         cov_mark::check_count!(wasm_codegen_emit_loop_conditional, 13);
-        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 22);
+        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 25);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 14);
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 24);
         cov_mark::check_count!(wasm_codegen_emit_array_index_write, 3);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 12);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 27);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 24);
         let test_name = "algo_array";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

@@ -41,6 +41,7 @@ pub(crate) fn codegen_output(source_code: &str) -> inference_wasm_codegen::Codeg
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
+    inference_analysis::analyze(&typed_context).unwrap();
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(
@@ -75,6 +76,7 @@ pub(crate) fn codegen_with_target_mode(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
+    inference_analysis::analyze(&typed_context).unwrap();
     let opt_level = target.default_opt_level();
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
 }
@@ -92,6 +94,7 @@ pub(crate) fn codegen_with_full_config(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
+    inference_analysis::analyze(&typed_context).unwrap();
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
 }
 
@@ -106,6 +109,7 @@ pub(crate) fn wasm_codegen_with_target(
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .unwrap()
         .typed_context();
+    inference_analysis::analyze(&typed_context).unwrap();
     let mode = inference_wasm_codegen::CompilationMode::default();
     let opt_level = target.default_opt_level();
     let codegen_output =

@@ -1,28 +1,30 @@
 pub fn linear_search(target: i32) -> i32 {
     let arr: [i32; 8] = [3, 7, 1, 9, 4, 6, 8, 2];
+    let mut result: i32 = 8;
     let mut i: i32 = 0;
     loop i < 8 {
-        if arr[i] == target { return i; }
+        if arr[i] == target { result = i; break; }
         i = i + 1;
     }
-    return 8;
+    return result;
 }
 
 pub fn binary_search(target: i32) -> i32 {
     let arr: [i32; 8] = [2, 5, 8, 12, 16, 23, 38, 56];
+    let mut result: i32 = 8;
     let mut low: i32 = 0;
     let mut high: i32 = 7;
     loop low <= high {
         let mid: i32 = (low + high) / 2;
         let val: i32 = arr[mid];
-        if val == target { return mid; }
+        if val == target { result = mid; break; }
         if val < target {
             low = mid + 1;
         } else {
             high = mid - 1;
         }
     }
-    return 8;
+    return result;
 }
 
 pub fn bubble_sort_element(idx: i32) -> i32 {
@@ -133,12 +135,13 @@ pub fn sum_u16_array() -> u16 {
 
 pub fn search_u32_array(target: u32) -> i32 {
     let arr: [u32; 6] = [100, 200, 300, 400, 500, 600];
+    let mut result: i32 = 6;
     let mut i: i32 = 0;
     loop i < 6 {
-        if arr[i] == target { return i; }
+        if arr[i] == target { result = i; break; }
         i = i + 1;
     }
-    return 6;
+    return result;
 }
 
 pub fn dot_product_i64() -> i64 {

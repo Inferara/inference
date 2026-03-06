@@ -14,7 +14,6 @@ crate::rule! {
         let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
             if matches!(arena[stmt_id].kind, Stmt::Break)
-                && walk_ctx.loop_depth > 0
                 && walk_ctx.nondet_depth > 0
             {
                 errors.push(AnalysisError::BreakInsideNonDetBlock {

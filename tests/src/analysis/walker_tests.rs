@@ -416,4 +416,295 @@ mod walker_traversal_tests {
             "expected BreakInsideNonDetBlock among errors: {errors:?}"
         );
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn a004_nested_loops_outer_has_no_break() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    loop {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak for outer loop: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a002_deeply_nested_nondet() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                forall {
+                    let mut i: i32 = 0;
+                    loop i < 10 {
+                        exists {
+                            break;
+                        }
+                        i = i + 1;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock with deeply nested nondet: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a002_break_in_if_inside_nondet_in_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo(x: bool) {
+                let mut i: i32 = 0;
+                loop i < 10 {
+                    forall {
+                        if x {
+                            break;
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock for break in if inside nondet: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a001_multiple_breaks_outside_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                break;
+                break;
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let break_count = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .count();
+        assert_eq!(
+            break_count, 2,
+            "expected exactly 2 BreakOutsideLoop errors, got {break_count}"
+        );
+    }
+
+    #[test]
+    fn a003_return_inside_conditional_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo(x: i32) -> i32 {
+                let mut i: i32 = 0;
+                loop i < x {
+                    return 0;
+                }
+                return 1;
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_return_inside_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+        assert!(
+            has_return_inside_loop,
+            "expected ReturnInsideLoop for conditional loop: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a004_infinite_loop_break_only_in_nondet() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    forall {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak (break inside nondet doesn't count): {errors:?}"
+        );
+
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock as well: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn valid_break_in_conditional_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                let mut i: i32 = 0;
+                loop i < 10 {
+                    break;
+                }
+            }
+        "#;
+        let result = analyze(source);
+        assert!(
+            result.is_ok(),
+            "expected no analysis errors for break in conditional loop, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn valid_break_in_if_inside_infinite_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo(x: bool) {
+                loop {
+                    if x {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let result = analyze(source);
+        assert!(
+            result.is_ok(),
+            "expected no analysis errors for break in if inside infinite loop, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn valid_return_inside_nondet_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                forall {
+                    return 0;
+                }
+                return 1;
+            }
+        "#;
+        let result = analyze(source);
+        assert!(
+            result.is_ok(),
+            "expected no analysis errors for return inside nondet block, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn valid_assert_inside_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo(x: i32) {
+                loop {
+                    assert x > 0;
+                    break;
+                }
+            }
+        "#;
+        let result = analyze(source);
+        assert!(
+            result.is_ok(),
+            "expected no analysis errors for assert inside loop with break, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn break_in_nondet_outside_loop_fires_both() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                forall {
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let break_outside_count = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .count();
+        assert_eq!(
+            break_outside_count, 1,
+            "expected exactly 1 BreakOutsideLoop, got {break_outside_count}"
+        );
+
+        let nondet_break_count = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }))
+            .count();
+        assert_eq!(
+            nondet_break_count, 1,
+            "expected 1 BreakInsideNonDetBlock, got {nondet_break_count}"
+        );
+    }
+
+    #[test]
+    fn a003_and_a004_return_inside_infinite_loop() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                loop {
+                    return 0;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_return_inside_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+        assert!(
+            has_return_inside_loop,
+            "expected ReturnInsideLoop: {errors:?}"
+        );
+
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak: {errors:?}"
+        );
+    }
 }

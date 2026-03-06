@@ -28,7 +28,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $linear_search (;0;) (type 0) (param $target i32) (result i32)
-    (local $arr i32) (local $i i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -80,6 +80,8 @@
     i32.store
     local.get $__frame_ptr
     local.set $arr
+    i32.const 8
+    local.set $result
     i32.const 0
     local.set $i
     block ;; label = @1
@@ -99,11 +101,8 @@
         i32.eq
         if ;; label = @3
           local.get $i
-          local.get $__frame_ptr
-          i32.const 32
-          i32.add
-          global.set 0
-          return
+          local.set $result
+          br 2 (;@1;)
         end
         local.get $i
         i32.const 1
@@ -112,7 +111,7 @@
         br 0 (;@2;)
       end
     end
-    i32.const 8
+    local.get $result
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -125,7 +124,7 @@
     unreachable
   )
   (func $binary_search (;1;) (type 1) (param $target i32) (result i32)
-    (local $arr i32) (local $low i32) (local $high i32) (local $mid i32) (local $val i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $result i32) (local $low i32) (local $high i32) (local $mid i32) (local $val i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -177,6 +176,8 @@
     i32.store
     local.get $__frame_ptr
     local.set $arr
+    i32.const 8
+    local.set $result
     i32.const 0
     local.set $low
     i32.const 7
@@ -206,11 +207,8 @@
         i32.eq
         if ;; label = @3
           local.get $mid
-          local.get $__frame_ptr
-          i32.const 32
-          i32.add
-          global.set 0
-          return
+          local.set $result
+          br 2 (;@1;)
         end
         local.get $val
         local.get $target
@@ -229,7 +227,7 @@
         br 0 (;@2;)
       end
     end
-    i32.const 8
+    local.get $result
     local.get $__frame_ptr
     i32.const 32
     i32.add
@@ -1032,7 +1030,7 @@
     unreachable
   )
   (func $search_u32_array (;10;) (type 10) (param $target i32) (result i32)
-    (local $arr i32) (local $i i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $result i32) (local $i i32) (local $__frame_ptr i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -1074,6 +1072,8 @@
     i32.store
     local.get $__frame_ptr
     local.set $arr
+    i32.const 6
+    local.set $result
     i32.const 0
     local.set $i
     block ;; label = @1
@@ -1093,11 +1093,8 @@
         i32.eq
         if ;; label = @3
           local.get $i
-          local.get $__frame_ptr
-          i32.const 32
-          i32.add
-          global.set 0
-          return
+          local.set $result
+          br 2 (;@1;)
         end
         local.get $i
         i32.const 1
@@ -1106,7 +1103,7 @@
         br 0 (;@2;)
       end
     end
-    i32.const 6
+    local.get $result
     local.get $__frame_ptr
     i32.const 32
     i32.add

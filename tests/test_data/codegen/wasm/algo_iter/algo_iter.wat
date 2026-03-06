@@ -118,7 +118,7 @@
     unreachable
   )
   (func $is_prime_iter (;2;) (type 2) (param $n i32) (result i32)
-    (local $d i32)
+    (local $result i32) (local $d i32)
     local.get $n
     i32.const 1
     i32.le_s
@@ -142,6 +142,8 @@
       i32.const 0
       return
     end
+    i32.const 1
+    local.set $result
     i32.const 3
     local.set $d
     block ;; label = @1
@@ -160,7 +162,8 @@
         i32.eq
         if ;; label = @3
           i32.const 0
-          return
+          local.set $result
+          br 2 (;@1;)
         end
         local.get $d
         i32.const 2
@@ -169,7 +172,7 @@
         br 0 (;@2;)
       end
     end
-    i32.const 1
+    local.get $result
     return
     unreachable
   )
@@ -542,7 +545,7 @@
     unreachable
   )
   (func $is_prime_bool (;11;) (type 11) (param $n i32) (result i32)
-    (local $d i32)
+    (local $result i32) (local $d i32)
     local.get $n
     i32.const 1
     i32.le_s
@@ -566,6 +569,8 @@
       i32.const 0
       return
     end
+    i32.const 1
+    local.set $result
     i32.const 3
     local.set $d
     block ;; label = @1
@@ -584,7 +589,8 @@
         i32.eq
         if ;; label = @3
           i32.const 0
-          return
+          local.set $result
+          br 2 (;@1;)
         end
         local.get $d
         i32.const 2
@@ -593,7 +599,7 @@
         br 0 (;@2;)
       end
     end
-    i32.const 1
+    local.get $result
     return
     unreachable
   )
