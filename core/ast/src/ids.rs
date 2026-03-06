@@ -16,7 +16,7 @@ pub type BlockId = Idx<BlockData>;
 pub type IdentId = Idx<Ident>;
 
 /// Convenience: create a typed index from a raw u32 (for tests and iteration).
-#[must_use]
+#[must_use = "returns a typed index from a raw u32"]
 pub fn idx_from_u32<T>(raw: u32) -> Idx<T> {
     Idx::from_raw(RawIdx::from_u32(raw))
 }

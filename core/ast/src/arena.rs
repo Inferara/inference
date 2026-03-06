@@ -97,7 +97,7 @@ impl std::ops::Index<IdentId> for AstArena {
 
 impl AstArena {
     /// Returns the source location of any node.
-    #[must_use]
+    #[must_use = "returns the source location of the node"]
     pub fn node_location(&self, node_id: NodeId) -> Location {
         match node_id {
             NodeId::SourceFile(id) => self.source_files[id].location,
@@ -114,7 +114,7 @@ impl AstArena {
     ///
     /// Searches all source files' def lists, including nested defs inside
     /// structs, specs, and modules.
-    #[must_use]
+    #[must_use = "returns the source file containing the given definition"]
     pub fn find_source_file_for_def(&self, target: DefId) -> Option<SourceFileId> {
         for (sf_id, sf) in self.source_files.iter() {
             if self.def_in_list(target, &sf.defs) {
@@ -154,7 +154,7 @@ impl AstArena {
     /// For `SourceFile` nodes this is trivial. For `Def` nodes it delegates to
     /// `find_source_file_for_def`. For other nodes it falls back to byte-offset
     /// matching.
-    #[must_use]
+    #[must_use = "returns the source file containing the given node"]
     pub fn find_source_file_for_node(&self, node_id: NodeId) -> Option<SourceFileId> {
         match node_id {
             NodeId::SourceFile(id) => Some(id),
@@ -223,7 +223,7 @@ impl AstArena {
     }
 
     /// Returns the name string of a definition (function, struct, etc.).
-    #[must_use]
+    #[must_use = "returns the name of the definition"]
     pub fn def_name(&self, def_id: DefId) -> &str {
         let name_id = match &self[def_id].kind {
             Def::Function { name, .. }
@@ -239,7 +239,7 @@ impl AstArena {
     }
 
     /// Returns the name string of an identifier.
-    #[must_use]
+    #[must_use = "returns the name of the identifier"]
     pub fn ident_name(&self, id: IdentId) -> &str {
         &self[id].name
     }

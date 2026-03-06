@@ -486,7 +486,11 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 ///
 /// - **Loop control flow validation**: Ensures `break` appears only inside loops
 ///   and not inside non-deterministic blocks, `return` does not appear inside
-///   loops, and infinite loops contain a `break` statement.
+///   loops or non-deterministic blocks, and infinite loops contain a `break`
+///   statement.
+///
+/// Returns `AnalysisResult` on success, which may contain warnings and
+/// informational messages even when no hard errors are found.
 ///
 /// Future analyses will include:
 /// - Dead code detection
@@ -512,13 +516,16 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 /// - `break` statement outside a loop body
 /// - `break` statement inside a non-deterministic block
 /// - `return` statement inside a loop body
+/// - `return` statement inside a non-deterministic block
 /// - Infinite loop without a `break` statement
 ///
 /// # Parameters
 ///
 /// - `typed_context`: The typed AST context from [`type_check`]
-pub fn analyze(typed_context: &TypedContext) -> anyhow::Result<()> {
-    inference_analysis::analyze(typed_context).map_err(|e| anyhow::anyhow!("{e}"))
+pub fn analyze(
+    typed_context: &TypedContext,
+) -> anyhow::Result<inference_analysis::errors::AnalysisResult> {
+    inference_analysis::analyze(typed_context).map_err(anyhow::Error::from)
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)

@@ -8,6 +8,7 @@ crate::rule! {
     /// Return inside a loop body is prohibited.
     #[id = "A003"]
     #[name = "Return inside loop"]
+    #[severity = error]
     pub struct ReturnInsideLoop;
     fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
         let mut errors = Vec::new();

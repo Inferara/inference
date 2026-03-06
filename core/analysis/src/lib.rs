@@ -41,7 +41,7 @@ pub mod rule;
 pub mod rules;
 mod walker;
 
-use errors::AnalysisErrors;
+use errors::{AnalysisErrors, AnalysisResult, Severity};
 
 /// Performs control flow analysis on the typed AST.
 ///
@@ -54,15 +54,22 @@ use errors::AnalysisErrors;
 /// Returns `AnalysisErrors` if any control flow violations are found.
 /// All errors are collected before returning, allowing the user to see
 /// all issues at once.
-pub fn analyze(typed_context: &TypedContext) -> Result<(), AnalysisErrors> {
+pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
     let all_rules = rules::all_rules();
     let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut infos = Vec::new();
     for r in &all_rules {
-        errors.extend(r.check(typed_context));
+        let findings = r.check(typed_context);
+        match r.severity() {
+            Severity::Error => errors.extend(findings),
+            Severity::Warning => warnings.extend(findings),
+            Severity::Info => infos.extend(findings),
+        }
     }
     if errors.is_empty() {
-        Ok(())
+        Ok(AnalysisResult { warnings, infos })
     } else {
-        Err(AnalysisErrors { errors })
+        Err(AnalysisErrors::new(errors))
     }
 }

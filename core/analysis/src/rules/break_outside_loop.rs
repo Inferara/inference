@@ -8,6 +8,7 @@ crate::rule! {
     /// Break statement must appear inside a loop body.
     #[id = "A001"]
     #[name = "Break outside loop"]
+    #[severity = error]
     pub struct BreakOutsideLoop;
     fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
         let mut errors = Vec::new();

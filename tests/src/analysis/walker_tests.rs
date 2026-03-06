@@ -8,7 +8,7 @@
 #[cfg(test)]
 mod walker_traversal_tests {
     use crate::utils::build_ast;
-    use inference_analysis::errors::{AnalysisError, AnalysisErrors};
+    use inference_analysis::errors::{AnalysisError, AnalysisErrors, AnalysisResult};
     use inference_type_checker::typed_context::TypedContext;
 
     fn type_check(source: &str) -> TypedContext {
@@ -18,15 +18,16 @@ mod walker_traversal_tests {
             .typed_context()
     }
 
-    fn analyze(source: &str) -> Result<(), AnalysisErrors> {
+    fn analyze(source: &str) -> Result<AnalysisResult, AnalysisErrors> {
         let ctx = type_check(source);
         inference_analysis::analyze(&ctx)
     }
 
     fn expect_errors(source: &str) -> Vec<AnalysisError> {
         analyze(source)
-            .expect_err("expected analysis errors but got Ok(())")
-            .errors
+            .expect_err("expected analysis errors but got Ok")
+            .errors()
+            .to_vec()
     }
 
     // --- Positive tests: errors expected ---
@@ -611,7 +612,7 @@ mod walker_traversal_tests {
     }
 
     #[test]
-    fn valid_return_inside_nondet_block() {
+    fn a005_return_inside_nondet_block() {
         let source = r#"
             fn main() -> i32 { return 0; }
             fn foo() -> i32 {
@@ -621,11 +622,49 @@ mod walker_traversal_tests {
                 return 1;
             }
         "#;
+        let errors = expect_errors(source);
+
+        let has_return_nondet = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+        assert!(
+            has_return_nondet,
+            "expected ReturnInsideNonDetBlock among errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn valid_return_outside_nondet_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                return 42;
+            }
+        "#;
         let result = analyze(source);
         assert!(
             result.is_ok(),
-            "expected no analysis errors for return inside nondet block, got: {:?}",
+            "expected no analysis errors for return outside nondet block, got: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn a001_break_outside_loop_inside_spec_nested_function() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            spec Utils {
+                fn helper() {
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            "expected BreakOutsideLoop inside spec, got: {:?}",
+            errors[0]
         );
     }
 

@@ -264,9 +264,19 @@ fn main() {
             }
             Ok(tctx) => {
                 typed_context = Some(tctx);
-                if let Err(e) = analyze(typed_context.as_ref().unwrap()) {
-                    eprintln!("Analysis failed: {e}");
-                    process::exit(1);
+                match analyze(typed_context.as_ref().unwrap()) {
+                    Ok(result) => {
+                        for w in &result.warnings {
+                            eprintln!("warning: {w}");
+                        }
+                        for i in &result.infos {
+                            eprintln!("info: {i}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Analysis failed: {e}");
+                        process::exit(1);
+                    }
                 }
                 println!("Analyzed: {}", args.path.display());
             }

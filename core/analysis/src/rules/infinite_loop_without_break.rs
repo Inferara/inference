@@ -16,6 +16,7 @@ crate::rule! {
     /// Infinite loop must contain a reachable break statement.
     #[id = "A004"]
     #[name = "Infinite loop without break"]
+    #[severity = error]
     pub struct InfiniteLoopWithoutBreak;
     fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
         let mut errors = Vec::new();
