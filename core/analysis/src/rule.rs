@@ -67,4 +67,5 @@ macro_rules! __severity {
     (error) => { $crate::errors::Severity::Error };
     (warning) => { $crate::errors::Severity::Warning };
     (info) => { $crate::errors::Severity::Info };
+    ($other:ident) => { compile_error!(concat!("invalid severity: `", stringify!($other), "`, expected `error`, `warning`, or `info`")) };
 }

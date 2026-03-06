@@ -13,6 +13,7 @@
 //! - `break` must not appear inside a non-deterministic block
 //! - `return` must not appear inside a loop body
 //! - Infinite loops (`loop { ... }`) must contain a `break` statement
+//! - `return` must not appear inside a non-deterministic block
 //!
 //! ## Pipeline Position
 //!
@@ -70,6 +71,6 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
     if errors.is_empty() {
         Ok(AnalysisResult { warnings, infos })
     } else {
-        Err(AnalysisErrors::new(errors))
+        Err(AnalysisErrors::new(errors, warnings, infos))
     }
 }

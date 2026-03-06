@@ -524,8 +524,8 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 /// - `typed_context`: The typed AST context from [`type_check`]
 pub fn analyze(
     typed_context: &TypedContext,
-) -> anyhow::Result<inference_analysis::errors::AnalysisResult> {
-    inference_analysis::analyze(typed_context).map_err(anyhow::Error::from)
+) -> Result<inference_analysis::errors::AnalysisResult, inference_analysis::errors::AnalysisErrors> {
+    inference_analysis::analyze(typed_context)
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)

@@ -18,6 +18,7 @@
 //! - [`AnalysisError::BreakInsideNonDetBlock`] - `break` used inside a non-deterministic block
 //! - [`AnalysisError::ReturnInsideLoop`] - `return` used inside a loop body
 //! - [`AnalysisError::InfiniteLoopWithoutBreak`] - Infinite loop missing a `break` statement
+//! - [`AnalysisError::ReturnInsideNonDetBlock`] - `return` used inside a non-deterministic block
 
 use std::fmt::{self, Display, Formatter};
 
@@ -36,12 +37,12 @@ pub enum Severity {
 #[derive(Debug, Clone, Error)]
 pub enum AnalysisError {
     #[error(
-        "{location}: break statement is only valid inside a loop body"
+        "{location}: break statement is only valid inside a loop body; move the break inside a loop body"
     )]
     BreakOutsideLoop { location: Location },
 
     #[error(
-        "{location}: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop"
+        "{location}: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop; move the break outside the non-deterministic block"
     )]
     BreakInsideNonDetBlock { location: Location },
 
@@ -53,7 +54,7 @@ pub enum AnalysisError {
     #[error("{location}: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate")]
     InfiniteLoopWithoutBreak { location: Location },
 
-    #[error("{location}: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function")]
+    #[error("{location}: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function; move the return outside the non-deterministic block")]
     ReturnInsideNonDetBlock { location: Location },
 }
 
@@ -75,18 +76,29 @@ impl AnalysisError {
 ///
 /// Collects all analysis errors found during a single pass, allowing the user
 /// to see all issues at once rather than fixing one error at a time.
+/// Also carries any warnings and infos found alongside the errors.
 #[derive(Debug, Clone)]
 pub struct AnalysisErrors {
     errors: Vec<AnalysisError>,
+    pub warnings: Vec<AnalysisError>,
+    pub infos: Vec<AnalysisError>,
 }
 
 impl AnalysisErrors {
-    pub(crate) fn new(errors: Vec<AnalysisError>) -> Self {
-        Self { errors }
+    pub(crate) fn new(
+        errors: Vec<AnalysisError>,
+        warnings: Vec<AnalysisError>,
+        infos: Vec<AnalysisError>,
+    ) -> Self {
+        Self {
+            errors,
+            warnings,
+            infos,
+        }
     }
 
     /// Returns the list of analysis errors.
-    #[must_use]
+    #[must_use = "returns the list of analysis errors"]
     pub fn errors(&self) -> &[AnalysisError] {
         &self.errors
     }
@@ -133,7 +145,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is only valid inside a loop body"
+            "1:5: break statement is only valid inside a loop body; move the break inside a loop body"
         );
     }
 
@@ -144,7 +156,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop"
+            "1:5: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop; move the break outside the non-deterministic block"
         );
     }
 
@@ -177,7 +189,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function"
+            "1:5: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function; move the return outside the non-deterministic block"
         );
     }
 
@@ -190,41 +202,49 @@ mod tests {
 
     #[test]
     fn display_analysis_errors_single() {
-        let errors = AnalysisErrors::new(vec![AnalysisError::BreakOutsideLoop {
-            location: test_location(),
-        }]);
+        let errors = AnalysisErrors::new(
+            vec![AnalysisError::BreakOutsideLoop {
+                location: test_location(),
+            }],
+            vec![],
+            vec![],
+        );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body"
+            "1:5: break statement is only valid inside a loop body; move the break inside a loop body"
         );
     }
 
     #[test]
     fn display_analysis_errors_multiple() {
-        let errors = AnalysisErrors::new(vec![
-            AnalysisError::BreakOutsideLoop {
-                location: test_location(),
-            },
-            AnalysisError::ReturnInsideLoop {
-                location: Location {
-                    offset_start: 20,
-                    offset_end: 30,
-                    start_line: 3,
-                    start_column: 10,
-                    end_line: 3,
-                    end_column: 20,
+        let errors = AnalysisErrors::new(
+            vec![
+                AnalysisError::BreakOutsideLoop {
+                    location: test_location(),
                 },
-            },
-        ]);
+                AnalysisError::ReturnInsideLoop {
+                    location: Location {
+                        offset_start: 20,
+                        offset_end: 30,
+                        start_line: 3,
+                        start_column: 10,
+                        end_line: 3,
+                        end_column: 20,
+                    },
+                },
+            ],
+            vec![],
+            vec![],
+        );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body; 3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
+            "1:5: break statement is only valid inside a loop body; move the break inside a loop body; 3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
         );
     }
 
     #[test]
     fn display_analysis_errors_empty() {
-        let errors = AnalysisErrors::new(vec![]);
+        let errors = AnalysisErrors::new(vec![], vec![], vec![]);
         assert_eq!(errors.to_string(), "");
     }
 

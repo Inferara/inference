@@ -274,6 +274,12 @@ fn main() {
                         }
                     }
                     Err(e) => {
+                        for w in &e.warnings {
+                            eprintln!("warning: {w}");
+                        }
+                        for i in &e.infos {
+                            eprintln!("info: {i}");
+                        }
                         eprintln!("Analysis failed: {e}");
                         process::exit(1);
                     }

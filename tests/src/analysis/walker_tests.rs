@@ -634,6 +634,28 @@ mod walker_traversal_tests {
     }
 
     #[test]
+    fn a005_return_inside_exists_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                exists {
+                    return 0;
+                }
+                return 1;
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_return_nondet = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+        assert!(
+            has_return_nondet,
+            "expected ReturnInsideNonDetBlock in exists block: {errors:?}"
+        );
+    }
+
+    #[test]
     fn valid_return_outside_nondet_block() {
         let source = r#"
             fn main() -> i32 { return 0; }
@@ -744,6 +766,39 @@ mod walker_traversal_tests {
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a003_and_a005_return_inside_loop_and_nondet() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                loop {
+                    forall {
+                        return 0;
+                    }
+                    break;
+                }
+                return 1;
+            }
+        "#;
+        let errors = expect_errors(source);
+
+        let has_return_inside_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+        assert!(
+            has_return_inside_loop,
+            "expected ReturnInsideLoop: {errors:?}"
+        );
+
+        let has_return_nondet = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+        assert!(
+            has_return_nondet,
+            "expected ReturnInsideNonDetBlock: {errors:?}"
         );
     }
 }
