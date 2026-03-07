@@ -31,8 +31,8 @@ pub(crate) fn walk_function_bodies(
 
     for source_file in typed_context.source_files() {
         for_each_function_body(arena, &source_file.defs, &mut |body_id| {
-            debug_assert_eq!(walk_ctx.loop_depth, 0, "loop_depth leak between functions");
-            debug_assert_eq!(walk_ctx.nondet_depth, 0, "nondet_depth leak between functions");
+            assert_eq!(walk_ctx.loop_depth, 0, "loop_depth leaked");
+            assert_eq!(walk_ctx.nondet_depth, 0, "nondet_depth leaked");
             walk_block(arena, body_id, &mut walk_ctx, visitor);
         });
     }

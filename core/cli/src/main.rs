@@ -263,27 +263,21 @@ fn main() {
                 process::exit(1);
             }
             Ok(tctx) => {
-                typed_context = Some(tctx);
-                match analyze(typed_context.as_ref().unwrap()) {
-                    Ok(result) => {
-                        for w in &result.warnings {
-                            eprintln!("warning: {w}");
-                        }
-                        for i in &result.infos {
-                            eprintln!("info: {i}");
-                        }
-                    }
+                match analyze(&tctx) {
                     Err(e) => {
-                        for w in &e.warnings {
-                            eprintln!("warning: {w}");
-                        }
-                        for i in &e.infos {
-                            eprintln!("info: {i}");
-                        }
                         eprintln!("Analysis failed: {e}");
                         process::exit(1);
                     }
+                    Ok(result) => {
+                        for w in result.warnings() {
+                            eprintln!("warning: {w}");
+                        }
+                        for i in result.infos() {
+                            eprintln!("info: {i}");
+                        }
+                    }
                 }
+                typed_context = Some(tctx);
                 println!("Analyzed: {}", args.path.display());
             }
         }

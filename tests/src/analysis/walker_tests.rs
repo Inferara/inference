@@ -418,6 +418,160 @@ mod walker_traversal_tests {
         );
     }
 
+    #[test]
+    fn a002_break_inside_assume_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    assume {
+                        break;
+                    }
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock in assume block: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a002_break_inside_unique_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    unique {
+                        break;
+                    }
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock in unique block: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a005_return_inside_assume_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                assume {
+                    return 0;
+                }
+                return 1;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_return_nondet = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+        assert!(
+            has_return_nondet,
+            "expected ReturnInsideNonDetBlock in assume block: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a005_return_inside_unique_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() -> i32 {
+                unique {
+                    return 0;
+                }
+                return 1;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_return_nondet = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+        assert!(
+            has_return_nondet,
+            "expected ReturnInsideNonDetBlock in unique block: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a004_infinite_loop_break_inside_assume() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    assume {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak (break in assume doesn't count): {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a004_infinite_loop_break_inside_exists() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    exists {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak (break in exists doesn't count): {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a004_infinite_loop_break_inside_unique() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    unique {
+                        break;
+                    }
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_infinite_loop = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+        assert!(
+            has_infinite_loop,
+            "expected InfiniteLoopWithoutBreak (break in unique doesn't count): {errors:?}"
+        );
+    }
+
     // --- Edge case tests ---
 
     #[test]

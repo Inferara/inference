@@ -36,13 +36,11 @@ pub enum Severity {
 /// Represents a control flow analysis error with source location.
 #[derive(Debug, Clone, Error)]
 pub enum AnalysisError {
-    #[error(
-        "{location}: break statement is only valid inside a loop body; move the break inside a loop body"
-    )]
+    #[error("{location}: break statement is only valid inside a loop body")]
     BreakOutsideLoop { location: Location },
 
     #[error(
-        "{location}: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop; move the break outside the non-deterministic block"
+        "{location}: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would disrupt path exploration; move the break outside the non-deterministic block"
     )]
     BreakInsideNonDetBlock { location: Location },
 
@@ -51,7 +49,7 @@ pub enum AnalysisError {
     )]
     ReturnInsideLoop { location: Location },
 
-    #[error("{location}: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate")]
+    #[error("{location}: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)")]
     InfiniteLoopWithoutBreak { location: Location },
 
     #[error("{location}: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function; move the return outside the non-deterministic block")]
@@ -80,8 +78,8 @@ impl AnalysisError {
 #[derive(Debug, Clone)]
 pub struct AnalysisErrors {
     errors: Vec<AnalysisError>,
-    pub warnings: Vec<AnalysisError>,
-    pub infos: Vec<AnalysisError>,
+    warnings: Vec<AnalysisError>,
+    infos: Vec<AnalysisError>,
 }
 
 impl AnalysisErrors {
@@ -90,6 +88,7 @@ impl AnalysisErrors {
         warnings: Vec<AnalysisError>,
         infos: Vec<AnalysisError>,
     ) -> Self {
+        assert!(!errors.is_empty(), "AnalysisErrors must contain at least one error");
         Self {
             errors,
             warnings,
@@ -102,12 +101,24 @@ impl AnalysisErrors {
     pub fn errors(&self) -> &[AnalysisError] {
         &self.errors
     }
+
+    /// Returns the list of analysis warnings.
+    #[must_use = "returns the list of analysis warnings"]
+    pub fn warnings(&self) -> &[AnalysisError] {
+        &self.warnings
+    }
+
+    /// Returns the list of informational findings.
+    #[must_use = "returns the list of informational findings"]
+    pub fn infos(&self) -> &[AnalysisError] {
+        &self.infos
+    }
 }
 
 impl Display for AnalysisErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let messages: Vec<String> = self.errors.iter().map(ToString::to_string).collect();
-        write!(f, "{}", messages.join("; "))
+        write!(f, "{}", messages.join("\n"))
     }
 }
 
@@ -119,8 +130,22 @@ impl std::error::Error for AnalysisErrors {}
 /// compilation pipeline to continue while still reporting lesser findings.
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    pub warnings: Vec<AnalysisError>,
-    pub infos: Vec<AnalysisError>,
+    pub(crate) warnings: Vec<AnalysisError>,
+    pub(crate) infos: Vec<AnalysisError>,
+}
+
+impl AnalysisResult {
+    /// Returns the list of analysis warnings.
+    #[must_use = "returns the list of analysis warnings"]
+    pub fn warnings(&self) -> &[AnalysisError] {
+        &self.warnings
+    }
+
+    /// Returns the list of informational findings.
+    #[must_use = "returns the list of informational findings"]
+    pub fn infos(&self) -> &[AnalysisError] {
+        &self.infos
+    }
 }
 
 #[cfg(test)]
@@ -145,7 +170,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is only valid inside a loop body; move the break inside a loop body"
+            "1:5: break statement is only valid inside a loop body"
         );
     }
 
@@ -156,7 +181,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would exit the enclosing loop; move the break outside the non-deterministic block"
+            "1:5: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would disrupt path exploration; move the break outside the non-deterministic block"
         );
     }
 
@@ -178,7 +203,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate"
+            "1:5: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)"
         );
     }
 
@@ -211,7 +236,7 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body; move the break inside a loop body"
+            "1:5: break statement is only valid inside a loop body"
         );
     }
 
@@ -238,14 +263,18 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body; move the break inside a loop body; 3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
+            "1:5: break statement is only valid inside a loop body\n3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
         );
     }
 
     #[test]
-    fn display_analysis_errors_empty() {
-        let errors = AnalysisErrors::new(vec![], vec![], vec![]);
-        assert_eq!(errors.to_string(), "");
+    fn display_analysis_result_empty() {
+        let result = AnalysisResult {
+            warnings: vec![],
+            infos: vec![],
+        };
+        assert!(result.warnings().is_empty());
+        assert!(result.infos().is_empty());
     }
 
     #[test]

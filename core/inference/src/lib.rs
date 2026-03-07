@@ -84,7 +84,7 @@
 //! let source = "fn main() { return 0; }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! analyze(&typed_context)?;
+//! let _analysis_result = analyze(&typed_context)?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -180,7 +180,7 @@
 //! fn compile_to_wasm(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     analyze(&typed_context)?;
+//!     let _analysis_result = analyze(&typed_context)?;
 //!     codegen(&typed_context)
 //! }
 //! ```
@@ -258,6 +258,7 @@
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
 
 use inference_ast::{arena::AstArena, builder::Builder};
+pub use inference_analysis::errors::AnalysisResult;
 use inference_type_checker::typed_context::TypedContext;
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
@@ -489,9 +490,6 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 ///   loops or non-deterministic blocks, and infinite loops contain a `break`
 ///   statement.
 ///
-/// Returns `AnalysisResult` on success, which may contain warnings and
-/// informational messages even when no hard errors are found.
-///
 /// Future analyses will include:
 /// - Dead code detection
 /// - Unused variable warnings
@@ -506,13 +504,14 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 /// let source = r#"fn main() { return 0; }"#;
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// analyze(&typed_context)?;
+/// let _analysis_result = analyze(&typed_context)?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
 /// # Errors
 ///
-/// Returns an error if any control flow violations are found, such as:
+/// Returns `anyhow::Error` containing the analysis errors if any control
+/// flow violations are found, such as:
 /// - `break` statement outside a loop body
 /// - `break` statement inside a non-deterministic block
 /// - `return` statement inside a loop body
@@ -522,10 +521,14 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 /// # Parameters
 ///
 /// - `typed_context`: The typed AST context from [`type_check`]
-pub fn analyze(
-    typed_context: &TypedContext,
-) -> Result<inference_analysis::errors::AnalysisResult, inference_analysis::errors::AnalysisErrors> {
-    inference_analysis::analyze(typed_context)
+///
+/// # Returns
+///
+/// On success, returns an [`AnalysisResult`] containing any warnings and
+/// informational findings collected during analysis.
+pub fn analyze(typed_context: &TypedContext) -> anyhow::Result<AnalysisResult> {
+    let result = inference_analysis::analyze(typed_context)?;
+    Ok(result)
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)

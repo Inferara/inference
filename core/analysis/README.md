@@ -36,8 +36,8 @@ rule! {
 
 | ID | Rule | Diagnostic Message |
 |----|------|--------------------|
-| A001 | `break` must be inside a loop body | `break statement is only valid inside a loop body; move the break inside a loop body` |
-| A002 | `break` must not be inside a non-deterministic block (`forall`, `exists`, `assume`, `unique`) | `break statement is not allowed inside a non-deterministic block; ...move the break outside the non-deterministic block` |
+| A001 | `break` must be inside a loop body | `break statement is only valid inside a loop body` |
+| A002 | `break` must not be inside a non-deterministic block (`forall`, `exists`, `assume`, `unique`) | `break statement is not allowed inside a non-deterministic block; ...break would disrupt path exploration; move the break outside the non-deterministic block` |
 | A003 | `return` must not appear inside a loop body | `return inside a loop is not allowed; use break to exit the loop, then return after it` |
-| A004 | Infinite `loop { }` must contain a reachable `break` | `infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate` |
+| A004 | Infinite `loop { }` must contain a reachable `break` | `infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)` |
 | A005 | `return` must not appear inside a non-deterministic block | `return statement is not allowed inside a non-deterministic block; ...move the return outside the non-deterministic block` |
