@@ -182,6 +182,26 @@ mod walker_traversal_tests {
     }
 
     #[test]
+    #[ignore = "module definitions are not yet supported in the tree-sitter grammar"]
+    fn a001_break_outside_loop_in_module_function() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            mod utils {
+                fn helper() {
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            "expected BreakOutsideLoop in module function, got: {:?}",
+            errors[0]
+        );
+    }
+
+    #[test]
     fn multiple_violations_across_struct_methods() {
         let source = r#"
             fn main() -> i32 { return 0; }

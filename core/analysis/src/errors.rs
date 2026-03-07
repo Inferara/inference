@@ -33,6 +33,16 @@ pub enum Severity {
     Error,
 }
 
+impl Display for Severity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Severity::Info => write!(f, "info"),
+            Severity::Warning => write!(f, "warning"),
+            Severity::Error => write!(f, "error"),
+        }
+    }
+}
+
 /// Represents a control flow analysis error with source location.
 #[derive(Debug, Clone, Error)]
 pub enum AnalysisError {
@@ -117,8 +127,23 @@ impl AnalysisErrors {
 
 impl Display for AnalysisErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let messages: Vec<String> = self.errors.iter().map(ToString::to_string).collect();
-        write!(f, "{}", messages.join("\n"))
+        let mut first = true;
+        for i in &self.infos {
+            if !first { writeln!(f)?; }
+            write!(f, "{}: {i}", Severity::Info)?;
+            first = false;
+        }
+        for w in &self.warnings {
+            if !first { writeln!(f)?; }
+            write!(f, "{}: {w}", Severity::Warning)?;
+            first = false;
+        }
+        for e in &self.errors {
+            if !first { writeln!(f)?; }
+            write!(f, "{}: {e}", Severity::Error)?;
+            first = false;
+        }
+        Ok(())
     }
 }
 
@@ -236,7 +261,7 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body"
+            "error: 1:5: break statement is only valid inside a loop body"
         );
     }
 
@@ -263,7 +288,7 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "1:5: break statement is only valid inside a loop body\n3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
+            "error: 1:5: break statement is only valid inside a loop body\nerror: 3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
         );
     }
 
@@ -282,5 +307,35 @@ mod tests {
         assert_ne!(Severity::Error, Severity::Warning);
         assert_ne!(Severity::Warning, Severity::Info);
         assert_ne!(Severity::Error, Severity::Info);
+    }
+
+    #[test]
+    fn severity_display() {
+        assert_eq!(Severity::Error.to_string(), "error");
+        assert_eq!(Severity::Warning.to_string(), "warning");
+        assert_eq!(Severity::Info.to_string(), "info");
+    }
+
+    #[test]
+    fn display_analysis_errors_with_warnings() {
+        let errors = AnalysisErrors::new(
+            vec![AnalysisError::BreakOutsideLoop {
+                location: test_location(),
+            }],
+            vec![AnalysisError::ReturnInsideLoop {
+                location: Location {
+                    offset_start: 20,
+                    offset_end: 30,
+                    start_line: 3,
+                    start_column: 10,
+                    end_line: 3,
+                    end_column: 20,
+                },
+            }],
+            vec![],
+        );
+        let output = errors.to_string();
+        assert!(output.contains("warning:"), "should contain warning prefix");
+        assert!(output.contains("error:"), "should contain error prefix");
     }
 }

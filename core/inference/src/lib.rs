@@ -258,7 +258,7 @@
 //! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
 
 use inference_ast::{arena::AstArena, builder::Builder};
-pub use inference_analysis::errors::AnalysisResult;
+pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_type_checker::typed_context::TypedContext;
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.

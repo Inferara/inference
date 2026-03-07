@@ -265,7 +265,7 @@ fn main() {
             Ok(tctx) => {
                 match analyze(&tctx) {
                     Err(e) => {
-                        eprintln!("Analysis failed: {e}");
+                        eprintln!("{e}");
                         process::exit(1);
                     }
                     Ok(result) => {
