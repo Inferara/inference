@@ -73,3 +73,39 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
         Err(AnalysisErrors::new(errors, warnings, infos))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errors::AnalysisDiagnostic;
+    use inference_ast::nodes::Location;
+
+    fn dummy_location() -> Location {
+        Location::default()
+    }
+
+    #[test]
+    fn rule_ids_match_diagnostic_rule_ids() {
+        let diagnostics: Vec<AnalysisDiagnostic> = vec![
+            AnalysisDiagnostic::BreakOutsideLoop { location: dummy_location() },
+            AnalysisDiagnostic::BreakInsideNonDetBlock { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::ReturnInsideLoop { location: dummy_location() },
+            AnalysisDiagnostic::InfiniteLoopWithoutBreak { location: dummy_location() },
+            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: dummy_location(), block_kind: "forall" },
+        ];
+
+        let rules = rules::all_rules();
+        assert_eq!(rules.len(), diagnostics.len(), "rule count must match diagnostic variant count");
+
+        for (rule, diag) in rules.iter().zip(diagnostics.iter()) {
+            assert_eq!(
+                rule.id(),
+                diag.rule_id(),
+                "Rule '{}' has id '{}' but its diagnostic variant has rule_id '{}'",
+                rule.name(),
+                rule.id(),
+                diag.rule_id()
+            );
+        }
+    }
+}

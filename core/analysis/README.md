@@ -41,3 +41,19 @@ rule! {
 | A003 | `return` must not appear inside a loop body | `return inside a loop is not allowed; use break to exit the loop, then return after it` |
 | A004 | Infinite `loop { }` must contain a reachable `break` | `infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)` |
 | A005 | `return` must not appear inside a non-deterministic block | `return statement is not allowed inside a non-deterministic block; ...move the return outside the non-deterministic block` |
+
+## Diagnostic output format
+
+Diagnostics follow the gcc/clang/rustc convention:
+
+```
+<line>:<column>: <severity>[<rule_id>]: <message>
+```
+
+Example:
+```
+1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'
+3:10: error[A002]: break statement is not allowed inside a 'forall' block; break would interfere with the path exploration required for formal verification; move the break outside the 'forall' block
+```
+
+When multiple diagnostics are present, they are sorted by source location (line, then column). Messages follow a `what; why; how` structure separated by semicolons.

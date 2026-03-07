@@ -319,6 +319,24 @@ mod tests {
     }
 
     #[test]
+    fn display_break_inside_assume_block() {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "assume",
+        };
+        assert!(err.to_string().contains("'assume' block"));
+    }
+
+    #[test]
+    fn display_return_inside_exists_block() {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "exists",
+        };
+        assert!(err.to_string().contains("'exists' block"));
+    }
+
+    #[test]
     fn error_location_accessor() {
         let loc = test_location();
         let err = AnalysisDiagnostic::BreakOutsideLoop { location: loc };
