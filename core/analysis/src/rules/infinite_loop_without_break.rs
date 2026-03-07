@@ -10,7 +10,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, StmtId};
 use inference_ast::nodes::{BlockKind, Stmt};
 
-use crate::errors::AnalysisError;
+use crate::errors::AnalysisDiagnostic;
 
 crate::rule! {
     /// Infinite loop must contain a reachable break statement.
@@ -18,7 +18,7 @@ crate::rule! {
     #[name = "Infinite loop without break"]
     #[severity = error]
     pub struct InfiniteLoopWithoutBreak;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
+    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
@@ -30,22 +30,22 @@ crate::rule! {
     }
 }
 
-fn check_block(arena: &AstArena, block_id: BlockId, errors: &mut Vec<AnalysisError>) {
+fn check_block(arena: &AstArena, block_id: BlockId, errors: &mut Vec<AnalysisDiagnostic>) {
     let block = &arena[block_id];
     check_statements(arena, &block.stmts, errors);
 }
 
-fn check_statements(arena: &AstArena, stmt_ids: &[StmtId], errors: &mut Vec<AnalysisError>) {
+fn check_statements(arena: &AstArena, stmt_ids: &[StmtId], errors: &mut Vec<AnalysisDiagnostic>) {
     for &stmt_id in stmt_ids {
         check_statement(arena, stmt_id, errors);
     }
 }
 
-fn check_statement(arena: &AstArena, stmt_id: StmtId, errors: &mut Vec<AnalysisError>) {
+fn check_statement(arena: &AstArena, stmt_id: StmtId, errors: &mut Vec<AnalysisDiagnostic>) {
     match &arena[stmt_id].kind {
         Stmt::Loop { condition, body } => {
             if condition.is_none() && !contains_break_for_this_loop(arena, *body) {
-                errors.push(AnalysisError::InfiniteLoopWithoutBreak {
+                errors.push(AnalysisDiagnostic::InfiniteLoopWithoutBreak {
                     location: arena[stmt_id].location,
                 });
             }

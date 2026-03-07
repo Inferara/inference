@@ -269,11 +269,8 @@ fn main() {
                         process::exit(1);
                     }
                     Ok(result) => {
-                        for w in result.warnings() {
-                            eprintln!("warning: {w}");
-                        }
-                        for i in result.infos() {
-                            eprintln!("info: {i}");
+                        if result.has_findings() {
+                            eprintln!("{result}");
                         }
                     }
                 }

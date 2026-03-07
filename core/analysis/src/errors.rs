@@ -14,11 +14,11 @@
 //! ## Error Categories
 //!
 //! **Loop Control Flow Errors**:
-//! - [`AnalysisError::BreakOutsideLoop`] - `break` used outside a loop body
-//! - [`AnalysisError::BreakInsideNonDetBlock`] - `break` used inside a non-deterministic block
-//! - [`AnalysisError::ReturnInsideLoop`] - `return` used inside a loop body
-//! - [`AnalysisError::InfiniteLoopWithoutBreak`] - Infinite loop missing a `break` statement
-//! - [`AnalysisError::ReturnInsideNonDetBlock`] - `return` used inside a non-deterministic block
+//! - [`AnalysisDiagnostic::BreakOutsideLoop`] - `break` used outside a loop body
+//! - [`AnalysisDiagnostic::BreakInsideNonDetBlock`] - `break` used inside a non-deterministic block
+//! - [`AnalysisDiagnostic::ReturnInsideLoop`] - `return` used inside a loop body
+//! - [`AnalysisDiagnostic::InfiniteLoopWithoutBreak`] - Infinite loop missing a `break` statement
+//! - [`AnalysisDiagnostic::ReturnInsideNonDetBlock`] - `return` used inside a non-deterministic block
 
 use std::fmt::{self, Display, Formatter};
 
@@ -26,7 +26,7 @@ use inference_ast::nodes::Location;
 use thiserror::Error;
 
 /// Severity level for analysis findings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
     Info,
     Warning,
@@ -44,38 +44,54 @@ impl Display for Severity {
 }
 
 /// Represents a control flow analysis error with source location.
-#[derive(Debug, Clone, Error)]
-pub enum AnalysisError {
-    #[error("{location}: break statement is only valid inside a loop body")]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AnalysisDiagnostic {
+    #[error("break statement is only valid inside a loop body; if you intended to exit the function, use 'return'")]
     BreakOutsideLoop { location: Location },
 
-    #[error(
-        "{location}: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would disrupt path exploration; move the break outside the non-deterministic block"
-    )]
-    BreakInsideNonDetBlock { location: Location },
+    #[error("break statement is not allowed inside a '{block_kind}' block; break would interfere with the path exploration required for formal verification; move the break outside the '{block_kind}' block")]
+    BreakInsideNonDetBlock {
+        location: Location,
+        block_kind: &'static str,
+    },
 
     #[error(
-        "{location}: return inside a loop is not allowed; use break to exit the loop, then return after it"
+        "return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
     )]
     ReturnInsideLoop { location: Location },
 
-    #[error("{location}: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)")]
+    #[error("infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)")]
     InfiniteLoopWithoutBreak { location: Location },
 
-    #[error("{location}: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function; move the return outside the non-deterministic block")]
-    ReturnInsideNonDetBlock { location: Location },
+    #[error("return statement is not allowed inside a '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block")]
+    ReturnInsideNonDetBlock {
+        location: Location,
+        block_kind: &'static str,
+    },
 }
 
-impl AnalysisError {
+impl AnalysisDiagnostic {
     /// Returns the source location associated with this error.
     #[must_use = "returns the source location without modifying the error"]
     pub fn location(&self) -> &Location {
         match self {
-            AnalysisError::BreakOutsideLoop { location }
-            | AnalysisError::BreakInsideNonDetBlock { location }
-            | AnalysisError::ReturnInsideLoop { location }
-            | AnalysisError::InfiniteLoopWithoutBreak { location }
-            | AnalysisError::ReturnInsideNonDetBlock { location } => location,
+            AnalysisDiagnostic::BreakOutsideLoop { location }
+            | AnalysisDiagnostic::BreakInsideNonDetBlock { location, .. }
+            | AnalysisDiagnostic::ReturnInsideLoop { location }
+            | AnalysisDiagnostic::InfiniteLoopWithoutBreak { location }
+            | AnalysisDiagnostic::ReturnInsideNonDetBlock { location, .. } => location,
+        }
+    }
+
+    /// Returns the analysis rule identifier (e.g. "A001") for this diagnostic.
+    #[must_use = "returns the rule identifier without modifying the diagnostic"]
+    pub fn rule_id(&self) -> &'static str {
+        match self {
+            AnalysisDiagnostic::BreakOutsideLoop { .. } => "A001",
+            AnalysisDiagnostic::BreakInsideNonDetBlock { .. } => "A002",
+            AnalysisDiagnostic::ReturnInsideLoop { .. } => "A003",
+            AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. } => "A004",
+            AnalysisDiagnostic::ReturnInsideNonDetBlock { .. } => "A005",
         }
     }
 }
@@ -87,16 +103,16 @@ impl AnalysisError {
 /// Also carries any warnings and infos found alongside the errors.
 #[derive(Debug, Clone)]
 pub struct AnalysisErrors {
-    errors: Vec<AnalysisError>,
-    warnings: Vec<AnalysisError>,
-    infos: Vec<AnalysisError>,
+    errors: Vec<AnalysisDiagnostic>,
+    warnings: Vec<AnalysisDiagnostic>,
+    infos: Vec<AnalysisDiagnostic>,
 }
 
 impl AnalysisErrors {
     pub(crate) fn new(
-        errors: Vec<AnalysisError>,
-        warnings: Vec<AnalysisError>,
-        infos: Vec<AnalysisError>,
+        errors: Vec<AnalysisDiagnostic>,
+        warnings: Vec<AnalysisDiagnostic>,
+        infos: Vec<AnalysisDiagnostic>,
     ) -> Self {
         assert!(!errors.is_empty(), "AnalysisErrors must contain at least one error");
         Self {
@@ -108,39 +124,46 @@ impl AnalysisErrors {
 
     /// Returns the list of analysis errors.
     #[must_use = "returns the list of analysis errors"]
-    pub fn errors(&self) -> &[AnalysisError] {
+    pub fn errors(&self) -> &[AnalysisDiagnostic] {
         &self.errors
     }
 
     /// Returns the list of analysis warnings.
     #[must_use = "returns the list of analysis warnings"]
-    pub fn warnings(&self) -> &[AnalysisError] {
+    pub fn warnings(&self) -> &[AnalysisDiagnostic] {
         &self.warnings
     }
 
     /// Returns the list of informational findings.
     #[must_use = "returns the list of informational findings"]
-    pub fn infos(&self) -> &[AnalysisError] {
+    pub fn infos(&self) -> &[AnalysisDiagnostic] {
         &self.infos
     }
 }
 
 impl Display for AnalysisErrors {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut all: Vec<(&AnalysisDiagnostic, Severity)> = Vec::new();
+        for d in &self.infos {
+            all.push((d, Severity::Info));
+        }
+        for d in &self.warnings {
+            all.push((d, Severity::Warning));
+        }
+        for d in &self.errors {
+            all.push((d, Severity::Error));
+        }
+        all.sort_by(|a, b| {
+            let la = a.0.location();
+            let lb = b.0.location();
+            (la.start_line, la.start_column).cmp(&(lb.start_line, lb.start_column))
+        });
         let mut first = true;
-        for i in &self.infos {
-            if !first { writeln!(f)?; }
-            write!(f, "{}: {i}", Severity::Info)?;
-            first = false;
-        }
-        for w in &self.warnings {
-            if !first { writeln!(f)?; }
-            write!(f, "{}: {w}", Severity::Warning)?;
-            first = false;
-        }
-        for e in &self.errors {
-            if !first { writeln!(f)?; }
-            write!(f, "{}: {e}", Severity::Error)?;
+        for (d, sev) in &all {
+            if !first {
+                writeln!(f)?;
+            }
+            write!(f, "{}: {sev}[{}]: {d}", d.location(), d.rule_id())?;
             first = false;
         }
         Ok(())
@@ -155,21 +178,53 @@ impl std::error::Error for AnalysisErrors {}
 /// compilation pipeline to continue while still reporting lesser findings.
 #[derive(Debug, Clone)]
 pub struct AnalysisResult {
-    pub(crate) warnings: Vec<AnalysisError>,
-    pub(crate) infos: Vec<AnalysisError>,
+    pub(crate) warnings: Vec<AnalysisDiagnostic>,
+    pub(crate) infos: Vec<AnalysisDiagnostic>,
 }
 
 impl AnalysisResult {
     /// Returns the list of analysis warnings.
     #[must_use = "returns the list of analysis warnings"]
-    pub fn warnings(&self) -> &[AnalysisError] {
+    pub fn warnings(&self) -> &[AnalysisDiagnostic] {
         &self.warnings
     }
 
     /// Returns the list of informational findings.
     #[must_use = "returns the list of informational findings"]
-    pub fn infos(&self) -> &[AnalysisError] {
+    pub fn infos(&self) -> &[AnalysisDiagnostic] {
         &self.infos
+    }
+
+    /// Returns true if there are any warnings or informational findings.
+    #[must_use = "returns whether any warnings or informational findings exist"]
+    pub fn has_findings(&self) -> bool {
+        !self.warnings.is_empty() || !self.infos.is_empty()
+    }
+}
+
+impl Display for AnalysisResult {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let mut all: Vec<(&AnalysisDiagnostic, Severity)> = Vec::new();
+        for d in &self.infos {
+            all.push((d, Severity::Info));
+        }
+        for d in &self.warnings {
+            all.push((d, Severity::Warning));
+        }
+        all.sort_by(|a, b| {
+            let la = a.0.location();
+            let lb = b.0.location();
+            (la.start_line, la.start_column).cmp(&(lb.start_line, lb.start_column))
+        });
+        let mut first = true;
+        for (d, sev) in &all {
+            if !first {
+                writeln!(f)?;
+            }
+            write!(f, "{}: {sev}[{}]: {d}", d.location(), d.rule_id())?;
+            first = false;
+        }
+        Ok(())
     }
 }
 
@@ -190,70 +245,114 @@ mod tests {
 
     #[test]
     fn display_break_outside_loop() {
-        let err = AnalysisError::BreakOutsideLoop {
+        let err = AnalysisDiagnostic::BreakOutsideLoop {
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is only valid inside a loop body"
+            "break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
         );
     }
 
     #[test]
     fn display_break_inside_nondet_block() {
-        let err = AnalysisError::BreakInsideNonDetBlock {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
             location: test_location(),
+            block_kind: "forall",
         };
         assert_eq!(
             err.to_string(),
-            "1:5: break statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and break would disrupt path exploration; move the break outside the non-deterministic block"
+            "break statement is not allowed inside a 'forall' block; break would interfere with the path exploration required for formal verification; move the break outside the 'forall' block"
         );
     }
 
     #[test]
     fn display_return_inside_loop() {
-        let err = AnalysisError::ReturnInsideLoop {
+        let err = AnalysisDiagnostic::ReturnInsideLoop {
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: return inside a loop is not allowed; use break to exit the loop, then return after it"
+            "return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
         );
     }
 
     #[test]
     fn display_infinite_loop_without_break() {
-        let err = AnalysisError::InfiniteLoopWithoutBreak {
+        let err = AnalysisDiagnostic::InfiniteLoopWithoutBreak {
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)"
+            "infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)"
         );
     }
 
     #[test]
     fn display_return_inside_nondet_block() {
-        let err = AnalysisError::ReturnInsideNonDetBlock {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
             location: test_location(),
+            block_kind: "forall",
         };
         assert_eq!(
             err.to_string(),
-            "1:5: return statement is not allowed inside a non-deterministic block; non-deterministic blocks must explore all execution paths, and return would exit the enclosing function; move the return outside the non-deterministic block"
+            "return statement is not allowed inside a 'forall' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the 'forall' block"
         );
+    }
+
+    #[test]
+    fn display_break_inside_exists_block() {
+        let err = AnalysisDiagnostic::BreakInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "exists",
+        };
+        assert!(err.to_string().contains("'exists' block"));
+    }
+
+    #[test]
+    fn display_return_inside_unique_block() {
+        let err = AnalysisDiagnostic::ReturnInsideNonDetBlock {
+            location: test_location(),
+            block_kind: "unique",
+        };
+        assert!(err.to_string().contains("'unique' block"));
     }
 
     #[test]
     fn error_location_accessor() {
         let loc = test_location();
-        let err = AnalysisError::BreakOutsideLoop { location: loc };
+        let err = AnalysisDiagnostic::BreakOutsideLoop { location: loc };
         assert_eq!(err.location(), &loc);
+    }
+
+    #[test]
+    fn rule_id_values() {
+        assert_eq!(
+            AnalysisDiagnostic::BreakOutsideLoop { location: test_location() }.rule_id(),
+            "A001"
+        );
+        assert_eq!(
+            AnalysisDiagnostic::BreakInsideNonDetBlock { location: test_location(), block_kind: "forall" }.rule_id(),
+            "A002"
+        );
+        assert_eq!(
+            AnalysisDiagnostic::ReturnInsideLoop { location: test_location() }.rule_id(),
+            "A003"
+        );
+        assert_eq!(
+            AnalysisDiagnostic::InfiniteLoopWithoutBreak { location: test_location() }.rule_id(),
+            "A004"
+        );
+        assert_eq!(
+            AnalysisDiagnostic::ReturnInsideNonDetBlock { location: test_location(), block_kind: "forall" }.rule_id(),
+            "A005"
+        );
     }
 
     #[test]
     fn display_analysis_errors_single() {
         let errors = AnalysisErrors::new(
-            vec![AnalysisError::BreakOutsideLoop {
+            vec![AnalysisDiagnostic::BreakOutsideLoop {
                 location: test_location(),
             }],
             vec![],
@@ -261,7 +360,7 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "error: 1:5: break statement is only valid inside a loop body"
+            "1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
         );
     }
 
@@ -269,10 +368,10 @@ mod tests {
     fn display_analysis_errors_multiple() {
         let errors = AnalysisErrors::new(
             vec![
-                AnalysisError::BreakOutsideLoop {
+                AnalysisDiagnostic::BreakOutsideLoop {
                     location: test_location(),
                 },
-                AnalysisError::ReturnInsideLoop {
+                AnalysisDiagnostic::ReturnInsideLoop {
                     location: Location {
                         offset_start: 20,
                         offset_end: 30,
@@ -288,7 +387,7 @@ mod tests {
         );
         assert_eq!(
             errors.to_string(),
-            "error: 1:5: break statement is only valid inside a loop body\nerror: 3:10: return inside a loop is not allowed; use break to exit the loop, then return after it"
+            "1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'\n3:10: error[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
         );
     }
 
@@ -300,6 +399,7 @@ mod tests {
         };
         assert!(result.warnings().is_empty());
         assert!(result.infos().is_empty());
+        assert_eq!(result.to_string(), "");
     }
 
     #[test]
@@ -317,12 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn display_analysis_errors_with_warnings() {
+    fn display_analysis_errors_with_warnings_sorted_by_location() {
         let errors = AnalysisErrors::new(
-            vec![AnalysisError::BreakOutsideLoop {
+            vec![AnalysisDiagnostic::BreakOutsideLoop {
                 location: test_location(),
             }],
-            vec![AnalysisError::ReturnInsideLoop {
+            vec![AnalysisDiagnostic::ReturnInsideLoop {
                 location: Location {
                     offset_start: 20,
                     offset_end: 30,
@@ -334,8 +434,97 @@ mod tests {
             }],
             vec![],
         );
-        let output = errors.to_string();
-        assert!(output.contains("warning:"), "should contain warning prefix");
-        assert!(output.contains("error:"), "should contain error prefix");
+        assert_eq!(
+            errors.to_string(),
+            "1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'\n3:10: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
+        );
+    }
+
+    #[test]
+    fn display_analysis_errors_with_all_severities_sorted_by_location() {
+        let errors = AnalysisErrors::new(
+            vec![AnalysisDiagnostic::BreakOutsideLoop {
+                location: test_location(),
+            }],
+            vec![AnalysisDiagnostic::ReturnInsideLoop {
+                location: test_location(),
+            }],
+            vec![AnalysisDiagnostic::InfiniteLoopWithoutBreak {
+                location: test_location(),
+            }],
+        );
+        // All at same location 1:5, so stable order within same location depends on push order:
+        // infos first, then warnings, then errors
+        assert_eq!(
+            errors.to_string(),
+            "1:5: info[A004]: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)\n1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it\n1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
+        );
+    }
+
+    #[test]
+    fn display_analysis_result_with_warning() {
+        let result = AnalysisResult {
+            warnings: vec![AnalysisDiagnostic::ReturnInsideLoop {
+                location: test_location(),
+            }],
+            infos: vec![],
+        };
+        assert_eq!(
+            result.to_string(),
+            "1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it"
+        );
+    }
+
+    #[test]
+    fn has_findings_returns_false_when_empty() {
+        let result = AnalysisResult {
+            warnings: vec![],
+            infos: vec![],
+        };
+        assert!(!result.has_findings());
+    }
+
+    #[test]
+    fn has_findings_returns_true_with_warning() {
+        let result = AnalysisResult {
+            warnings: vec![AnalysisDiagnostic::ReturnInsideLoop {
+                location: test_location(),
+            }],
+            infos: vec![],
+        };
+        assert!(result.has_findings());
+    }
+
+    #[test]
+    fn has_findings_returns_true_with_info() {
+        let result = AnalysisResult {
+            warnings: vec![],
+            infos: vec![AnalysisDiagnostic::InfiniteLoopWithoutBreak {
+                location: test_location(),
+            }],
+        };
+        assert!(result.has_findings());
+    }
+
+    #[test]
+    fn analysis_errors_new_panics_on_empty_errors() {
+        let result = std::panic::catch_unwind(|| {
+            AnalysisErrors::new(vec![], vec![], vec![]);
+        });
+        assert!(
+            result.is_err(),
+            "AnalysisErrors::new should panic when errors is empty"
+        );
+    }
+
+    #[test]
+    fn partial_eq_for_diagnostic() {
+        let a = AnalysisDiagnostic::BreakOutsideLoop {
+            location: test_location(),
+        };
+        let b = AnalysisDiagnostic::BreakOutsideLoop {
+            location: test_location(),
+        };
+        assert_eq!(a, b);
     }
 }

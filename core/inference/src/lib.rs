@@ -510,8 +510,7 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 ///
 /// # Errors
 ///
-/// Returns `anyhow::Error` containing the analysis errors if any control
-/// flow violations are found, such as:
+/// Returns `AnalysisErrors` if any control flow violations are found, such as:
 /// - `break` statement outside a loop body
 /// - `break` statement inside a non-deterministic block
 /// - `return` statement inside a loop body
@@ -526,9 +525,8 @@ pub fn type_check(arena: AstArena) -> anyhow::Result<TypedContext> {
 ///
 /// On success, returns an [`AnalysisResult`] containing any warnings and
 /// informational findings collected during analysis.
-pub fn analyze(typed_context: &TypedContext) -> anyhow::Result<AnalysisResult> {
-    let result = inference_analysis::analyze(typed_context)?;
-    Ok(result)
+pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
+    inference_analysis::analyze(typed_context)
 }
 
 /// Generates WebAssembly binary from a typed AST for the default target (`Wasm32`)

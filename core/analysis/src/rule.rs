@@ -4,7 +4,7 @@
 #[doc(hidden)]
 pub use inference_type_checker::typed_context::TypedContext;
 
-use crate::errors::{AnalysisError, Severity};
+use crate::errors::{AnalysisDiagnostic, Severity};
 
 /// A single analysis rule that checks a semantic invariant.
 ///
@@ -19,7 +19,7 @@ pub trait Rule: Send + Sync {
     /// Severity level for findings produced by this rule.
     fn severity(&self) -> Severity;
     /// Run the check against the typed context and return errors found.
-    fn check(&self, ctx: &TypedContext) -> Vec<AnalysisError>;
+    fn check(&self, ctx: &TypedContext) -> Vec<AnalysisDiagnostic>;
 }
 
 /// Declares an analysis rule struct and implements the `Rule` trait.
@@ -32,7 +32,7 @@ pub trait Rule: Send + Sync {
 ///     #[name = "Break outside loop"]
 ///     #[severity = error]
 ///     pub struct BreakOutsideLoop;
-///     fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
+///     fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
 ///         // implementation
 ///     }
 /// }
@@ -45,7 +45,7 @@ macro_rules! rule {
         #[name = $name:literal]
         #[severity = $severity:ident]
         pub struct $tname:ident;
-        fn check($ctx:ident : &TypedContext) -> Vec<AnalysisError> $body:block
+        fn check($ctx:ident : &TypedContext) -> Vec<AnalysisDiagnostic> $body:block
     ) => {
         $(#[doc = $doc])*
         pub struct $tname;
@@ -55,7 +55,7 @@ macro_rules! rule {
             fn severity(&self) -> $crate::errors::Severity {
                 $crate::__severity!($severity)
             }
-            fn check(&self, $ctx: &$crate::rule::TypedContext) -> Vec<$crate::errors::AnalysisError> $body
+            fn check(&self, $ctx: &$crate::rule::TypedContext) -> Vec<$crate::errors::AnalysisDiagnostic> $body
         }
     };
 }

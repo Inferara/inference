@@ -6,13 +6,24 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{Def, Stmt};
+use inference_ast::nodes::{BlockKind, Def, Stmt};
 use inference_type_checker::typed_context::TypedContext;
 
 /// Context passed to visitor callbacks during AST walking.
 pub(crate) struct WalkContext {
     pub loop_depth: u32,
     pub nondet_depth: u32,
+    pub nondet_block_kind: Option<&'static str>,
+}
+
+fn block_kind_label(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Forall => "forall",
+        BlockKind::Exists => "exists",
+        BlockKind::Assume => "assume",
+        BlockKind::Unique => "unique",
+        BlockKind::Regular => unreachable!("called only for non-det blocks"),
+    }
 }
 
 /// Walks all function bodies and calls `visitor` for every statement.
@@ -27,12 +38,14 @@ pub(crate) fn walk_function_bodies(
     let mut walk_ctx = WalkContext {
         loop_depth: 0,
         nondet_depth: 0,
+        nondet_block_kind: None,
     };
 
     for source_file in typed_context.source_files() {
         for_each_function_body(arena, &source_file.defs, &mut |body_id| {
             assert_eq!(walk_ctx.loop_depth, 0, "loop_depth leaked");
             assert_eq!(walk_ctx.nondet_depth, 0, "nondet_depth leaked");
+            assert!(walk_ctx.nondet_block_kind.is_none(), "nondet_block_kind leaked");
             walk_block(arena, body_id, &mut walk_ctx, visitor);
         });
     }
@@ -81,13 +94,15 @@ fn walk_block(
     visitor: &mut dyn FnMut(StmtId, &WalkContext),
 ) {
     let block = &arena[block_id];
-    let is_nondet = block.block_kind.is_non_det();
-    if is_nondet {
+    if block.block_kind.is_non_det() {
+        let prev_kind = ctx.nondet_block_kind;
+        ctx.nondet_block_kind = Some(block_kind_label(block.block_kind));
         ctx.nondet_depth += 1;
-    }
-    walk_statements(arena, &block.stmts, ctx, visitor);
-    if is_nondet {
+        walk_statements(arena, &block.stmts, ctx, visitor);
         ctx.nondet_depth -= 1;
+        ctx.nondet_block_kind = prev_kind;
+    } else {
+        walk_statements(arena, &block.stmts, ctx, visitor);
     }
 }
 

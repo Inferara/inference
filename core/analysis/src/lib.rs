@@ -56,11 +56,10 @@ use errors::{AnalysisErrors, AnalysisResult, Severity};
 /// All errors are collected before returning, allowing the user to see
 /// all issues at once.
 pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
-    let all_rules = rules::all_rules();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut infos = Vec::new();
-    for r in &all_rules {
+    for &r in rules::all_rules() {
         let findings = r.check(typed_context);
         match r.severity() {
             Severity::Error => errors.extend(findings),

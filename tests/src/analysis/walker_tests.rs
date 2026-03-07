@@ -8,7 +8,7 @@
 #[cfg(test)]
 mod walker_traversal_tests {
     use crate::utils::build_ast;
-    use inference_analysis::errors::{AnalysisError, AnalysisErrors, AnalysisResult};
+    use inference_analysis::errors::{AnalysisDiagnostic, AnalysisErrors, AnalysisResult};
     use inference_type_checker::typed_context::TypedContext;
 
     fn type_check(source: &str) -> TypedContext {
@@ -23,7 +23,7 @@ mod walker_traversal_tests {
         inference_analysis::analyze(&ctx)
     }
 
-    fn expect_errors(source: &str) -> Vec<AnalysisError> {
+    fn expect_errors(source: &str) -> Vec<AnalysisDiagnostic> {
         analyze(source)
             .expect_err("expected analysis errors but got Ok")
             .errors()
@@ -45,7 +45,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         assert_eq!(errors.len(), 1);
         assert!(
-            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            matches!(&errors[0], AnalysisDiagnostic::BreakOutsideLoop { .. }),
             "expected BreakOutsideLoop, got: {:?}",
             errors[0]
         );
@@ -67,7 +67,7 @@ mod walker_traversal_tests {
 
         let has_return_inside_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideLoop { .. }));
         assert!(
             has_return_inside_loop,
             "expected ReturnInsideLoop among errors: {errors:?}"
@@ -89,7 +89,7 @@ mod walker_traversal_tests {
 
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak among errors: {errors:?}"
@@ -109,7 +109,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         assert_eq!(errors.len(), 1);
         assert!(
-            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            matches!(&errors[0], AnalysisDiagnostic::BreakOutsideLoop { .. }),
             "expected BreakOutsideLoop, got: {:?}",
             errors[0]
         );
@@ -131,7 +131,7 @@ mod walker_traversal_tests {
 
         let has_return_inside_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideLoop { .. }));
         assert!(
             has_return_inside_loop,
             "expected ReturnInsideLoop among errors: {errors:?}"
@@ -153,7 +153,7 @@ mod walker_traversal_tests {
 
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak among errors: {errors:?}"
@@ -175,15 +175,17 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         assert_eq!(errors.len(), 1);
         assert!(
-            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            matches!(&errors[0], AnalysisDiagnostic::BreakOutsideLoop { .. }),
             "expected BreakOutsideLoop in spec-nested struct, got: {:?}",
             errors[0]
         );
     }
 
     #[test]
-    #[ignore = "module definitions are not yet supported in the tree-sitter grammar"]
     fn a001_break_outside_loop_in_module_function() {
+        // FIXME: module definitions are not yet supported in the tree-sitter grammar.
+        // Once supported, this test should verify that analysis detects BreakOutsideLoop
+        // inside module functions. Currently the parser rejects `mod` blocks.
         let source = r#"
             fn main() -> i32 { return 0; }
             mod utils {
@@ -192,12 +194,10 @@ mod walker_traversal_tests {
                 }
             }
         "#;
-        let errors = expect_errors(source);
-        assert_eq!(errors.len(), 1);
+        let result = crate::utils::try_build_ast(source.to_string());
         assert!(
-            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
-            "expected BreakOutsideLoop in module function, got: {:?}",
-            errors[0]
+            result.is_err(),
+            "expected parse error for module definition, but parsing succeeded"
         );
     }
 
@@ -219,10 +219,10 @@ mod walker_traversal_tests {
 
         let has_break_outside = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakOutsideLoop { .. }));
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_break_outside,
             "expected BreakOutsideLoop among errors: {errors:?}"
@@ -250,7 +250,7 @@ mod walker_traversal_tests {
 
         let break_count = errors
             .iter()
-            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .filter(|e| matches!(e, AnalysisDiagnostic::BreakOutsideLoop { .. }))
             .count();
         assert_eq!(
             break_count, 2,
@@ -275,7 +275,7 @@ mod walker_traversal_tests {
 
         let break_count = errors
             .iter()
-            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .filter(|e| matches!(e, AnalysisDiagnostic::BreakOutsideLoop { .. }))
             .count();
         assert_eq!(
             break_count, 2,
@@ -406,7 +406,7 @@ mod walker_traversal_tests {
 
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock among errors: {errors:?}"
@@ -431,7 +431,7 @@ mod walker_traversal_tests {
 
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock among errors: {errors:?}"
@@ -454,7 +454,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock in assume block: {errors:?}"
@@ -477,7 +477,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock in unique block: {errors:?}"
@@ -498,7 +498,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_return_nondet = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. }));
         assert!(
             has_return_nondet,
             "expected ReturnInsideNonDetBlock in assume block: {errors:?}"
@@ -519,7 +519,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_return_nondet = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. }));
         assert!(
             has_return_nondet,
             "expected ReturnInsideNonDetBlock in unique block: {errors:?}"
@@ -541,7 +541,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak (break in assume doesn't count): {errors:?}"
@@ -563,7 +563,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak (break in exists doesn't count): {errors:?}"
@@ -585,7 +585,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak (break in unique doesn't count): {errors:?}"
@@ -610,7 +610,7 @@ mod walker_traversal_tests {
 
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak for outer loop: {errors:?}"
@@ -637,7 +637,7 @@ mod walker_traversal_tests {
 
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock with deeply nested nondet: {errors:?}"
@@ -664,7 +664,7 @@ mod walker_traversal_tests {
 
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock for break in if inside nondet: {errors:?}"
@@ -684,7 +684,7 @@ mod walker_traversal_tests {
 
         let break_count = errors
             .iter()
-            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .filter(|e| matches!(e, AnalysisDiagnostic::BreakOutsideLoop { .. }))
             .count();
         assert_eq!(
             break_count, 2,
@@ -708,7 +708,7 @@ mod walker_traversal_tests {
 
         let has_return_inside_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideLoop { .. }));
         assert!(
             has_return_inside_loop,
             "expected ReturnInsideLoop for conditional loop: {errors:?}"
@@ -731,7 +731,7 @@ mod walker_traversal_tests {
 
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak (break inside nondet doesn't count): {errors:?}"
@@ -739,7 +739,7 @@ mod walker_traversal_tests {
 
         let has_nondet_break = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
         assert!(
             has_nondet_break,
             "expected BreakInsideNonDetBlock as well: {errors:?}"
@@ -800,7 +800,7 @@ mod walker_traversal_tests {
 
         let has_return_nondet = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. }));
         assert!(
             has_return_nondet,
             "expected ReturnInsideNonDetBlock among errors: {errors:?}"
@@ -822,7 +822,7 @@ mod walker_traversal_tests {
 
         let has_return_nondet = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. }));
         assert!(
             has_return_nondet,
             "expected ReturnInsideNonDetBlock in exists block: {errors:?}"
@@ -858,7 +858,7 @@ mod walker_traversal_tests {
         let errors = expect_errors(source);
         assert_eq!(errors.len(), 1);
         assert!(
-            matches!(&errors[0], AnalysisError::BreakOutsideLoop { .. }),
+            matches!(&errors[0], AnalysisDiagnostic::BreakOutsideLoop { .. }),
             "expected BreakOutsideLoop inside spec, got: {:?}",
             errors[0]
         );
@@ -897,7 +897,7 @@ mod walker_traversal_tests {
 
         let break_outside_count = errors
             .iter()
-            .filter(|e| matches!(e, AnalysisError::BreakOutsideLoop { .. }))
+            .filter(|e| matches!(e, AnalysisDiagnostic::BreakOutsideLoop { .. }))
             .count();
         assert_eq!(
             break_outside_count, 1,
@@ -906,7 +906,7 @@ mod walker_traversal_tests {
 
         let nondet_break_count = errors
             .iter()
-            .filter(|e| matches!(e, AnalysisError::BreakInsideNonDetBlock { .. }))
+            .filter(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }))
             .count();
         assert_eq!(
             nondet_break_count, 1,
@@ -928,7 +928,7 @@ mod walker_traversal_tests {
 
         let has_return_inside_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideLoop { .. }));
         assert!(
             has_return_inside_loop,
             "expected ReturnInsideLoop: {errors:?}"
@@ -936,7 +936,7 @@ mod walker_traversal_tests {
 
         let has_infinite_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::InfiniteLoopWithoutBreak { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::InfiniteLoopWithoutBreak { .. }));
         assert!(
             has_infinite_loop,
             "expected InfiniteLoopWithoutBreak: {errors:?}"
@@ -961,7 +961,7 @@ mod walker_traversal_tests {
 
         let has_return_inside_loop = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideLoop { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideLoop { .. }));
         assert!(
             has_return_inside_loop,
             "expected ReturnInsideLoop: {errors:?}"
@@ -969,7 +969,7 @@ mod walker_traversal_tests {
 
         let has_return_nondet = errors
             .iter()
-            .any(|e| matches!(e, AnalysisError::ReturnInsideNonDetBlock { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::ReturnInsideNonDetBlock { .. }));
         assert!(
             has_return_nondet,
             "expected ReturnInsideNonDetBlock: {errors:?}"

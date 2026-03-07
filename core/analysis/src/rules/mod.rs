@@ -15,14 +15,14 @@ use return_inside_nondet_block::ReturnInsideNonDetBlock;
 /// Adding a new rule:
 /// 1. Create `rules/new_rule.rs` using the `rule!` macro
 /// 2. Add `pub mod new_rule;` above
-/// 3. Add `Box::new(NewRule)` to the vec below
+/// 3. Add `&NewRule` to the slice below
 #[must_use = "returns all registered analysis rules"]
-pub fn all_rules() -> Vec<Box<dyn crate::rule::Rule>> {
-    vec![
-        Box::new(BreakOutsideLoop),
-        Box::new(BreakInsideNonDetBlock),
-        Box::new(ReturnInsideLoop),
-        Box::new(InfiniteLoopWithoutBreak),
-        Box::new(ReturnInsideNonDetBlock),
+pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
+    &[
+        &BreakOutsideLoop,
+        &BreakInsideNonDetBlock,
+        &ReturnInsideLoop,
+        &InfiniteLoopWithoutBreak,
+        &ReturnInsideNonDetBlock,
     ]
 }

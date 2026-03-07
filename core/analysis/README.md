@@ -5,7 +5,7 @@ Static analysis rules for the Inference compiler. Runs after type checking, befo
 ## Architecture
 
 Each analysis check is an independent struct implementing the `Rule` trait. Rules receive the
-fully-typed `TypedContext` and return a list of `AnalysisError` values. The `analyze()` entry
+fully-typed `TypedContext` and return a list of `AnalysisDiagnostic` values. The `analyze()` entry
 point runs all rules sequentially and collects every error before returning.
 
 A shared `walk_function_bodies()` walker handles AST traversal with `loop_depth` and
@@ -20,7 +20,7 @@ rule! {
     #[name = "Break outside loop"]
     #[severity = error]
     pub struct BreakOutsideLoop;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisError> {
+    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
         // implementation using walk_function_bodies
     }
 }
