@@ -38,7 +38,7 @@ Install the official VS Code extension for syntax highlighting:
 The `infs build` command compiles a single `.inf` source file through three phases:
 
 1. **Parse** (`--parse`) – Build the typed AST using tree-sitter
-2. **Analyze** (`--analyze`) – Perform type checking and semantic validation (WIP)
+2. **Analyze** (`--analyze`) – Perform type checking, static analysis, and semantic validation
 3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
 Phases run in canonical order (parse → analyze → codegen). When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk.

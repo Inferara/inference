@@ -90,6 +90,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Refactor `ConstantDefinition` lowering to share `lower_literal` helper with `VariableDefinition` (~130 lines removed)
   - Remove dead `is_uzumaki: bool` field from `VariableDefinitionStatement` AST node
 
+### Analysis
+
+- Add `core/analysis/` crate with rule-based static analysis between type checking and codegen ([#156])
+  - Five analysis rules: A001 break-outside-loop, A002 break-in-nondet, A003 return-in-loop, A004 infinite-loop-without-break, A005 return-in-nondet
+  - `Rule` trait with `rule!` declarative macro for zero-boilerplate rule definitions
+  - Shared AST walker (`walk_function_bodies`) with `loop_depth` and `nondet_depth` tracking
+  - Three-severity model: `Error` (blocks compilation), `Warning`, `Info`
+  - Diagnostic format: `<line>:<column>: <severity>[<rule_id>]: <message>`
+  - Rules are zero-sized `Send + Sync` structs for future parallel execution
+
+### AST
+
+- Migrate AST arena from `FxHashMap<u32, AstNode>` + `Rc<T>` + `RefCell<T>` to typed `Arena<T>` via vendored la-arena ([#156])
+  - Typed indices (`ExprId`, `StmtId`, `DefId`, `BlockId`, `TypeId`, `IdentId`) prevent cross-category ID misuse at compile time
+  - `AstArena` struct with separate `Arena<T>` per node category and `Index` trait for `arena[id]` syntax
+  - `NodeId` enum for type-erased cross-category references (used in type annotation storage)
+  - `Send + Sync` with compile-time assertion — no `RefCell` or `Rc` in AST nodes
+  - Cache-friendly `Vec<T>` storage replacing heap-scattered `Rc<T>`
+  - Remove `AstNode` enum, `ast_node!`/`ast_enum!`/`ast_enums!` macros, `enums_impl.rs`, `parent_map`/`children_map`
+
 ### CLI
 
 - Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])
@@ -135,6 +155,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Add 43 analysis walker tests covering all 5 rules across free functions, struct methods, and spec functions ([#156])
+  - Negative tests for valid code, edge cases for nested loops, deeply nested nondet, overlapping rule triggers
+  - All four nondet block types (forall, exists, assume, unique) tested for A002
+- Update all AST, type-checker, and codegen tests for typed arena API ([#156])
+  - Migrate from `arena.filter_nodes(|node| matches!(node, AstNode::...))` to structured traversal via typed IDs
+  - Update test utilities with `find_function_by_name()`, `collect_exprs_matching()`, `collect_all_stmts()`
 - Add 5 array test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#148])
   - `array_literal.inf`: i32/i64/bool/u8 array literals and empty array
   - `array_index.inf`: literal index, variable index, sum array, multiple element types
@@ -446,3 +472,4 @@ Initial tagged release.
 [#146]: https://github.com/Inferara/inference/pull/146
 [#148]: https://github.com/Inferara/inference/pull/148
 [#152]: https://github.com/Inferara/inference/pull/152
+[#156]: https://github.com/Inferara/inference/pull/156
