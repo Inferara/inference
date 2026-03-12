@@ -63,8 +63,8 @@ use rustc_hash::FxHashMap;
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgKind, BlockKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
-    UnaryOperatorKind, Visibility,
+    ArgKind, BlockKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind,
+    Visibility,
 };
 use inference_type_checker::{
     type_info::{NumberType, TypeInfo, TypeInfoKind},
@@ -185,31 +185,27 @@ impl Compiler {
     ///
     /// Must be called before `visit_function_definition` so that forward references
     /// resolve correctly during call lowering.
-    pub(crate) fn build_func_name_to_idx(
-        &mut self,
-        arena: &AstArena,
-        func_def_ids: &[DefId],
-    ) {
+    pub(crate) fn build_func_name_to_idx(&mut self, arena: &AstArena, func_def_ids: &[DefId]) {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
             let fn_name = arena.def_name(def_id).to_string();
             self.func_name_to_idx
                 .insert(fn_name.clone(), idx as u32 + self.func_idx);
 
-            if let Def::Function { returns, .. } = &arena[def_id].kind {
-                if let Some(return_ty_id) = returns {
-                    let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
-                    if let TypeInfoKind::Array(ref elem_type, length) = return_type_info.kind {
-                        let elem_sz = element_size(&elem_type.kind);
-                        self.func_array_returns.insert(
-                            fn_name,
-                            ArrayReturnInfo {
-                                elem_kind: elem_type.kind.clone(),
-                                elem_size: elem_sz,
-                                length,
-                            },
-                        );
-                    }
+            if let Def::Function { returns, .. } = &arena[def_id].kind
+                && let Some(return_ty_id) = returns
+            {
+                let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
+                if let TypeInfoKind::Array(ref elem_type, length) = return_type_info.kind {
+                    let elem_sz = element_size(&elem_type.kind);
+                    self.func_array_returns.insert(
+                        fn_name,
+                        ArrayReturnInfo {
+                            elem_kind: elem_type.kind.clone(),
+                            elem_size: elem_sz,
+                            length,
+                        },
+                    );
                 }
             }
         }
@@ -229,9 +225,9 @@ impl Compiler {
                 | SimpleTypeKind::U16
                 | SimpleTypeKind::I32
                 | SimpleTypeKind::U32,
-            ) => Some(ValType::I32),
+            )
+            | TypeNode::Array { .. } => Some(ValType::I32),
             TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Some(ValType::I64),
-            TypeNode::Array { .. } => Some(ValType::I32),
             TypeNode::Generic { .. } => todo!(),
             TypeNode::Function { .. } => todo!(),
             TypeNode::QualifiedName { .. } => todo!(),
@@ -282,7 +278,8 @@ impl Compiler {
 
         if is_array_return {
             params.push(ValType::I32);
-            self.locals_map.insert("sret".to_string(), (0, ValType::I32));
+            self.locals_map
+                .insert("sret".to_string(), (0, ValType::I32));
             local_idx = 1;
         }
 
@@ -347,7 +344,8 @@ impl Compiler {
         }
 
         let mut local_declarations: Vec<(u32, ValType)> = {
-            let mut sorted_locals: Vec<(u32, ValType)> = self.locals_map
+            let mut sorted_locals: Vec<(u32, ValType)> = self
+                .locals_map
                 .values()
                 .copied()
                 .filter(|(idx, _)| *idx >= param_count)
@@ -362,24 +360,23 @@ impl Compiler {
 
         self.func = Some(Function::new(local_declarations));
 
-        if let (Some(layout), Some(func)) =
-            (&self.frame_layout, &mut self.func)
-        {
+        if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
             // Copy-on-entry: for each array-typed parameter, copy the caller's data
             // into the callee's frame to enforce value semantics.
             for arg in &args {
                 if let ArgKind::Named { name, .. } = &arg.kind {
-                    let type_info = ctx
-                        .get_node_typeinfo(NodeId::Def(def_id))
-                        .or_else(|| {
-                            let ti = TypeInfo::from_type_id(arena, match &arg.kind {
+                    let type_info = ctx.get_node_typeinfo(NodeId::Def(def_id)).or_else(|| {
+                        let ti = TypeInfo::from_type_id(
+                            arena,
+                            match &arg.kind {
                                 ArgKind::Named { ty, .. } => *ty,
                                 _ => unreachable!(),
-                            });
-                            Some(ti)
-                        });
+                            },
+                        );
+                        Some(ti)
+                    });
                     // Try direct lookup on the arg's type
                     let arg_name = arena[*name].name.clone();
                     let arg_type_info = {
@@ -391,7 +388,8 @@ impl Compiler {
                     };
                     let _ = type_info; // drop the def-level lookup
                     if let TypeInfoKind::Array(elem_type, _length) = &arg_type_info.kind {
-                        let param_local = self.locals_map
+                        let param_local = self
+                            .locals_map
                             .get(&arg_name)
                             .expect("Array parameter must be in locals_map")
                             .0;
@@ -399,13 +397,7 @@ impl Compiler {
                             .array_offsets
                             .get(&arg_name)
                             .expect("Array parameter must have a frame slot");
-                        emit_array_param_copy(
-                            func,
-                            layout,
-                            slot,
-                            param_local,
-                            &elem_type.kind,
-                        );
+                        emit_array_param_copy(func, layout, slot, param_local, &elem_type.kind);
                     }
                 }
             }
@@ -419,22 +411,19 @@ impl Compiler {
         }
 
         if has_return_value {
-            if let (Some(layout), Some(func)) =
-                (&self.frame_layout, &mut self.func)
-            {
+            if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
                 emit_stack_epilogue(func, layout);
             }
             self.func().instruction(&Instruction::Unreachable);
-        } else if let (Some(layout), Some(func)) =
-            (&self.frame_layout, &mut self.func)
-        {
+        } else if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_epilogue(func, layout);
         }
 
         self.func().instruction(&Instruction::End);
 
         self.func_names.push((self.func_idx, fn_name.clone()));
-        let mut local_name_entries: Vec<(u32, String)> = self.locals_map
+        let mut local_name_entries: Vec<(u32, String)> = self
+            .locals_map
             .iter()
             .map(|(name, (idx, _))| (*idx, name.clone()))
             .collect();
@@ -446,7 +435,10 @@ impl Compiler {
             self.local_names.push((self.func_idx, local_name_entries));
         }
 
-        let completed_func = self.func.take().expect("func must be Some after compilation");
+        let completed_func = self
+            .func
+            .take()
+            .expect("func must be Some after compilation");
         self.bodies.push(completed_func);
         self.frame_layout = None;
         self.locals_map.clear();
@@ -541,9 +533,9 @@ impl Compiler {
                 let type_info = TypeInfo::from_type_id(arena, *ty);
                 if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                     let elem_sz = element_size(&elem_type.kind);
-                    let byte_count = elem_sz
-                        .checked_mul(*length)
-                        .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                    let byte_count = elem_sz.checked_mul(*length).expect(
+                        "Array byte count overflow: element size * length exceeds u32::MAX",
+                    );
                     let aligned_offset = align_to(current_offset, elem_sz);
                     let slot = ArraySlot {
                         offset: aligned_offset,
@@ -559,7 +551,13 @@ impl Compiler {
             }
         }
 
-        Self::collect_array_slots(arena, block_id, ctx, &mut array_offsets, &mut current_offset);
+        Self::collect_array_slots(
+            arena,
+            block_id,
+            ctx,
+            &mut array_offsets,
+            &mut current_offset,
+        );
 
         if current_offset == 0 {
             return None;
@@ -595,9 +593,9 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
                         let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz
-                            .checked_mul(*length)
-                            .expect("Array byte count overflow: element size * length exceeds u32::MAX");
+                        let byte_count = elem_sz.checked_mul(*length).expect(
+                            "Array byte count overflow: element size * length exceeds u32::MAX",
+                        );
                         let aligned_offset = align_to(*current_offset, elem_sz);
                         let slot = ArraySlot {
                             offset: aligned_offset,
@@ -606,9 +604,9 @@ impl Compiler {
                         };
                         let var_name = arena[*name].name.clone();
                         array_offsets.insert(var_name, slot);
-                        *current_offset = aligned_offset
-                            .checked_add(byte_count)
-                            .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
+                        *current_offset = aligned_offset.checked_add(byte_count).expect(
+                            "Frame offset overflow: total array allocation exceeds u32::MAX",
+                        );
                     }
                 }
                 Stmt::Block(inner_block_id) => {
@@ -634,7 +632,11 @@ impl Compiler {
                     );
                     if let Some(else_id) = else_block {
                         Self::collect_array_slots(
-                            arena, *else_id, ctx, array_offsets, current_offset,
+                            arena,
+                            *else_id,
+                            ctx,
+                            array_offsets,
+                            current_offset,
                         );
                     }
                 }
@@ -648,12 +650,7 @@ impl Compiler {
 
     /// Lowers an AST statement to WASM instructions.
     #[allow(clippy::too_many_lines)]
-    fn lower_statement(
-        &mut self,
-        arena: &AstArena,
-        stmt_id: StmtId,
-        ctx: &TypedContext,
-    ) {
+    fn lower_statement(&mut self, arena: &AstArena, stmt_id: StmtId, ctx: &TypedContext) {
         let stmt_kind = arena[stmt_id].kind.clone();
         match stmt_kind {
             Stmt::Block(block_id) => {
@@ -662,14 +659,14 @@ impl Compiler {
             Stmt::Expr(expr_id) => {
                 // The type checker rejects standalone calls to array-returning
                 // functions, so this path should be unreachable.
-                if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind {
-                    if let Expr::Identifier(callee_name_id) = &arena[*function].kind {
-                        let callee_name = &arena[*callee_name_id].name;
-                        assert!(
-                            !self.func_array_returns.contains_key(callee_name),
-                            "standalone call to array-returning function should have been rejected by the type checker",
-                        );
-                    }
+                if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
+                    && let Expr::Identifier(callee_name_id) = &arena[*function].kind
+                {
+                    let callee_name = &arena[*callee_name_id].name;
+                    assert!(
+                        !self.func_array_returns.contains_key(callee_name),
+                        "standalone call to array-returning function should have been rejected by the type checker",
+                    );
                 }
                 self.lower_expression(arena, expr_id, ctx, None);
                 let expr_produces_value = ctx
@@ -691,9 +688,7 @@ impl Compiler {
                 } else {
                     self.lower_expression(arena, expr, ctx, None);
                 }
-                if let (Some(layout), Some(func)) =
-                    (&self.frame_layout, &mut self.func)
-                {
+                if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
                     emit_stack_epilogue(func, layout);
                 }
                 self.func().instruction(&Instruction::Return);
@@ -719,14 +714,11 @@ impl Compiler {
             } => {
                 self.lower_if_statement(arena, condition, then_block, else_block, ctx);
             }
-            Stmt::VarDef {
-                name,
-                value,
-                ..
-            } => {
+            Stmt::VarDef { name, value, .. } => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
                 let var_name = arena[name].name.clone();
-                let (local_idx, _) = self.locals_map
+                let (local_idx, _) = self
+                    .locals_map
                     .get(&var_name)
                     .expect("Variable local not found in pre-scan");
                 match value {
@@ -741,21 +733,15 @@ impl Compiler {
                         );
 
                         // Detect sret call
-                        let is_sret_call = is_array_type
-                            && self.is_sret_function_call(arena, val_expr_id);
+                        let is_sret_call =
+                            is_array_type && self.is_sret_function_call(arena, val_expr_id);
 
                         // Detect array-to-array copy
-                        let is_array_copy = is_array_type
-                            && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
+                        let is_array_copy =
+                            is_array_type && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
 
                         if is_sret_call {
-                            self.lower_sret_var_init(
-                                arena,
-                                val_expr_id,
-                                local_idx,
-                                &var_name,
-                                ctx,
-                            );
+                            self.lower_sret_var_init(arena, val_expr_id, local_idx, &var_name, ctx);
                         } else if is_array_copy {
                             cov_mark::hit!(wasm_codegen_emit_array_copy);
                             self.lower_array_copy_var_init(
@@ -780,7 +766,8 @@ impl Compiler {
                     let const_name = arena[*name].name.clone();
                     let value = *value;
                     self.lower_expression(arena, value, ctx, None);
-                    let (local_idx, _) = self.locals_map
+                    let (local_idx, _) = self
+                        .locals_map
                         .get(&const_name)
                         .expect("Local not found in pre-scan");
                     let local_idx = *local_idx;
@@ -792,11 +779,11 @@ impl Compiler {
 
     /// Checks whether an expression is a function call to an sret function.
     fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
-        if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind {
-            if let Expr::Identifier(callee_name_id) = &arena[*function].kind {
-                let callee_name = &arena[*callee_name_id].name;
-                return self.func_array_returns.contains_key(callee_name);
-            }
+        if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
+            && let Expr::Identifier(callee_name_id) = &arena[*function].kind
+        {
+            let callee_name = &arena[*callee_name_id].name;
+            return self.func_array_returns.contains_key(callee_name);
         }
         false
     }
@@ -810,7 +797,10 @@ impl Compiler {
         var_name: &str,
         ctx: &TypedContext,
     ) {
-        let layout = self.frame_layout.as_ref().expect("Array variable requires frame layout");
+        let layout = self
+            .frame_layout
+            .as_ref()
+            .expect("Array variable requires frame layout");
         let dest_slot = layout
             .array_offsets
             .get(var_name)
@@ -822,10 +812,12 @@ impl Compiler {
             let function = *function;
             let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
             // Push sret pointer: frame_ptr + dest_slot.offset
-            self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
             if dest_offset > 0 {
                 #[allow(clippy::cast_possible_wrap)]
-                self.func().instruction(&Instruction::I32Const(dest_offset as i32));
+                self.func()
+                    .instruction(&Instruction::I32Const(dest_offset as i32));
                 self.func().instruction(&Instruction::I32Add);
             }
             // Push regular arguments
@@ -844,10 +836,12 @@ impl Compiler {
         }
 
         // Set local to point to destination slot
-        self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
         if dest_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
         self.func().instruction(&Instruction::LocalSet(local_idx));
@@ -862,7 +856,10 @@ impl Compiler {
         var_name: &str,
         ctx: &TypedContext,
     ) {
-        let layout = self.frame_layout.as_ref().expect("Array variable requires frame layout");
+        let layout = self
+            .frame_layout
+            .as_ref()
+            .expect("Array variable requires frame layout");
         let dest_slot = layout
             .array_offsets
             .get(var_name)
@@ -872,39 +869,39 @@ impl Compiler {
         let frame_ptr_local = layout.frame_ptr_local;
 
         // dest = frame_ptr + dest_slot.offset
-        self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
         if dest_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
         // src = lower_expression(identifier) -> source pointer
         self.lower_expression(arena, val_expr_id, ctx, None);
         // byte count
         #[allow(clippy::cast_possible_wrap)]
-        self.func().instruction(&Instruction::I32Const(byte_size as i32));
+        self.func()
+            .instruction(&Instruction::I32Const(byte_size as i32));
         self.func().instruction(&Instruction::MemoryCopy {
             src_mem: 0,
             dst_mem: 0,
         });
 
         // Set local to point to destination slot
-        self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
         if dest_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
         self.func().instruction(&Instruction::LocalSet(local_idx));
     }
 
     /// Lowers a block (regular or non-det) to WASM instructions.
-    fn lower_block(
-        &mut self,
-        arena: &AstArena,
-        block_id: BlockId,
-        ctx: &TypedContext,
-    ) {
+    fn lower_block(&mut self, arena: &AstArena, block_id: BlockId, ctx: &TypedContext) {
         let block = &arena[block_id];
         let opcode = match block.block_kind {
             BlockKind::Forall => Some(FORALL_OPCODE),
@@ -956,11 +953,7 @@ impl Compiler {
             }
             Expr::MemberAccess { .. } => todo!(),
             Expr::TypeMemberAccess { .. } => todo!(),
-            Expr::FunctionCall {
-                function,
-                args,
-                ..
-            } => {
+            Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
                 match self.lower_function_call(arena, function, &args, ctx) {
                     Ok(()) => {}
@@ -990,15 +983,14 @@ impl Compiler {
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
                 let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    panic!(
-                        "Array literal (expr_id={expr_id:?}) has no enclosing variable name"
-                    )
+                    panic!("Array literal (expr_id={expr_id:?}) has no enclosing variable name")
                 });
                 let elements = elements.clone();
                 self.lower_array_literal(arena, &elements, var_name, ctx);
             }
             Expr::BoolLiteral { value } => {
-                self.func().instruction(&Instruction::I32Const(i32::from(value)));
+                self.func()
+                    .instruction(&Instruction::I32Const(i32::from(value)));
             }
             Expr::StringLiteral { .. } => todo!(),
             Expr::NumberLiteral { ref value } => {
@@ -1015,17 +1007,15 @@ impl Compiler {
             Expr::Type(_) => todo!(),
             Expr::Uzumaki => {
                 let node_id = NodeId::Expr(expr_id);
-                if let Some(type_info) = ctx.get_node_typeinfo(node_id) {
-                    if let TypeInfoKind::Array(ref elem_type, length) = type_info.kind {
-                        cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
-                        let var_name = enclosing_var_name.unwrap_or_else(|| {
-                            panic!(
-                                "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
-                            )
-                        });
-                        self.lower_array_uzumaki(arena, elem_type, length, var_name);
-                        return;
-                    }
+                if let Some(type_info) = ctx.get_node_typeinfo(node_id)
+                    && let TypeInfoKind::Array(ref elem_type, length) = type_info.kind
+                {
+                    cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                    let var_name = enclosing_var_name.unwrap_or_else(|| {
+                        panic!("Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name")
+                    });
+                    self.lower_array_uzumaki(arena, elem_type, length, var_name);
+                    return;
                 }
                 if ctx.is_node_i32(node_id) {
                     cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
@@ -1043,6 +1033,7 @@ impl Compiler {
     }
 
     /// Resolves the callee name from a function expression.
+    #[allow(clippy::unused_self)]
     fn resolve_callee_name(&self, arena: &AstArena, function_expr_id: ExprId) -> Option<String> {
         if let Expr::Identifier(ident_id) = &arena[function_expr_id].kind {
             Some(arena[*ident_id].name.clone())
@@ -1092,7 +1083,8 @@ impl Compiler {
             Expr::Identifier(ident_id) => {
                 cov_mark::hit!(wasm_codegen_emit_assign_identifier);
                 let name = &arena[*ident_id].name;
-                let (local_idx, _) = self.locals_map
+                let (local_idx, _) = self
+                    .locals_map
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
@@ -1127,7 +1119,8 @@ impl Compiler {
         match &arena[return_expr_id].kind {
             Expr::Identifier(ident_id) => {
                 let name = &arena[*ident_id].name;
-                let (source_local, _) = self.locals_map
+                let (source_local, _) = self
+                    .locals_map
                     .get(name)
                     .expect("Return identifier not found in locals_map");
                 let source_local = *source_local;
@@ -1143,9 +1136,7 @@ impl Compiler {
                     self.func().instruction(&store_instr);
                 }
             }
-            Expr::FunctionCall {
-                function, args, ..
-            } => {
+            Expr::FunctionCall { function, args, .. } => {
                 let function = *function;
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
                 let callee_name = self
@@ -1212,7 +1203,8 @@ impl Compiler {
         cov_mark::hit!(wasm_codegen_emit_if_statement);
 
         self.lower_expression(arena, condition, ctx, None);
-        self.func().instruction(&Instruction::If(WasmBlockType::Empty));
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
         self.loop_ctx.wasm_block_depth += 1;
 
         let then_stmts = arena[then_block].stmts.clone();
@@ -1331,7 +1323,8 @@ impl Compiler {
         } else {
             self.lower_expression(arena, index_expr_id, ctx, None);
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(elem_sz as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(elem_sz as i32));
             self.func().instruction(&Instruction::I32Mul);
             self.func().instruction(&Instruction::I32Add);
         }
@@ -1347,16 +1340,16 @@ impl Compiler {
     ) {
         let parent_var_name = enclosing_var_name;
 
-        let layout = self.frame_layout.as_ref()
+        let layout = self
+            .frame_layout
+            .as_ref()
             .expect("Array uzumaki requires a frame layout (function must have arrays)");
 
         let slot = layout
             .array_offsets
             .get(parent_var_name)
             .unwrap_or_else(|| {
-                panic!(
-                    "Array variable '{parent_var_name}' not found in frame layout offsets"
-                )
+                panic!("Array variable '{parent_var_name}' not found in frame layout offsets")
             });
 
         let uzumaki_opcode = if Self::is_i64_type(&elem_type.kind) {
@@ -1373,23 +1366,27 @@ impl Compiler {
         for i in 0..length {
             #[allow(clippy::cast_possible_wrap)]
             let byte_offset = (slot_offset + i * slot_elem_size) as i32;
-            self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
             self.func().instruction(&Instruction::I32Const(byte_offset));
             self.func().instruction(&Instruction::I32Add);
             self.emit_uzumaki(uzumaki_opcode);
             self.func().instruction(&store_instr);
         }
 
-        self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
         if slot_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
     }
 
     /// Lowers a binary expression to WASM stack instructions.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)]
     fn lower_binary_expression(
         &mut self,
         arena: &AstArena,
@@ -1412,13 +1409,25 @@ impl Compiler {
 
         let instruction = match op {
             OperatorKind::Add => {
-                if is_i64 { Instruction::I64Add } else { Instruction::I32Add }
+                if is_i64 {
+                    Instruction::I64Add
+                } else {
+                    Instruction::I32Add
+                }
             }
             OperatorKind::Sub => {
-                if is_i64 { Instruction::I64Sub } else { Instruction::I32Sub }
+                if is_i64 {
+                    Instruction::I64Sub
+                } else {
+                    Instruction::I32Sub
+                }
             }
             OperatorKind::Mul => {
-                if is_i64 { Instruction::I64Mul } else { Instruction::I32Mul }
+                if is_i64 {
+                    Instruction::I64Mul
+                } else {
+                    Instruction::I32Mul
+                }
             }
             OperatorKind::Div => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64DivU,
@@ -1435,10 +1444,18 @@ impl Compiler {
             OperatorKind::And => Instruction::I32And,
             OperatorKind::Or => Instruction::I32Or,
             OperatorKind::Eq => {
-                if is_i64 { Instruction::I64Eq } else { Instruction::I32Eq }
+                if is_i64 {
+                    Instruction::I64Eq
+                } else {
+                    Instruction::I32Eq
+                }
             }
             OperatorKind::Ne => {
-                if is_i64 { Instruction::I64Ne } else { Instruction::I32Ne }
+                if is_i64 {
+                    Instruction::I64Ne
+                } else {
+                    Instruction::I32Ne
+                }
             }
             OperatorKind::Lt => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64LtU,
@@ -1465,16 +1482,32 @@ impl Compiler {
                 (false, false) => Instruction::I32GeS,
             },
             OperatorKind::BitAnd => {
-                if is_i64 { Instruction::I64And } else { Instruction::I32And }
+                if is_i64 {
+                    Instruction::I64And
+                } else {
+                    Instruction::I32And
+                }
             }
             OperatorKind::BitOr => {
-                if is_i64 { Instruction::I64Or } else { Instruction::I32Or }
+                if is_i64 {
+                    Instruction::I64Or
+                } else {
+                    Instruction::I32Or
+                }
             }
             OperatorKind::BitXor => {
-                if is_i64 { Instruction::I64Xor } else { Instruction::I32Xor }
+                if is_i64 {
+                    Instruction::I64Xor
+                } else {
+                    Instruction::I32Xor
+                }
             }
             OperatorKind::Shl => {
-                if is_i64 { Instruction::I64Shl } else { Instruction::I32Shl }
+                if is_i64 {
+                    Instruction::I64Shl
+                } else {
+                    Instruction::I32Shl
+                }
             }
             OperatorKind::Shr => match (is_i64, is_unsigned) {
                 (true, true) => Instruction::I64ShrU,
@@ -1510,6 +1543,7 @@ impl Compiler {
     }
 
     /// Lowers a prefix unary expression to WASM stack instructions.
+    #[allow(clippy::needless_pass_by_value)]
     fn lower_prefix_unary_expression(
         &mut self,
         arena: &AstArena,
@@ -1563,12 +1597,7 @@ impl Compiler {
     }
 
     /// Lowers a number literal to WASM constant instructions.
-    fn lower_number_literal(
-        &mut self,
-        expr_id: ExprId,
-        value: &str,
-        ctx: &TypedContext,
-    ) {
+    fn lower_number_literal(&mut self, expr_id: ExprId, value: &str, ctx: &TypedContext) {
         let type_info = ctx
             .get_node_typeinfo(NodeId::Expr(expr_id))
             .expect("Number literal must have type info");
@@ -1638,9 +1667,7 @@ impl Compiler {
             .array_offsets
             .get(parent_var_name)
             .unwrap_or_else(|| {
-                panic!(
-                    "Array variable '{parent_var_name}' not found in frame layout offsets"
-                )
+                panic!("Array variable '{parent_var_name}' not found in frame layout offsets")
             });
 
         let slot_length = slot.length;
@@ -1650,10 +1677,12 @@ impl Compiler {
         let frame_ptr_local = layout.frame_ptr_local;
 
         if slot_length == 0 {
-            self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
             if slot_offset > 0 {
                 #[allow(clippy::cast_possible_wrap)]
-                self.func().instruction(&Instruction::I32Const(slot_offset as i32));
+                self.func()
+                    .instruction(&Instruction::I32Const(slot_offset as i32));
                 self.func().instruction(&Instruction::I32Add);
             }
             return;
@@ -1662,18 +1691,22 @@ impl Compiler {
         for (i, &element_id) in elements.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let byte_offset = slot_offset + (i as u32) * slot_elem_size;
-            self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(byte_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(byte_offset as i32));
             self.func().instruction(&Instruction::I32Add);
             self.lower_expression(arena, element_id, ctx, None);
             self.func().instruction(&store_instr);
         }
 
-        self.func().instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
         if slot_offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
-            self.func().instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
     }
@@ -1791,6 +1824,22 @@ impl Compiler {
     }
 }
 
+/// Returns the pre-computed byte offset when `index_expr` is a constant number literal.
+fn try_const_index_byte_offset(
+    arena: &AstArena,
+    index_expr_id: ExprId,
+    elem_sz: u32,
+) -> Option<i32> {
+    if let Expr::NumberLiteral { ref value } = arena[index_expr_id].kind {
+        let index_val = value.parse::<i32>().ok()?;
+        #[allow(clippy::cast_possible_wrap)]
+        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
+        Some(byte_offset)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1898,17 +1947,5 @@ mod tests {
             shift += 7;
         }
         (result, bytes.len())
-    }
-}
-
-/// Returns the pre-computed byte offset when `index_expr` is a constant number literal.
-fn try_const_index_byte_offset(arena: &AstArena, index_expr_id: ExprId, elem_sz: u32) -> Option<i32> {
-    if let Expr::NumberLiteral { ref value } = arena[index_expr_id].kind {
-        let index_val = value.parse::<i32>().ok()?;
-        #[allow(clippy::cast_possible_wrap)]
-        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
-        Some(byte_offset)
-    } else {
-        None
     }
 }

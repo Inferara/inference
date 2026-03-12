@@ -199,6 +199,7 @@ impl AstArena {
 
 impl AstArena {
     /// Returns all source file data entries.
+    #[must_use]
     pub fn source_files(&self) -> impl ExactSizeIterator<Item = &SourceFileData> + '_ {
         self.source_files.values()
     }
@@ -440,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn get_node_source_fallback_without_parent_chain() {
         let mut arena = AstArena::default();
         let source = "fn foo() { return 42; }".to_string();

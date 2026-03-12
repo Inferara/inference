@@ -128,7 +128,10 @@ fn test_parse_function_return_type_i32_is_simple() {
             assert!(matches!(kind, SimpleTypeKind::I32));
             assert_eq!(kind.as_str(), "i32");
         } else {
-            panic!("Expected TypeNode::Simple for i32 return type, got {:?}", arena[ret_ty].kind);
+            panic!(
+                "Expected TypeNode::Simple for i32 return type, got {:?}",
+                arena[ret_ty].kind
+            );
         }
     }
 }
@@ -195,7 +198,10 @@ fn test_parse_variable_type_i32_is_simple() {
             if let TypeNode::Simple(kind) = &arena[*ty].kind {
                 assert!(matches!(kind, SimpleTypeKind::I32));
             } else {
-                panic!("Expected TypeNode::Simple for variable type, got {:?}", arena[*ty].kind);
+                panic!(
+                    "Expected TypeNode::Simple for variable type, got {:?}",
+                    arena[*ty].kind
+                );
             }
         }
     }
@@ -384,17 +390,17 @@ fn test_array_type_is_not_simple() {
     let arena = build_ast(source.to_string());
 
     let func_id = find_function_by_name(&arena, "test").unwrap();
-    if let Def::Function { args, .. } = &arena[func_id].kind {
-        if let ArgKind::Named { ty, .. } = &args[0].kind {
-            assert!(
-                !matches!(&arena[*ty].kind, TypeNode::Simple(_)),
-                "Array type should not be TypeNode::Simple"
-            );
-            assert!(
-                matches!(&arena[*ty].kind, TypeNode::Array { .. }),
-                "Array type should be TypeNode::Array"
-            );
-        }
+    if let Def::Function { args, .. } = &arena[func_id].kind
+        && let ArgKind::Named { ty, .. } = &args[0].kind
+    {
+        assert!(
+            !matches!(&arena[*ty].kind, TypeNode::Simple(_)),
+            "Array type should not be TypeNode::Simple"
+        );
+        assert!(
+            matches!(&arena[*ty].kind, TypeNode::Array { .. }),
+            "Array type should be TypeNode::Array"
+        );
     }
 }
 
@@ -404,15 +410,14 @@ fn test_array_element_type_is_simple() {
     let arena = build_ast(source.to_string());
 
     let func_id = find_function_by_name(&arena, "test").unwrap();
-    if let Def::Function { args, .. } = &arena[func_id].kind {
-        if let ArgKind::Named { ty, .. } = &args[0].kind {
-            if let TypeNode::Array { element, .. } = &arena[*ty].kind {
-                if let TypeNode::Simple(kind) = &arena[*element].kind {
-                    assert!(matches!(kind, SimpleTypeKind::I32));
-                } else {
-                    panic!("Array element type should be TypeNode::Simple");
-                }
-            }
+    if let Def::Function { args, .. } = &arena[func_id].kind
+        && let ArgKind::Named { ty, .. } = &args[0].kind
+        && let TypeNode::Array { element, .. } = &arena[*ty].kind
+    {
+        if let TypeNode::Simple(kind) = &arena[*element].kind {
+            assert!(matches!(kind, SimpleTypeKind::I32));
+        } else {
+            panic!("Array element type should be TypeNode::Simple");
         }
     }
 }
@@ -462,18 +467,21 @@ fn test_function_type_with_primitive_return() {
     let arena = build_ast(source.to_string());
 
     let func_id = find_function_by_name(&arena, "apply").unwrap();
-    if let Def::Function { args, .. } = &arena[func_id].kind {
-        if let ArgKind::Named { ty, .. } = &args[0].kind {
-            if let TypeNode::Function { ret, .. } = &arena[*ty].kind {
-                let ret_ty = ret.expect("Should have return type");
-                if let TypeNode::Simple(kind) = &arena[ret_ty].kind {
-                    assert!(matches!(kind, SimpleTypeKind::I32));
-                } else {
-                    panic!("Function type return should be TypeNode::Simple, got {:?}", arena[ret_ty].kind);
-                }
+    if let Def::Function { args, .. } = &arena[func_id].kind
+        && let ArgKind::Named { ty, .. } = &args[0].kind
+    {
+        if let TypeNode::Function { ret, .. } = &arena[*ty].kind {
+            let ret_ty = ret.expect("Should have return type");
+            if let TypeNode::Simple(kind) = &arena[ret_ty].kind {
+                assert!(matches!(kind, SimpleTypeKind::I32));
             } else {
-                panic!("Expected function type for first argument");
+                panic!(
+                    "Function type return should be TypeNode::Simple, got {:?}",
+                    arena[ret_ty].kind
+                );
             }
+        } else {
+            panic!("Expected function type for first argument");
         }
     }
 }

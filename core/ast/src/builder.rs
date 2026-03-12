@@ -25,8 +25,12 @@
 //! ```
 
 use crate::arena::AstArena;
-use crate::ids::*;
-use crate::nodes::*;
+use crate::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
+use crate::nodes::{
+    ArgData, ArgKind, BlockData, BlockKind, Def, DefData, Directive, Expr, ExprData, Field, Ident,
+    Location, OperatorKind, SimpleTypeKind, SourceFileData, Stmt, StmtData, TypeData, TypeNode,
+    UnaryOperatorKind, UseDirective, Visibility,
+};
 use tree_sitter::Node;
 
 pub struct Builder<'a> {
@@ -69,6 +73,11 @@ impl<'a> Builder<'a> {
     /// # Errors
     ///
     /// Returns an error if the source contains syntax errors.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if the CST structure does not match expected patterns,
+    /// but it will attempt to recover from syntax errors by inserting placeholder nodes and collecting error messages.
     #[allow(clippy::single_match_else)]
     pub fn build_ast(&mut self) -> anyhow::Result<AstArena> {
         for (root, code) in &self.source_code.clone() {
@@ -89,9 +98,7 @@ impl<'a> Builder<'a> {
 
                     match child_kind {
                         "use_directive" => {
-                            directives.push(Directive::Use(
-                                self.build_use_directive(&child, code),
-                            ));
+                            directives.push(Directive::Use(self.build_use_directive(&child, code)));
                         }
                         _ => {
                             let def_id = self.build_definition(&child, code);
@@ -199,9 +206,7 @@ impl<'a> Builder<'a> {
             "enum_definition" => self.build_enum_definition(node, code),
             "constant_definition" => self.build_constant_definition(node, code),
             "function_definition" => self.build_function_definition(node, code),
-            "external_function_definition" => {
-                self.build_external_function_definition(node, code)
-            }
+            "external_function_definition" => self.build_external_function_definition(node, code),
             "type_definition_statement" => self.build_type_alias_definition(node, code),
             "ERROR" => {
                 cov_mark::hit!(ast_builder_error_definition_recovery);
@@ -569,14 +574,14 @@ impl<'a> Builder<'a> {
         stmts
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_statement(&mut self, node: &Node, code: &[u8]) -> StmtId {
         let location = Self::get_location(node, code);
         match node.kind() {
             "assign_statement" => {
-                let left = self
-                    .build_expression(&node.child_by_field_name("left").unwrap(), code);
-                let right = self
-                    .build_expression(&node.child_by_field_name("right").unwrap(), code);
+                let left = self.build_expression(&node.child_by_field_name("left").unwrap(), code);
+                let right =
+                    self.build_expression(&node.child_by_field_name("right").unwrap(), code);
                 self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::Assign { left, right },
@@ -637,16 +642,16 @@ impl<'a> Builder<'a> {
                 })
             }
             "if_statement" => {
-                let condition =
-                    if let Some(condition_node) = node.child_by_field_name("condition") {
-                        self.build_expression(&condition_node, code)
-                    } else {
-                        self.errors.push(anyhow::anyhow!(
-                            "Missing if condition at {}",
-                            Self::get_location(node, code)
-                        ));
-                        self.create_error_expr(node, code)
-                    };
+                let condition = if let Some(condition_node) = node.child_by_field_name("condition")
+                {
+                    self.build_expression(&condition_node, code)
+                } else {
+                    self.errors.push(anyhow::anyhow!(
+                        "Missing if condition at {}",
+                        Self::get_location(node, code)
+                    ));
+                    self.create_error_expr(node, code)
+                };
                 let then_block = if let Some(if_arm_node) = node.child_by_field_name("if_arm") {
                     self.build_block(&if_arm_node, code)
                 } else {
@@ -674,13 +679,13 @@ impl<'a> Builder<'a> {
             }
             "variable_definition_statement" => {
                 let ty = self.build_type(&node.child_by_field_name("type").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 let is_mut = node.child_by_field_name("mut").is_some();
                 let value = node
                     .child_by_field_name("value")
                     .map(|n| self.build_expression(&n, code));
-                let stmt_id = self.arena.stmts.alloc(StmtData {
+
+                self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::VarDef {
                         name,
@@ -688,13 +693,11 @@ impl<'a> Builder<'a> {
                         value,
                         is_mut,
                     },
-                });
-                stmt_id
+                })
             }
             "type_definition_statement" => {
                 let ty = self.build_type(&node.child_by_field_name("type").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 self.arena.stmts.alloc(StmtData {
                     location,
                     kind: Stmt::TypeDef { name, ty },
@@ -782,8 +785,7 @@ impl<'a> Builder<'a> {
                 self.collect_errors(node, code);
                 let expr =
                     self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::MemberAccess { expr, name },
@@ -793,19 +795,14 @@ impl<'a> Builder<'a> {
                 self.collect_errors(node, code);
                 let expr =
                     self.build_expression(&node.child_by_field_name("expression").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 self.arena.exprs.alloc(ExprData {
                     location,
                     kind: Expr::TypeMemberAccess { expr, name },
                 })
             }
-            "function_call_expression" => {
-                self.build_function_call_expression(node, code)
-            }
-            "struct_expression" => {
-                self.build_struct_expression(node, code)
-            }
+            "function_call_expression" => self.build_function_call_expression(node, code),
+            "struct_expression" => self.build_struct_expression(node, code),
             "prefix_unary_expression" => {
                 self.collect_errors(node, code);
                 let inner = self.build_expression(&node.child(1).unwrap(), code);
@@ -829,9 +826,7 @@ impl<'a> Builder<'a> {
                     kind: Expr::Parenthesized { expr: inner },
                 })
             }
-            "binary_expression" => {
-                self.build_binary_expression(node, code)
-            }
+            "binary_expression" => self.build_binary_expression(node, code),
             "bool_literal" | "string_literal" | "number_literal" | "array_literal"
             | "unit_literal" => self.build_literal(node, code),
             "uzumaki_keyword" => {
@@ -870,8 +865,7 @@ impl<'a> Builder<'a> {
     fn build_function_call_expression(&mut self, node: &Node, code: &[u8]) -> ExprId {
         self.collect_errors(node, code);
         let location = Self::get_location(node, code);
-        let function =
-            self.build_expression(&node.child_by_field_name("function").unwrap(), code);
+        let function = self.build_expression(&node.child_by_field_name("function").unwrap(), code);
         let mut args: Vec<(Option<IdentId>, ExprId)> = Vec::new();
         let mut type_params = Vec::new();
         let mut pending_name: Option<IdentId> = None;
@@ -1080,6 +1074,7 @@ impl<'a> Builder<'a> {
         node.utf8_text(code).unwrap().to_string()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn build_type(&mut self, node: &Node, code: &[u8]) -> TypeId {
         let location = Self::get_location(node, code);
         let node_kind = node.kind();
@@ -1153,8 +1148,7 @@ impl<'a> Builder<'a> {
                 self.collect_errors(node, code);
                 let alias =
                     self.build_identifier(&node.child_by_field_name("alias").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::Qualified { alias, name },
@@ -1164,8 +1158,7 @@ impl<'a> Builder<'a> {
                 self.collect_errors(node, code);
                 let qualifier =
                     self.build_identifier(&node.child_by_field_name("qualifier").unwrap(), code);
-                let name =
-                    self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
+                let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
                 self.arena.types.alloc(TypeData {
                     location,
                     kind: TypeNode::QualifiedName { qualifier, name },
@@ -1183,10 +1176,7 @@ impl<'a> Builder<'a> {
                     .map(|returns_type_node| self.build_type(&returns_type_node, code));
                 self.arena.types.alloc(TypeData {
                     location,
-                    kind: TypeNode::Function {
-                        params,
-                        ret,
-                    },
+                    kind: TypeNode::Function { params, ret },
                 })
             }
             "identifier" => {

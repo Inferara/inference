@@ -60,7 +60,7 @@ pub enum AnalysisDiagnostic {
     )]
     ReturnInsideLoop { location: Location },
 
-    #[error("infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)")]
+    #[error("infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop does not count)")]
     InfiniteLoopWithoutBreak { location: Location },
 
     #[error("return statement is not allowed inside a '{block_kind}' block; return would exit the enclosing function, interfering with the path exploration required for formal verification; move the return outside the '{block_kind}' block")]
@@ -284,7 +284,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)"
+            "infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop does not count)"
         );
     }
 
@@ -475,7 +475,7 @@ mod tests {
         // infos first, then warnings, then errors
         assert_eq!(
             errors.to_string(),
-            "1:5: info[A004]: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop or non-deterministic block does not count)\n1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it\n1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
+            "1:5: info[A004]: infinite loop must contain a reachable break statement; a loop without a condition requires break to terminate (break inside a nested loop does not count)\n1:5: warning[A003]: return inside a loop is not allowed; a single exit point per function simplifies formal verification; use break to exit the loop, then return after it\n1:5: error[A001]: break statement is only valid inside a loop body; if you intended to exit the function, use 'return'"
         );
     }
 

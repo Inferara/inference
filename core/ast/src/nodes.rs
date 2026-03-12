@@ -20,7 +20,7 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
 
-use crate::ids::*;
+use crate::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 
 // ---------------------------------------------------------------------------
 // Location
@@ -438,13 +438,9 @@ pub enum ArgKind {
         is_mut: bool,
     },
     /// Self reference: `self` or `mut self`
-    SelfRef {
-        is_mut: bool,
-    },
+    SelfRef { is_mut: bool },
     /// Ignored argument: `_: Type`
-    Ignored {
-        ty: TypeId,
-    },
+    Ignored { ty: TypeId },
     /// Type-only argument (positional type)
     TypeOnly(TypeId),
 }
@@ -462,6 +458,7 @@ pub struct Field {
 
 impl TypeNode {
     /// Returns `true` if this type is the unit type `()`.
+    #[must_use]
     pub fn is_unit_type(&self) -> bool {
         matches!(self, TypeNode::Simple(SimpleTypeKind::Unit))
     }
@@ -469,6 +466,7 @@ impl TypeNode {
 
 impl BlockKind {
     /// Returns `true` for non-deterministic block kinds (forall, exists, assume, unique).
+    #[must_use]
     pub fn is_non_det(&self) -> bool {
         !matches!(self, BlockKind::Regular)
     }

@@ -2,9 +2,7 @@ use inference_ast::{
     arena::AstArena,
     builder::Builder,
     ids::{BlockId, DefId, ExprId, StmtId},
-    nodes::{
-        ArgKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind,
-    },
+    nodes::{ArgKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind},
 };
 
 pub(crate) fn get_test_data_path() -> std::path::PathBuf {
@@ -44,13 +42,8 @@ pub(crate) fn codegen_output(source_code: &str) -> inference_wasm_codegen::Codeg
     let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    inference_wasm_codegen::codegen(
-        &typed_context,
-        target,
-        mode,
-        target.default_opt_level(),
-    )
-    .unwrap()
+    inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level())
+        .unwrap()
 }
 
 /// Generates codegen output from source code with an explicit compilation mode.
@@ -246,13 +239,13 @@ pub(crate) fn collect_function_def_ids(arena: &AstArena) -> Vec<DefId> {
 }
 
 /// Helper to find a function DefId by name.
-pub(crate) fn find_function_by_name<'a>(arena: &'a AstArena, name: &str) -> Option<DefId> {
+pub(crate) fn find_function_by_name(arena: &AstArena, name: &str) -> Option<DefId> {
     for sf in arena.source_files() {
         for &def_id in &sf.defs {
-            if let Def::Function { name: name_id, .. } = &arena[def_id].kind {
-                if arena[*name_id].name == name {
-                    return Some(def_id);
-                }
+            if let Def::Function { name: name_id, .. } = &arena[def_id].kind
+                && arena[*name_id].name == name
+            {
+                return Some(def_id);
             }
         }
     }
@@ -412,9 +405,8 @@ pub(crate) fn assert_single_unary_op(arena: &AstArena, expected: UnaryOperatorKi
 
     for def_id in &func_ids {
         if let Def::Function { body, .. } = &arena[*def_id].kind {
-            let exprs = collect_exprs_matching(arena, *body, &|e| {
-                matches!(e, Expr::PrefixUnary { .. })
-            });
+            let exprs =
+                collect_exprs_matching(arena, *body, &|e| matches!(e, Expr::PrefixUnary { .. }));
             for expr_id in &exprs {
                 if let Expr::PrefixUnary { op, .. } = &arena[*expr_id].kind {
                     unary_count += 1;
@@ -446,10 +438,7 @@ pub(crate) fn assert_function_signature(
     let def_id = find_function_by_name(arena, name)
         .unwrap_or_else(|| panic!("Expected function named '{name}'"));
 
-    if let Def::Function {
-        args, returns, ..
-    } = &arena[def_id].kind
-    {
+    if let Def::Function { args, returns, .. } = &arena[def_id].kind {
         if let Some(expected_count) = param_count {
             assert_eq!(
                 args.len(),
@@ -459,10 +448,9 @@ pub(crate) fn assert_function_signature(
             );
         }
 
-        let has_ret = returns.map_or(false, |ty_id| !arena[ty_id].kind.is_unit_type());
+        let has_ret = returns.is_some_and(|ty_id| !arena[ty_id].kind.is_unit_type());
         assert_eq!(
-            has_ret || returns.is_some() && !has_return,
-            has_return || returns.is_some() && !has_return,
+            has_ret, has_return,
             "Function '{name}' return type mismatch"
         );
         // Simpler check: returns.is_some() is what the old code tested
@@ -472,7 +460,11 @@ pub(crate) fn assert_function_signature(
             "Function '{}' return type: expected {}, found {}",
             name,
             if has_return { "present" } else { "absent" },
-            if returns.is_some() { "present" } else { "absent" }
+            if returns.is_some() {
+                "present"
+            } else {
+                "absent"
+            }
         );
     } else {
         panic!("DefId does not point to a function");
@@ -483,10 +475,7 @@ pub(crate) fn assert_function_signature(
 pub(crate) fn assert_constant_def(arena: &AstArena, name: &str) {
     let found = arena.source_files().any(|sf| {
         sf.defs.iter().any(|&def_id| {
-            if let Def::Constant {
-                name: name_id, ..
-            } = &arena[def_id].kind
-            {
+            if let Def::Constant { name: name_id, .. } = &arena[def_id].kind {
                 arena[*name_id].name == name
             } else {
                 false
@@ -517,9 +506,7 @@ fn block_contains_var_def(
     let block = &arena[block_id];
     for &stmt_id in &block.stmts {
         match &arena[stmt_id].kind {
-            Stmt::VarDef {
-                name: name_id, ..
-            } => {
+            Stmt::VarDef { name: name_id, .. } => {
                 if arena[*name_id].name == name {
                     return true;
                 }
@@ -537,10 +524,10 @@ fn block_contains_var_def(
                 if block_contains_var_def(arena, *then_block, name) {
                     return true;
                 }
-                if let Some(else_id) = else_block {
-                    if block_contains_var_def(arena, *else_id, name) {
-                        return true;
-                    }
+                if let Some(else_id) = else_block
+                    && block_contains_var_def(arena, *else_id, name)
+                {
+                    return true;
                 }
             }
             Stmt::Loop { body, .. } => {
@@ -564,17 +551,16 @@ pub(crate) fn assert_struct_def(arena: &AstArena, name: &str, field_count: Optio
                 fields,
                 ..
             } = &arena[def_id].kind
+                && arena[*name_id].name == name
             {
-                if arena[*name_id].name == name {
-                    found = true;
-                    if let Some(expected_count) = field_count {
-                        assert_eq!(
-                            fields.len(),
-                            expected_count,
-                            "Struct '{name}' expected {expected_count} fields, found {}",
-                            fields.len()
-                        );
-                    }
+                found = true;
+                if let Some(expected_count) = field_count {
+                    assert_eq!(
+                        fields.len(),
+                        expected_count,
+                        "Struct '{name}' expected {expected_count} fields, found {}",
+                        fields.len()
+                    );
                 }
             }
         }
@@ -624,17 +610,16 @@ pub(crate) fn assert_enum_def(arena: &AstArena, name: &str, variant_count: Optio
                 variants,
                 ..
             } = &arena[def_id].kind
+                && arena[*name_id].name == name
             {
-                if arena[*name_id].name == name {
-                    found = true;
-                    if let Some(expected_count) = variant_count {
-                        assert_eq!(
-                            variants.len(),
-                            expected_count,
-                            "Enum '{name}' expected {expected_count} variants, found {}",
-                            variants.len()
-                        );
-                    }
+                found = true;
+                if let Some(expected_count) = variant_count {
+                    assert_eq!(
+                        variants.len(),
+                        expected_count,
+                        "Enum '{name}' expected {expected_count} variants, found {}",
+                        variants.len()
+                    );
                 }
             }
         }

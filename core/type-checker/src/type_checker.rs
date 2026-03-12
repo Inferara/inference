@@ -85,9 +85,7 @@ impl TypeChecker {
                 Def::Function { .. } => {
                     self.infer_variables(def_id, ctx);
                 }
-                Def::Struct {
-                    name, methods, ..
-                } => {
+                Def::Struct { name, methods, .. } => {
                     let struct_name = ctx.arena()[*name].name.clone();
                     let struct_type = TypeInfo {
                         kind: TypeInfoKind::Struct(struct_name),
@@ -183,21 +181,19 @@ impl TypeChecker {
                                 .iter()
                                 .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
 
-                            let tp_names: Vec<String> = type_params
-                                .iter()
-                                .map(|p| arena[*p].name.clone())
-                                .collect();
+                            let tp_names: Vec<String> =
+                                type_params.iter().map(|p| arena[*p].name.clone()).collect();
                             let param_types: Vec<TypeInfo> = args
                                 .iter()
                                 .filter_map(|a| match &a.kind {
                                     ArgKind::SelfRef { .. } => None,
                                     ArgKind::Named { ty, .. }
                                     | ArgKind::Ignored { ty }
-                                    | ArgKind::TypeOnly(ty) => Some(
-                                        TypeInfo::from_type_id_with_type_params(
+                                    | ArgKind::TypeOnly(ty) => {
+                                        Some(TypeInfo::from_type_id_with_type_params(
                                             arena, *ty, &tp_names,
-                                        ),
-                                    ),
+                                        ))
+                                    }
                                 })
                                 .collect();
 
@@ -243,10 +239,8 @@ impl TypeChecker {
                     variants,
                 } => {
                     let enum_name = arena[*name].name.clone();
-                    let variant_names: Vec<&str> = variants
-                        .iter()
-                        .map(|v| arena[*v].name.as_str())
-                        .collect();
+                    let variant_names: Vec<&str> =
+                        variants.iter().map(|v| arena[*v].name.as_str()).collect();
                     self.symbol_table
                         .register_enum(&enum_name, &variant_names, vis.clone())
                         .unwrap_or_else(|_| {
@@ -302,10 +296,11 @@ impl TypeChecker {
                         .symbol_table
                         .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
                     let value_id = *value;
-                    if let Err(err) = self
-                        .symbol_table
-                        .push_variable_to_scope(&const_name, const_type.clone(), false)
-                    {
+                    if let Err(err) = self.symbol_table.push_variable_to_scope(
+                        &const_name,
+                        const_type.clone(),
+                        false,
+                    ) {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
                             name: const_name,
@@ -340,17 +335,16 @@ impl TypeChecker {
                             ArgKind::Ignored { ty } => {
                                 self.validate_type(ctx.arena(), *ty, &tp_names);
                             }
-                            ArgKind::Named { name: arg_name, ty, .. } => {
+                            ArgKind::Named {
+                                name: arg_name, ty, ..
+                            } => {
                                 self.validate_type(ctx.arena(), *ty, &tp_names);
                                 let type_info = TypeInfo::from_type_id_with_type_params(
                                     ctx.arena(),
                                     *ty,
                                     &tp_names,
                                 );
-                                ctx.set_node_typeinfo(
-                                    NodeId::Ident(*arg_name),
-                                    type_info,
-                                );
+                                ctx.set_node_typeinfo(NodeId::Ident(*arg_name), type_info);
                             }
                             ArgKind::TypeOnly(ty) => {
                                 self.validate_type(ctx.arena(), *ty, &tp_names);
@@ -380,15 +374,17 @@ impl TypeChecker {
                             ArgKind::SelfRef { .. } => None,
                             ArgKind::Named { ty, .. }
                             | ArgKind::Ignored { ty }
-                            | ArgKind::TypeOnly(ty) => Some(
-                                TypeInfo::from_type_id_with_type_params(ctx.arena(), *ty, &tp_names),
-                            ),
+                            | ArgKind::TypeOnly(ty) => {
+                                Some(TypeInfo::from_type_id_with_type_params(
+                                    ctx.arena(),
+                                    *ty,
+                                    &tp_names,
+                                ))
+                            }
                         })
                         .collect();
                     let return_type = returns
-                        .map(|r| {
-                            TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names)
-                        })
+                        .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
                         .unwrap_or_default();
                     if let Err(err) = self.symbol_table.register_function(
                         &func_name,
@@ -405,7 +401,10 @@ impl TypeChecker {
                     }
                 }
                 Def::ExternFunction {
-                    name, args, returns, ..
+                    name,
+                    args,
+                    returns,
+                    ..
                 } => {
                     let func_name = ctx.arena()[*name].name.clone();
                     let param_types: Vec<TypeInfo> = args
@@ -508,7 +507,12 @@ impl TypeChecker {
     ///
     /// Reports `InvalidArraySize` if the size is zero (sentinel from parse failure)
     /// or if the literal text cannot be parsed as a positive u32.
-    fn validate_array_size(&mut self, arena: &AstArena, size_expr_id: ExprId, type_location: Location) {
+    fn validate_array_size(
+        &mut self,
+        arena: &AstArena,
+        size_expr_id: ExprId,
+        type_location: Location,
+    ) {
         let expr_data = &arena[size_expr_id];
         if let Expr::NumberLiteral { value } = &expr_data.kind {
             match value.parse::<u32>() {
@@ -555,9 +559,9 @@ impl TypeChecker {
                         TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
                     );
                     let name_str = arena[*arg_name].name.clone();
-                    if let Err(err) =
-                        self.symbol_table
-                            .push_variable_to_scope(&name_str, arg_type, *is_mut)
+                    if let Err(err) = self
+                        .symbol_table
+                        .push_variable_to_scope(&name_str, arg_type, *is_mut)
                     {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
@@ -624,9 +628,9 @@ impl TypeChecker {
                         TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names),
                     );
                     let name_str = arena[*arg_name].name.clone();
-                    if let Err(err) =
-                        self.symbol_table
-                            .push_variable_to_scope(&name_str, arg_type, *is_mut)
+                    if let Err(err) = self
+                        .symbol_table
+                        .push_variable_to_scope(&name_str, arg_type, *is_mut)
                     {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
@@ -637,11 +641,10 @@ impl TypeChecker {
                     }
                 }
                 ArgKind::SelfRef { is_mut } => {
-                    if let Err(err) = self.symbol_table.push_variable_to_scope(
-                        "self",
-                        self_type.clone(),
-                        *is_mut,
-                    ) {
+                    if let Err(err) =
+                        self.symbol_table
+                            .push_variable_to_scope("self", self_type.clone(), *is_mut)
+                    {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Variable,
                             name: "self".to_string(),
@@ -666,12 +669,7 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_statement(
-        &mut self,
-        stmt_id: StmtId,
-        return_type: &TypeInfo,
-        ctx: &mut TypedContext,
-    ) {
+    fn infer_statement(&mut self, stmt_id: StmtId, return_type: &TypeInfo, ctx: &mut TypedContext) {
         let arena = ctx.arena();
         let stmt_data = &arena[stmt_id];
         let location = stmt_data.location;
@@ -683,20 +681,15 @@ impl TypeChecker {
                 if let Expr::Identifier(ident_id) = &arena[left].kind {
                     let name = arena[*ident_id].name.clone();
                     if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
-                        self.errors.push(TypeCheckError::AssignToImmutable {
-                            name,
-                            location,
-                        });
+                        self.errors
+                            .push(TypeCheckError::AssignToImmutable { name, location });
                     }
-                } else if let Expr::ArrayIndexAccess { array, .. } = &arena[left].kind {
-                    if let Some(name) = self.extract_root_array_name(ctx.arena(), *array) {
-                        if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
-                            self.errors.push(TypeCheckError::AssignToImmutable {
-                                name,
-                                location,
-                            });
-                        }
-                    }
+                } else if let Expr::ArrayIndexAccess { array, .. } = &arena[left].kind
+                    && let Some(name) = self.extract_root_array_name(ctx.arena(), *array)
+                    && let Some(false) = self.symbol_table.lookup_variable_is_mut(&name)
+                {
+                    self.errors
+                        .push(TypeCheckError::AssignToImmutable { name, location });
                 }
                 let target_type = self.infer_expression(left, ctx);
                 {
@@ -727,11 +720,10 @@ impl TypeChecker {
                             && let Some(sig) = self.symbol_table.lookup_function(fn_name)
                             && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
                         {
-                            self.errors.push(
-                                TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            self.errors
+                                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
                                     location: ctx.arena()[right].location,
-                                },
-                            );
+                                });
                         }
                     }
                     let value_type = self.infer_expression(right, ctx);
@@ -860,33 +852,28 @@ impl TypeChecker {
                         let arena = ctx.arena();
                         (arena[expr_id].kind.clone(), arena[expr_id].location)
                     };
-                    if let Expr::NumberLiteral { value: ref num_value } = expr_kind {
+                    if let Expr::NumberLiteral {
+                        value: ref num_value,
+                    } = expr_kind
+                    {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                        self.validate_literal_range(
-                            num_value,
-                            &target_type.kind,
-                            expr_loc,
-                        );
+                        self.validate_literal_range(num_value, &target_type.kind, expr_loc);
                     }
-                    if let Expr::ArrayLiteral { elements } = &expr_kind {
-                        if let TypeInfoKind::Array(ref elem_type, _) = target_type.kind {
-                            let elems: Vec<ExprId> = elements.clone();
-                            for elem_id in elems {
-                                let (el_kind, el_loc) = {
-                                    let arena = ctx.arena();
-                                    (arena[elem_id].kind.clone(), arena[elem_id].location)
-                                };
-                                if let Expr::NumberLiteral { value: ref num_value } = el_kind {
-                                    ctx.set_node_typeinfo(
-                                        NodeId::Expr(elem_id),
-                                        (**elem_type).clone(),
-                                    );
-                                    self.validate_literal_range(
-                                        num_value,
-                                        &elem_type.kind,
-                                        el_loc,
-                                    );
-                                }
+                    if let Expr::ArrayLiteral { elements } = &expr_kind
+                        && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
+                    {
+                        let elems: Vec<ExprId> = elements.clone();
+                        for elem_id in elems {
+                            let (el_kind, el_loc) = {
+                                let arena = ctx.arena();
+                                (arena[elem_id].kind.clone(), arena[elem_id].location)
+                            };
+                            if let Expr::NumberLiteral {
+                                value: ref num_value,
+                            } = el_kind
+                            {
+                                ctx.set_node_typeinfo(NodeId::Expr(elem_id), (**elem_type).clone());
+                                self.validate_literal_range(num_value, &elem_type.kind, el_loc);
                             }
                         }
                     }
@@ -922,10 +909,7 @@ impl TypeChecker {
                 let arena = ctx.arena();
                 let type_name = arena[name].name.clone();
                 let type_info = TypeInfo::from_type_id(arena, ty);
-                if let Err(err) = self
-                    .symbol_table
-                    .register_type(&type_name, Some(type_info))
-                {
+                if let Err(err) = self.symbol_table.register_type(&type_name, Some(type_info)) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Type,
                         name: type_name,
@@ -988,11 +972,7 @@ impl TypeChecker {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn infer_expression(
-        &mut self,
-        expr_id: ExprId,
-        ctx: &mut TypedContext,
-    ) -> Option<TypeInfo> {
+    fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
         let arena = ctx.arena();
         let expr_data = &arena[expr_id];
         let location = expr_data.location;
@@ -1006,11 +986,8 @@ impl TypeChecker {
                         && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
                         && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
                     {
-                        self.errors.push(
-                            TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                location,
-                            },
-                        );
+                        self.errors
+                            .push(TypeCheckError::ArrayReturnCallInExpressionPosition { location });
                     }
                 }
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
@@ -1035,10 +1012,7 @@ impl TypeChecker {
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
-                            ctx.set_node_typeinfo(
-                                NodeId::Expr(expr_id),
-                                (**element_type).clone(),
-                            );
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), (**element_type).clone());
                             Some((**element_type).clone())
                         }
                         _ => {
@@ -1112,7 +1086,10 @@ impl TypeChecker {
                     None
                 }
             }
-            Expr::TypeMemberAccess { expr: inner_expr, name } => {
+            Expr::TypeMemberAccess {
+                expr: inner_expr,
+                name,
+            } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
@@ -1191,9 +1168,7 @@ impl TypeChecker {
                 function,
                 type_params: call_type_params,
                 args,
-            } => {
-                self.infer_function_call(expr_id, function, &call_type_params, &args, ctx)
-            }
+            } => self.infer_function_call(expr_id, function, &call_type_params, &args, ctx),
             Expr::StructLiteral { name, .. } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
@@ -1210,67 +1185,56 @@ impl TypeChecker {
                 });
                 None
             }
-            Expr::PrefixUnary { expr, op } => {
-                match op {
-                    UnaryOperatorKind::Not => {
-                        let expression_type_op = self.infer_expression(expr, ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_bool() {
-                                ctx.set_node_typeinfo(
-                                    NodeId::Expr(expr_id),
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::Not,
-                                expected_type: "booleans",
-                                found_type: expression_type,
-                                location,
-                            });
+            Expr::PrefixUnary { expr, op } => match op {
+                UnaryOperatorKind::Not => {
+                    let expression_type_op = self.infer_expression(expr, ctx);
+                    if let Some(expression_type) = expression_type_op {
+                        if expression_type.is_bool() {
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), expression_type.clone());
+                            return Some(expression_type);
                         }
-                        None
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::Not,
+                            expected_type: "booleans",
+                            found_type: expression_type,
+                            location,
+                        });
                     }
-                    UnaryOperatorKind::Neg => {
-                        let expression_type_op = self.infer_expression(expr, ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_signed_integer() {
-                                ctx.set_node_typeinfo(
-                                    NodeId::Expr(expr_id),
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::Neg,
-                                expected_type: "signed integers (i8, i16, i32, i64)",
-                                found_type: expression_type,
-                                location,
-                            });
-                        }
-                        None
-                    }
-                    UnaryOperatorKind::BitNot => {
-                        let expression_type_op = self.infer_expression(expr, ctx);
-                        if let Some(expression_type) = expression_type_op {
-                            if expression_type.is_number() {
-                                ctx.set_node_typeinfo(
-                                    NodeId::Expr(expr_id),
-                                    expression_type.clone(),
-                                );
-                                return Some(expression_type);
-                            }
-                            self.errors.push(TypeCheckError::InvalidUnaryOperand {
-                                operator: UnaryOperatorKind::BitNot,
-                                expected_type: "integers (i8, i16, i32, i64, u8, u16, u32, u64)",
-                                found_type: expression_type,
-                                location,
-                            });
-                        }
-                        None
-                    }
+                    None
                 }
-            }
+                UnaryOperatorKind::Neg => {
+                    let expression_type_op = self.infer_expression(expr, ctx);
+                    if let Some(expression_type) = expression_type_op {
+                        if expression_type.is_signed_integer() {
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), expression_type.clone());
+                            return Some(expression_type);
+                        }
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::Neg,
+                            expected_type: "signed integers (i8, i16, i32, i64)",
+                            found_type: expression_type,
+                            location,
+                        });
+                    }
+                    None
+                }
+                UnaryOperatorKind::BitNot => {
+                    let expression_type_op = self.infer_expression(expr, ctx);
+                    if let Some(expression_type) = expression_type_op {
+                        if expression_type.is_number() {
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), expression_type.clone());
+                            return Some(expression_type);
+                        }
+                        self.errors.push(TypeCheckError::InvalidUnaryOperand {
+                            operator: UnaryOperatorKind::BitNot,
+                            expected_type: "integers (i8, i16, i32, i64, u8, u16, u32, u64)",
+                            found_type: expression_type,
+                            location,
+                        });
+                    }
+                    None
+                }
+            },
             Expr::Parenthesized { expr } => {
                 let inner_type = self.infer_expression(expr, ctx);
                 if let Some(ref type_info) = inner_type {
@@ -1361,30 +1325,30 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                if !elements.is_empty() {
-                    if let Some(element_type_info) = self.infer_expression(elements[0], ctx) {
-                        for &element_id in &elements[1..] {
-                            let element_type = self.infer_expression(element_id, ctx);
-                            if let Some(element_type) = element_type
-                                && element_type != element_type_info
-                            {
-                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                    expected: element_type_info.clone(),
-                                    found: element_type,
-                                    location,
-                                });
-                            }
+                if !elements.is_empty()
+                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
+                {
+                    for &element_id in &elements[1..] {
+                        let element_type = self.infer_expression(element_id, ctx);
+                        if let Some(element_type) = element_type
+                            && element_type != element_type_info
+                        {
+                            self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                expected: element_type_info.clone(),
+                                found: element_type,
+                                location,
+                            });
                         }
-                        let array_type = TypeInfo {
-                            kind: TypeInfoKind::Array(
-                                Box::new(element_type_info),
-                                elements.len() as u32,
-                            ),
-                            type_params: vec![],
-                        };
-                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
-                        return Some(array_type);
                     }
+                    let array_type = TypeInfo {
+                        kind: TypeInfoKind::Array(
+                            Box::new(element_type_info),
+                            elements.len() as u32,
+                        ),
+                        type_params: vec![],
+                    };
+                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                    return Some(array_type);
                 }
                 None
             }
@@ -1417,10 +1381,7 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), var_ty.clone());
                     Some(var_ty)
                 } else {
-                    self.push_error_dedup(TypeCheckError::UnknownIdentifier {
-                        name,
-                        location,
-                    });
+                    self.push_error_dedup(TypeCheckError::UnknownIdentifier { name, location });
                     None
                 }
             }
@@ -1453,27 +1414,25 @@ impl TypeChecker {
         let location = arena[call_expr_id].location;
 
         // Handle Type::function() syntax - associated function calls
-        if let Expr::TypeMemberAccess { expr: inner_expr, name: method_name_id } = &arena[function_expr_id].kind {
+        if let Expr::TypeMemberAccess {
+            expr: inner_expr,
+            name: method_name_id,
+        } = &arena[function_expr_id].kind
+        {
             let inner_expr = *inner_expr;
             let method_name_id = *method_name_id;
 
             let type_name = match &ctx.arena()[inner_expr].kind {
-                Expr::Type(ty_id) => {
-                    match &ctx.arena()[*ty_id].kind {
-                        TypeNode::Custom(ident_id) => Some(ctx.arena()[*ident_id].name.clone()),
-                        TypeNode::QualifiedName { qualifier, name } => {
-                            Some(format!(
-                                "{}::{}",
-                                ctx.arena()[*qualifier].name,
-                                ctx.arena()[*name].name,
-                            ))
-                        }
-                        TypeNode::Qualified { alias: _, name } => {
-                            Some(ctx.arena()[*name].name.clone())
-                        }
-                        _ => None,
-                    }
-                }
+                Expr::Type(ty_id) => match &ctx.arena()[*ty_id].kind {
+                    TypeNode::Custom(ident_id) => Some(ctx.arena()[*ident_id].name.clone()),
+                    TypeNode::QualifiedName { qualifier, name } => Some(format!(
+                        "{}::{}",
+                        ctx.arena()[*qualifier].name,
+                        ctx.arena()[*name].name,
+                    )),
+                    TypeNode::Qualified { alias: _, name } => Some(ctx.arena()[*name].name.clone()),
+                    _ => None,
+                },
                 Expr::Identifier(ident_id) => Some(ctx.arena()[*ident_id].name.clone()),
                 _ => None,
             };
@@ -1489,13 +1448,12 @@ impl TypeChecker {
                 {
                     if method_info.is_instance_method() {
                         cov_mark::hit!(type_checker_instance_method_called_as_associated);
-                        self.errors.push(
-                            TypeCheckError::InstanceMethodCalledAsAssociated {
+                        self.errors
+                            .push(TypeCheckError::InstanceMethodCalledAsAssociated {
                                 type_name: type_name.clone(),
                                 method_name: method_name.clone(),
                                 location: ctx.arena()[function_expr_id].location,
-                            },
-                        );
+                            });
                     }
 
                     self.check_and_report_visibility(
@@ -1548,17 +1506,11 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(
                         NodeId::Expr(function_expr_id),
                         TypeInfo {
-                            kind: TypeInfoKind::Function(format!(
-                                "{}::{}",
-                                type_name, method_name
-                            )),
+                            kind: TypeInfoKind::Function(format!("{}::{}", type_name, method_name)),
                             type_params: vec![],
                         },
                     );
-                    ctx.set_node_typeinfo(
-                        NodeId::Expr(call_expr_id),
-                        sig_return_type.clone(),
-                    );
+                    ctx.set_node_typeinfo(NodeId::Expr(call_expr_id), sig_return_type.clone());
                     return Some(sig_return_type);
                 }
                 // Not an enum and not a method - fall through to standard function handling
@@ -1567,7 +1519,11 @@ impl TypeChecker {
         }
 
         // Handle instance method calls: obj.method()
-        if let Expr::MemberAccess { expr: receiver_expr, name: method_name_id } = &ctx.arena()[function_expr_id].kind {
+        if let Expr::MemberAccess {
+            expr: receiver_expr,
+            name: method_name_id,
+        } = &ctx.arena()[function_expr_id].kind
+        {
             let receiver_expr = *receiver_expr;
             let method_name_id = *method_name_id;
 
@@ -1593,13 +1549,12 @@ impl TypeChecker {
                     {
                         if !method_info.is_instance_method() {
                             cov_mark::hit!(type_checker_associated_function_called_as_method);
-                            self.errors.push(
-                                TypeCheckError::AssociatedFunctionCalledAsMethod {
+                            self.errors
+                                .push(TypeCheckError::AssociatedFunctionCalledAsMethod {
                                     type_name: type_name.clone(),
                                     method_name: method_name.clone(),
                                     location: ctx.arena()[function_expr_id].location,
-                                },
-                            );
+                                });
                         }
 
                         self.check_and_report_visibility(
@@ -1659,10 +1614,7 @@ impl TypeChecker {
                                 type_params: vec![],
                             },
                         );
-                        ctx.set_node_typeinfo(
-                            NodeId::Expr(call_expr_id),
-                            sig_return_type.clone(),
-                        );
+                        ctx.set_node_typeinfo(NodeId::Expr(call_expr_id), sig_return_type.clone());
                         return Some(sig_return_type);
                     }
                     self.errors.push(TypeCheckError::MethodNotFound {
@@ -1739,17 +1691,20 @@ impl TypeChecker {
         let substitutions = if !signature.type_params.is_empty() {
             if !call_type_params.is_empty() {
                 if call_type_params.len() != signature.type_params.len() {
-                    self.errors.push(TypeCheckError::TypeParameterCountMismatch {
-                        name: func_name.clone(),
-                        expected: signature.type_params.len(),
-                        found: call_type_params.len(),
-                        location,
-                    });
+                    self.errors
+                        .push(TypeCheckError::TypeParameterCountMismatch {
+                            name: func_name.clone(),
+                            expected: signature.type_params.len(),
+                            found: call_type_params.len(),
+                            location,
+                        });
                     FxHashMap::default()
                 } else {
                     {
                         let mut subs: FxHashMap<String, TypeInfo> = FxHashMap::default();
-                        for (param_name, type_ident_id) in signature.type_params.iter().zip(call_type_params.iter()) {
+                        for (param_name, type_ident_id) in
+                            signature.type_params.iter().zip(call_type_params.iter())
+                        {
                             let type_name = ctx.arena()[*type_ident_id].name.clone();
                             let concrete_type = self
                                 .symbol_table
@@ -1765,12 +1720,8 @@ impl TypeChecker {
                 }
             } else {
                 // Try to infer type parameters from arguments
-                let inferred = self.infer_type_params_from_args(
-                    &signature,
-                    call_args,
-                    &location,
-                    ctx,
-                );
+                let inferred =
+                    self.infer_type_params_from_args(&signature, call_args, &location, ctx);
                 if inferred.is_empty() && !signature.type_params.is_empty() {
                     self.errors.push(TypeCheckError::MissingTypeParameters {
                         function_name: func_name.clone(),
@@ -1839,22 +1790,21 @@ impl TypeChecker {
                 && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
                 && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
             {
-                self.errors.push(
-                    TypeCheckError::ArrayReturnCallInExpressionPosition {
-                        location: arena[arg_expr_id].location,
-                    },
-                );
-            }
-        }
-        if let Expr::Uzumaki = &arena[arg_expr_id].kind {
-            if let Some(pt) = param_type {
-                if matches!(pt.kind, TypeInfoKind::Array(_, _)) {
-                    self.errors.push(TypeCheckError::ArrayUzumakiAsArgument {
+                self.errors
+                    .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
                         location: arena[arg_expr_id].location,
                     });
-                }
-                ctx.set_node_typeinfo(NodeId::Expr(arg_expr_id), pt.clone());
             }
+        }
+        if let Expr::Uzumaki = &arena[arg_expr_id].kind
+            && let Some(pt) = param_type
+        {
+            if matches!(pt.kind, TypeInfoKind::Array(_, _)) {
+                self.errors.push(TypeCheckError::ArrayUzumakiAsArgument {
+                    location: arena[arg_expr_id].location,
+                });
+            }
+            ctx.set_node_typeinfo(NodeId::Expr(arg_expr_id), pt.clone());
         }
     }
 
@@ -1862,7 +1812,11 @@ impl TypeChecker {
     ///
     /// For `Identifier(id)` returns the identifier name.
     /// For more complex expressions, returns None (handled by caller).
-    fn resolve_function_call_name(&self, arena: &AstArena, function_expr_id: ExprId) -> Option<String> {
+    fn resolve_function_call_name(
+        &self,
+        arena: &AstArena,
+        function_expr_id: ExprId,
+    ) -> Option<String> {
         match &arena[function_expr_id].kind {
             Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
             _ => None,
@@ -1942,10 +1896,8 @@ impl TypeChecker {
                         variants,
                     } => {
                         let e_name = arena[*enum_name].name.clone();
-                        let variant_names: Vec<&str> = variants
-                            .iter()
-                            .map(|v| arena[*v].name.as_str())
-                            .collect();
+                        let variant_names: Vec<&str> =
+                            variants.iter().map(|v| arena[*v].name.as_str()).collect();
                         self.symbol_table
                             .register_enum(&e_name, &variant_names, enum_vis.clone())
                             .unwrap_or_else(|_| {
@@ -1957,7 +1909,9 @@ impl TypeChecker {
                                 });
                             });
                     }
-                    Def::Spec { name: spec_name, .. } => {
+                    Def::Spec {
+                        name: spec_name, ..
+                    } => {
                         let sp_name = arena[*spec_name].name.clone();
                         self.symbol_table
                             .register_spec(&sp_name)
@@ -1985,11 +1939,10 @@ impl TypeChecker {
                         let const_type = self
                             .symbol_table
                             .resolve_custom_type(TypeInfo::from_type_id(arena, *ty));
-                        if let Err(err) = self.symbol_table.push_variable_to_scope(
-                            &c_name,
-                            const_type,
-                            false,
-                        ) {
+                        if let Err(err) = self
+                            .symbol_table
+                            .push_variable_to_scope(&c_name, const_type, false)
+                        {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: c_name,
@@ -2011,9 +1964,7 @@ impl TypeChecker {
                                 ArgKind::SelfRef { .. } => None,
                                 ArgKind::Named { ty, .. }
                                 | ArgKind::Ignored { ty }
-                                | ArgKind::TypeOnly(ty) => {
-                                    Some(TypeInfo::from_type_id(arena, *ty))
-                                }
+                                | ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id(arena, *ty)),
                             })
                             .collect();
                         let return_type = returns

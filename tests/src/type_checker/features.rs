@@ -816,8 +816,7 @@ mod enum_tests {
         // NOTE: Avoid naming enums the same as builtin types (e.g., "Unit")
         // because `from_builtin_str` is case-insensitive and would resolve
         // the parameter type to the builtin instead of the enum.
-        let source =
-            r#"enum Single { Value } fn test_single(u: Single) {} fn test() { test_single(Single::Value); }"#;
+        let source = r#"enum Single { Value } fn test_single(u: Single) {} fn test() { test_single(Single::Value); }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -930,8 +929,8 @@ mod generics_tests {
         let source = r#"fn identity T'(x: T) -> T { return x; }"#;
         let arena = build_ast(source.to_string());
 
-        let def_id = find_function_by_name(&arena, "identity")
-            .expect("Should find function 'identity'");
+        let def_id =
+            find_function_by_name(&arena, "identity").expect("Should find function 'identity'");
 
         if let Def::Function {
             type_params, args, ..
@@ -993,16 +992,14 @@ mod generics_tests {
         let arena = build_ast(source.to_string());
 
         // Find function call expressions via arena traversal
-        let func_call_ids =
-            collect_all_exprs(&arena, &|e| matches!(e, Expr::FunctionCall { .. }));
+        let func_call_ids = collect_all_exprs(&arena, &|e| matches!(e, Expr::FunctionCall { .. }));
 
         // Check that there is at least one function call
-        if let Some(&call_id) = func_call_ids.first() {
-            if let Expr::FunctionCall { function, .. } = &arena[call_id].kind {
-                if let Expr::Identifier(ident_id) = &arena[*function].kind {
-                    println!("Function call name: '{}'", arena[*ident_id].name);
-                }
-            }
+        if let Some(&call_id) = func_call_ids.first()
+            && let Expr::FunctionCall { function, .. } = &arena[call_id].kind
+            && let Expr::Identifier(ident_id) = &arena[*function].kind
+        {
+            println!("Function call name: '{}'", arena[*ident_id].name);
         }
 
         // Type checking should work with type inference

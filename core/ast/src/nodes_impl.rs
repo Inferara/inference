@@ -5,8 +5,8 @@
 //! This module provides query helpers that need arena access.
 
 use crate::arena::AstArena;
-use crate::ids::*;
-use crate::nodes::*;
+use crate::ids::{BlockId, DefId, ExprId, StmtId};
+use crate::nodes::{Def, Expr, Stmt};
 
 impl AstArena {
     /// Checks whether a block (and its transitive children) contains
@@ -27,8 +27,7 @@ impl AstArena {
             Stmt::Block(block_id) => self.block_is_non_det(*block_id),
             Stmt::Expr(expr_id) => self.expr_is_non_det(*expr_id),
             Stmt::Return { expr } => self.expr_is_non_det(*expr),
-            Stmt::Loop { condition, .. } => condition
-                .map_or(false, |c| self.expr_is_non_det(c)),
+            Stmt::Loop { condition, .. } => condition.is_some_and(|c| self.expr_is_non_det(c)),
             Stmt::If {
                 condition,
                 then_block,
@@ -36,10 +35,9 @@ impl AstArena {
             } => {
                 self.expr_is_non_det(*condition)
                     || self.block_is_non_det(*then_block)
-                    || else_block.map_or(false, |b| self.block_is_non_det(b))
+                    || else_block.is_some_and(|b| self.block_is_non_det(b))
             }
-            Stmt::VarDef { value, .. } => value
-                .map_or(false, |v| self.expr_is_non_det(v)),
+            Stmt::VarDef { value, .. } => value.is_some_and(|v| self.expr_is_non_det(v)),
             _ => false,
         }
     }
@@ -77,8 +75,7 @@ impl AstArena {
     pub fn def_is_void_function(&self, def_id: DefId) -> bool {
         match &self[def_id].kind {
             Def::Function { returns, body, .. } => {
-                let returns_unit = returns
-                    .map_or(true, |ty_id| self[ty_id].kind.is_unit_type());
+                let returns_unit = returns.is_none_or(|ty_id| self[ty_id].kind.is_unit_type());
                 returns_unit || self.block_is_void(*body)
             }
             _ => true,
