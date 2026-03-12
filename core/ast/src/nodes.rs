@@ -1,9 +1,30 @@
+//! AST node type definitions for the Inference compiler.
+//!
+//! This module defines the complete AST type hierarchy using typed arena indices
+//! instead of `Arc<T>` pointers. Every node is stored in a typed `Vec` inside
+//! `AstArena` and referenced by a lightweight `Copy` index (`ExprId`, `StmtId`, etc.).
+//!
+//! # Layout
+//!
+//! Each arena category has a wrapper struct that holds `location` + `kind`:
+//!
+//! ```text
+//! ExprData { location: Location, kind: Expr }
+//! StmtData { location: Location, kind: Stmt }
+//! DefData  { location: Location, kind: Def  }
+//! TypeData { location: Location, kind: TypeNode }
+//! ```
+//!
+//! Blocks and identifiers are simpler and store their data inline.
+
 use core::fmt;
-use std::{
-    cell::RefCell,
-    fmt::{Display, Formatter},
-    rc::Rc,
-};
+use std::fmt::{Display, Formatter};
+
+use crate::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
+
+// ---------------------------------------------------------------------------
+// Location
+// ---------------------------------------------------------------------------
 
 /// Source location information for AST nodes.
 ///
@@ -46,278 +67,19 @@ impl Display for Location {
     }
 }
 
-#[macro_export]
-macro_rules! ast_node {
-    (
-        $(#[$outer:meta])*
-        $struct_vis:vis struct $name:ident {
-            $(
-                $(#[$field_attr:meta])*
-                $field_vis:vis $field_name:ident : $field_ty:ty
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug)]
-        $struct_vis struct $name {
-            pub id: u32,
-            pub location: $crate::nodes::Location,
-            $(
-                $(#[$field_attr])*
-                $field_vis $field_name : $field_ty,
-            )*
-        }
-    };
-}
-
-macro_rules! ast_nodes {
-    (
-        $(
-            $(#[$outer:meta])*
-            $struct_vis:vis struct $name:ident { $($fields:tt)* }
-        )+
-    ) => {
-        $(
-            ast_node! {
-                $(#[$outer])*
-                $struct_vis struct $name { $($fields)* }
-            }
-        )+
-    };
-}
-
-macro_rules! ast_enum {
-    (
-        $(#[$outer:meta])*
-        $enum_vis:vis enum $name:ident {
-            $(
-                $(#[$arm_attr:meta])*
-                $(@$conv:ident)? $arm:ident $( ( $($tuple:tt)* ) )? $( { $($struct:tt)* } )? ,
-            )*
-        }
-    ) => {
-        $(#[$outer])*
-        #[derive(Clone, PartialEq, Eq, Debug)]
-        $enum_vis enum $name {
-            $(
-                $(#[$arm_attr])*
-                $arm $( ( $($tuple)* ) )? $( { $($struct)* } )? ,
-            )*
-        }
-
-        impl $name {
-
-            #[must_use]
-            #[allow(unused_variables)]
-            pub fn id(&self) -> u32 {
-                match self {
-                    $(
-                        $name::$arm(n, ..) => { ast_enum!(@id_arm n, $($conv)?) }
-                    )*
-                }
-            }
-
-            #[must_use]
-            #[allow(unused_variables)]
-            pub fn location(&self) -> Location {
-                match self {
-                    $(
-                        $name::$arm(n, ..) => { ast_enum!(@location_arm n, $($conv)?) }
-                    )*
-                }
-            }
-        }
-    };
-
-    // Variants marked with `skip` (e.g., `SimpleTypeKind`) do not correspond to
-    // heap-allocated AST nodes and therefore have no stable ID. For these cases
-    // we return `u32::MAX` as a sentinel "no ID" value. Code that performs
-    // ID-based lookups must treat `u32::MAX` as invalid and never assign it to
-    // any real node.
-    (@id_arm $inner:ident, skip) => {
-        u32::MAX
-    };
-
-    (@id_arm $inner:ident, inner_enum) => {
-        $inner.id()
-    };
-
-    (@id_arm $inner:ident, ) => {
-        $inner.id
-    };
-
-    (@location_arm $inner:ident, skip) => {
-        Location::default()
-    };
-
-    (@location_arm $inner:ident, inner_enum) => {
-        $inner.location()
-    };
-
-    (@location_arm $inner:ident, ) => {
-        $inner.location
-    };
-}
-
-macro_rules! ast_enums {
-    (
-        $(
-            $(#[$outer:meta])*
-            $enum_vis:vis enum $name:ident { $($arms:tt)* }
-        )+
-    ) => {
-        $(
-            ast_enum! {
-                $(#[$outer])*
-                $enum_vis enum $name { $($arms)* }
-            }
-        )+
-
-        #[derive(Clone, Debug)]
-        pub enum AstNode {
-            $(
-                $name($name),
-            )+
-        }
-
-        impl AstNode {
-            #[must_use]
-            pub fn id(&self) -> u32 {
-                match self {
-                    $(
-                        AstNode::$name(node) => node.id(),
-                    )+
-                }
-            }
-
-            #[must_use]
-            pub fn location(&self) -> Location {
-                match self {
-                    $(
-                        AstNode::$name(node) => node.location(),
-                    )+
-                }
-            }
-
-            #[must_use]
-            pub fn start_line(&self) -> u32 {
-                match self {
-                    $(
-                        AstNode::$name(node) => node.location().start_line,
-                    )+
-                }
-            }
-        }
-    };
-}
-
-ast_enums! {
-
-    pub enum Ast {
-        SourceFile(Rc<SourceFile>),
-    }
-
-    pub enum Directive {
-        Use(Rc<UseDirective>),
-    }
-
-    pub enum Definition {
-        Spec(Rc<SpecDefinition>),
-        Struct(Rc<StructDefinition>),
-        Enum(Rc<EnumDefinition>),
-        Constant(Rc<ConstantDefinition>),
-        Function(Rc<FunctionDefinition>),
-        ExternalFunction(Rc<ExternalFunctionDefinition>),
-        Type(Rc<TypeDefinition>),
-        Module(Rc<ModuleDefinition>),
-    }
-
-    pub enum BlockType {
-        Block(Rc<Block>),
-        Assume(Rc<Block>),
-        Forall(Rc<Block>),
-        Exists(Rc<Block>),
-        Unique(Rc<Block>),
-    }
-
-    pub enum Statement {
-        @inner_enum Block(BlockType),
-        @inner_enum Expression(Expression),
-        Assign(Rc<AssignStatement>),
-        Return(Rc<ReturnStatement>),
-        Loop(Rc<LoopStatement>),
-        Break(Rc<BreakStatement>),
-        If(Rc<IfStatement>),
-        VariableDefinition(Rc<VariableDefinitionStatement>),
-        TypeDefinition(Rc<TypeDefinitionStatement>),
-        Assert(Rc<AssertStatement>),
-        ConstantDefinition(Rc<ConstantDefinition>),
-    }
-
-    pub enum Expression {
-        ArrayIndexAccess(Rc<ArrayIndexAccessExpression>),
-        Binary(Rc<BinaryExpression>),
-        MemberAccess(Rc<MemberAccessExpression>),
-        TypeMemberAccess(Rc<TypeMemberAccessExpression>),
-        FunctionCall(Rc<FunctionCallExpression>),
-        Struct(Rc<StructExpression>),
-        PrefixUnary(Rc<PrefixUnaryExpression>),
-        Parenthesized(Rc<ParenthesizedExpression>),
-        @inner_enum Literal(Literal),
-        Identifier(Rc<Identifier>),
-        @inner_enum Type(Type),
-        Uzumaki(Rc<UzumakiExpression>),
-    }
-
-    pub enum Literal {
-        Array(Rc<ArrayLiteral>),
-        Bool(Rc<BoolLiteral>),
-        String(Rc<StringLiteral>),
-        Number(Rc<NumberLiteral>),
-        Unit(Rc<UnitLiteral>),
-    }
-    pub enum Type {
-        Array(Rc<TypeArray>),
-        @skip Simple(SimpleTypeKind),
-        Generic(Rc<GenericType>),
-        Function(Rc<FunctionType>),
-        QualifiedName(Rc<QualifiedName>),
-        Qualified(Rc<TypeQualifiedName>),
-        Custom(Rc<Identifier>),
-    }
-
-    pub enum ArgumentType {
-        SelfReference(Rc<SelfReference>),
-        IgnoreArgument(Rc<IgnoreArgument>),
-        Argument(Rc<Argument>),
-        @inner_enum Type(Type),
-    }
-
-    pub enum Misc {
-        StructField(Rc<StructField>),
-    }
-}
+// ---------------------------------------------------------------------------
+// Shared enums (unchanged)
+// ---------------------------------------------------------------------------
 
 /// Visibility modifier for definitions.
-///
-/// Controls whether a definition (function, struct, constant, etc.) is accessible
-/// from outside its containing module.
-///
-/// # Default
-///
-/// Definitions are `Private` by default, following the principle of least privilege.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Visibility {
-    /// Private visibility (default). Definition is only accessible within its module.
     #[default]
     Private,
-    /// Public visibility (marked with `pub`). Definition is accessible from other modules.
     Public,
 }
 
 /// Unary operator kinds for prefix expressions.
-///
-/// Represents operators that take a single operand.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UnaryOperatorKind {
     /// Logical negation: `!expr`
@@ -329,9 +91,6 @@ pub enum UnaryOperatorKind {
 }
 
 /// Simple type kinds for primitive built-in types.
-///
-/// Primitive types have dedicated variants for efficient pattern matching
-/// without string comparison. User-defined types use `Type::Custom` instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum SimpleTypeKind {
     Unit,
@@ -366,277 +125,349 @@ impl SimpleTypeKind {
 }
 
 /// Binary operator kinds for expressions.
-///
-/// Represents operators that take two operands (left and right).
-/// Operators are listed roughly in order of precedence groups.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OperatorKind {
-    /// Exponentiation: `a ** b`
     Pow,
-    /// Addition: `a + b`
     Add,
-    /// Subtraction: `a - b`
     Sub,
-    /// Multiplication: `a * b`
     Mul,
-    /// Division: `a / b`
     Div,
-    /// Modulo (remainder): `a % b`
     Mod,
-    /// Logical AND: `a && b`
     And,
-    /// Logical OR: `a || b`
     Or,
-    /// Equality: `a == b`
     Eq,
-    /// Inequality: `a != b`
     Ne,
-    /// Less than: `a < b`
     Lt,
-    /// Less than or equal: `a <= b`
     Le,
-    /// Greater than: `a > b`
     Gt,
-    /// Greater than or equal: `a >= b`
     Ge,
-    /// Bitwise AND: `a & b`
     BitAnd,
-    /// Bitwise OR: `a | b`
     BitOr,
-    /// Bitwise XOR: `a ^ b`
     BitXor,
-    /// Bitwise left shift: `a << b`
     Shl,
-    /// Bitwise right shift: `a >> b`
     Shr,
 }
 
-ast_nodes! {
+// ---------------------------------------------------------------------------
+// Wrapper structs (stored in arena Vecs)
+// ---------------------------------------------------------------------------
 
-    /// Root AST node representing a parsed source file.
-    ///
-    /// Stores the complete source text, enabling any node to retrieve its source
-    /// via `Location::offset_start..Location::offset_end` slicing on this field.
-    pub struct SourceFile {
-        pub source: String,
-        pub directives: Vec<Directive>,
-        pub definitions: Vec<Definition>,
+/// Expression wrapper: `location` + `kind`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExprData {
+    pub location: Location,
+    pub kind: Expr,
+}
+
+/// Statement wrapper: `location` + `kind`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StmtData {
+    pub location: Location,
+    pub kind: Stmt,
+}
+
+/// Definition wrapper: `location` + `kind`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DefData {
+    pub location: Location,
+    pub kind: Def,
+}
+
+/// Type node wrapper: `location` + `kind`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypeData {
+    pub location: Location,
+    pub kind: TypeNode,
+}
+
+/// A block of statements with a kind (regular, forall, exists, assume, unique).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BlockData {
+    pub location: Location,
+    pub block_kind: BlockKind,
+    pub stmts: Vec<StmtId>,
+}
+
+/// An identifier (variable name, type name, etc.).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ident {
+    pub location: Location,
+    pub name: String,
+}
+
+/// Root AST node representing a parsed source file.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SourceFileData {
+    pub location: Location,
+    pub source: String,
+    pub defs: Vec<DefId>,
+    pub directives: Vec<Directive>,
+}
+
+// ---------------------------------------------------------------------------
+// Block kind
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BlockKind {
+    Regular,
+    Forall,
+    Exists,
+    Assume,
+    Unique,
+}
+
+// ---------------------------------------------------------------------------
+// Directives
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Directive {
+    Use(UseDirective),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct UseDirective {
+    pub location: Location,
+    pub imported_types: Vec<IdentId>,
+    pub segments: Vec<IdentId>,
+    pub from: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Definitions
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Def {
+    Function {
+        name: IdentId,
+        vis: Visibility,
+        type_params: Vec<IdentId>,
+        args: Vec<ArgData>,
+        returns: Option<TypeId>,
+        body: BlockId,
+    },
+    ExternFunction {
+        name: IdentId,
+        vis: Visibility,
+        args: Vec<ArgData>,
+        returns: Option<TypeId>,
+    },
+    Struct {
+        name: IdentId,
+        vis: Visibility,
+        fields: Vec<Field>,
+        methods: Vec<DefId>,
+    },
+    Enum {
+        name: IdentId,
+        vis: Visibility,
+        variants: Vec<IdentId>,
+    },
+    Spec {
+        name: IdentId,
+        vis: Visibility,
+        defs: Vec<DefId>,
+    },
+    Constant {
+        name: IdentId,
+        vis: Visibility,
+        ty: TypeId,
+        value: ExprId,
+    },
+    TypeAlias {
+        name: IdentId,
+        vis: Visibility,
+        ty: TypeId,
+    },
+    Module {
+        name: IdentId,
+        vis: Visibility,
+        defs: Option<Vec<DefId>>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Stmt {
+    Block(BlockId),
+    Expr(ExprId),
+    Assign {
+        left: ExprId,
+        right: ExprId,
+    },
+    Return {
+        expr: ExprId,
+    },
+    Loop {
+        condition: Option<ExprId>,
+        body: BlockId,
+    },
+    Break,
+    If {
+        condition: ExprId,
+        then_block: BlockId,
+        else_block: Option<BlockId>,
+    },
+    VarDef {
+        name: IdentId,
+        ty: TypeId,
+        value: Option<ExprId>,
+        is_mut: bool,
+    },
+    TypeDef {
+        name: IdentId,
+        ty: TypeId,
+    },
+    Assert {
+        expr: ExprId,
+    },
+    ConstDef(DefId),
+}
+
+// ---------------------------------------------------------------------------
+// Expressions
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Expr {
+    Binary {
+        left: ExprId,
+        right: ExprId,
+        op: OperatorKind,
+    },
+    PrefixUnary {
+        expr: ExprId,
+        op: UnaryOperatorKind,
+    },
+    Parenthesized {
+        expr: ExprId,
+    },
+    FunctionCall {
+        function: ExprId,
+        type_params: Vec<IdentId>,
+        args: Vec<(Option<IdentId>, ExprId)>,
+    },
+    ArrayIndexAccess {
+        array: ExprId,
+        index: ExprId,
+    },
+    MemberAccess {
+        expr: ExprId,
+        name: IdentId,
+    },
+    TypeMemberAccess {
+        expr: ExprId,
+        name: IdentId,
+    },
+    StructLiteral {
+        name: IdentId,
+        fields: Vec<(IdentId, ExprId)>,
+    },
+    Identifier(IdentId),
+    NumberLiteral {
+        value: String,
+    },
+    BoolLiteral {
+        value: bool,
+    },
+    StringLiteral {
+        value: String,
+    },
+    ArrayLiteral {
+        elements: Vec<ExprId>,
+    },
+    UnitLiteral,
+    Uzumaki,
+    /// A type in expression position (e.g., type annotations stored as expressions).
+    Type(TypeId),
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TypeNode {
+    Simple(SimpleTypeKind),
+    Array {
+        element: TypeId,
+        size: ExprId,
+    },
+    Generic {
+        base: IdentId,
+        params: Vec<IdentId>,
+    },
+    Function {
+        params: Vec<TypeId>,
+        ret: Option<TypeId>,
+    },
+    QualifiedName {
+        qualifier: IdentId,
+        name: IdentId,
+    },
+    Qualified {
+        alias: IdentId,
+        name: IdentId,
+    },
+    Custom(IdentId),
+}
+
+// ---------------------------------------------------------------------------
+// Inline helper structs (not arena-allocated)
+// ---------------------------------------------------------------------------
+
+/// A function/method argument definition.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ArgData {
+    pub location: Location,
+    pub kind: ArgKind,
+}
+
+/// The kind of a function argument.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ArgKind {
+    /// Named argument: `name: Type` or `mut name: Type`
+    Named {
+        name: IdentId,
+        ty: TypeId,
+        is_mut: bool,
+    },
+    /// Self reference: `self` or `mut self`
+    SelfRef { is_mut: bool },
+    /// Ignored argument: `_: Type`
+    Ignored { ty: TypeId },
+    /// Type-only argument (positional type)
+    TypeOnly(TypeId),
+}
+
+/// A struct field definition.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Field {
+    pub name: IdentId,
+    pub ty: TypeId,
+}
+
+// ---------------------------------------------------------------------------
+// Convenience impls
+// ---------------------------------------------------------------------------
+
+impl TypeNode {
+    /// Returns `true` if this type is the unit type `()`.
+    #[must_use]
+    pub fn is_unit_type(&self) -> bool {
+        matches!(self, TypeNode::Simple(SimpleTypeKind::Unit))
     }
+}
 
-    pub struct UseDirective {
-        pub imported_types: Option<Vec<Rc<Identifier>>>,
-        pub segments: Option<Vec<Rc<Identifier>>>,
-        pub from: Option<String>,
+impl BlockKind {
+    /// Returns `true` for non-deterministic block kinds (forall, exists, assume, unique).
+    #[must_use]
+    pub fn is_non_det(&self) -> bool {
+        !matches!(self, BlockKind::Regular)
     }
-
-    pub struct SpecDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub definitions: Vec<Definition>,
-    }
-
-    pub struct StructDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub fields: Vec<Rc<StructField>>,
-        pub methods: Vec<Rc<FunctionDefinition>>,
-    }
-
-    pub struct StructField {
-        pub name: Rc<Identifier>,
-        pub type_: Type,
-    }
-
-    pub struct EnumDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub variants: Vec<Rc<Identifier>>,
-    }
-
-    pub struct Identifier {
-        pub name: String,
-    }
-
-    pub struct ConstantDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub ty: Type,
-        pub value: Literal,
-    }
-
-    pub struct FunctionDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub type_parameters: Option<Vec<Rc<Identifier>>>,
-        pub arguments: Option<Vec<ArgumentType>>,
-        pub returns: Option<Type>,
-        pub body: BlockType,
-    }
-
-    pub struct ExternalFunctionDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub arguments: Option<Vec<ArgumentType>>,
-        pub returns: Option<Type>,
-    }
-
-    pub struct TypeDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub ty: Type,
-    }
-
-    pub struct ModuleDefinition {
-        pub visibility: Visibility,
-        pub name: Rc<Identifier>,
-        pub body: Option<Vec<Definition>>,
-    }
-
-    pub struct Argument {
-        pub name: Rc<Identifier>,
-        pub is_mut: bool,
-        pub ty: Type,
-    }
-
-    pub struct SelfReference {
-        pub is_mut: bool,
-    }
-
-    pub struct IgnoreArgument {
-        pub ty: Type,
-    }
-
-    pub struct Block {
-        pub statements: Vec<Statement>,
-    }
-
-    pub struct ExpressionStatement {
-        pub expression: Expression,
-    }
-
-    pub struct ReturnStatement {
-        pub expression: RefCell<Expression>,
-    }
-
-    pub struct LoopStatement {
-        pub condition: RefCell<Option<Expression>>,
-        pub body: BlockType,
-    }
-
-    pub struct BreakStatement {}
-
-    pub struct IfStatement {
-        pub condition: RefCell<Expression>,
-        pub if_arm: BlockType,
-        pub else_arm: Option<BlockType>,
-    }
-
-    pub struct VariableDefinitionStatement {
-        pub name: Rc<Identifier>,
-        pub is_mut: bool,
-        pub ty: Type,
-        pub value: Option<RefCell<Expression>>,
-    }
-
-    pub struct TypeDefinitionStatement {
-        pub name: Rc<Identifier>,
-        pub ty: Type,
-    }
-
-    pub struct AssignStatement {
-        pub left: RefCell<Expression>,
-        pub right: RefCell<Expression>,
-    }
-
-    pub struct ArrayIndexAccessExpression {
-        pub array: RefCell<Expression>,
-        pub index: RefCell<Expression>,
-    }
-
-    pub struct MemberAccessExpression {
-        pub expression: RefCell<Expression>,
-        pub name: Rc<Identifier>,
-    }
-
-    pub struct TypeMemberAccessExpression {
-        pub expression: RefCell<Expression>,
-        pub name: Rc<Identifier>,
-    }
-
-    pub struct FunctionCallExpression {
-        pub function: Expression,
-        pub type_parameters: Option<Vec<Rc<Identifier>>>,
-        pub arguments: Option<Vec<(Option<Rc<Identifier>>, RefCell<Expression>)>>,
-    }
-
-    pub struct StructExpression {
-        pub name: Rc<Identifier>,
-        pub fields: Option<Vec<(Rc<Identifier>, RefCell<Expression>)>>,
-    }
-
-    pub struct UzumakiExpression {}
-
-    pub struct PrefixUnaryExpression {
-        pub expression: RefCell<Expression>,
-        pub operator: UnaryOperatorKind,
-    }
-
-    pub struct AssertStatement {
-        pub expression: RefCell<Expression>,
-    }
-
-    pub struct ParenthesizedExpression {
-        pub expression: RefCell<Expression>,
-    }
-
-    pub struct BinaryExpression {
-        pub left: RefCell<Expression>,
-        pub operator: OperatorKind,
-        pub right: RefCell<Expression>,
-    }
-
-    pub struct ArrayLiteral {
-        pub elements: Option<Vec<RefCell<Expression>>>,
-    }
-
-    pub struct BoolLiteral {
-        pub value: bool
-    }
-
-    pub struct StringLiteral {
-        pub value: String
-    }
-
-    pub struct NumberLiteral {
-        pub value: String,
-    }
-
-    pub struct UnitLiteral {
-    }
-
-    pub struct GenericType {
-        pub base: Rc<Identifier>,
-        pub parameters: Vec<Rc<Identifier>>,
-    }
-
-    pub struct FunctionType {
-        pub parameters: Option<Vec<Type>>,
-        pub returns: Option<Type>,
-    }
-
-    pub struct QualifiedName {
-        pub qualifier: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-    }
-
-    pub struct TypeQualifiedName {
-        pub alias: Rc<Identifier>,
-        pub name: Rc<Identifier>,
-    }
-
-    pub struct TypeArray {
-        pub element_type: Type,
-        pub size: Expression,
-    }
-
 }

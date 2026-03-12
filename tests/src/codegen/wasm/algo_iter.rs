@@ -38,11 +38,11 @@ mod algo_iter_tests {
         cov_mark::check_count!(wasm_codegen_emit_binary_expression, 72);
         cov_mark::check_count!(wasm_codegen_emit_if_statement, 22);
         cov_mark::check_count!(wasm_codegen_emit_function_params, 18);
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 44);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 46);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 9);
         cov_mark::check_count!(wasm_codegen_emit_loop_statement, 12);
         cov_mark::check_count!(wasm_codegen_emit_loop_conditional, 12);
-        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 32);
+        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 34);
         let test_name = "algo_iter";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

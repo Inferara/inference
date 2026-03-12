@@ -465,22 +465,6 @@ match &resolved_type.kind {
 
 This is used internally to ensure that custom types in function parameters match inferred argument types exactly, without needing a compatibility shim.
 
-### Finding Enclosing Variable Definitions
-
-When processing expressions, you sometimes need to find which variable definition encloses a given node. The `TypedContext` provides a method to walk the parent chain:
-
-```rust
-// Find the enclosing variable definition for a node
-if let Some(var_name) = typed_context.find_enclosing_variable_name(node_id) {
-    println!("This expression is inside variable `{}`", var_name);
-}
-```
-
-This is useful when:
-- Tracking which variables are referenced within expressions
-- Collecting type information about the context where an expression appears
-- Building scope-aware diagnostics
-
 ### Verifying All Expressions Have Types
 
 ```rust

@@ -263,11 +263,18 @@ fn main() {
                 process::exit(1);
             }
             Ok(tctx) => {
-                typed_context = Some(tctx);
-                if let Err(e) = analyze(typed_context.as_ref().unwrap()) {
-                    eprintln!("Analysis failed: {e}");
-                    process::exit(1);
+                match analyze(&tctx) {
+                    Err(e) => {
+                        eprintln!("{e}");
+                        process::exit(1);
+                    }
+                    Ok(result) => {
+                        if result.has_findings() {
+                            eprintln!("{result}");
+                        }
+                    }
                 }
+                typed_context = Some(tctx);
                 println!("Analyzed: {}", args.path.display());
             }
         }

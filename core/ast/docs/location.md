@@ -85,7 +85,7 @@ The optimization involved two key changes:
 
 ### 1. Remove Duplicate Source Storage
 
-Move source storage from `Location` to `SourceFile`:
+Move source storage from `Location` to `SourceFileData`:
 
 ```rust
 // Location no longer stores source
@@ -95,11 +95,12 @@ pub struct Location {
     // ... no source field
 }
 
-// SourceFile now owns the source
-pub struct SourceFile {
+// SourceFileData now owns the source (one copy per file)
+pub struct SourceFileData {
     pub source: String,      // <-- Single source of truth
+    pub defs: Vec<DefId>,
     pub directives: Vec<Directive>,
-    pub definitions: Vec<Definition>,
+    pub location: Location,
 }
 ```
 
@@ -123,49 +124,71 @@ Benefits of `Copy`:
 
 ### Source Text Retrieval
 
-To get source text for a node, use the Arena's convenience API:
+To get source text for a node, use the `AstArena`'s convenience API:
 
 ```rust
-// New approach: query the arena
-let source_text = arena.get_node_source(node_id);
+use inference_ast::ids::NodeId;
+
+// Query the arena with a NodeId
+let source_text = arena.get_node_source(NodeId::Def(def_id));
 ```
 
 Internally, this:
-1. Finds the node by ID
-2. Walks up to the root `SourceFile` (O(depth))
-3. Slices `SourceFile.source` using the byte offsets (O(1))
+1. Gets the node's `Location` via `arena.node_location(node_id)`
+2. Finds the enclosing `SourceFileData` via `arena.find_source_file_for_node(node_id)`
+3. Slices `SourceFileData.source` using the byte offsets — O(1)
 
 ```rust
-pub fn get_node_source(&self, node_id: u32) -> Option<&str> {
-    // 1. Find the enclosing SourceFile
-    let source_file_id = self.find_source_file_for_node(node_id)?;
-
-    // 2. Get the node's location
-    let node = self.nodes.get(&node_id)?;
-    let location = node.location();
-
-    // 3. Get the SourceFile's source string
-    let source_file_node = self.nodes.get(&source_file_id)?;
-    let source = match source_file_node {
-        AstNode::Ast(Ast::SourceFile(sf)) => &sf.source,
-        _ => return None,
-    };
-
-    // 4. Slice the source using byte offsets
+pub fn get_node_source(&self, node_id: NodeId) -> Option<&str> {
+    // 1. Get the node's location
+    let location = self.node_location(node_id)?;
     let start = location.offset_start as usize;
     let end = location.offset_end as usize;
+    if start > end {
+        return None;
+    }
 
-    source.get(start..end)
+    // 2. Find the enclosing source file
+    let sf_id = self.find_source_file_for_node(node_id)?;
+
+    // 3. Slice the source using byte offsets
+    self[sf_id].source.get(start..end)
 }
 ```
 
+`find_source_file_for_node` works as follows:
+- For `NodeId::SourceFile(id)`: returns `Some(id)` immediately
+- For `NodeId::Def(def_id)`: delegates to `find_source_file_for_def`, which searches the `defs` lists of all source files (including nested methods inside structs)
+- For other nodes: uses byte-offset matching against all source files
+
+### Node Location Retrieval
+
+`node_location` dispatches on the `NodeId` variant and reads from the corresponding arena:
+
+```rust
+pub fn node_location(&self, node_id: NodeId) -> Option<Location> {
+    match node_id {
+        NodeId::SourceFile(id) => self.source_files.get(id).map(|n| n.location),
+        NodeId::Def(id)        => self.defs.get(id).map(|n| n.location),
+        NodeId::Stmt(id)       => self.stmts.get(id).map(|n| n.location),
+        NodeId::Expr(id)       => self.exprs.get(id).map(|n| n.location),
+        NodeId::Type(id)       => self.types.get(id).map(|n| n.location),
+        NodeId::Block(id)      => self.blocks.get(id).map(|n| n.location),
+        NodeId::Ident(id)      => self.idents.get(id).map(|n| n.location),
+    }
+}
+```
+
+Returns `None` only if the index is out of range.
+
 ### Complexity Analysis
 
-- **Best case**: Node is a `SourceFile` → O(1)
-- **Average case**: Node is 5-10 levels deep → O(10)
-- **Worst case**: Deeply nested expression → O(20)
+- **`node_location`**: O(1) — single arena lookup
+- **`find_source_file_for_def`**: O(d × n) worst case, where d is nesting depth and n is number of defs; in practice O(n) for shallow hierarchies
+- **`find_source_file_for_node` (non-def)**: O(n) — byte-offset matching across all source files
+- **`get_node_source` slice**: O(1) after the source file is found
 
-For compiler workloads, this is negligible compared to the memory savings.
+For compiler workloads, the total cost is negligible compared to type-checking or code generation.
 
 ### Byte Offset Semantics
 
@@ -180,8 +203,8 @@ fn add(a: i32) -> i32 { return a; }
 Function location:
 ```
 offset_start: 0
-offset_end: 39
-source[0..39] == "fn add(a: i32) -> i32 { return a; }"
+offset_end: 36
+source[0..36] == "fn add(a: i32) -> i32 { return a; }"
 ```
 
 Identifier "a" location:
@@ -206,10 +229,10 @@ source[7..8] == "a"
 Passing `Location` by value is now cheaper than passing by reference:
 
 ```rust
-// Before: passing by reference (8 bytes pointer)
+// Before: passing by reference (8 bytes pointer + indirection)
 fn analyze(loc: &Location) { ... }
 
-// After: passing by value (24 bytes on stack)
+// After: passing by value (24 bytes on stack, no pointer)
 fn analyze(loc: Location) { ... }  // Often faster!
 ```
 
@@ -228,18 +251,19 @@ Measured on `examples/fib.inf` (200-node AST):
 | Clone Location | 15 ns | 2 ns | 7.5× |
 | Get source text | 8 ns | 45 ns | 0.18× |
 
-Note: Source text retrieval is slower (tree walk required), but this operation is rare (only during error reporting).
+Note: Source text retrieval is slower because it requires a source file lookup rather than a direct field read. This is acceptable because source retrieval only occurs during error reporting.
 
 ## Usage Patterns
 
 ### Error Reporting
 
 ```rust
-use inference_ast::nodes::AstNode;
+use inference_ast::arena::AstArena;
+use inference_ast::ids::NodeId;
 
-fn report_type_error(arena: &Arena, node_id: u32) {
-    let node = arena.find_node(node_id).expect("Node not found");
-    let location = node.location();  // Copy, not reference!
+fn report_type_error(arena: &AstArena, node_id: NodeId) {
+    let location = arena.node_location(node_id)
+        .expect("Node not found");  // Location is Copy
     let source = arena.get_node_source(node_id).unwrap_or("<unknown>");
 
     eprintln!(
@@ -253,6 +277,8 @@ fn report_type_error(arena: &Arena, node_id: u32) {
 
 ### Range Formatting
 
+`Location` implements `Display` as `line:column`:
+
 ```rust
 impl Display for Location {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -261,150 +287,162 @@ impl Display for Location {
 }
 
 // Usage
-let loc = node.location();
+let loc = arena[stmt_id].location;  // Copy — no borrow needed
 println!("Error at {}", loc);  // "Error at 5:12"
 ```
 
 ### Span Utilities
 
-Common operations on locations:
+Common operations on locations that you can implement where needed:
 
 ```rust
-impl Location {
-    /// Check if this location contains another location
-    pub fn contains(&self, other: &Location) -> bool {
-        self.offset_start <= other.offset_start
-            && other.offset_end <= self.offset_end
-    }
+use inference_ast::nodes::Location;
 
-    /// Check if this location overlaps with another
-    pub fn overlaps(&self, other: &Location) -> bool {
-        self.offset_start < other.offset_end
-            && other.offset_start < self.offset_end
-    }
+/// Check if this location contains another location (by byte offset).
+fn contains(outer: Location, inner: Location) -> bool {
+    outer.offset_start <= inner.offset_start
+        && inner.offset_end <= outer.offset_end
+}
 
-    /// Get the length in bytes
-    pub fn byte_length(&self) -> u32 {
-        self.offset_end - self.offset_start
-    }
+/// Check if two locations overlap.
+fn overlaps(a: Location, b: Location) -> bool {
+    a.offset_start < b.offset_end && b.offset_start < a.offset_end
+}
 
-    /// Get the span in lines
-    pub fn line_span(&self) -> u32 {
-        self.end_line - self.start_line + 1
-    }
+/// Get the length in bytes.
+fn byte_length(loc: Location) -> u32 {
+    loc.offset_end - loc.offset_start
 }
 ```
 
 ### Storing Locations
 
-Since `Location` is `Copy`, you can store it by value:
+Since `Location` is `Copy`, store it by value in structs — no lifetime annotation or smart pointer needed:
 
 ```rust
+use inference_ast::nodes::Location;
+
 struct TypeError {
-    location: Location,  // Not &Location or Rc<Location>
+    location: Location,  // Not &Location, not Arc<Location>
     message: String,
 }
 
 impl TypeError {
-    fn new(node: &AstNode, message: String) -> Self {
-        TypeError {
-            location: node.location(),  // Copied, not borrowed
-            message,
-        }
+    fn new(location: Location, message: String) -> Self {
+        TypeError { location, message }
     }
 }
+```
+
+To extract a location from any node:
+
+```rust
+use inference_ast::ids::NodeId;
+
+// From a typed index — direct field access
+let loc: Location = arena[stmt_id].location;
+
+// From a NodeId — dispatches to the right Vec
+let loc: Option<Location> = arena.node_location(NodeId::Stmt(stmt_id));
 ```
 
 ## Migration Guide
 
-If you have code using the old `Location` API, here's how to migrate:
+If you have code written against an older API, here is how to migrate:
 
-### Before: Direct Source Access
-
-```rust
-// Old code (no longer works)
-fn print_source(loc: &Location) {
-    println!("{}", loc.source);  // Field removed!
-}
-```
-
-### After: Arena-Based Retrieval
+### Before: `Arena` with `find_node` and `u32` IDs
 
 ```rust
-// New code
+// Old code (no longer exists)
 fn print_source(arena: &Arena, node_id: u32) {
-    if let Some(source) = arena.get_node_source(node_id) {
-        println!("{}", source);
+    if let Some(node) = arena.find_node(node_id) {
+        let source = arena.get_node_source(node_id);
+        println!("{:?}: {:?}", node, source);
     }
 }
 ```
 
-### Before: Cloning Location
+### After: `AstArena` with typed IDs and `NodeId`
 
 ```rust
-// Old code: expensive clone
-let loc_copy = node.location.clone();
-```
+use inference_ast::arena::AstArena;
+use inference_ast::ids::NodeId;
 
-### After: Cheap Copy
-
-```rust
-// New code: implicit copy (2ns instead of 15ns)
-let loc_copy = node.location();
-```
-
-### Before: Storing Location References
-
-```rust
-// Old code: lifetime complications
-struct Analyzer<'a> {
-    loc: &'a Location,
+fn print_source(arena: &AstArena, node_id: NodeId) {
+    if let Some(loc) = arena.node_location(node_id) {
+        let source = arena.get_node_source(node_id).unwrap_or("<unavailable>");
+        println!("At {}: {}", loc, source);
+    }
 }
 ```
 
-### After: Storing Location by Value
+### Before: Accessing Source from `SourceFile`
 
 ```rust
-// New code: no lifetime needed
-struct Analyzer {
-    loc: Location,  // Copy type, no borrow
+// Old code — SourceFile was the node type
+if let AstNode::Ast(Ast::SourceFile(sf)) = node {
+    println!("Source: {}", sf.source);
 }
+```
+
+### After: Accessing Source from `SourceFileData`
+
+```rust
+use inference_ast::ids::SourceFileId;
+
+// Direct index access — no node enum wrapper
+let sf: &SourceFileData = &arena[sf_id];
+println!("Source: {}", sf.source);
+```
+
+### Before: Getting Location from a Node
+
+```rust
+// Old code — every node had a .location() method
+let location = node.location();
+```
+
+### After: Location is a Public Field
+
+```rust
+// New code — location is a plain field on the wrapper struct
+let location = arena[stmt_id].location;          // Copy
+let location = arena[def_id].location;           // Copy
+
+// Or for a NodeId:
+let location = arena.node_location(node_id);     // Option<Location>
 ```
 
 ## Testing
 
-The optimization is thoroughly tested in `tests/src/ast/arena.rs`:
+The optimization is tested in `tests/src/ast/arena.rs`:
 
 ```rust
 #[test]
-fn test_get_node_source_returns_function_source() {
-    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+fn test_location_offsets() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let functions = arena.functions();
-    let function = &functions[0];
-
-    let function_source = arena.get_node_source(function.id);
-    assert_eq!(
-        function_source.unwrap(),
-        "fn add(a: i32, b: i32) -> i32 { return a + b; }"
-    );
+    let func_ids = arena.function_def_ids();
+    let func_loc = arena[func_ids[0]].location;
+    assert_eq!(func_loc.offset_start, 0);
+    assert!(func_loc.offset_end > 0, "Function should have non-zero end offset");
 }
 ```
 
 Run location-related tests:
 
 ```bash
-cargo test -p inference-ast test_get_node_source
-cargo test -p inference-ast test_find_source_file
+cargo test -p inference-tests ast::arena
+cargo test -p inference-ast
 ```
 
 ## Related Optimizations
 
 This change enabled other optimizations:
 
-1. **Parent map optimization**: O(1) parent lookup with `FxHashMap`
-2. **Reduced TypeChecker clones**: No longer clones heavy `Location` structs
+1. **Send + Sync on AstArena**: No `RefCell` or `Arc` means the arena can be shared across threads
+2. **Reduced clones in type-checker**: No longer clones heavy `Location` structs
 3. **Improved cache locality**: Stack-allocated locations reduce cache misses
 
 See [Architecture Guide](architecture.md) for the complete picture.
@@ -416,23 +454,23 @@ See [Architecture Guide](architecture.md) for the complete picture.
 ```rust
 // Considered but rejected
 pub struct Location<'a> {
-    source: &'a str,  // <-- Adds lifetime parameter
+    source: &'a str,  // <-- Adds lifetime parameter to everything
     // ...
 }
 ```
 
 Problems:
-- Lifetime parameters everywhere: `Arena<'a>`, `AstNode<'a>`, etc.
+- Lifetime parameters propagate everywhere: `AstArena<'a>`, every node struct, etc.
 - Borrow checker fights during tree traversal
-- Can't store in collections easily
+- Cannot store in collections easily
 - Complicates serialization
 
-### Why Not Use `Rc<String>`?
+### Why Not Use `Arc<String>`?
 
 ```rust
 // Considered but rejected
 pub struct Location {
-    source: Rc<String>,  // <-- Reference counting overhead
+    source: Arc<String>,  // <-- Reference counting overhead
     // ...
 }
 ```
@@ -441,28 +479,28 @@ Problems:
 - Reference counting overhead on every clone
 - Still 8 bytes per location (pointer size)
 - Not `Copy`, so cloning is explicit
-- Thread-safety requires `Arc` (even more overhead)
+- Thread safety requires `Arc` — even more overhead than `Rc`
 
 ### Why Byte Offsets?
 
 Alternatives considered:
 - **Character offsets**: Requires UTF-8 iteration (slow)
-- **Line/column only**: Can't slice source directly
-- **Tree-sitter node**: Requires keeping tree-sitter tree alive
+- **Line/column only**: Cannot slice source directly
+- **Tree-sitter node**: Requires keeping the tree-sitter tree alive alongside the arena
 
 Byte offsets are:
 - Fast (direct memory access)
-- UTF-8 friendly (Rust strings are UTF-8)
-- Precise (unambiguous position)
+- UTF-8 friendly (Rust strings are valid UTF-8; `str::get(start..end)` handles boundaries correctly)
+- Precise (unambiguous position within the source string)
 
 ## Future Considerations
 
 Potential further optimizations:
 
-1. **Compressed locations**: Use 16-bit offsets for small files
-2. **Relative offsets**: Store offset relative to parent (smaller numbers)
-3. **Line map**: Cache line boundaries for faster line/column lookup
-4. **Span interning**: Deduplicate identical spans
+1. **Compressed locations**: Use 16-bit offsets for small files (< 64KB)
+2. **Relative offsets**: Store offset relative to parent node (smaller numbers, delta encoding)
+3. **Line map**: Cache line boundaries for faster line/column lookup without storing redundant data
+4. **Span interning**: Deduplicate identical spans when many nodes share the same location
 
 ## Conclusion
 
@@ -471,7 +509,7 @@ The Location optimization demonstrates how small design changes can have signifi
 - **98% memory reduction** with no API breakage
 - **Simpler code**: `Copy` instead of `Clone`
 - **Better performance**: Stack allocation and cache locality
-- **Cleaner design**: Single source of truth in `SourceFile`
+- **Cleaner design**: Single source of truth in `SourceFileData`
 
 This optimization is a prime example of applying the "data-oriented design" philosophy to compiler construction.
 

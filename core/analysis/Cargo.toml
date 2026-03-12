@@ -1,0 +1,15 @@
+[package]
+name = "inference-analysis"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Static analysis pass for the Inference compiler"
+keywords = ["compiler", "analysis", "control-flow", "verification"]
+categories = ["compilers"]
+
+[dependencies]
+inference-ast.workspace = true
+inference-type-checker.workspace = true
+thiserror.workspace = true

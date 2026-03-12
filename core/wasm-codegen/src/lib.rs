@@ -46,6 +46,8 @@
 
 #![warn(clippy::pedantic)]
 
+use inference_ast::ids::DefId;
+use inference_ast::nodes::Def;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::compiler::Compiler;
@@ -60,17 +62,6 @@ pub use output::CodegenOutput;
 pub use target::{CompilationMode, OptLevel, Target};
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
-///
-/// This function builds a complete WASM module in-process via `wasm-encoder` and returns
-/// a [`CodegenOutput`] containing the binary bytes and compilation metadata.
-///
-/// # Validation
-///
-/// - **`Proof` mode with non-`Wasm32` target**: Rejected. Proof mode emits custom 0xfc
-///   non-deterministic instructions that only the Wasm32 target supports.
-/// - **`Soroban` target with non-det operations (other than `spec`)**: Rejected. The
-///   Soroban VM cannot execute custom 0xfc WebAssembly instructions. `spec` nodes are
-///   safe because they are stripped in `compile` mode.
 ///
 /// # Errors
 ///
@@ -93,17 +84,19 @@ pub fn codegen(
         ));
     }
 
+    let arena = typed_context.arena();
+
     if target == Target::Soroban {
-        for source_file in &typed_context.source_files() {
-            for func_def in source_file.function_definitions() {
-                if func_def.is_non_det() {
+        for source_file in typed_context.source_files() {
+            for &def_id in &source_file.defs {
+                if arena.def_is_non_det(def_id) {
                     cov_mark::hit!(wasm_codegen_soroban_rejects_nondet_function);
+                    let fn_name = arena.def_name(def_id);
                     return Err(anyhow::anyhow!(
                         "Soroban target does not support non-deterministic operations. \
-                         Function '{}' contains non-deterministic constructs (uzumaki, \
+                         Function '{fn_name}' contains non-deterministic constructs (uzumaki, \
                          forall, exists, assume, or unique blocks) that produce custom \
                          0xfc WebAssembly instructions incompatible with the Soroban VM.",
-                        func_def.name()
                     ));
                 }
             }
@@ -117,7 +110,7 @@ pub fn codegen(
         todo!("Multi-file support not yet implemented");
     }
 
-    if !typed_context.source_files().is_empty() {
+    if typed_context.source_files().len() != 0 {
         traverse_t_ast_with_compiler(typed_context, &mut compiler);
     }
 
@@ -135,30 +128,18 @@ pub fn codegen(
 }
 
 /// Traverses the typed AST and compiles all function definitions.
-///
-/// This function iterates through all source files in the typed context and generates
-/// WASM bytecode for each function definition. Currently, only function definitions at
-/// the module level are compiled; other top-level constructs (types, constants, etc.)
-/// are not yet supported.
-///
-/// # Parameters
-///
-/// - `typed_context` - Typed AST with type information for all nodes
-/// - `compiler` - WASM compiler instance for binary generation
-///
-/// # Current Limitations
-///
-/// - Only function definitions are compiled
-/// - Type definitions, constants, and other top-level items are ignored
-/// - Multi-file compilation is not fully tested (see `codegen` function)
 fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
-    for source_file in &typed_context.source_files() {
-        let func_defs = source_file.function_definitions();
-        // Pre-scan: build function name-to-index map so that forward references
-        // (callee defined after caller in source) resolve correctly at call sites.
-        compiler.build_func_name_to_idx(&func_defs);
-        for func_def in func_defs {
-            compiler.visit_function_definition(&func_def, typed_context);
+    let arena = typed_context.arena();
+    for source_file in typed_context.source_files() {
+        let func_def_ids: Vec<DefId> = source_file
+            .defs
+            .iter()
+            .copied()
+            .filter(|&def_id| matches!(arena[def_id].kind, Def::Function { .. }))
+            .collect();
+        compiler.build_func_name_to_idx(arena, &func_def_ids);
+        for &def_id in &func_def_ids {
+            compiler.visit_function_definition(def_id, arena, typed_context);
         }
     }
 }

@@ -15,23 +15,23 @@
 //!
 //! ## Default Return Types
 //!
-//! Functions without an explicit return type default to the unit type. This is
-//! represented using `Type::Simple(SimpleTypeKind::Unit)`, which provides a
-//! lightweight value-based representation without heap allocation.
+//! Functions without an explicit return type default to the unit type, represented
+//! as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::sync::Weak;
+
+use std::sync::Arc;
 
 use anyhow::bail;
 
 use crate::type_info::{TypeInfo, TypeInfoKind};
-use inference_ast::arena::Arena;
-use inference_ast::nodes::{
-    ArgumentType, Definition, Location, ModuleDefinition, SimpleTypeKind, Type, Visibility,
-};
+use inference_ast::arena::AstArena;
+use inference_ast::ids::DefId;
+use inference_ast::nodes::{ArgKind, Def, Location, Visibility};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-pub(crate) type ScopeRef = Rc<RefCell<Scope>>;
+pub(crate) type ScopeRef = Arc<RefCell<Scope>>;
 pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
 
 #[derive(Debug, Clone)]
@@ -267,6 +267,7 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
+    #[allow(clippy::arc_with_non_send_sync)]
     #[must_use = "scope constructor returns a new scope that should be used"]
     pub(crate) fn new(
         id: u32,
@@ -275,7 +276,7 @@ impl Scope {
         visibility: Visibility,
         parent: Option<WeakScopeRef>,
     ) -> ScopeRef {
-        Rc::new(RefCell::new(Self {
+        Arc::new(RefCell::new(Self {
             id,
             name: name.to_string(),
             full_path,
@@ -438,10 +439,10 @@ impl SymbolTable {
             Visibility::Public,
             None,
         );
-        self.scopes.insert(self.next_scope_id, Rc::clone(&root));
-        self.mod_scopes.insert(String::new(), Rc::clone(&root));
+        self.scopes.insert(self.next_scope_id, Arc::clone(&root));
+        self.mod_scopes.insert(String::new(), Arc::clone(&root));
         self.next_scope_id += 1;
-        self.root_scope = Some(Rc::clone(&root));
+        self.root_scope = Some(Arc::clone(&root));
         self.current_scope = Some(root);
     }
 
@@ -491,13 +492,13 @@ impl SymbolTable {
             None => name.to_string(),
         };
 
-        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.as_ref().map(Rc::downgrade));
+        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.as_ref().map(Arc::downgrade));
 
         if let Some(current) = &parent {
-            current.borrow_mut().add_child(Rc::clone(&new_scope));
+            current.borrow_mut().add_child(Arc::clone(&new_scope));
         }
 
-        self.scopes.insert(scope_id, Rc::clone(&new_scope));
+        self.scopes.insert(scope_id, Arc::clone(&new_scope));
         self.current_scope = Some(new_scope);
         scope_id
     }
@@ -509,16 +510,16 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn register_type(&mut self, name: &str, ty: Option<&Type>) -> anyhow::Result<()> {
+    pub(crate) fn register_type(
+        &mut self,
+        name: &str,
+        ty: Option<TypeInfo>,
+    ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
-            let type_info = if let Some(ty) = ty {
-                TypeInfo::new(ty)
-            } else {
-                TypeInfo {
-                    kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
-                    type_params: vec![],
-                }
-            };
+            let type_info = ty.unwrap_or_else(|| TypeInfo {
+                kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
+                type_params: vec![],
+            });
             scope
                 .borrow_mut()
                 .insert_symbol(name, Symbol::TypeAlias(type_info))
@@ -622,8 +623,8 @@ impl SymbolTable {
         &mut self,
         name: &str,
         type_params: Vec<String>,
-        param_types: &[Type],
-        return_type: &Type,
+        param_types: Vec<TypeInfo>,
+        return_type: TypeInfo,
     ) -> Result<(), String> {
         self.register_function_with_visibility(
             name,
@@ -638,29 +639,20 @@ impl SymbolTable {
         &mut self,
         name: &str,
         type_params: Vec<String>,
-        param_types: &[Type],
-        return_type: &Type,
+        param_types: Vec<TypeInfo>,
+        return_type: TypeInfo,
         visibility: Visibility,
     ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
-            // Use type_params when constructing TypeInfo so that
-            // type parameters like T, U are recognized as Generic types.
-            // Then resolve Custom(name) to Struct(name) or Enum(name)
-            // using the symbol table, so that parameter types match
-            // inferred argument types without a compatibility shim.
             let sig = FuncInfo {
                 name: name.to_string(),
-                type_params: type_params.clone(),
+                type_params,
                 param_types: param_types
-                    .iter()
-                    .map(|t| {
-                        let ti = TypeInfo::new_with_type_params(t, &type_params);
-                        self.resolve_custom_type(ti)
-                    })
+                    .into_iter()
+                    .map(|ti| self.resolve_custom_type(ti))
                     .collect(),
-                return_type: self
-                    .resolve_custom_type(TypeInfo::new_with_type_params(return_type, &type_params)),
+                return_type: self.resolve_custom_type(return_type),
                 visibility,
                 definition_scope_id: scope_id,
             };
@@ -769,11 +761,11 @@ impl SymbolTable {
     }
 
     #[must_use = "returns the scope ID which may be needed for later reference"]
-    pub(crate) fn enter_module(&mut self, module: &Rc<ModuleDefinition>) -> u32 {
-        let scope_id = self.push_scope_with_name(&module.name(), module.visibility.clone());
+    pub(crate) fn enter_module(&mut self, name: &str, visibility: Visibility) -> u32 {
+        let scope_id = self.push_scope_with_name(name, visibility);
         if let Some(scope) = self.scopes.get(&scope_id) {
             let full_path = scope.borrow().full_path.clone();
-            self.mod_scopes.insert(full_path, Rc::clone(scope));
+            self.mod_scopes.insert(full_path, Arc::clone(scope));
         }
         scope_id
     }
@@ -897,18 +889,18 @@ impl SymbolTable {
     pub(crate) fn load_external_module(
         &mut self,
         module_name: &str,
-        arena: &Arena,
+        arena: &AstArena,
     ) -> anyhow::Result<u32> {
         let scope_id = self.push_scope_with_name(module_name, Visibility::Public);
 
         if let Some(scope) = self.scopes.get(&scope_id) {
             let full_path = scope.borrow().full_path.clone();
-            self.mod_scopes.insert(full_path, Rc::clone(scope));
+            self.mod_scopes.insert(full_path, Arc::clone(scope));
         }
 
-        for source_file in arena.source_files() {
-            for definition in &source_file.definitions {
-                self.register_definition_from_external(definition)?;
+        for sf in arena.source_files() {
+            for &def_id in &sf.defs {
+                self.register_definition_from_external(arena, def_id)?;
             }
         }
 
@@ -918,69 +910,89 @@ impl SymbolTable {
     }
 
     /// Register a definition from an external module into the current scope.
-    ///
-    /// Currently handles: Struct, Enum, Spec, Function, Type.
-    /// Skips: Constant, ExternalFunction, Module (deferred to future phases).
     #[allow(dead_code)]
-    fn register_definition_from_external(&mut self, definition: &Definition) -> anyhow::Result<()> {
-        match definition {
-            Definition::Struct(s) => {
-                let fields: Vec<(String, TypeInfo, Visibility)> = s
-                    .fields
+    fn register_definition_from_external(
+        &mut self,
+        arena: &AstArena,
+        def_id: DefId,
+    ) -> anyhow::Result<()> {
+        let def_data = &arena[def_id];
+        match &def_data.kind {
+            Def::Struct {
+                name, vis, fields, ..
+            } => {
+                let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
                     .iter()
                     .map(|f| {
                         (
-                            f.name.name.clone(),
-                            TypeInfo::new(&f.type_),
+                            arena[f.name].name.clone(),
+                            TypeInfo::from_type_id(arena, f.ty),
                             Visibility::Private,
                         )
                     })
                     .collect();
-                self.register_struct(&s.name(), &fields, vec![], s.visibility.clone())?;
+                self.register_struct(
+                    &arena[*name].name,
+                    &field_infos,
+                    vec![],
+                    vis.clone(),
+                )?;
             }
-            Definition::Enum(e) => {
-                let variants: Vec<&str> = e.variants.iter().map(|v| v.name.as_str()).collect();
-                self.register_enum(&e.name(), &variants, e.visibility.clone())?;
+            Def::Enum {
+                name, vis, variants,
+            } => {
+                let variant_names: Vec<&str> =
+                    variants.iter().map(|v| arena[*v].name.as_str()).collect();
+                self.register_enum(&arena[*name].name, &variant_names, vis.clone())?;
             }
-            Definition::Spec(sp) => {
-                self.register_spec(&sp.name())?;
+            Def::Spec { name, .. } => {
+                self.register_spec(&arena[*name].name)?;
             }
-            Definition::Function(f) => {
-                let type_params = f
-                    .type_parameters
-                    .as_ref()
-                    .map(|tps| tps.iter().map(|p| p.name()).collect())
-                    .unwrap_or_default();
-                let param_types: Vec<_> = f
-                    .arguments
-                    .as_deref()
-                    .unwrap_or(&[])
+            Def::Function {
+                name,
+                vis,
+                type_params,
+                args,
+                returns,
+                ..
+            } => {
+                let tp_names: Vec<String> =
+                    type_params.iter().map(|p| arena[*p].name.clone()).collect();
+                let param_types: Vec<TypeInfo> = args
                     .iter()
-                    .filter_map(|a| match a {
-                        ArgumentType::Argument(arg) => Some(arg.ty.clone()),
-                        ArgumentType::IgnoreArgument(ig) => Some(ig.ty.clone()),
-                        ArgumentType::Type(t) => Some(t.clone()),
-                        ArgumentType::SelfReference(_) => None,
+                    .filter_map(|a| match &a.kind {
+                        ArgKind::Named { ty, .. } => {
+                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
+                        }
+                        ArgKind::Ignored { ty } => {
+                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
+                        }
+                        ArgKind::TypeOnly(ty) => {
+                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
+                        }
+                        ArgKind::SelfRef { .. } => None,
                     })
                     .collect();
-                let return_type = f
-                    .returns
-                    .clone()
-                    .unwrap_or(Type::Simple(SimpleTypeKind::Unit));
+                let return_type = returns
+                    .map(|r| TypeInfo::from_type_id_with_type_params(arena, r, &tp_names))
+                    .unwrap_or_default();
 
                 self.register_function_with_visibility(
-                    &f.name(),
-                    type_params,
-                    &param_types,
-                    &return_type,
-                    f.visibility.clone(),
+                    &arena[*name].name,
+                    tp_names,
+                    param_types,
+                    return_type,
+                    vis.clone(),
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
             }
-            Definition::Type(t) => {
-                self.register_type(&t.name(), Some(&t.ty))?;
+            Def::TypeAlias { name, ty, .. } => {
+                self.register_type(
+                    &arena[*name].name,
+                    Some(TypeInfo::from_type_id(arena, *ty)),
+                )?;
             }
-            Definition::Constant(_) | Definition::ExternalFunction(_) | Definition::Module(_) => {}
+            Def::Constant { .. } | Def::ExternFunction { .. } | Def::Module { .. } => {}
         }
         Ok(())
     }
@@ -1046,10 +1058,12 @@ mod tests {
 
         #[test]
         fn register_type_creates_type_alias_with_provided_type() {
-            use inference_ast::nodes::SimpleTypeKind;
             let mut table = SymbolTable::default();
-            let simple_type = Type::Simple(SimpleTypeKind::I32);
-            let result = table.register_type("MyInt", Some(&simple_type));
+            let type_info = TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            };
+            let result = table.register_type("MyInt", Some(type_info));
             assert!(result.is_ok());
             let lookup = table.lookup_type("MyInt");
             assert!(lookup.is_some());

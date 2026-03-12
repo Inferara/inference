@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use crate::arena::Arena;
+use crate::arena::AstArena;
 use crate::builder::Builder;
 use crate::errors::AstError;
 
@@ -18,7 +18,7 @@ pub struct ParsedModule {
     /// The name of the module (e.g., "std", "core")
     pub name: String,
     /// The parsed AST arena for this module
-    pub arena: Arena,
+    pub arena: AstArena,
     /// The root file path
     pub root_path: PathBuf,
 }
@@ -61,28 +61,12 @@ pub fn create_empty_prelude() -> ExternPrelude {
 /// Module names are normalized: hyphens are replaced with underscores to match
 /// Inference's convention for crate names.
 ///
-/// # Arguments
-/// * `module_dir` - Path to the module's root directory
-/// * `name` - Name of the module
-/// * `prelude` - The prelude registry to insert into
-///
 /// # Errors
-/// Returns an error if:
-/// - No module root file is found in standard locations
-/// - The source file cannot be read
-/// - The source code fails to parse
+/// Returns an error if the module root is not found, the source cannot be read,
+/// or parsing fails.
 ///
 /// # Panics
-/// Panics if the Inference grammar fails to load (should never happen with valid tree-sitter setup).
-///
-/// # Example
-/// ```ignore
-/// use inference_ast::extern_prelude::{create_empty_prelude, parse_external_module};
-/// use std::path::Path;
-///
-/// let mut prelude = create_empty_prelude();
-/// parse_external_module(Path::new("/path/to/mylib"), "mylib", &mut prelude)?;
-/// ```
+/// Panics if the Inference grammar fails to load.
 pub fn parse_external_module(
     module_dir: &Path,
     name: &str,

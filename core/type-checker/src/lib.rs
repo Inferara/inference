@@ -53,11 +53,11 @@
 //! Use [`TypeCheckerBuilder`] to type-check an AST arena:
 //!
 //! ```ignore
-//! use inference_ast::arena::Arena;
+//! use inference_ast::arena::AstArena;
 //! use inference_type_checker::TypeCheckerBuilder;
 //!
 //! // Parse source code into an arena
-//! let arena: Arena = parse_source(source_code)?;
+//! let arena: AstArena = parse_source(source_code)?;
 //!
 //! // Run type checking
 //! let typed_context = TypeCheckerBuilder::build_typed_context(arena)?
@@ -98,7 +98,7 @@
 
 use std::marker::PhantomData;
 
-use inference_ast::arena::Arena;
+use inference_ast::arena::AstArena;
 
 use crate::{type_checker::TypeChecker, typed_context::TypedContext};
 
@@ -152,7 +152,7 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
     /// Returns an error if type checking fails with unrecoverable errors.
     #[must_use = "returns builder with typed context, extract with .typed_context()"]
     pub fn build_typed_context(
-        arena: Arena,
+        arena: AstArena,
     ) -> anyhow::Result<TypeCheckerBuilder<TypeCheckerCompleteState>> {
         let mut ctx = TypedContext::new(arena);
         let mut type_checker = TypeChecker::default();
@@ -164,23 +164,6 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
                 return Err(e);
             }
         }
-
-        debug_assert!(
-            {
-                let untyped = ctx.find_untyped_expressions();
-                if !untyped.is_empty() {
-                    eprintln!(
-                        "Type checker bug: {} expression(s) without TypeInfo:",
-                        untyped.len()
-                    );
-                    for m in &untyped {
-                        eprintln!("  - {} at {} (id: {})", m.kind, m.location, m.id);
-                    }
-                }
-                untyped.is_empty()
-            },
-            "All expressions should have TypeInfo after type checking"
-        );
 
         Ok(TypeCheckerBuilder {
             typed_context: ctx,

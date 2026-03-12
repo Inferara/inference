@@ -1,761 +1,308 @@
 use crate::utils::build_ast;
-use inference_ast::arena::Arena;
-use inference_ast::nodes::{Ast, AstNode, Definition, Identifier, Location, Statement};
-
-/// Tests for Arena's parent-child lookup functionality with FxHashMap-based O(1) lookups.
+use inference_ast::arena::AstArena;
+use inference_ast::ids::*;
+use inference_ast::nodes::*;
 
 #[test]
-fn test_find_parent_node_returns_correct_parent() {
+fn test_source_files_parsed_correctly() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let source_file = &source_files[0];
-
-    let parent_id = arena.find_parent_node(function.id);
-    assert!(parent_id.is_some(), "Function should have a parent");
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files.len(), 1, "Should have 1 source file");
     assert_eq!(
-        parent_id.unwrap(),
-        source_file.id,
-        "Function's parent should be the SourceFile"
+        source_files[0].source, source,
+        "Source file should contain the original source"
     );
 }
 
 #[test]
-fn test_find_parent_node_root_returns_none() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
+fn test_function_def_ids_returns_functions() {
+    let source = r#"fn first() -> i32 { return 1; } fn second() -> i32 { return 2; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let source_file = &source_files[0];
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 2, "Should find 2 function definitions");
 
-    let parent_id = arena.find_parent_node(source_file.id);
-    assert!(
-        parent_id.is_none(),
-        "Root SourceFile node should have no parent (not Some(u32::MAX))"
-    );
-}
-
-#[test]
-fn test_find_parent_node_nonexistent_returns_none() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let nonexistent_id = u32::MAX - 1;
-    let parent_id = arena.find_parent_node(nonexistent_id);
-    assert!(
-        parent_id.is_none(),
-        "Non-existent node ID should return None"
-    );
-}
-
-#[test]
-fn test_find_parent_node_nested_hierarchy() {
-    let source = r#"fn outer() -> i32 { let x: i32 = 10; return x; }"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-
-    let statements = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-    assert_eq!(statements.len(), 1, "Expected 1 variable definition");
-
-    let var_def = &statements[0];
-    let var_parent_id = arena.find_parent_node(var_def.id());
-    assert!(
-        var_parent_id.is_some(),
-        "Variable definition should have a parent"
-    );
-
-    let block_node = arena.find_node(var_parent_id.unwrap());
-    assert!(block_node.is_some(), "Parent block should exist in arena");
-    assert!(
-        matches!(block_node.unwrap(), AstNode::Statement(Statement::Block(_))),
-        "Variable definition's parent should be a Block"
-    );
-}
-
-#[test]
-fn test_list_children_finds_direct_children() {
-    let source = r#"const A: i32 = 1; const B: i32 = 2; fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let source_file = &source_files[0];
-
-    let children = arena.get_children_cmp(source_file.id, |node| {
-        matches!(node, AstNode::Definition(_))
-    });
-
-    assert_eq!(
-        children.len(),
-        3,
-        "SourceFile should have 3 definition children (2 constants + 1 function)"
-    );
-}
-
-#[test]
-fn test_list_children_empty_for_leaf_node() {
-    let source = r#"const X: i32 = 42;"#;
-    let arena = build_ast(source.to_string());
-
-    let constants =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Constant(_))));
-    assert_eq!(constants.len(), 1);
-    let constant = &constants[0];
-
-    let children = arena.get_children_cmp(constant.id(), |_| true);
-
-    assert!(
-        !children.is_empty(),
-        "Constant definition should have child nodes (identifier, type, literal)"
-    );
-}
-
-#[test]
-fn test_get_children_cmp_traverses_tree() {
-    let source = r#"fn test() -> i32 { let a: i32 = 1; let b: i32 = 2; return a + b; }"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let all_statements =
-        arena.get_children_cmp(function.id, |node| matches!(node, AstNode::Statement(_)));
-
-    assert!(
-        all_statements.len() >= 3,
-        "Should find at least 3 statements (block + 2 var defs or returns)"
-    );
-}
-
-#[test]
-fn test_get_children_cmp_with_filter() {
-    let source = r#"fn test() -> bool { if (true) { return false; } return true; }"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files = arena.source_files();
-    let source_file = &source_files[0];
-
-    let definitions = arena.get_children_cmp(source_file.id, |node| {
-        matches!(node, AstNode::Definition(_))
-    });
-
-    assert_eq!(
-        definitions.len(),
-        1,
-        "Should find 1 function definition as direct child"
-    );
-
-    let functions = arena.functions();
-    let function = &functions[0];
-
-    let statements =
-        arena.get_children_cmp(function.id, |node| matches!(node, AstNode::Statement(_)));
-
-    assert!(
-        !statements.is_empty(),
-        "Should find statements when traversing from function"
-    );
-}
-
-#[test]
-fn test_find_parent_chain_to_root() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let return_statements =
-        arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Return(_))));
-    assert_eq!(return_statements.len(), 1);
-    let return_stmt = &return_statements[0];
-
-    let mut current_id = return_stmt.id();
-    let mut depth = 0;
-    const MAX_DEPTH: u32 = 10;
-
-    while let Some(parent_id) = arena.find_parent_node(current_id) {
-        current_id = parent_id;
-        depth += 1;
-        assert!(depth < MAX_DEPTH, "Parent chain should not be circular");
-    }
-
-    let root_node = arena.find_node(current_id);
-    assert!(root_node.is_some(), "Should reach a valid root node");
-    assert!(
-        matches!(root_node.unwrap(), AstNode::Ast(Ast::SourceFile(_))),
-        "Root node should be SourceFile"
-    );
-}
-
-#[test]
-fn test_multiple_source_definitions_have_same_parent() {
-    let source = r#"fn first() {} fn second() {} fn third() {}"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 3);
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let expected_parent_id = source_files[0].id;
-
-    for func in &functions {
-        let parent_id = arena.find_parent_node(func.id);
-        assert!(parent_id.is_some());
-        assert_eq!(
-            parent_id.unwrap(),
-            expected_parent_id,
-            "All top-level functions should have SourceFile as parent"
-        );
-    }
-}
-
-#[test]
-fn test_struct_fields_have_struct_as_ancestor() {
-    let source = r#"struct Point { x: i32; y: i32; }"#;
-    let arena = build_ast(source.to_string());
-
-    let struct_defs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
-    assert_eq!(struct_defs.len(), 1);
-    let struct_def = &struct_defs[0];
-
-    let struct_fields = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Misc(inference_ast::nodes::Misc::StructField(_))
-        )
-    });
-    assert_eq!(struct_fields.len(), 2, "Struct should have 2 fields");
-
-    for field in &struct_fields {
-        let parent_id = arena.find_parent_node(field.id());
-        assert!(parent_id.is_some(), "Field should have a parent");
-        assert_eq!(
-            parent_id.unwrap(),
-            struct_def.id(),
-            "Field's parent should be the struct definition"
-        );
-    }
-}
-
-#[test]
-fn test_children_lookup_consistency() {
-    let source = r#"fn test(a: i32, b: i32) -> i32 { return a + b; }"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let all_children = arena.get_children_cmp(function.id, |_| true);
-
-    for child in &all_children {
-        if child.id() == function.id {
-            continue;
-        }
-        let mut found_ancestor = false;
-        let mut current_id = child.id();
-
-        while let Some(parent_id) = arena.find_parent_node(current_id) {
-            if parent_id == function.id {
-                found_ancestor = true;
-                break;
-            }
-            current_id = parent_id;
-        }
-
+    for def_id in &func_ids {
         assert!(
-            found_ancestor,
-            "Every child returned by get_children_cmp should have the queried node as an ancestor"
+            matches!(arena[*def_id].kind, Def::Function { .. }),
+            "DefId should point to a function"
         );
     }
 }
 
-/// Tests for Arena's convenience API methods: `find_source_file_for_node` and `get_node_source`.
-/// These methods provide efficient source text retrieval for any AST node.
-
 #[test]
-fn test_get_node_source_returns_function_source() {
+fn test_def_name_returns_function_name() {
     let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
     let arena = build_ast(source.to_string());
 
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let function_source = arena.get_node_source(function.id);
-    assert!(
-        function_source.is_some(),
-        "Function source should be retrievable"
-    );
-    assert_eq!(
-        function_source.unwrap(),
-        "fn add(a: i32, b: i32) -> i32 { return a + b; }",
-        "Function source should match the original source text"
-    );
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 1);
+    assert_eq!(arena.def_name(func_ids[0]), "add");
 }
 
 #[test]
-fn test_get_node_source_for_nested_identifier() {
-    let source = r#"fn test() -> i32 { let value: i32 = 42; return value; }"#;
+fn test_multiple_definitions_have_correct_names() {
+    let source = r#"fn first() {} fn second() {} fn third() {}"#;
     let arena = build_ast(source.to_string());
 
-    let identifiers = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(inference_ast::nodes::Expression::Identifier(_))
-        )
-    });
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 3);
 
-    let value_identifier = identifiers.iter().find(|node| {
-        if let AstNode::Expression(inference_ast::nodes::Expression::Identifier(ident)) = node {
-            ident.name == "value"
-        } else {
-            false
-        }
-    });
+    let names: Vec<&str> = func_ids.iter().map(|&id| arena.def_name(id)).collect();
+    assert!(names.contains(&"first"));
+    assert!(names.contains(&"second"));
+    assert!(names.contains(&"third"));
+}
 
-    assert!(value_identifier.is_some(), "Should find 'value' identifier");
-    let ident_source = arena.get_node_source(value_identifier.unwrap().id());
-    assert!(
-        ident_source.is_some(),
-        "Identifier source should be retrievable"
-    );
+#[test]
+fn test_source_file_defs_include_all_definitions() {
+    let source = r#"const A: i32 = 1; const B: i32 = 2; fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files.len(), 1);
     assert_eq!(
-        ident_source.unwrap(),
-        "value",
-        "Identifier source should match"
+        source_files[0].defs.len(),
+        3,
+        "SourceFile should have 3 definitions (2 constants + 1 function)"
     );
 }
 
 #[test]
-fn test_get_node_source_for_source_file() {
+fn test_struct_definition_has_fields_and_methods() {
+    let source = r#"struct Point { x: i32; y: i32; }"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].defs.len(), 1);
+
+    let def_id = source_files[0].defs[0];
+    if let Def::Struct { name, fields, .. } = &arena[def_id].kind {
+        assert_eq!(arena[*name].name, "Point");
+        assert_eq!(fields.len(), 2, "Struct should have 2 fields");
+    } else {
+        panic!("Expected struct definition");
+    }
+}
+
+#[test]
+fn test_function_body_has_statements() {
+    let source = r#"fn test() -> i32 { let x: i32 = 10; return x; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 1);
+
+    if let Def::Function { body, .. } = &arena[func_ids[0]].kind {
+        let block = &arena[*body];
+        assert_eq!(
+            block.stmts.len(),
+            2,
+            "Function body should have 2 statements"
+        );
+    }
+}
+
+#[test]
+fn test_variable_definition_properties() {
+    let source = r#"fn test() { let x: i32 = 10; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    if let Def::Function { body, .. } = &arena[func_ids[0]].kind {
+        let block = &arena[*body];
+        assert_eq!(block.stmts.len(), 1);
+
+        let stmt_id = block.stmts[0];
+        if let Stmt::VarDef { name, ty, value, is_mut } = &arena[stmt_id].kind {
+            assert_eq!(arena[*name].name, "x");
+            assert!(matches!(arena[*ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
+            assert!(value.is_some());
+            assert!(!is_mut);
+        } else {
+            panic!("Expected variable definition");
+        }
+    }
+}
+
+#[test]
+fn test_return_statement_has_expression() {
+    let source = r#"fn test() -> i32 { return 42; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    if let Def::Function { body, .. } = &arena[func_ids[0]].kind {
+        let block = &arena[*body];
+        assert_eq!(block.stmts.len(), 1);
+
+        if let Stmt::Return { expr } = &arena[block.stmts[0]].kind {
+            if let Expr::NumberLiteral { value } = &arena[*expr].kind {
+                assert_eq!(value, "42");
+            } else {
+                panic!("Expected number literal in return");
+            }
+        } else {
+            panic!("Expected return statement");
+        }
+    }
+}
+
+#[test]
+fn test_binary_expression_structure() {
+    let source = r#"fn calc() -> i32 { return 10 + 20; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    if let Def::Function { body, .. } = &arena[func_ids[0]].kind {
+        let block = &arena[*body];
+        if let Stmt::Return { expr } = &arena[block.stmts[0]].kind {
+            if let Expr::Binary { left, right, op } = &arena[*expr].kind {
+                assert_eq!(*op, OperatorKind::Add);
+                assert!(matches!(arena[*left].kind, Expr::NumberLiteral { .. }));
+                assert!(matches!(arena[*right].kind, Expr::NumberLiteral { .. }));
+            } else {
+                panic!("Expected binary expression");
+            }
+        }
+    }
+}
+
+#[test]
+fn test_source_file_source_text() {
     let source = r#"fn main() -> i32 { return 0; }"#;
     let arena = build_ast(source.to_string());
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
-    let source_file = &source_files[0];
-
-    let file_source = arena.get_node_source(source_file.id);
-    assert!(
-        file_source.is_some(),
-        "SourceFile source should be retrievable"
-    );
     assert_eq!(
-        file_source.unwrap(),
-        source,
+        source_files[0].source, source,
         "SourceFile source should return the entire source text"
     );
 }
 
 #[test]
-fn test_get_node_source_nonexistent_returns_none() {
+fn test_location_offsets() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let nonexistent_id = u32::MAX - 1;
-    let result = arena.get_node_source(nonexistent_id);
-    assert!(result.is_none(), "Non-existent node ID should return None");
+    let func_ids = arena.function_def_ids();
+    let func_loc = arena[func_ids[0]].location;
+    assert_eq!(func_loc.offset_start, 0);
+    assert!(func_loc.offset_end > 0, "Function should have non-zero end offset");
 }
 
-#[test]
-fn test_get_node_source_for_binary_expression() {
-    let source = r#"fn calc() -> i32 { return 10 + 20; }"#;
-    let arena = build_ast(source.to_string());
-
-    let binary_expressions = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(inference_ast::nodes::Expression::Binary(_))
-        )
-    });
-
-    assert!(
-        !binary_expressions.is_empty(),
-        "Should find binary expression"
-    );
-    let binary_expr = &binary_expressions[0];
-
-    let expr_source = arena.get_node_source(binary_expr.id());
-    assert!(
-        expr_source.is_some(),
-        "Binary expression source should be retrievable"
-    );
-    assert_eq!(
-        expr_source.unwrap(),
-        "10 + 20",
-        "Binary expression source should match"
-    );
-}
+/// Tests for constant/struct/enum definitions
 
 #[test]
-fn test_get_node_source_for_return_statement() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
+fn test_constant_definition_structure() {
+    let source = r#"const X: i32 = 42;"#;
     let arena = build_ast(source.to_string());
 
-    let return_statements =
-        arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Return(_))));
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files[0].defs.len(), 1);
 
-    assert_eq!(return_statements.len(), 1, "Should find 1 return statement");
-    let return_stmt = &return_statements[0];
-
-    let stmt_source = arena.get_node_source(return_stmt.id());
-    assert!(
-        stmt_source.is_some(),
-        "Return statement source should be retrievable"
-    );
-    assert_eq!(
-        stmt_source.unwrap(),
-        "return 42;",
-        "Return statement source should match"
-    );
-}
-
-#[test]
-fn test_find_source_file_for_function_returns_correct_id() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let expected_source_file_id = source_files[0].id;
-
-    let found_source_file_id = arena.find_source_file_for_node(function.id);
-    assert!(
-        found_source_file_id.is_some(),
-        "Should find SourceFile for function"
-    );
-    assert_eq!(
-        found_source_file_id.unwrap(),
-        expected_source_file_id,
-        "Should return the correct SourceFile ID"
-    );
-}
-
-#[test]
-fn test_find_source_file_for_source_file_returns_self() {
-    let source = r#"fn test() {}"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let source_file = &source_files[0];
-
-    let found_id = arena.find_source_file_for_node(source_file.id);
-    assert!(found_id.is_some(), "SourceFile should find itself");
-    assert_eq!(
-        found_id.unwrap(),
-        source_file.id,
-        "SourceFile should return its own ID when queried"
-    );
-}
-
-#[test]
-fn test_find_source_file_for_nonexistent_returns_none() {
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let arena = build_ast(source.to_string());
-
-    let nonexistent_id = u32::MAX - 1;
-    let result = arena.find_source_file_for_node(nonexistent_id);
-    assert!(result.is_none(), "Non-existent node ID should return None");
-}
-
-#[test]
-fn test_get_node_source_zero_length_span() {
-    let source = r#"fn test() {}"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 1);
-    let function = &functions[0];
-
-    let func_source = arena.get_node_source(function.id);
-    assert!(
-        func_source.is_some(),
-        "Function with empty body should still have retrievable source"
-    );
-    assert_eq!(
-        func_source.unwrap(),
-        "fn test() {}",
-        "Function source should match"
-    );
-}
-
-#[test]
-fn test_find_source_file_for_deeply_nested_node() {
-    let source =
-        r#"fn outer() -> i32 { if (true) { let x: i32 = 1 + 2 + 3; return x; } return 0; }"#;
-    let arena = build_ast(source.to_string());
-
-    let source_files = arena.source_files();
-    assert_eq!(source_files.len(), 1);
-    let expected_source_file_id = source_files[0].id;
-
-    let binary_expressions = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(inference_ast::nodes::Expression::Binary(_))
-        )
-    });
-
-    assert!(
-        !binary_expressions.is_empty(),
-        "Should find binary expressions"
-    );
-
-    for expr in &binary_expressions {
-        let found_id = arena.find_source_file_for_node(expr.id());
-        assert!(
-            found_id.is_some(),
-            "Deeply nested expression should have SourceFile ancestor"
-        );
-        assert_eq!(
-            found_id.unwrap(),
-            expected_source_file_id,
-            "All nodes should have the same SourceFile ancestor"
-        );
+    let def_id = source_files[0].defs[0];
+    if let Def::Constant { name, ty, value, .. } = &arena[def_id].kind {
+        assert_eq!(arena[*name].name, "X");
+        assert!(matches!(arena[*ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
+        assert!(matches!(arena[*value].kind, Expr::NumberLiteral { .. }));
+    } else {
+        panic!("Expected constant definition");
     }
 }
 
 #[test]
-fn test_get_node_source_for_variable_definition() {
-    let source = r#"fn test() { let counter: i32 = 100; }"#;
-    let arena = build_ast(source.to_string());
-
-    let var_definitions = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-
-    assert_eq!(
-        var_definitions.len(),
-        1,
-        "Should find 1 variable definition"
-    );
-    let var_def = &var_definitions[0];
-
-    let def_source = arena.get_node_source(var_def.id());
-    assert!(
-        def_source.is_some(),
-        "Variable definition source should be retrievable"
-    );
-    assert_eq!(
-        def_source.unwrap(),
-        "let counter: i32 = 100;",
-        "Variable definition source should match"
-    );
-}
-
-#[test]
-fn test_get_node_source_for_struct_definition() {
-    let source = r#"struct Point { x: i32; y: i32; }"#;
-    let arena = build_ast(source.to_string());
-
-    let struct_defs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
-
-    assert_eq!(struct_defs.len(), 1, "Should find 1 struct definition");
-    let struct_def = &struct_defs[0];
-
-    let struct_source = arena.get_node_source(struct_def.id());
-    assert!(
-        struct_source.is_some(),
-        "Struct definition source should be retrievable"
-    );
-    assert_eq!(
-        struct_source.unwrap(),
-        "struct Point { x: i32; y: i32; }",
-        "Struct definition source should match"
-    );
-}
-
-#[test]
-fn test_get_node_source_multiple_functions() {
-    let source = r#"fn first() -> i32 { return 1; } fn second() -> i32 { return 2; }"#;
-    let arena = build_ast(source.to_string());
-
-    let functions = arena.functions();
-    assert_eq!(functions.len(), 2, "Should find 2 functions");
-
-    let first_source = arena.get_node_source(functions[0].id);
-    let second_source = arena.get_node_source(functions[1].id);
-
-    assert!(
-        first_source.is_some(),
-        "First function source should be retrievable"
-    );
-    assert!(
-        second_source.is_some(),
-        "Second function source should be retrievable"
-    );
-
-    let sources: Vec<&str> = vec![first_source.unwrap(), second_source.unwrap()];
-    assert!(
-        sources.contains(&"fn first() -> i32 { return 1; }"),
-        "Should find first function source"
-    );
-    assert!(
-        sources.contains(&"fn second() -> i32 { return 2; }"),
-        "Should find second function source"
-    );
-}
-
-/// Tests for `list_type_definitions()` method
-
-#[test]
-fn test_list_type_definitions_returns_type_aliases() {
+fn test_type_alias_definition() {
     let source = r#"type MyInt = i32;"#;
     let arena = build_ast(source.to_string());
 
-    let type_defs = arena.list_type_definitions();
-    assert_eq!(type_defs.len(), 1, "Should find 1 type definition");
-    assert_eq!(type_defs[0].name.name, "MyInt");
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files[0].defs.len(), 1);
+
+    let def_id = source_files[0].defs[0];
+    if let Def::TypeAlias { name, ty, .. } = &arena[def_id].kind {
+        assert_eq!(arena[*name].name, "MyInt");
+        assert!(matches!(arena[*ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
+    } else {
+        panic!("Expected type alias definition");
+    }
 }
 
 #[test]
-fn test_list_type_definitions_multiple() {
+fn test_multiple_type_aliases() {
     let source = r#"type MyInt = i32;
 type MyBool = bool;
 type MyArray = [i32; 10];"#;
     let arena = build_ast(source.to_string());
 
-    let type_defs = arena.list_type_definitions();
-    assert_eq!(type_defs.len(), 3, "Should find 3 type definitions");
-
-    let names: Vec<&str> = type_defs.iter().map(|td| td.name.name.as_str()).collect();
-    assert!(names.contains(&"MyInt"));
-    assert!(names.contains(&"MyBool"));
-    assert!(names.contains(&"MyArray"));
+    let source_files: Vec<_> = arena.source_files().collect();
+    let type_aliases: Vec<&DefData> = source_files[0]
+        .defs
+        .iter()
+        .map(|&id| &arena[id])
+        .filter(|d| matches!(d.kind, Def::TypeAlias { .. }))
+        .collect();
+    assert_eq!(type_aliases.len(), 3, "Should find 3 type definitions");
 }
 
 #[test]
-fn test_list_type_definitions_empty_when_no_types() {
+fn test_no_type_aliases_when_only_functions() {
     let source = r#"fn test() -> i32 { return 42; }"#;
     let arena = build_ast(source.to_string());
 
-    let type_defs = arena.list_type_definitions();
-    assert!(type_defs.is_empty(), "Should find no type definitions");
+    let source_files: Vec<_> = arena.source_files().collect();
+    let type_aliases: Vec<&DefData> = source_files[0]
+        .defs
+        .iter()
+        .map(|&id| &arena[id])
+        .filter(|d| matches!(d.kind, Def::TypeAlias { .. }))
+        .collect();
+    assert!(type_aliases.is_empty(), "Should find no type definitions");
 }
 
 #[test]
-fn test_list_type_definitions_mixed_with_other_definitions() {
+fn test_mixed_definitions() {
     let source = r#"const X: i32 = 42;
 type MyInt = i32;
 fn test() -> i32 { return X; }
 type MyBool = bool;"#;
     let arena = build_ast(source.to_string());
 
-    let type_defs = arena.list_type_definitions();
-    assert_eq!(
-        type_defs.len(),
-        2,
-        "Should find 2 type definitions among mixed definitions"
-    );
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files[0].defs.len(), 4, "Should have 4 total definitions");
+
+    let type_alias_count = source_files[0]
+        .defs
+        .iter()
+        .filter(|&&id| matches!(arena[id].kind, Def::TypeAlias { .. }))
+        .count();
+    assert_eq!(type_alias_count, 2, "Should find 2 type definitions among mixed definitions");
 }
 
-/// Tests for edge cases in `get_node_source()` - invalid offsets and edge cases
+/// Tests for empty arena
 
 #[test]
-fn test_get_node_source_with_manually_constructed_arena_invalid_source_file() {
-    let arena = Arena::default();
-    let result = arena.get_node_source(12345);
-    assert!(result.is_none(), "Empty arena should return None");
-}
-
-#[test]
-fn test_find_source_file_for_nonexistent_node_in_empty_arena() {
-    let arena = Arena::default();
-    let result = arena.find_source_file_for_node(99999);
+fn test_empty_arena_source_files() {
+    let arena = AstArena::default();
     assert!(
-        result.is_none(),
-        "Non-existent node in empty arena should return None"
-    );
-}
-
-#[test]
-fn test_find_parent_node_in_empty_arena() {
-    let arena = Arena::default();
-    let result = arena.find_parent_node(12345);
-    assert!(
-        result.is_none(),
-        "Empty arena should return None for parent lookup"
-    );
-}
-
-#[test]
-fn test_find_node_in_empty_arena() {
-    let arena = Arena::default();
-    let result = arena.find_node(12345);
-    assert!(
-        result.is_none(),
-        "Empty arena should return None for find_node"
-    );
-}
-
-#[test]
-fn test_get_children_cmp_on_nonexistent_node() {
-    let arena = Arena::default();
-    let children = arena.get_children_cmp(99999, |_| true);
-    assert!(
-        children.is_empty(),
-        "Non-existent node should return empty children"
-    );
-}
-
-#[test]
-fn test_filter_nodes_on_empty_arena() {
-    let arena = Arena::default();
-    let filtered = arena.filter_nodes(|_| true);
-    assert!(
-        filtered.is_empty(),
-        "Empty arena should return no filtered nodes"
-    );
-}
-
-#[test]
-fn test_source_files_on_empty_arena() {
-    let arena = Arena::default();
-    let source_files = arena.source_files();
-    assert!(
-        source_files.is_empty(),
+        arena.source_files().len() == 0,
         "Empty arena should return no source files"
     );
 }
 
 #[test]
-fn test_functions_on_empty_arena() {
-    let arena = Arena::default();
-    let functions = arena.functions();
+fn test_empty_arena_function_def_ids() {
+    let arena = AstArena::default();
     assert!(
-        functions.is_empty(),
+        arena.function_def_ids().is_empty(),
         "Empty arena should return no functions"
     );
 }
 
-#[test]
-fn test_list_type_definitions_on_empty_arena() {
-    let arena = Arena::default();
-    let type_defs = arena.list_type_definitions();
-    assert!(
-        type_defs.is_empty(),
-        "Empty arena should return no type definitions"
-    );
-}
-
-/// Tests for Arena::clone() functionality
+/// Tests for AstArena::clone() functionality
 
 #[test]
 fn test_arena_clone() {
@@ -770,13 +317,13 @@ fn test_arena_clone() {
     );
 
     assert_eq!(
-        arena.functions().len(),
-        cloned_arena.functions().len(),
+        arena.function_def_ids().len(),
+        cloned_arena.function_def_ids().len(),
         "Cloned arena should have same number of functions"
     );
 }
 
-/// Tests for Location with edge cases
+/// Tests for Location
 
 #[test]
 fn test_location_default_via_struct() {
@@ -789,50 +336,83 @@ fn test_location_default_via_struct() {
     assert_eq!(loc.end_column, 0);
 }
 
-/// Tests for Arena::add_node functionality
+/// Tests for alloc and index operations
 
 #[test]
-fn test_add_node_valid_succeeds() {
-    use std::rc::Rc;
-
-    let mut arena = Arena::default();
-    let identifier = Rc::new(Identifier::new(1, "valid".to_string(), Location::default()));
-    let node = AstNode::Expression(inference_ast::nodes::Expression::Identifier(identifier));
-
-    arena.add_node(node, u32::MAX);
-    assert!(
-        arena.find_node(1).is_some(),
-        "Added node should be retrievable"
-    );
+fn test_alloc_and_index_expr() {
+    let mut arena = AstArena::default();
+    let id = arena.exprs.alloc(ExprData {
+        location: Location::default(),
+        kind: Expr::NumberLiteral {
+            value: "42".to_string(),
+        },
+    });
+    assert!(matches!(arena[id].kind, Expr::NumberLiteral { .. }));
 }
 
 #[test]
-fn test_add_node_with_parent_creates_relationship() {
-    use std::rc::Rc;
+fn test_alloc_and_index_ident() {
+    let mut arena = AstArena::default();
+    let id = arena.idents.alloc(Ident {
+        location: Location::default(),
+        name: "foo".to_string(),
+    });
+    assert_eq!(arena[id].name, "foo");
+}
 
-    let mut arena = Arena::default();
+/// Tests for function with return type and arguments
 
-    let parent_ident = Rc::new(Identifier::new(
-        1,
-        "parent".to_string(),
-        Location::default(),
-    ));
-    let parent_node =
-        AstNode::Expression(inference_ast::nodes::Expression::Identifier(parent_ident));
-    arena.add_node(parent_node, u32::MAX);
+#[test]
+fn test_function_return_type() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
 
-    let child_ident = Rc::new(Identifier::new(2, "child".to_string(), Location::default()));
-    let child_node = AstNode::Expression(inference_ast::nodes::Expression::Identifier(child_ident));
-    arena.add_node(child_node, 1);
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 1);
 
-    assert_eq!(
-        arena.find_parent_node(2),
-        Some(1),
-        "Child should have parent"
-    );
-    assert_eq!(
-        arena.find_parent_node(1),
-        None,
-        "Root node should have no parent"
-    );
+    if let Def::Function { returns, .. } = &arena[func_ids[0]].kind {
+        let ret_ty = returns.expect("Should have return type");
+        assert!(matches!(arena[ret_ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
+    }
+}
+
+#[test]
+fn test_function_arguments() {
+    let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    if let Def::Function { args, .. } = &arena[func_ids[0]].kind {
+        assert_eq!(args.len(), 2);
+        for arg in args {
+            if let ArgKind::Named { ty, .. } = &arg.kind {
+                assert!(matches!(arena[*ty].kind, TypeNode::Simple(SimpleTypeKind::I32)));
+            }
+        }
+    }
+}
+
+#[test]
+fn test_multiple_functions_source() {
+    let source = r#"fn first() -> i32 { return 1; } fn second() -> i32 { return 2; }"#;
+    let arena = build_ast(source.to_string());
+
+    let func_ids = arena.function_def_ids();
+    assert_eq!(func_ids.len(), 2, "Should find 2 functions");
+
+    let names: Vec<&str> = func_ids.iter().map(|&id| arena.def_name(id)).collect();
+    assert!(names.contains(&"first"));
+    assert!(names.contains(&"second"));
+}
+
+/// Test directives are preserved
+
+#[test]
+fn test_directives_parsed() {
+    let source = r#"use inference::std;"#;
+    let arena = build_ast(source.to_string());
+
+    let source_files: Vec<_> = arena.source_files().collect();
+    assert_eq!(source_files.len(), 1);
+    assert_eq!(source_files[0].directives.len(), 1);
 }

@@ -1,6 +1,6 @@
 # Arena API Guide
 
-Comprehensive reference for the Arena API with practical examples for all experience levels.
+Comprehensive reference for the `AstArena` API with practical examples for all experience levels.
 
 ## Table of Contents
 
@@ -19,54 +19,71 @@ Comprehensive reference for the Arena API with practical examples for all experi
 
 To understand this guide, you should be familiar with:
 
-- Basic Rust concepts (ownership, borrowing, Option types)
+- Basic Rust concepts (ownership, borrowing, `Option` types)
 - Pattern matching with enums
-- Closures and iterator methods
+- Rust's `Index` trait (the `arena[id]` syntax)
 - Hash maps and their O(1) lookup characteristics
 
-No prior compiler experience required. We'll explain AST concepts as we go.
+No prior compiler experience is required. AST concepts are explained as they appear.
 
 ## Core Concepts
 
 ### What is an Arena?
 
-An **arena** is a memory management pattern where all objects are allocated in a single pool. In our AST implementation:
+An **arena** is a memory management pattern where all objects are allocated in a single pool. In this AST implementation:
 
-- The `Arena` struct owns all AST nodes
-- Nodes reference each other by ID (not pointers)
-- The arena never deallocates individual nodes (only the entire arena at once)
+- `AstArena` owns all AST nodes, organized into seven typed `Vec`s
+- Nodes reference each other by typed index, not by pointer
+- The arena never deallocates individual nodes; the entire arena is freed at once
+
+Because there are no `Arc<T>` or `RefCell<T>` wrappers, `AstArena` implements `Send + Sync` and can be freely shared across threads.
 
 ### What is an AST Node?
 
-An **Abstract Syntax Tree (AST) node** represents a piece of code structure. For example:
+An **Abstract Syntax Tree (AST) node** represents a structural element of source code. For example:
 
 ```inference
 fn add(a: i32, b: i32) -> i32 { return a + b; }
 ```
 
 This creates nodes for:
-- Function definition ("add")
-- Parameters ("a" and "b")
-- Return type ("i32")
-- Block statement
-- Return statement
-- Binary expression (a + b)
-- Identifiers ("a" and "b")
+- Function definition (`add`) — stored as `DefData` in `defs`
+- Parameters (`a` and `b`) — stored as `ArgData` inline inside `Def::Function`
+- Return type (`i32`) — stored as `TypeData` in `types`
+- Body block — stored as `BlockData` in `blocks`
+- Return statement — stored as `StmtData` in `stmts`
+- Binary expression (`a + b`) — stored as `ExprData` in `exprs`
+- Identifiers (`a`, `b`) — stored as `Ident` in `idents`
 
-### Node Identification
+### Typed Indices
 
-Every node has a unique `u32` ID:
+Every node category has its own index type, defined as a type alias over `la_arena::Idx<T>`:
+
+| Index type | Targets | Example use |
+|-----------|---------|-------------|
+| `SourceFileId` | `arena.source_files` | Root of the tree |
+| `DefId` | `arena.defs` | Function, struct, enum, … |
+| `StmtId` | `arena.stmts` | Return, if, let, … |
+| `ExprId` | `arena.exprs` | Binary, literal, call, … |
+| `TypeId` | `arena.types` | `i32`, `[T; N]`, custom, … |
+| `BlockId` | `arena.blocks` | `{ … }` bodies |
+| `IdentId` | `arena.idents` | Identifiers and names |
+
+The type system prevents using an `ExprId` to index `defs`. Because `Idx<T>` is parameterized over the node type, mismatches are caught at compile time.
+
+The `NodeId` enum wraps any typed ID for use in heterogeneous contexts, such as type annotation storage:
 
 ```rust
-let node = arena.find_node(42)?;
-let id = node.id();  // Returns 42
+pub enum NodeId {
+    SourceFile(SourceFileId),
+    Def(DefId),
+    Stmt(StmtId),
+    Expr(ExprId),
+    Type(TypeId),
+    Block(BlockId),
+    Ident(IdentId),
+}
 ```
-
-IDs are:
-- Unique within an arena
-- Non-zero (0 is a sentinel value)
-- Assigned sequentially during parsing
-- Stable (never change after assignment)
 
 ## Building an Arena
 
@@ -88,12 +105,10 @@ builder.add_source_code(tree.root_node(), source.as_bytes());
 let arena = builder.build_ast()?;
 ```
 
-**What happens here:**
-1. Tree-sitter parses source code into a concrete syntax tree
-2. `Builder` walks the CST and creates typed AST nodes
-3. Assigns unique IDs sequentially starting from 1
-4. Records parent-child relationships in the arena
-5. Returns an immutable `Arena` or error if parse errors exist
+What happens here:
+1. Tree-sitter parses source code into a concrete syntax tree (CST)
+2. `Builder` walks the CST and allocates typed AST nodes into the arena's `Vec`s
+3. Returns an immutable `AstArena`, or an error if parse errors are present
 
 ### From a File
 
@@ -117,211 +132,172 @@ let arena = builder.build_ast()?;
 For testing or gradual construction:
 
 ```rust
-let arena = Arena::default();
+use inference_ast::arena::AstArena;
+
+let arena = AstArena::default();
 ```
 
-Note: Empty arenas are rare in practice. Usually, you build from source.
+Empty arenas are rare in practice. Usually, you build from source.
 
 ## Querying Nodes
 
-### Finding a Node by ID
+### Indexing Directly
+
+The primary access pattern is direct `Vec` indexing using a typed ID. The `Index` trait is implemented for each ID type:
 
 ```rust
-let node = arena.find_node(node_id);
+use inference_ast::nodes::{Def, Stmt, Expr};
 
-match node {
-    Some(n) => println!("Found node: {:?}", n),
-    None => println!("Node {} does not exist", node_id),
+// Get all function definition IDs
+let func_ids = arena.function_def_ids();
+
+// Index into the arena — O(1) Vec access
+let def_data = &arena[func_ids[0]];
+println!("Location: {}", def_data.location);
+
+// Match on the node kind
+if let Def::Function { name, body, .. } = &def_data.kind {
+    let fn_name = arena.ident_name(*name);
+    println!("Function: {}", fn_name);
+
+    // Index the body block
+    let block = &arena[*body];
+    println!("Statements: {}", block.stmts.len());
+
+    // Index a statement in the block
+    let stmt_data = &arena[block.stmts[0]];
+    if let Stmt::Return { expr } = stmt_data.kind {
+        let expr_data = &arena[expr];
+        println!("Return expression: {:?}", expr_data.kind);
+    }
 }
 ```
 
-**Complexity:** O(1) hash map lookup
-
-**Returns:** `Option<AstNode>`
-
-**Common uses:**
-- Validating node existence
-- Retrieving node details for error messages
-- Following node references
+This pattern — obtain a typed ID, index the arena, match on the `kind` field, follow inner typed IDs — is the primary way to traverse the AST.
 
 ### Getting All Source Files
 
 ```rust
-let source_files = arena.source_files();
+let source_files = arena.source_files();  // &[SourceFileData]
 
-for file in source_files {
-    println!("File: {} bytes", file.source.len());
+for sf in source_files {
+    println!("Source file: {} bytes", sf.source.len());
+    println!("Definitions: {}", sf.defs.len());
 }
 ```
 
-**Returns:** `Vec<Rc<SourceFile>>`
-
-**Note:** Currently, Inference supports single-file compilation, so this typically returns one file.
+Returns a slice borrowed from the arena. Currently, Inference supports single-file compilation, so this slice has one element.
 
 ### Getting All Functions
 
 ```rust
-let functions = arena.functions();
+let func_ids = arena.function_def_ids();  // Vec<DefId>
 
-for func in functions {
-    println!("Function: {}", func.name.name);
-    println!("  Line: {}", func.location.start_line);
+for def_id in &func_ids {
+    println!("Function: {}", arena.def_name(*def_id));
+    println!("  Line: {}", arena[*def_id].location.start_line);
 }
 ```
 
-**Returns:** `Vec<Rc<FunctionDefinition>>`
+`function_def_ids` walks the source files and returns `DefId`s whose `kind` is `Def::Function`. It does not return methods (struct-associated functions) — only top-level function definitions.
 
-**Common uses:**
-- Building symbol tables
-- Analyzing function signatures
-- Generating function list documentation
+### Getting Type Aliases
 
-### Getting All Type Definitions
+There is no dedicated method for type aliases. Iterate `source_files → defs` and filter by variant:
 
 ```rust
-let types = arena.list_type_definitions();
+use inference_ast::nodes::Def;
 
-for type_def in types {
-    println!("Type alias: {} = {:?}", type_def.name.name, type_def.ty);
-}
+let source_files = arena.source_files();
+let type_aliases: Vec<_> = source_files[0]
+    .defs
+    .iter()
+    .filter(|&&id| matches!(arena[id].kind, Def::TypeAlias { .. }))
+    .collect();
+
+println!("Type aliases: {}", type_aliases.len());
 ```
 
-**Returns:** `Vec<Rc<TypeDefinition>>`
+This structural traversal pattern replaces the old `filter_nodes` global scan.
 
-**Example:**
-```inference
-type Age = i32;
-type Name = str;
+### Getting the Name of Any Definition
+
+```rust
+let name = arena.def_name(def_id);  // &str
+```
+
+Works for functions, structs, enums, specs, constants, type aliases, and modules.
+
+### Getting an Identifier Name
+
+```rust
+let name = arena.ident_name(ident_id);  // &str
 ```
 
 ## Traversing the Tree
 
-### Finding a Node's Parent
+### Structural Traversal (Primary Pattern)
 
-```rust
-let parent_id = arena.find_parent_node(node_id);
+The recommended way to traverse the AST is to follow typed IDs structurally, starting from `source_files`:
 
-match parent_id {
-    Some(id) => {
-        let parent = arena.find_node(id).unwrap();
-        println!("Parent: {:?}", parent);
-    }
-    None => println!("This is a root node"),
-}
+```
+source_files[i]              SourceFileData
+  .defs[j]                   DefId → DefData
+    .kind = Def::Function
+      .body                  BlockId → BlockData
+        .stmts[k]            StmtId → StmtData
+          .kind = Stmt::Return
+            .expr            ExprId → ExprData
+              .kind = Expr::Binary { left, right, op }
+                .left        ExprId → ExprData
 ```
 
-**Complexity:** O(1)
-
-**Returns:** `Option<u32>` (parent's ID, not the node itself)
-
-**Returns None for:**
-- Root nodes (SourceFile)
-- Invalid node IDs
-
-### Walking Up to the Root
-
 ```rust
-fn print_ancestor_chain(arena: &Arena, node_id: u32) {
-    let mut current_id = node_id;
-    let mut depth = 0;
+use inference_ast::nodes::{Def, Stmt, Expr, OperatorKind};
 
-    loop {
-        let node = arena.find_node(current_id).expect("Invalid node ID");
-        println!("{:indent$}{:?}", "", node, indent = depth * 2);
-
-        match arena.find_parent_node(current_id) {
-            Some(parent_id) => {
-                current_id = parent_id;
-                depth += 1;
+for sf in arena.source_files() {
+    for &def_id in &sf.defs {
+        if let Def::Function { body, .. } = &arena[def_id].kind {
+            for &stmt_id in &arena[*body].stmts {
+                if let Stmt::Return { expr } = arena[stmt_id].kind {
+                    if let Expr::Binary { left, right, op } = &arena[expr].kind {
+                        if *op == OperatorKind::Add {
+                            println!("Found an addition at {}", arena[expr].location);
+                        }
+                        let _ = (left, right);
+                    }
+                }
             }
-            None => break,  // Reached root
         }
     }
 }
 ```
 
-**Example output:**
-```
-ReturnStatement
-  Block
-    FunctionDefinition
-      SourceFile
-```
+This approach is efficient because it follows the natural tree structure and only visits nodes you actually need.
 
-### Getting Direct Children
+### Walking Up to a Source File
 
 ```rust
-let children = arena.get_children_cmp(node_id, |_| true);
+use inference_ast::ids::NodeId;
 
-println!("Node {} has {} children", node_id, children.len());
-for child in children {
-    println!("  Child {}: {:?}", child.id(), child);
+let sf_id = arena.find_source_file_for_node(NodeId::Stmt(stmt_id));
+
+if let Some(id) = sf_id {
+    let sf = &arena[id];
+    println!("Source file has {} bytes", sf.source.len());
 }
 ```
 
-**Parameters:**
-- `node_id`: The parent node
-- `comparator`: Filter function (return true to include)
-
-**Complexity:** O(1) for children list + O(c) to iterate where c is child count
-
-### Getting Children of Specific Type
-
-Because `get_children_cmp` only traverses into children that match the comparator, it
-works well when the target nodes are direct children of the starting node.
-
-```rust
-use inference_ast::nodes::{AstNode, Statement};
-
-// Get all direct statement children of a block
-// (works because Block's children in the arena are Statement nodes)
-let statements = arena.get_children_cmp(block_id, |node| {
-    matches!(node, AstNode::Statement(_))
-});
-```
-
-To find nodes nested inside non-matching parents (for example, all return statements
-anywhere in a function), use `filter_nodes` with a source-file scope instead:
-
-```rust
-use inference_ast::nodes::{AstNode, Statement};
-
-// Find all return statements in the entire arena
-let returns = arena.filter_nodes(|node| {
-    matches!(node, AstNode::Statement(Statement::Return(_)))
-});
-```
-
-### Recursive Traversal
-
-`get_children_cmp` performs a depth-first traversal. It collects matching nodes and only
-continues traversal into children that also match the comparator. This means nodes that
-fail the comparator act as boundaries — their children are not explored.
-
-```rust
-// Find all binary expression descendants of a function
-let binary_exprs = arena.get_children_cmp(function_id, |node| {
-    matches!(node, AstNode::Expression(Expression::Binary(_)))
-});
-
-println!("Found {} binary expressions", binary_exprs.len());
-```
-
-**How it works:**
-1. Starts at `function_id`
-2. For each visited node: if the comparator returns true, adds the node to results
-3. Pushes only the children of matching nodes onto the traversal stack
-4. Non-matching nodes are not traversed into
-
-**Implication:** If you need all descendants regardless of intermediate nodes, use
-`arena.filter_nodes()` instead, which scans the entire arena.
+For `Def` nodes, delegates to `find_source_file_for_def`, which searches the source files' `defs` lists. For other nodes, uses byte-offset matching against all source files.
 
 ## Source Text Retrieval
 
 ### Getting Source for Any Node
 
 ```rust
-let source = arena.get_node_source(node_id);
+use inference_ast::ids::NodeId;
+
+let source = arena.get_node_source(NodeId::Def(def_id));
 
 match source {
     Some(text) => println!("Source: {}", text),
@@ -329,29 +305,42 @@ match source {
 }
 ```
 
-**Complexity:** O(d) where d is tree depth + O(1) string slice
+Returns `None` when:
+- The node ID is out of range
+- The source file cannot be determined
+- The byte offsets fall outside the source string
 
-**Returns:** `Option<&str>` (borrowed from SourceFile)
+### Getting a Node's Location
 
-**Returns None when:**
-- Node ID doesn't exist
-- No SourceFile ancestor exists
-- Byte offsets are invalid
+```rust
+use inference_ast::ids::NodeId;
+
+let location = arena.node_location(NodeId::Expr(expr_id));
+
+if let Some(loc) = location {
+    println!("Node spans {}:{} to {}:{}", loc.start_line, loc.start_column, loc.end_line, loc.end_column);
+    println!("Byte range: {}..{}", loc.offset_start, loc.offset_end);
+}
+```
+
+`Location` is a 24-byte `Copy` type; it can be stored by value without cloning.
 
 ### Example: Printing Function Source
 
 ```rust
-let functions = arena.functions();
-for func in functions {
-    if let Some(source) = arena.get_node_source(func.id) {
-        println!("Function {}:", func.name.name);
+use inference_ast::ids::NodeId;
+
+let func_ids = arena.function_def_ids();
+for def_id in &func_ids {
+    if let Some(source) = arena.get_node_source(NodeId::Def(*def_id)) {
+        println!("Function {}:", arena.def_name(*def_id));
         println!("{}", source);
         println!();
     }
 }
 ```
 
-**Output:**
+Output:
 ```
 Function add:
 fn add(a: i32, b: i32) -> i32 { return a + b; }
@@ -363,125 +352,154 @@ fn multiply(x: i32, y: i32) -> i32 { return x * y; }
 ### Finding the Source File for a Node
 
 ```rust
-let source_file_id = arena.find_source_file_for_node(node_id);
+use inference_ast::ids::NodeId;
 
-match source_file_id {
-    Some(id) => {
-        let file = arena.find_node(id).unwrap();
-        if let AstNode::Ast(Ast::SourceFile(sf)) = file {
-            println!("Source file has {} bytes", sf.source.len());
-        }
-    }
-    None => println!("No source file ancestor"),
+if let Some(sf_id) = arena.find_source_file_for_node(NodeId::Stmt(stmt_id)) {
+    let sf = &arena[sf_id];
+    println!("Source file: {} bytes, {} definitions", sf.source.len(), sf.defs.len());
 }
 ```
 
-**Complexity:** O(d) where d is tree depth
+If you have a `DefId`, the more direct variant is:
 
-**How it works:**
-1. Checks if node itself is a SourceFile (early return)
-2. Walks up parent chain to root
-3. Checks if root is a SourceFile
+```rust
+let sf_id = arena.find_source_file_for_def(def_id);
+```
 
 ## Filtering and Searching
 
-### Filter Nodes by Predicate
+### Structural Search (Recommended)
+
+Walk the tree structurally instead of scanning the entire arena. This is faster and makes intent explicit:
 
 ```rust
-// Find all variable definitions
-let variables = arena.filter_nodes(|node| {
-    matches!(node, AstNode::Statement(Statement::VariableDefinition(_)))
-});
+use inference_ast::nodes::{Def, Stmt};
 
-println!("Found {} variable definitions", variables.len());
+// Find all return statements inside a specific function
+fn collect_returns(
+    arena: &inference_ast::arena::AstArena,
+    def_id: inference_ast::ids::DefId,
+) -> Vec<inference_ast::ids::StmtId> {
+    let mut returns = Vec::new();
+
+    if let Def::Function { body, .. } = &arena[def_id].kind {
+        collect_returns_in_block(arena, *body, &mut returns);
+    }
+
+    returns
+}
+
+fn collect_returns_in_block(
+    arena: &inference_ast::arena::AstArena,
+    block_id: inference_ast::ids::BlockId,
+    out: &mut Vec<inference_ast::ids::StmtId>,
+) {
+    for &stmt_id in &arena[block_id].stmts {
+        match &arena[stmt_id].kind {
+            Stmt::Return { .. } => out.push(stmt_id),
+            Stmt::If { then_block, else_block, .. } => {
+                collect_returns_in_block(arena, *then_block, out);
+                if let Some(eb) = else_block {
+                    collect_returns_in_block(arena, *eb, out);
+                }
+            }
+            Stmt::Loop { body, .. } => collect_returns_in_block(arena, *body, out),
+            _ => {}
+        }
+    }
+}
 ```
 
-**Complexity:** O(n) where n is total nodes in arena
+### Searching Across All Definitions
 
-**Returns:** `Vec<AstNode>`
-
-**Common uses:**
-- Finding all nodes of a type
-- Building symbol tables
-- Code analysis passes
-
-### Extract Data from Nodes
+When you need to search the whole program, iterate `source_files → defs`:
 
 ```rust
-use inference_ast::nodes::{Definition, AstNode};
+use inference_ast::nodes::Def;
 
-// Get names of all structs
-let struct_names: Vec<String> = arena
-    .filter_nodes(|node| {
-        matches!(node, AstNode::Definition(Definition::Struct(_)))
-    })
-    .iter()
-    .filter_map(|node| {
-        if let AstNode::Definition(Definition::Struct(s)) = node {
-            Some(s.name.name.clone())
-        } else {
-            None
+// Find all struct names
+let mut struct_names: Vec<&str> = Vec::new();
+
+for sf in arena.source_files() {
+    for &def_id in &sf.defs {
+        if let Def::Struct { name, .. } = &arena[def_id].kind {
+            struct_names.push(arena.ident_name(*name));
         }
-    })
-    .collect();
+    }
+}
 
 println!("Structs: {:?}", struct_names);
 ```
 
-### Find Nodes by Name
+### Find Definition by Name
 
 ```rust
-// Find a function by name
-fn find_function_by_name(arena: &Arena, name: &str) -> Option<Rc<FunctionDefinition>> {
-    arena
-        .functions()
-        .into_iter()
-        .find(|f| f.name.name == name)
+use inference_ast::nodes::Def;
+use inference_ast::ids::DefId;
+
+fn find_function_by_name(
+    arena: &inference_ast::arena::AstArena,
+    target: &str,
+) -> Option<DefId> {
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            if matches!(arena[def_id].kind, Def::Function { .. })
+                && arena.def_name(def_id) == target
+            {
+                return Some(def_id);
+            }
+        }
+    }
+    None
 }
 
 // Usage
-if let Some(func) = find_function_by_name(&arena, "main") {
-    println!("Found main function at line {}", func.location.start_line);
+if let Some(def_id) = find_function_by_name(&arena, "main") {
+    println!("Found main at line {}", arena[def_id].location.start_line);
 }
 ```
 
-### Find Nodes by Location
+### Find Nodes by Source Location
 
 ```rust
-// Find all nodes on line 10
-let nodes_on_line_10 = arena.filter_nodes(|node| {
-    node.location().start_line == 10
-});
-
-println!("Line 10 contains {} nodes", nodes_on_line_10.len());
+// Find all definitions that start on line 10
+let defs_on_line_10: Vec<_> = arena
+    .source_files()
+    .iter()
+    .flat_map(|sf| sf.defs.iter())
+    .filter(|&&id| arena[id].location.start_line == 10)
+    .collect();
 ```
 
 ## Common Patterns
 
-### Pattern 1: Type Checking a Function
+### Pattern 1: Analyzing a Function
 
 ```rust
-use inference_ast::nodes::{AstNode, Statement, Definition};
+use inference_ast::nodes::{Def, Stmt};
+use inference_ast::ids::DefId;
 
-fn check_function_types(arena: &Arena, func_id: u32) -> Result<(), String> {
-    let func_node = arena.find_node(func_id)
-        .ok_or("Function not found")?;
+fn analyze_function(
+    arena: &inference_ast::arena::AstArena,
+    def_id: DefId,
+) -> Result<(), String> {
+    let def_data = &arena[def_id];
 
-    let func = match func_node {
-        AstNode::Definition(Definition::Function(f)) => f,
+    let (name, body) = match &def_data.kind {
+        Def::Function { name, body, .. } => (*name, *body),
         _ => return Err("Not a function".to_string()),
     };
 
-    // Get all return statements in function (filter_nodes scans the whole arena;
-    // for a single-file program this is equivalent to searching the function's subtree)
-    let returns = arena.filter_nodes(|node| {
-        matches!(node, AstNode::Statement(Statement::Return(_)))
-    });
+    println!("Analyzing: {}", arena.ident_name(name));
 
-    println!("Function {} has {} return statements", func.name.name, returns.len());
+    let block = &arena[body];
+    let return_count = block
+        .stmts
+        .iter()
+        .filter(|&&s| matches!(arena[s].kind, Stmt::Return { .. }))
+        .count();
 
-    // Check each return matches function signature
-    // ... type checking logic ...
+    println!("Top-level return statements: {}", return_count);
 
     Ok(())
 }
@@ -491,29 +509,18 @@ fn check_function_types(arena: &Arena, func_id: u32) -> Result<(), String> {
 
 ```rust
 use std::collections::HashMap;
-use inference_ast::nodes::{AstNode, Definition};
+use inference_ast::nodes::Def;
+use inference_ast::ids::DefId;
 
-fn build_symbol_table(arena: &Arena) -> HashMap<String, u32> {
+fn build_symbol_table(
+    arena: &inference_ast::arena::AstArena,
+) -> HashMap<String, DefId> {
     let mut symbols = HashMap::new();
 
-    // Add all top-level functions
-    for func in arena.functions() {
-        symbols.insert(func.name.name.clone(), func.id);
-    }
-
-    // Add all type definitions
-    for type_def in arena.list_type_definitions() {
-        symbols.insert(type_def.name.name.clone(), type_def.id);
-    }
-
-    // Add all structs
-    let structs = arena.filter_nodes(|node| {
-        matches!(node, AstNode::Definition(Definition::Struct(_)))
-    });
-
-    for struct_node in structs {
-        if let AstNode::Definition(Definition::Struct(s)) = struct_node {
-            symbols.insert(s.name.name.clone(), s.id);
+    for sf in arena.source_files() {
+        for &def_id in &sf.defs {
+            let name = arena.def_name(def_id).to_string();
+            symbols.insert(name, def_id);
         }
     }
 
@@ -524,84 +531,60 @@ fn build_symbol_table(arena: &Arena) -> HashMap<String, u32> {
 ### Pattern 3: Error Reporting
 
 ```rust
+use inference_ast::arena::AstArena;
+use inference_ast::ids::NodeId;
+use inference_ast::nodes::Location;
+
 struct CompilerError {
     message: String,
     location: Location,
     source_snippet: String,
 }
 
-fn report_error(arena: &Arena, node_id: u32, message: String) -> CompilerError {
-    let node = arena.find_node(node_id).expect("Invalid node ID");
-    let location = node.location();
-    let source_snippet = arena.get_node_source(node_id)
+fn make_error(arena: &AstArena, node_id: NodeId, message: String) -> CompilerError {
+    let location = arena.node_location(node_id).unwrap_or_default();
+    let source_snippet = arena
+        .get_node_source(node_id)
         .unwrap_or("<source unavailable>")
         .to_string();
 
-    CompilerError {
-        message,
-        location,
-        source_snippet,
-    }
+    CompilerError { message, location, source_snippet }
 }
 
 // Usage
-let error = report_error(&arena, bad_node_id, "Type mismatch".to_string());
-eprintln!("Error at {}:{}: {}",
-    error.location.start_line,
-    error.location.start_column,
-    error.message
-);
-eprintln!("  {}", error.source_snippet);
+let err = make_error(&arena, NodeId::Expr(bad_expr_id), "Type mismatch".to_string());
+eprintln!("Error at {}: {}", err.location, err.message);
+eprintln!("  {}", err.source_snippet);
 ```
 
-### Pattern 4: Code Generation
+### Pattern 4: Structural Code Generation
 
 ```rust
-fn generate_code(arena: &Arena, node_id: u32) -> String {
-    let node = arena.find_node(node_id).expect("Node not found");
+use inference_ast::arena::AstArena;
+use inference_ast::ids::DefId;
+use inference_ast::nodes::{Def, Stmt, Expr};
 
-    match node {
-        AstNode::Statement(Statement::Return(ret)) => {
-            // Generate code for return statement
-            let expr_source = arena.get_node_source(ret.expression.borrow().id())
-                .unwrap_or("0");
-            format!("return {};", expr_source)
+fn emit_function(arena: &AstArena, def_id: DefId) -> String {
+    let def_data = &arena[def_id];
+
+    if let Def::Function { name, body, .. } = &def_data.kind {
+        let fn_name = arena.ident_name(*name);
+        let block = &arena[*body];
+        let mut output = format!("func {}() {{\n", fn_name);
+
+        for &stmt_id in &block.stmts {
+            if let Stmt::Return { expr } = arena[stmt_id].kind {
+                if let Expr::NumberLiteral { value } = &arena[expr].kind {
+                    output.push_str(&format!("  return {};\n", value));
+                }
+            }
         }
-        AstNode::Definition(Definition::Function(func)) => {
-            // Generate code for function
-            let body = arena.get_node_source(func.body.id())
-                .unwrap_or("{}");
-            format!("function {} {}", func.name.name, body)
-        }
-        _ => String::new(),
+
+        output.push('}');
+        output
+    } else {
+        String::new()
     }
-}
-```
-
-### Pattern 5: Finding Enclosing Scope
-
-```rust
-use inference_ast::nodes::{AstNode, Definition, BlockType};
-
-fn find_enclosing_function(arena: &Arena, node_id: u32) -> Option<Rc<FunctionDefinition>> {
-    let mut current_id = node_id;
-
-    loop {
-        let node = arena.find_node(current_id)?;
-
-        // Check if this node is a function
-        if let AstNode::Definition(Definition::Function(func)) = node {
-            return Some(func);
-        }
-
-        // Move up to parent
-        current_id = arena.find_parent_node(current_id)?;
-    }
-}
-
-// Usage
-if let Some(func) = find_enclosing_function(&arena, expression_id) {
-    println!("Expression is inside function: {}", func.name.name);
 }
 ```
 
@@ -609,291 +592,170 @@ if let Some(func) = find_enclosing_function(&arena, expression_id) {
 
 ### Dealing with Option Values
 
-Most Arena methods return `Option` to handle missing nodes gracefully:
+Allocation indices are always valid immediately after allocation. `Option` arises when you use an index that came from outside (for example, from a hash map or a saved ID). Use `?` or `match` as appropriate:
 
 ```rust
-// Pattern 1: Early return with ?
-fn process_node(arena: &Arena, node_id: u32) -> Option<String> {
-    let node = arena.find_node(node_id)?;
+use inference_ast::ids::NodeId;
+
+// Early return with ?
+fn get_source(
+    arena: &inference_ast::arena::AstArena,
+    node_id: NodeId,
+) -> Option<String> {
+    let loc = arena.node_location(node_id)?;
     let source = arena.get_node_source(node_id)?;
-    Some(format!("{:?}: {}", node, source))
+    Some(format!("{}:{}: {}", loc.start_line, loc.start_column, source))
 }
 
-// Pattern 2: Match expression
-fn process_node_verbose(arena: &Arena, node_id: u32) -> String {
-    match arena.find_node(node_id) {
-        Some(node) => format!("Found: {:?}", node),
-        None => format!("Node {} not found", node_id),
-    }
-}
-
-// Pattern 3: unwrap_or with default
-let source = arena.get_node_source(node_id).unwrap_or("<unavailable>");
-```
-
-### Validating Node Types
-
-```rust
-use inference_ast::nodes::{AstNode, Definition};
-
-fn ensure_function(arena: &Arena, node_id: u32) -> Result<Rc<FunctionDefinition>, String> {
-    let node = arena.find_node(node_id)
-        .ok_or_else(|| format!("Node {} not found", node_id))?;
-
-    match node {
-        AstNode::Definition(Definition::Function(func)) => Ok(func),
-        _ => Err(format!("Node {} is not a function", node_id)),
+// Match expression
+fn describe_node(
+    arena: &inference_ast::arena::AstArena,
+    node_id: NodeId,
+) -> String {
+    match arena.node_location(node_id) {
+        Some(loc) => format!("Node at {}", loc),
+        None => "Unknown node".to_string(),
     }
 }
 ```
 
-### Handling Malformed ASTs
+### Validating Node Kinds
+
+Use `match` or `if let` to validate before using an ID:
 
 ```rust
-fn safe_traverse(arena: &Arena, node_id: u32, max_depth: u32) -> Vec<u32> {
-    let mut path = Vec::new();
-    let mut current_id = node_id;
-    let mut depth = 0;
+use inference_ast::ids::DefId;
+use inference_ast::nodes::Def;
 
-    loop {
-        // Guard against cycles or extreme depth
-        if depth >= max_depth {
-            eprintln!("Warning: Maximum depth {} reached", max_depth);
-            break;
-        }
-
-        path.push(current_id);
-
-        match arena.find_parent_node(current_id) {
-            Some(parent_id) => {
-                current_id = parent_id;
-                depth += 1;
-            }
-            None => break,
-        }
+fn require_function(
+    arena: &inference_ast::arena::AstArena,
+    def_id: DefId,
+) -> Result<(), String> {
+    match &arena[def_id].kind {
+        Def::Function { .. } => Ok(()),
+        _ => Err(format!("Definition {:?} is not a function", def_id)),
     }
+}
+```
 
-    path
+### Guarding Against Out-of-Range IDs
+
+Direct indexing (`arena[id]`) panics if the index is out of range, just like a plain `Vec`. If you have an ID from an external source (for example, deserialized from a file), use `node_location` first to test validity:
+
+```rust
+use inference_ast::ids::NodeId;
+
+fn is_valid_expr(
+    arena: &inference_ast::arena::AstArena,
+    expr_id: inference_ast::ids::ExprId,
+) -> bool {
+    arena.node_location(NodeId::Expr(expr_id)).is_some()
 }
 ```
 
 ## Performance Tips
 
-### Tip 1: Reuse Filtered Results
+### Tip 1: Prefer Structural Traversal over Global Scanning
+
+Structural traversal (following typed IDs from `source_files → defs → …`) visits only the nodes you need. A global scan iterates every node in every `Vec`. For most compiler passes, structural traversal is both faster and more readable.
 
 ```rust
-// Bad: filters twice
-let functions = arena.functions();
-for func in &functions {
-    // ...
-}
-let functions_again = arena.functions();  // Duplicate work!
+// Less efficient: visits every definition to find functions
+let func_ids = arena.function_def_ids();
 
-// Good: filter once, reuse
-let functions = arena.functions();
-for func in &functions {
-    // ...
+// More efficient when you already have a source file and only want one kind:
+let funcs: Vec<_> = arena.source_files()[0]
+    .defs
+    .iter()
+    .filter(|&&id| matches!(arena[id].kind, inference_ast::nodes::Def::Function { .. }))
+    .collect();
+```
+
+In practice, for typical Inference source files the difference is negligible. Prefer whichever is clearer.
+
+### Tip 2: Cache Query Results
+
+Arena query methods like `function_def_ids()` and `source_files()` are cheap, but avoid calling them in tight loops when the result is stable:
+
+```rust
+// Good: collect once, iterate multiple times
+let func_ids = arena.function_def_ids();
+for def_id in &func_ids {
+    // first pass
 }
-for func in &functions {  // Reuse existing Vec
-    // ...
+for def_id in &func_ids {
+    // second pass
 }
 ```
 
-### Tip 2: Use Early Returns
+### Tip 3: Store Locations by Value
+
+`Location` is `Copy` (24 bytes). Store it by value to avoid pointer indirection:
 
 ```rust
-// Bad: unnecessary work
-fn find_main(arena: &Arena) -> Option<Rc<FunctionDefinition>> {
-    let all_functions = arena.functions();
-    all_functions.into_iter().find(|f| f.name.name == "main")
-}
-
-// Good: iterator short-circuits
-fn find_main(arena: &Arena) -> Option<Rc<FunctionDefinition>> {
-    arena.functions().into_iter().find(|f| f.name.name == "main")
-}
+// Good: no borrow, no heap allocation
+let loc: inference_ast::nodes::Location = arena[stmt_id].location;
+process_location(loc);
 ```
 
-### Tip 3: Prefer Specific Queries
+### Tip 4: Use `def_name` and `ident_name` for String Access
+
+These methods return `&str` borrowed from the arena, avoiding allocation:
 
 ```rust
-// Bad: filters all nodes
-let functions = arena.filter_nodes(|node| {
-    matches!(node, AstNode::Definition(Definition::Function(_)))
-});
-
-// Good: uses specialized method
-let functions = arena.functions();
+// Good: zero allocation
+let name: &str = arena.def_name(def_id);
+let ident: &str = arena.ident_name(ident_id);
 ```
 
-### Tip 4: Cache Source File Lookups
+### Tip 5: Use Specific Query Methods
 
-```rust
-// Bad: repeated source file lookups
-for node_id in node_ids {
-    let sf_id = arena.find_source_file_for_node(node_id);  // O(depth) each time
-    // ...
-}
-
-// Good: cache if all nodes share same source file
-let source_file_id = arena.find_source_file_for_node(node_ids[0]).unwrap();
-for node_id in node_ids {
-    // Assume all nodes are in same file (validate in debug builds)
-    debug_assert_eq!(arena.find_source_file_for_node(node_id), Some(source_file_id));
-    // ...
-}
-```
-
-### Tip 5: Avoid Unnecessary Cloning
-
-```rust
-// Bad: clones entire node
-let node = arena.find_node(node_id).unwrap();
-process_node(node.clone());  // Expensive!
-
-// Good: borrow or extract only what you need
-let node = arena.find_node(node_id).unwrap();
-let location = node.location();  // Copy (cheap)
-process_location(location);
-```
-
-## Advanced Examples
-
-### Example 1: Control Flow Graph
-
-```rust
-use inference_ast::nodes::{AstNode, Statement};
-
-fn build_cfg(arena: &Arena, function_id: u32) -> Vec<(u32, u32)> {
-    let mut edges = Vec::new();
-
-    // filter_nodes scans the entire arena in node-ID order.
-    // For a single-function program this gives all statements.
-    let statements = arena.filter_nodes(|node| {
-        matches!(node, AstNode::Statement(_))
-    });
-
-    for (i, stmt) in statements.iter().enumerate() {
-        match stmt {
-            AstNode::Statement(Statement::If(if_stmt)) => {
-                // Branch: if condition → then block + else block
-                edges.push((if_stmt.id, if_stmt.if_arm.id()));
-                if let Some(else_arm) = &if_stmt.else_arm {
-                    edges.push((if_stmt.id, else_arm.id()));
-                }
-            }
-            AstNode::Statement(Statement::Loop(loop_stmt)) => {
-                // Loop: loop → body, body → loop
-                edges.push((loop_stmt.id, loop_stmt.body.id()));
-                edges.push((loop_stmt.body.id(), loop_stmt.id));
-            }
-            _ if i + 1 < statements.len() => {
-                // Sequential: stmt[i] → stmt[i+1]
-                edges.push((stmt.id(), statements[i + 1].id()));
-            }
-            _ => {}
-        }
-    }
-
-    edges
-}
-```
-
-### Example 2: Dead Code Detection
-
-```rust
-use inference_ast::nodes::{AstNode, Statement};
-
-fn find_unreachable_code(arena: &Arena, _function_id: u32) -> Vec<u32> {
-    let mut unreachable = Vec::new();
-
-    // filter_nodes returns all statements in the arena in node-ID (source) order.
-    let statements = arena.filter_nodes(|node| {
-        matches!(node, AstNode::Statement(_))
-    });
-
-    let mut found_return = false;
-
-    for stmt in statements {
-        if found_return {
-            unreachable.push(stmt.id());
-        }
-
-        if matches!(stmt, AstNode::Statement(Statement::Return(_))) {
-            found_return = true;
-        }
-    }
-
-    unreachable
-}
-```
-
-### Example 3: Complexity Metrics
-
-```rust
-fn calculate_cyclomatic_complexity(arena: &Arena, _function_id: u32) -> u32 {
-    let mut complexity = 1;  // Base complexity
-
-    // filter_nodes returns all matching nodes across the arena in source order.
-    let branch_points = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Statement(Statement::If(_)) | AstNode::Statement(Statement::Loop(_))
-        )
-    });
-
-    complexity += branch_points.len() as u32;
-
-    complexity
-}
-```
+Use `function_def_ids()` instead of manually filtering all defs when you need all functions. This communicates intent clearly and is easy to extend if the method gains optimizations in the future.
 
 ## Troubleshooting
 
-### Issue: "Node not found" errors
+### Issue: Index out of bounds when accessing `arena[id]`
 
-**Cause:** Stale node IDs or cross-arena references
+**Cause:** The ID was created for a different arena (for example, from a previous compilation run), or was manufactured from a raw value that exceeds the arena's current size.
 
-**Solution:** Ensure node IDs are from the same arena:
+**Solution:** Use `arena.node_location(NodeId::Expr(expr_id)).is_some()` to validate before indexing.
 
-```rust
-// Bad: mixing IDs from different arenas
-let arena1 = build_ast(source1);
-let arena2 = build_ast(source2);
-let node = arena2.find_node(arena1_node_id);  // Returns None!
+### Issue: `get_node_source` returns `None`
 
-// Good: use IDs from the correct arena
-let node = arena1.find_node(arena1_node_id);
-```
+**Possible causes:**
+1. The node ID is out of range — validate with `node_location`
+2. The source file cannot be determined — the node's byte offsets do not fall within any `SourceFileData`
+3. Byte offsets are outside the source string — this indicates a builder bug
 
-### Issue: "Source not found" errors
-
-**Cause:** Node has no SourceFile ancestor
-
-**Solution:** Validate the node has a source file:
+**Diagnostic:**
 
 ```rust
-if arena.find_source_file_for_node(node_id).is_none() {
-    eprintln!("Warning: Node {} has no source file", node_id);
+use inference_ast::ids::NodeId;
+
+let node_id = NodeId::Stmt(stmt_id);
+if arena.node_location(node_id).is_none() {
+    eprintln!("Node ID is out of range");
+} else if arena.find_source_file_for_node(node_id).is_none() {
+    eprintln!("No source file found for node");
+} else {
+    eprintln!("Byte offsets fall outside source string");
 }
 ```
 
-### Issue: Slow tree traversal
+### Issue: Slow traversal
 
-**Cause:** Inefficient traversal or redundant lookups
+**Solution:** Replace global scans with structural traversal. If you still need to visit all nodes of a given category, iterate the relevant `Vec` directly:
 
-**Solution:** Profile with `cargo flamegraph` and optimize hot paths:
-
-```bash
-cargo flamegraph --test test_name
+```rust
+// Iterates only expression nodes — no other categories visited
+let arena_ref = &arena;
+// (Vec fields are pub(crate); access through provided query methods)
 ```
+
+For performance-sensitive paths, profile with `cargo flamegraph` to identify the real bottleneck before optimizing.
 
 ## Related Documentation
 
 - [Architecture Guide](architecture.md) - System design and internals
 - [Location Optimization](location.md) - Memory-efficient source tracking
 - [Node Types](nodes.md) - Complete AST node reference
-
-## Feedback
-
-If you find this guide helpful or have suggestions for improvement, please open an issue or submit a pull request on the main repository.

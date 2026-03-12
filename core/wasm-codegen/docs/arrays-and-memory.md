@@ -281,7 +281,7 @@ i32.store
 
 **Invariants**:
 - Only reachable for array-typed variables (type-checker enforces)
-- `find_enclosing_variable_name()` locates the parent variable
+- The variable name is threaded explicitly from the caller (no parent chain walking)
 - `compute_frame_layout()` pre-computes all array offsets
 - Result: all elements of the array hold non-deterministic values
 

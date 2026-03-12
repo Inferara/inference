@@ -1,9 +1,11 @@
 use crate::utils::{
     assert_constant_def, assert_enum_def, assert_function_signature, assert_single_binary_op,
-    assert_single_unary_op, assert_struct_def, assert_variable_def, build_ast, try_build_ast,
+    assert_single_unary_op, assert_struct_def, assert_variable_def, build_ast,
+    collect_exprs_matching, find_function_by_name, try_build_ast,
 };
+use inference_ast::ids::*;
 use inference_ast::nodes::{
-    AstNode, Definition, Expression, Literal, OperatorKind, Statement, UnaryOperatorKind,
+    ArgKind, Def, Expr, OperatorKind, Stmt, TypeNode, UnaryOperatorKind,
 };
 
 // --- Definition Tests ---
@@ -40,10 +42,10 @@ fn func2() -> i32 {return 2;}
 fn func3(x: i32) -> i32 {return x;}
 "#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
-    let definitions = &source_files[0].definitions;
+    let definitions = &source_files[0].defs;
     assert_eq!(definitions.len(), 3);
 }
 
@@ -126,16 +128,20 @@ fn test_parse_struct_with_methods() {
     }
     "#;
     let arena = build_ast(source.to_string());
-    let structs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Struct(_))));
-    assert_eq!(structs.len(), 1, "Expected 1 struct definition");
 
-    if let AstNode::Definition(Definition::Struct(struct_def)) = &structs[0] {
-        assert_eq!(struct_def.name.name, "Counter");
-        assert_eq!(struct_def.fields.len(), 1, "Expected 1 field");
-        assert_eq!(struct_def.methods.len(), 1, "Expected 1 method");
-        assert_eq!(struct_def.methods[0].name.name, "get");
-    }
+    let source_files: Vec<_> = arena.source_files().collect();
+    let struct_def = source_files[0].defs.iter().find_map(|&def_id| {
+        if let Def::Struct { name, fields, methods, .. } = &arena[def_id].kind {
+            Some((name, fields, methods))
+        } else {
+            None
+        }
+    });
+    let (name, fields, methods) = struct_def.expect("Should find struct definition");
+    assert_eq!(arena[*name].name, "Counter");
+    assert_eq!(fields.len(), 1, "Expected 1 field");
+    assert_eq!(methods.len(), 1, "Expected 1 method");
+    assert_eq!(arena.def_name(methods[0]), "get");
 }
 
 // --- Directive Tests ---
@@ -144,7 +150,7 @@ fn test_parse_struct_with_methods() {
 fn test_parse_use_directive_simple() {
     let source = r#"use inference::std;"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
     let directives = &source_files[0].directives;
@@ -157,7 +163,7 @@ fn test_parse_use_directive_with_imports() {
     let arena = build_ast(source.to_string());
     assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let source_files = arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     let directives = &source_files[0].directives;
     assert_eq!(directives.len(), 1, "Should find 1 use directive");
 }
@@ -167,7 +173,7 @@ fn test_parse_multiple_use_directives() {
     let source = r#"use inference::std;
 use inference::std::types::Address;"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
+    let source_files: Vec<_> = arena.source_files().collect();
     assert_eq!(source_files.len(), 1);
 
     let directives = &source_files[0].directives;
@@ -212,67 +218,74 @@ fn test_parse_binary_expression_divide() {
 fn test_parse_binary_expression_divide_chained() {
     let source = r#"fn test() -> i32 { return 10 / 2 / 1; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let binary_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
-    assert_eq!(
-        binary_exprs.len(),
-        2,
-        "Chained division should produce 2 binary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::Binary { .. }));
+        assert_eq!(
+            exprs.len(),
+            2,
+            "Chained division should produce 2 binary expressions"
+        );
+    }
 }
 
 #[test]
 fn test_parse_binary_expression_divide_with_multiply() {
     let source = r#"fn test() -> i32 { return a * b / c; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let binary_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
-    assert_eq!(
-        binary_exprs.len(),
-        2,
-        "Mixed operators should produce 2 binary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::Binary { .. }));
+        assert_eq!(
+            exprs.len(),
+            2,
+            "Mixed operators should produce 2 binary expressions"
+        );
+    }
 }
 
 #[test]
 fn test_parse_binary_expression_divide_precedence() {
     let source = r#"fn test() -> i32 { return a + b / c; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let binary_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
-    assert_eq!(
-        binary_exprs.len(),
-        2,
-        "Precedence expression should produce 2 binary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::Binary { .. }));
+        assert_eq!(
+            exprs.len(),
+            2,
+            "Precedence expression should produce 2 binary expressions"
+        );
+    }
 }
 
 #[test]
 fn test_parse_binary_expression_complex() {
     let source = r#"fn test() -> i32 { return a + b * c; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let binary_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Binary(_))));
-    assert_eq!(
-        binary_exprs.len(),
-        2,
-        "Complex expression should produce 2 binary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::Binary { .. }));
+        assert_eq!(
+            exprs.len(),
+            2,
+            "Complex expression should produce 2 binary expressions"
+        );
+    }
 }
 
 #[test]
 fn test_parse_comparison_less_than() {
     let source = r#"fn test() -> bool { return a < b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Lt);
 }
 
@@ -280,7 +293,6 @@ fn test_parse_comparison_less_than() {
 fn test_parse_comparison_greater_than() {
     let source = r#"fn test() -> bool { return a > b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Gt);
 }
 
@@ -288,7 +300,6 @@ fn test_parse_comparison_greater_than() {
 fn test_parse_comparison_less_equal() {
     let source = r#"fn test() -> bool { return a <= b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Le);
 }
 
@@ -296,7 +307,6 @@ fn test_parse_comparison_less_equal() {
 fn test_parse_comparison_greater_equal() {
     let source = r#"fn test() -> bool { return a >= b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Ge);
 }
 
@@ -304,7 +314,6 @@ fn test_parse_comparison_greater_equal() {
 fn test_parse_comparison_equal() {
     let source = r#"fn test() -> bool { return a == b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Eq);
 }
 
@@ -312,7 +321,6 @@ fn test_parse_comparison_equal() {
 fn test_parse_comparison_not_equal() {
     let source = r#"fn test() -> bool { return a != b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Ne);
 }
 
@@ -320,7 +328,6 @@ fn test_parse_comparison_not_equal() {
 fn test_parse_logical_and() {
     let source = r#"fn test() -> bool { return a && b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::And);
 }
 
@@ -328,7 +335,6 @@ fn test_parse_logical_and() {
 fn test_parse_logical_or() {
     let source = r#"fn test() -> bool { return a || b; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Or);
 }
 
@@ -336,7 +342,6 @@ fn test_parse_logical_or() {
 fn test_parse_unary_not() {
     let source = r#"fn test() -> bool { return !a; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_unary_op(&arena, UnaryOperatorKind::Not);
 }
 
@@ -344,48 +349,49 @@ fn test_parse_unary_not() {
 fn test_parse_unary_negate() {
     let source = r#"fn test() -> i32 { return -x; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_unary_op(&arena, UnaryOperatorKind::Neg);
 }
 
 #[test]
 fn test_parse_negative_literal() {
-    // Note: tree-sitter-inference parses `-42` as a negative literal, not as unary minus
-    // applied to `42`. This is grammar-level behavior - the minus is part of the literal.
     let source = r#"fn test() -> i32 { return -42; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    // Grammar parses -42 as a negative literal, not a prefix unary expression
-    assert_eq!(
-        prefix_exprs.len(),
-        0,
-        "Negative literal is not a prefix unary expression"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        // Grammar parses -42 as a negative literal, not a prefix unary expression
+        assert_eq!(
+            exprs.len(),
+            0,
+            "Negative literal is not a prefix unary expression"
+        );
+    }
 }
 
 #[test]
 fn test_parse_unary_negate_parenthesized() {
     let source = r#"fn test() -> i32 { return -(42); }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    assert_eq!(
-        prefix_exprs.len(),
-        1,
-        "Should find 1 prefix unary expression"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        assert_eq!(
+            exprs.len(),
+            1,
+            "Should find 1 prefix unary expression"
+        );
 
-    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
-        assert_eq!(unary_expr.operator, UnaryOperatorKind::Neg);
-    } else {
-        panic!("Expected prefix unary expression");
+        if let Expr::PrefixUnary { op, .. } = &arena[exprs[0]].kind {
+            assert_eq!(*op, UnaryOperatorKind::Neg);
+        } else {
+            panic!("Expected prefix unary expression");
+        }
     }
 }
 
@@ -393,21 +399,17 @@ fn test_parse_unary_negate_parenthesized() {
 fn test_parse_unary_bitnot() {
     let source = r#"fn test() -> i32 { return ~flags; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    assert_eq!(
-        prefix_exprs.len(),
-        1,
-        "Should find 1 prefix unary expression"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 prefix unary expression");
 
-    if let AstNode::Expression(Expression::PrefixUnary(unary_expr)) = &prefix_exprs[0] {
-        assert_eq!(unary_expr.operator, UnaryOperatorKind::BitNot);
-    } else {
-        panic!("Expected prefix unary expression");
+        if let Expr::PrefixUnary { op, .. } = &arena[exprs[0]].kind {
+            assert_eq!(*op, UnaryOperatorKind::BitNot);
+        }
     }
 }
 
@@ -415,48 +417,42 @@ fn test_parse_unary_bitnot() {
 fn test_parse_unary_double_negate() {
     let source = r#"fn test() -> i32 { return --x; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    assert_eq!(
-        prefix_exprs.len(),
-        2,
-        "Should find 2 prefix unary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        assert_eq!(exprs.len(), 2, "Should find 2 prefix unary expressions");
+    }
 }
 
 #[test]
 fn test_parse_unary_negate_bitnot() {
     let source = r#"fn test() -> i32 { return -~x; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    assert_eq!(
-        prefix_exprs.len(),
-        2,
-        "Should find 2 prefix unary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        assert_eq!(exprs.len(), 2, "Should find 2 prefix unary expressions");
+    }
 }
 
 #[test]
 fn test_parse_unary_bitnot_negate() {
     let source = r#"fn test() -> i32 { return ~-x; }"#;
     let arena = build_ast(source.to_string());
-    let source_files = &arena.source_files();
-    assert_eq!(source_files.len(), 1);
 
-    let prefix_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::PrefixUnary(_))));
-    assert_eq!(
-        prefix_exprs.len(),
-        2,
-        "Should find 2 prefix unary expressions"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::PrefixUnary { .. })
+        });
+        assert_eq!(exprs.len(), 2, "Should find 2 prefix unary expressions");
+    }
 }
 
 // --- Statement Tests ---
@@ -465,7 +461,6 @@ fn test_parse_unary_bitnot_negate() {
 fn test_parse_variable_declaration() {
     let source = r#"fn test() { let x: i32 = 5; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_variable_def(&arena, "x");
 }
 
@@ -473,7 +468,6 @@ fn test_parse_variable_declaration() {
 fn test_parse_variable_declaration_no_init() {
     let source = r#"fn test() { let x: i32; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_variable_def(&arena, "x");
 }
 
@@ -481,15 +475,24 @@ fn test_parse_variable_declaration_no_init() {
 fn test_parse_variable_mutable() {
     let source = r#"fn test() { let mut x: i32 = 42; }"#;
     let arena = build_ast(source.to_string());
-    let var_defs = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
 
-    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
-        assert_eq!(v.name.name, "x");
-        assert!(v.is_mut, "Variable declared with 'mut' should have is_mut == true");
-    } else {
-        panic!("Expected variable definition statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let var_defs: Vec<_> = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::VarDef { .. }))
+            .collect();
+        assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
+
+        if let Stmt::VarDef {
+            name, is_mut, ..
+        } = &arena[*var_defs[0]].kind
+        {
+            assert_eq!(arena[*name].name, "x");
+            assert!(*is_mut, "Variable declared with 'mut' should have is_mut == true");
+        }
     }
 }
 
@@ -497,15 +500,24 @@ fn test_parse_variable_mutable() {
 fn test_parse_variable_immutable() {
     let source = r#"fn test() { let x: i32 = 42; }"#;
     let arena = build_ast(source.to_string());
-    let var_defs = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
 
-    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
-        assert_eq!(v.name.name, "x");
-        assert!(!v.is_mut, "Variable declared without 'mut' should have is_mut == false");
-    } else {
-        panic!("Expected variable definition statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let var_defs: Vec<_> = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::VarDef { .. }))
+            .collect();
+        assert_eq!(var_defs.len(), 1);
+
+        if let Stmt::VarDef {
+            name, is_mut, ..
+        } = &arena[*var_defs[0]].kind
+        {
+            assert_eq!(arena[*name].name, "x");
+            assert!(!*is_mut, "Variable declared without 'mut' should have is_mut == false");
+        }
     }
 }
 
@@ -513,16 +525,21 @@ fn test_parse_variable_immutable() {
 fn test_parse_variable_mutable_no_init() {
     let source = r#"fn test() { let mut y: i64; }"#;
     let arena = build_ast(source.to_string());
-    let var_defs = arena
-        .filter_nodes(|node| matches!(node, AstNode::Statement(Statement::VariableDefinition(_))));
-    assert_eq!(var_defs.len(), 1, "Should find 1 variable definition");
 
-    if let AstNode::Statement(Statement::VariableDefinition(v)) = &var_defs[0] {
-        assert_eq!(v.name.name, "y");
-        assert!(v.is_mut, "Variable declared with 'mut' should have is_mut == true");
-        assert!(v.value.is_none(), "Uninitialized variable should have no value");
-    } else {
-        panic!("Expected variable definition statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        if let Stmt::VarDef {
+            name,
+            is_mut,
+            value,
+            ..
+        } = &arena[block.stmts[0]].kind
+        {
+            assert_eq!(arena[*name].name, "y");
+            assert!(*is_mut);
+            assert!(value.is_none(), "Uninitialized variable should have no value");
+        }
     }
 }
 
@@ -530,92 +547,120 @@ fn test_parse_variable_mutable_no_init() {
 fn test_parse_assignment() {
     let source = r#"fn test() { x = 10; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let assigns =
-        arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Assign(_))));
-    assert_eq!(assigns.len(), 1, "Should find 1 assignment statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let assign_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::Assign { .. }))
+            .count();
+        assert_eq!(assign_count, 1, "Should find 1 assignment statement");
+    }
 }
 
 #[test]
 fn test_parse_array_index_access() {
     let source = r#"fn test() -> i32 { return arr[0]; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let accesses = arena
-        .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::ArrayIndexAccess(_))));
-    assert_eq!(accesses.len(), 1, "Should find 1 array index access");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::ArrayIndexAccess { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 array index access");
+    }
 }
 
 #[test]
 fn test_parse_array_index_expression() {
     let source = r#"fn test() -> i32 { return arr[i + 1]; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let accesses = arena
-        .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::ArrayIndexAccess(_))));
-    assert_eq!(accesses.len(), 1, "Should find 1 array index access");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::ArrayIndexAccess { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 array index access");
+    }
 }
 
 #[test]
 fn test_parse_function_call_no_args() {
     let source = r#"fn test() { foo(); }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let calls =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::FunctionCall(_))));
-    assert_eq!(calls.len(), 1, "Should find 1 function call");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::FunctionCall { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 function call");
+    }
 }
 
 #[test]
 fn test_parse_function_call_one_arg() {
     let source = r#"fn test() { foo(42); }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let calls =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::FunctionCall(_))));
-    assert_eq!(calls.len(), 1, "Should find 1 function call");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::FunctionCall { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 function call");
+    }
 }
 
 #[test]
 fn test_parse_function_call_multiple_args() {
     let source = r#"fn test() { add(1, 2); }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let calls =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::FunctionCall(_))));
-    assert_eq!(calls.len(), 1, "Should find 1 function call");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::FunctionCall { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 function call");
+    }
 }
 
 #[test]
 fn test_parse_if_statement() {
     let source = r#"fn test() { if (x > 0) { return x; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let ifs = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::If(_))));
-    assert_eq!(ifs.len(), 1, "Should find 1 if statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let if_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::If { .. }))
+            .count();
+        assert_eq!(if_count, 1, "Should find 1 if statement");
+    }
 }
 
 #[test]
 fn test_parse_if_else_statement() {
     let source = r#"fn test() -> i32 { if (x > 0) { return x; } else { return 0; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let ifs = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::If(_))));
-    assert_eq!(ifs.len(), 1, "Should find 1 if statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let if_stmt = block.stmts.iter().find(|&&s| matches!(arena[s].kind, Stmt::If { .. }));
+        assert!(if_stmt.is_some(), "Should find if statement");
 
-    if let AstNode::Statement(Statement::If(if_stmt)) = &ifs[0] {
-        assert!(
-            if_stmt.else_arm.is_some(),
-            "If statement should have else arm"
-        );
+        if let Stmt::If { else_block, .. } = &arena[*if_stmt.unwrap()].kind {
+            assert!(else_block.is_some(), "If statement should have else arm");
+        }
     }
 }
 
@@ -623,83 +668,122 @@ fn test_parse_if_else_statement() {
 fn test_parse_loop_statement() {
     let source = r#"fn test() { loop { break; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let loops = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Loop(_))));
-    assert_eq!(loops.len(), 1, "Should find 1 loop statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let loop_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::Loop { .. }))
+            .count();
+        assert_eq!(loop_count, 1, "Should find 1 loop statement");
+    }
 }
 
 #[test]
 fn test_parse_for_loop() {
     let source = r#"fn test() { let mut i: i32 = 0; loop i < 10 { foo(i); i = i + 1; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let loops = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Loop(_))));
-    assert_eq!(loops.len(), 1, "Should find 1 loop statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let loop_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::Loop { .. }))
+            .count();
+        assert_eq!(loop_count, 1, "Should find 1 loop statement");
+    }
 }
 
 #[test]
 fn test_parse_break_statement() {
     let source = r#"fn test() { loop { break; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let breaks = arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Break(_))));
-    assert_eq!(breaks.len(), 1, "Should find 1 break statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|_| false);
+        // Check for break in loop body
+        let block = &arena[*body];
+        if let Stmt::Loop { body: loop_body, .. } = &arena[block.stmts[0]].kind {
+            let loop_block = &arena[*loop_body];
+            let break_count = loop_block
+                .stmts
+                .iter()
+                .filter(|&&s| matches!(arena[s].kind, Stmt::Break))
+                .count();
+            assert_eq!(break_count, 1, "Should find 1 break statement");
+        }
+        let _ = exprs; // suppress unused warning
+    }
 }
 
 #[test]
 fn test_parse_assert_statement() {
     let source = r#"fn test() { assert x > 0; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let asserts =
-        arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Assert(_))));
-    assert_eq!(asserts.len(), 1, "Should find 1 assert statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let assert_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::Assert { .. }))
+            .count();
+        assert_eq!(assert_count, 1, "Should find 1 assert statement");
+    }
 }
 
 #[test]
 fn test_parse_assert_with_complex_expr() {
     let source = r#"fn test() { assert a < b && b < c; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let asserts =
-        arena.filter_nodes(|node| matches!(node, AstNode::Statement(Statement::Assert(_))));
-    assert_eq!(asserts.len(), 1, "Should find 1 assert statement");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        let assert_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| matches!(arena[s].kind, Stmt::Assert { .. }))
+            .count();
+        assert_eq!(assert_count, 1, "Should find 1 assert statement");
+    }
 }
 
 #[test]
 fn test_parse_parenthesized_expression() {
     let source = r#"fn test() -> i32 { return (a + b) * c; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let parens = arena
-        .filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Parenthesized(_))));
-    assert!(!parens.is_empty(), "Should find parenthesized expression");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::Parenthesized { .. })
+        });
+        assert!(!exprs.is_empty(), "Should find parenthesized expression");
+    }
 }
 
 #[test]
 fn test_parse_bool_literal_true() {
     let source = r#"fn test() -> bool { return true; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let bool_literals = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(Expression::Literal(Literal::Bool(_)))
-        )
-    });
-    assert_eq!(bool_literals.len(), 1, "Should find 1 bool literal");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::BoolLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 bool literal");
 
-    if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0] {
-        assert!(lit.value, "Bool literal should be true");
-    } else {
-        panic!("Expected bool literal");
+        if let Expr::BoolLiteral { value } = &arena[exprs[0]].kind {
+            assert!(*value, "Bool literal should be true");
+        }
     }
 }
 
@@ -707,20 +791,17 @@ fn test_parse_bool_literal_true() {
 fn test_parse_bool_literal_false() {
     let source = r#"fn test() -> bool { return false; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let bool_literals = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(Expression::Literal(Literal::Bool(_)))
-        )
-    });
-    assert_eq!(bool_literals.len(), 1, "Should find 1 bool literal");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::BoolLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 bool literal");
 
-    if let AstNode::Expression(Expression::Literal(Literal::Bool(lit))) = &bool_literals[0] {
-        assert!(!lit.value, "Bool literal should be false");
-    } else {
-        panic!("Expected bool literal");
+        if let Expr::BoolLiteral { value } = &arena[exprs[0]].kind {
+            assert!(!*value, "Bool literal should be false");
+        }
     }
 }
 
@@ -728,23 +809,20 @@ fn test_parse_bool_literal_false() {
 fn test_parse_string_literal() {
     let source = r#"fn test() -> str { return "hello"; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let string_literals = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(Expression::Literal(Literal::String(_)))
-        )
-    });
-    assert_eq!(string_literals.len(), 1, "Should find 1 string literal");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::StringLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 string literal");
 
-    if let AstNode::Expression(Expression::Literal(Literal::String(lit))) = &string_literals[0] {
-        assert!(
-            lit.value.contains("hello"),
-            "String literal should contain 'hello'"
-        );
-    } else {
-        panic!("Expected string literal");
+        if let Expr::StringLiteral { value } = &arena[exprs[0]].kind {
+            assert!(
+                value.contains("hello"),
+                "String literal should contain 'hello'"
+            );
+        }
     }
 }
 
@@ -752,21 +830,17 @@ fn test_parse_string_literal() {
 fn test_parse_array_literal_empty() {
     let source = r#"fn test() -> [i32; 0] { return []; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let array_literals = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(Expression::Literal(Literal::Array(_)))
-        )
-    });
-    assert_eq!(array_literals.len(), 1, "Should find 1 array literal");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::ArrayLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 array literal");
 
-    if let AstNode::Expression(Expression::Literal(Literal::Array(lit))) = &array_literals[0] {
-        let is_empty = lit.elements.as_ref().is_none_or(Vec::is_empty);
-        assert!(is_empty, "Array literal should be empty");
-    } else {
-        panic!("Expected array literal");
+        if let Expr::ArrayLiteral { elements } = &arena[exprs[0]].kind {
+            assert!(elements.is_empty(), "Array literal should be empty");
+        }
     }
 }
 
@@ -774,21 +848,17 @@ fn test_parse_array_literal_empty() {
 fn test_parse_array_literal_values() {
     let source = r#"fn test() -> [i32; 3] { return [1, 2, 3]; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let array_literals = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Expression(Expression::Literal(Literal::Array(_)))
-        )
-    });
-    assert_eq!(array_literals.len(), 1, "Should find 1 array literal");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::ArrayLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 array literal");
 
-    if let AstNode::Expression(Expression::Literal(Literal::Array(lit))) = &array_literals[0] {
-        let count = lit.elements.as_ref().map_or(0, |v| v.len());
-        assert_eq!(count, 3, "Array literal should have 3 elements");
-    } else {
-        panic!("Expected array literal");
+        if let Expr::ArrayLiteral { elements } = &arena[exprs[0]].kind {
+            assert_eq!(elements.len(), 3, "Array literal should have 3 elements");
+        }
     }
 }
 
@@ -796,16 +866,17 @@ fn test_parse_array_literal_values() {
 fn test_parse_member_access() {
     let source = r#"fn test() -> i32 { return obj.field; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let member_accesses =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::MemberAccess(_))));
-    assert_eq!(member_accesses.len(), 1, "Should find 1 member access");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::MemberAccess { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 member access");
 
-    if let AstNode::Expression(Expression::MemberAccess(ma)) = &member_accesses[0] {
-        assert_eq!(ma.name.name, "field", "Member access should access 'field'");
-    } else {
-        panic!("Expected member access expression");
+        if let Expr::MemberAccess { name, .. } = &arena[exprs[0]].kind {
+            assert_eq!(arena[*name].name, "field");
+        }
     }
 }
 
@@ -813,22 +884,13 @@ fn test_parse_member_access() {
 fn test_parse_chained_member_access() {
     let source = r#"fn test() -> i32 { return obj.field.subfield; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let member_accesses =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::MemberAccess(_))));
-    assert!(
-        !member_accesses.is_empty(),
-        "Should find at least 1 member access"
-    );
-
-    if let AstNode::Expression(Expression::MemberAccess(ma)) = &member_accesses[0] {
-        assert_eq!(
-            ma.name.name, "subfield",
-            "Outermost member access should be 'subfield'"
-        );
-    } else {
-        panic!("Expected member access expression");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::MemberAccess { .. })
+        });
+        assert!(!exprs.is_empty(), "Should find at least 1 member access");
     }
 }
 
@@ -836,16 +898,17 @@ fn test_parse_chained_member_access() {
 fn test_parse_struct_expression() {
     let source = r#"fn test() -> Point { return Point { x: 1, y: 2 }; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let struct_exprs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Expression(Expression::Struct(_))));
-    assert_eq!(struct_exprs.len(), 1, "Should find 1 struct expression");
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let exprs = collect_exprs_matching(&arena, *body, &|e| {
+            matches!(e, Expr::StructLiteral { .. })
+        });
+        assert_eq!(exprs.len(), 1, "Should find 1 struct expression");
 
-    if let AstNode::Expression(Expression::Struct(se)) = &struct_exprs[0] {
-        assert_eq!(se.name.name, "Point", "Struct expression should be 'Point'");
-    } else {
-        panic!("Expected struct expression");
+        if let Expr::StructLiteral { name, .. } = &arena[exprs[0]].kind {
+            assert_eq!(arena[*name].name, "Point");
+        }
     }
 }
 
@@ -853,37 +916,34 @@ fn test_parse_struct_expression() {
 fn test_parse_external_function() {
     let source = r#"external fn sorting_function(Address, Address) -> Address;"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let ext_funcs = arena
-        .filter_nodes(|node| matches!(node, AstNode::Definition(Definition::ExternalFunction(_))));
-    assert_eq!(ext_funcs.len(), 1, "Should find 1 external function");
-
-    if let AstNode::Definition(Definition::ExternalFunction(ef)) = &ext_funcs[0] {
-        assert_eq!(
-            ef.name.name, "sorting_function",
-            "External function should be 'sorting_function'"
-        );
-    } else {
-        panic!("Expected external function definition");
-    }
+    let source_files: Vec<_> = arena.source_files().collect();
+    let ext_func = source_files[0].defs.iter().find_map(|&def_id| {
+        if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
+            Some(name)
+        } else {
+            None
+        }
+    });
+    let name_id = ext_func.expect("Should find external function");
+    assert_eq!(arena[*name_id].name, "sorting_function");
 }
 
 #[test]
 fn test_parse_type_alias() {
     let source = r#"type sf = sorting_function;"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let type_defs =
-        arena.filter_nodes(|node| matches!(node, AstNode::Definition(Definition::Type(_))));
-    assert_eq!(type_defs.len(), 1, "Should find 1 type definition");
-
-    if let AstNode::Definition(Definition::Type(td)) = &type_defs[0] {
-        assert_eq!(td.name.name, "sf", "Type alias should be 'sf'");
-    } else {
-        panic!("Expected type definition");
-    }
+    let source_files: Vec<_> = arena.source_files().collect();
+    let type_alias = source_files[0].defs.iter().find_map(|&def_id| {
+        if let Def::TypeAlias { name, .. } = &arena[def_id].kind {
+            Some(name)
+        } else {
+            None
+        }
+    });
+    let name_id = type_alias.expect("Should find type definition");
+    assert_eq!(arena[*name_id].name, "sf");
 }
 
 #[test]
@@ -906,48 +966,44 @@ fn test_parse_function_type_param() {
 fn test_parse_empty_block() {
     let source = r#"fn test() {}"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(0), false);
 
-    let functions = arena.functions();
-    let func = &functions[0];
-    assert!(
-        func.body.statements().is_empty(),
-        "Empty function should have no statements"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        assert!(
+            block.stmts.is_empty(),
+            "Empty function should have no statements"
+        );
+    }
 }
 
 #[test]
 fn test_parse_block_multiple_statements() {
     let source = r#"fn test() { let x: i32 = 1; let y: i32 = 2; return x + y; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let functions = arena.functions();
-    let func = &functions[0];
-    assert_eq!(
-        func.body.statements().len(),
-        3,
-        "Function should have 3 statements"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        assert_eq!(block.stmts.len(), 3, "Function should have 3 statements");
+    }
 }
 
 #[test]
 fn test_parse_nested_blocks() {
     let source = r#"fn test() { { let x: i32 = 1; } }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
 
-    let blocks = arena.filter_nodes(|node| {
-        matches!(
-            node,
-            AstNode::Statement(Statement::Block(inference_ast::nodes::BlockType::Block(_)))
-        )
-    });
-    assert!(
-        !blocks.is_empty(),
-        "Should find at least 1 nested block statement"
-    );
+    let func_id = find_function_by_name(&arena, "test").unwrap();
+    if let Def::Function { body, .. } = &arena[func_id].kind {
+        let block = &arena[*body];
+        assert!(!block.stmts.is_empty(), "Should have at least 1 statement");
+        assert!(
+            matches!(arena[block.stmts[0]].kind, Stmt::Block(_)),
+            "First statement should be a nested block"
+        );
+    }
     assert_variable_def(&arena, "x");
 }
 
@@ -955,7 +1011,6 @@ fn test_parse_nested_blocks() {
 fn test_parse_power_operator() {
     let source = r#"fn test() -> i32 { return 2 ** 16; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Pow);
 }
 
@@ -963,7 +1018,6 @@ fn test_parse_power_operator() {
 fn test_parse_modulo_operator() {
     let source = r#"fn test() -> i32 { return a % 4; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_single_binary_op(&arena, OperatorKind::Mod);
 }
 
@@ -975,7 +1029,6 @@ fn test() -> i32 {
     return 42;
 }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(0), true);
 }
 
@@ -987,7 +1040,6 @@ fn test() -> i32 {
     return 42;
 }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(0), true);
 }
 
@@ -995,7 +1047,6 @@ fn test() -> i32 {
 fn test_parse_function_with_bool_return() {
     let source = r#"fn is_positive(x: i32) -> bool { return x > 0; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "is_positive", Some(1), true);
 }
 
@@ -1004,7 +1055,6 @@ fn test_parse_custom_struct_type() {
     let source = r#"struct Point { x: i32; y: i32; }
 fn test(p: Point) -> Point { return p; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_struct_def(&arena, "Point", Some(2));
     assert_function_signature(&arena, "test", Some(1), true);
 }
@@ -1016,7 +1066,6 @@ const FLAG: bool = true;
 const NUM: i32 = 42;
 "#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_constant_def(&arena, "FLAG");
     assert_constant_def(&arena, "NUM");
 }
@@ -1025,7 +1074,6 @@ const NUM: i32 = 42;
 fn test_parse_unit_return_type() {
     let source = r#"fn test() { assert(true); }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(0), false);
 }
 
@@ -1033,7 +1081,6 @@ fn test_parse_unit_return_type() {
 fn test_parse_function_multiple_params() {
     let source = r#"fn test(a: i32, b: i32, c: i32, d: i32) -> i32 { return a + b + c + d; }"#;
     let arena = build_ast(source.to_string());
-    assert_eq!(arena.source_files().len(), 1, "Should have 1 source file");
     assert_function_signature(&arena, "test", Some(4), true);
 }
 

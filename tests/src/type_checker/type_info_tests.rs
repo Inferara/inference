@@ -4,11 +4,9 @@
 //! They complement the integration tests in tests/src/type_checker/ which test
 //! end-to-end type checking with source code parsing.
 
-use std::rc::Rc;
-
+use inference_ast::arena::AstArena;
 use inference_ast::nodes::{
-    Expression, FunctionType, GenericType, Identifier, Literal, NumberLiteral, QualifiedName,
-    SimpleTypeKind, Type, TypeArray, TypeQualifiedName,
+    Expr, ExprData, Ident, Location, SimpleTypeKind, TypeData, TypeNode,
 };
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use rustc_hash::FxHashMap;
@@ -779,22 +777,20 @@ mod type_info_kind_builtin_methods {
 
 mod type_info_from_ast {
     use super::*;
-    use inference_ast::nodes::Location;
 
     fn dummy_location() -> Location {
         Location::new(0, 0, 0, 0, 0, 0)
     }
 
-    fn make_identifier(name: &str) -> Rc<Identifier> {
-        Rc::new(Identifier {
-            id: 0,
+    fn alloc_ident(arena: &mut AstArena, name: &str) -> inference_ast::ids::IdentId {
+        arena.idents.alloc(Ident {
             location: dummy_location(),
             name: name.to_string(),
         })
     }
 
-    fn simple_type_kind_from_str(name: &str) -> SimpleTypeKind {
-        match name.to_lowercase().as_str() {
+    fn alloc_simple_type(arena: &mut AstArena, name: &str) -> inference_ast::ids::TypeId {
+        let kind = match name.to_lowercase().as_str() {
             "unit" => SimpleTypeKind::Unit,
             "bool" => SimpleTypeKind::Bool,
             "i8" => SimpleTypeKind::I8,
@@ -806,49 +802,59 @@ mod type_info_from_ast {
             "u32" => SimpleTypeKind::U32,
             "u64" => SimpleTypeKind::U64,
             _ => panic!("Unknown simple type kind: {}", name),
-        }
-    }
-
-    fn make_simple_type(name: &str) -> Type {
-        Type::Simple(simple_type_kind_from_str(name))
-    }
-
-    fn make_number_literal(value: &str) -> Expression {
-        Expression::Literal(Literal::Number(Rc::new(NumberLiteral {
-            id: 0,
+        };
+        arena.types.alloc(TypeData {
             location: dummy_location(),
-            value: value.to_string(),
-        })))
+            kind: TypeNode::Simple(kind),
+        })
+    }
+
+    fn alloc_number_literal_expr(
+        arena: &mut AstArena,
+        value: &str,
+    ) -> inference_ast::ids::ExprId {
+        arena.exprs.alloc(ExprData {
+            location: dummy_location(),
+            kind: Expr::NumberLiteral {
+                value: value.to_string(),
+            },
+        })
     }
 
     #[test]
     fn test_new_from_simple_builtin_i32() {
-        let ty = make_simple_type("i32");
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ty_id = alloc_simple_type(&mut arena, "i32");
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
         assert!(ti.type_params.is_empty());
     }
 
     #[test]
     fn test_new_from_simple_builtin_bool() {
-        let ty = make_simple_type("bool");
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ty_id = alloc_simple_type(&mut arena, "bool");
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Bool);
     }
 
     #[test]
     fn test_new_from_string_custom_type() {
-        // String type is parsed as Type::Custom (no dedicated SimpleTypeKind variant)
-        // but TypeInfo recognizes it as the builtin String type
-        let ty = Type::Custom(make_identifier("string"));
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "string");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::String);
     }
 
     #[test]
     fn test_new_from_simple_builtin_unit() {
-        let ty = make_simple_type("unit");
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ty_id = alloc_simple_type(&mut arena, "unit");
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Unit);
     }
 
@@ -866,67 +872,88 @@ mod type_info_from_ast {
         ];
 
         for (name, expected) in cases {
-            let ty = make_simple_type(name);
-            let ti = TypeInfo::new(&ty);
+            let mut arena = AstArena::default();
+            let ty_id = alloc_simple_type(&mut arena, name);
+            let ti = TypeInfo::from_type_id(&arena, ty_id);
             assert_eq!(ti.kind, TypeInfoKind::Number(expected), "Failed for {name}");
         }
     }
 
     #[test]
     fn test_new_from_custom_type() {
-        // Custom types use Type::Custom variant
-        let ty = Type::Custom(make_identifier("MyCustomType"));
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "MyCustomType");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Custom("MyCustomType".to_string()));
     }
 
     #[test]
     fn test_new_from_generic_type() {
-        let ty = Type::Generic(Rc::new(GenericType {
-            id: 0,
+        let mut arena = AstArena::default();
+        let base_id = alloc_ident(&mut arena, "Container");
+        let param_t = alloc_ident(&mut arena, "T");
+        let param_u = alloc_ident(&mut arena, "U");
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            base: make_identifier("Container"),
-            parameters: vec![make_identifier("T"), make_identifier("U")],
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Generic {
+                base: base_id,
+                params: vec![param_t, param_u],
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Generic("Container".to_string()));
         assert_eq!(ti.type_params, vec!["T".to_string(), "U".to_string()]);
     }
 
     #[test]
     fn test_new_from_qualified_name() {
-        let ty = Type::QualifiedName(Rc::new(QualifiedName {
-            id: 0,
+        let mut arena = AstArena::default();
+        let qualifier_id = alloc_ident(&mut arena, "std");
+        let name_id = alloc_ident(&mut arena, "Vec");
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            qualifier: make_identifier("std"),
-            name: make_identifier("Vec"),
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::QualifiedName {
+                qualifier: qualifier_id,
+                name: name_id,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::QualifiedName("std::Vec".to_string()));
     }
 
     #[test]
     fn test_new_from_qualified() {
-        let ty = Type::Qualified(Rc::new(TypeQualifiedName {
-            id: 0,
+        let mut arena = AstArena::default();
+        let alias_id = alloc_ident(&mut arena, "Module");
+        let name_id = alloc_ident(&mut arena, "Type");
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            alias: make_identifier("Module"),
-            name: make_identifier("Type"),
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Qualified {
+                alias: alias_id,
+                name: name_id,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Qualified("Type".to_string()));
     }
 
     #[test]
     fn test_new_from_array_type() {
-        let elem_type = make_simple_type("i32");
-        let ty = Type::Array(Rc::new(TypeArray {
-            id: 0,
+        let mut arena = AstArena::default();
+        let elem_ty = alloc_simple_type(&mut arena, "i32");
+        let size_expr = alloc_number_literal_expr(&mut arena, "10");
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            element_type: elem_type,
-            size: make_number_literal("10"),
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Array {
+                element: elem_ty,
+                size: size_expr,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Array(elem, size) = &ti.kind {
             assert_eq!(elem.kind, TypeInfoKind::Number(NumberType::I32));
@@ -938,20 +965,25 @@ mod type_info_from_ast {
 
     #[test]
     fn test_new_from_nested_array_type() {
-        let inner_elem = make_simple_type("bool");
-        let inner_array = Type::Array(Rc::new(TypeArray {
-            id: 0,
+        let mut arena = AstArena::default();
+        let inner_elem_ty = alloc_simple_type(&mut arena, "bool");
+        let inner_size = alloc_number_literal_expr(&mut arena, "5");
+        let inner_array_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
-            element_type: inner_elem,
-            size: make_number_literal("5"),
-        }));
-        let ty = Type::Array(Rc::new(TypeArray {
-            id: 0,
+            kind: TypeNode::Array {
+                element: inner_elem_ty,
+                size: inner_size,
+            },
+        });
+        let outer_size = alloc_number_literal_expr(&mut arena, "3");
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            element_type: inner_array,
-            size: make_number_literal("3"),
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Array {
+                element: inner_array_ty,
+                size: outer_size,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Array(outer_elem, outer_size) = &ti.kind {
             assert_eq!(*outer_size, 3);
@@ -968,13 +1000,15 @@ mod type_info_from_ast {
 
     #[test]
     fn test_new_from_function_type_no_params_no_return() {
-        let ty = Type::Function(Rc::new(FunctionType {
-            id: 0,
+        let mut arena = AstArena::default();
+        let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
-            parameters: None,
-            returns: None,
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Function {
+                params: vec![],
+                ret: None,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
             assert!(sig.contains("Function<0"));
@@ -986,14 +1020,22 @@ mod type_info_from_ast {
 
     #[test]
     fn test_new_from_function_type_with_params() {
-        // String type is parsed as Custom (no dedicated tree-sitter node kind)
-        let ty = Type::Function(Rc::new(FunctionType {
-            id: 0,
+        let mut arena = AstArena::default();
+        let param_i32 = alloc_simple_type(&mut arena, "i32");
+        let param_bool = alloc_simple_type(&mut arena, "bool");
+        let ret_ident = alloc_ident(&mut arena, "string");
+        let ret_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
-            parameters: Some(vec![make_simple_type("i32"), make_simple_type("bool")]),
-            returns: Some(Type::Custom(make_identifier("string"))),
-        }));
-        let ti = TypeInfo::new(&ty);
+            kind: TypeNode::Custom(ret_ident),
+        });
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Function {
+                params: vec![param_i32, param_bool],
+                ret: Some(ret_ty),
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
 
         if let TypeInfoKind::Function(sig) = &ti.kind {
             assert!(sig.contains("Function<2"));
@@ -1005,8 +1047,13 @@ mod type_info_from_ast {
 
     #[test]
     fn test_new_from_custom_identifier() {
-        let ty = Type::Custom(make_identifier("Point"));
-        let ti = TypeInfo::new(&ty);
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "Point");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
         assert_eq!(ti.kind, TypeInfoKind::Custom("Point".to_string()));
     }
 }
@@ -1166,22 +1213,20 @@ mod is_signed_methods {
 
 mod type_info_with_type_params {
     use super::*;
-    use inference_ast::nodes::Location;
 
     fn dummy_location() -> Location {
         Location::new(0, 0, 0, 0, 0, 0)
     }
 
-    fn make_identifier(name: &str) -> Rc<Identifier> {
-        Rc::new(Identifier {
-            id: 0,
+    fn alloc_ident(arena: &mut AstArena, name: &str) -> inference_ast::ids::IdentId {
+        arena.idents.alloc(Ident {
             location: dummy_location(),
             name: name.to_string(),
         })
     }
 
-    fn simple_type_kind_from_str(name: &str) -> SimpleTypeKind {
-        match name.to_lowercase().as_str() {
+    fn alloc_simple_type(arena: &mut AstArena, name: &str) -> inference_ast::ids::TypeId {
+        let kind = match name.to_lowercase().as_str() {
             "unit" => SimpleTypeKind::Unit,
             "bool" => SimpleTypeKind::Bool,
             "i8" => SimpleTypeKind::I8,
@@ -1193,71 +1238,99 @@ mod type_info_with_type_params {
             "u32" => SimpleTypeKind::U32,
             "u64" => SimpleTypeKind::U64,
             _ => panic!("Unknown simple type kind: {}", name),
-        }
-    }
-
-    fn make_simple_type(name: &str) -> Type {
-        Type::Simple(simple_type_kind_from_str(name))
-    }
-
-    fn make_number_literal(value: &str) -> Expression {
-        Expression::Literal(Literal::Number(Rc::new(NumberLiteral {
-            id: 0,
+        };
+        arena.types.alloc(TypeData {
             location: dummy_location(),
-            value: value.to_string(),
-        })))
+            kind: TypeNode::Simple(kind),
+        })
+    }
+
+    fn alloc_number_literal_expr(
+        arena: &mut AstArena,
+        value: &str,
+    ) -> inference_ast::ids::ExprId {
+        arena.exprs.alloc(ExprData {
+            location: dummy_location(),
+            kind: Expr::NumberLiteral {
+                value: value.to_string(),
+            },
+        })
     }
 
     #[test]
     fn test_custom_type_becomes_generic_when_in_type_params_list() {
-        // Type "T" parsed as Custom becomes Generic when T is in type_param_names
-        let ty = Type::Custom(make_identifier("T"));
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "T");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
         let type_params = vec!["T".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert_eq!(ti.kind, TypeInfoKind::Generic("T".to_string()));
     }
 
     #[test]
     fn test_custom_type_stays_custom_when_not_in_type_params_list() {
-        // Type "T" parsed as Custom stays Custom when T is not in type_param_names
-        let ty = Type::Custom(make_identifier("T"));
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "T");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
         let type_params = vec!["U".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert_eq!(ti.kind, TypeInfoKind::Custom("T".to_string()));
     }
 
     #[test]
     fn test_custom_type_becomes_generic_when_in_params() {
-        let ty = Type::Custom(make_identifier("T"));
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "T");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
         let type_params = vec!["T".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert_eq!(ti.kind, TypeInfoKind::Generic("T".to_string()));
     }
 
     #[test]
     fn test_custom_type_stays_custom_when_not_in_params() {
-        let ty = Type::Custom(make_identifier("MyStruct"));
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "MyStruct");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
         let type_params = vec!["T".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert_eq!(ti.kind, TypeInfoKind::Custom("MyStruct".to_string()));
     }
 
     #[test]
     fn test_array_element_becomes_generic() {
-        // Element type "T" as Custom becomes Generic when T is in type_param_names
-        let elem_type = Type::Custom(make_identifier("T"));
-        let ty = Type::Array(Rc::new(TypeArray {
-            id: 0,
+        let mut arena = AstArena::default();
+        let elem_ident = alloc_ident(&mut arena, "T");
+        let elem_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
-            element_type: elem_type,
-            size: make_number_literal("5"),
-        }));
+            kind: TypeNode::Custom(elem_ident),
+        });
+        let size_expr = alloc_number_literal_expr(&mut arena, "5");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Array {
+                element: elem_ty,
+                size: size_expr,
+            },
+        });
         let type_params = vec!["T".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         if let TypeInfoKind::Array(elem, size) = &ti.kind {
             assert_eq!(elem.kind, TypeInfoKind::Generic("T".to_string()));
@@ -1269,31 +1342,48 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_function_params_become_generic() {
-        // Function parameters with Custom types become Generic when in type_param_names
-        let ty = Type::Function(Rc::new(FunctionType {
-            id: 0,
+        let mut arena = AstArena::default();
+        let param_ident = alloc_ident(&mut arena, "T");
+        let param_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
-            parameters: Some(vec![Type::Custom(make_identifier("T"))]),
-            returns: Some(Type::Custom(make_identifier("U"))),
-        }));
+            kind: TypeNode::Custom(param_ident),
+        });
+        let ret_ident = alloc_ident(&mut arena, "U");
+        let ret_ty = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ret_ident),
+        });
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Function {
+                params: vec![param_ty],
+                ret: Some(ret_ty),
+            },
+        });
         let type_params = vec!["T".to_string(), "U".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert!(matches!(ti.kind, TypeInfoKind::Function(_)));
     }
 
     #[test]
     fn test_multiple_type_params_all_resolved() {
-        // Array element with Custom type becomes Generic when in type_param_names
-        let elem_type = Type::Custom(make_identifier("K"));
-        let ty = Type::Array(Rc::new(TypeArray {
-            id: 0,
+        let mut arena = AstArena::default();
+        let elem_ident = alloc_ident(&mut arena, "K");
+        let elem_ty = arena.types.alloc(TypeData {
             location: dummy_location(),
-            element_type: elem_type,
-            size: make_number_literal("10"),
-        }));
+            kind: TypeNode::Custom(elem_ident),
+        });
+        let size_expr = alloc_number_literal_expr(&mut arena, "10");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Array {
+                element: elem_ty,
+                size: size_expr,
+            },
+        });
         let type_params = vec!["K".to_string(), "V".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         if let TypeInfoKind::Array(elem, _) = &ti.kind {
             assert_eq!(elem.kind, TypeInfoKind::Generic("K".to_string()));
@@ -1304,31 +1394,33 @@ mod type_info_with_type_params {
 
     #[test]
     fn test_empty_type_params_no_generics() {
-        // Custom type "T" stays Custom when no type_param_names provided
-        let ty = Type::Custom(make_identifier("T"));
-        let ti = TypeInfo::new_with_type_params(&ty, &[]);
+        let mut arena = AstArena::default();
+        let ident_id = alloc_ident(&mut arena, "T");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Custom(ident_id),
+        });
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &[]);
 
         assert_eq!(ti.kind, TypeInfoKind::Custom("T".to_string()));
     }
 
     #[test]
     fn test_simple_type_cannot_be_shadowed_by_type_param() {
-        // Type::Simple(i32) always becomes Number(I32), even if "i32" is in type_param_names
-        // This is expected behavior: primitive types have dedicated SimpleTypeKind variants
-        // and are not subject to type parameter shadowing
-        let ty = make_simple_type("i32");
+        let mut arena = AstArena::default();
+        let ty_id = alloc_simple_type(&mut arena, "i32");
         let type_params = vec!["i32".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
-        // Primitive types are not affected by type_param_names
         assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
     }
 
     #[test]
     fn test_builtin_without_matching_type_param_stays_builtin() {
-        let ty = make_simple_type("i32");
+        let mut arena = AstArena::default();
+        let ty_id = alloc_simple_type(&mut arena, "i32");
         let type_params = vec!["T".to_string()];
-        let ti = TypeInfo::new_with_type_params(&ty, &type_params);
+        let ti = TypeInfo::from_type_id_with_type_params(&arena, ty_id, &type_params);
 
         assert_eq!(ti.kind, TypeInfoKind::Number(NumberType::I32));
     }
