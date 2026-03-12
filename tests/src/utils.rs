@@ -506,15 +506,15 @@ fn block_contains_var_def(
     let block = &arena[block_id];
     for &stmt_id in &block.stmts {
         match &arena[stmt_id].kind {
-            Stmt::VarDef { name: name_id, .. } => {
-                if arena[*name_id].name == name {
-                    return true;
-                }
+            Stmt::VarDef { name: name_id, .. }
+                if arena[*name_id].name == name =>
+            {
+                return true;
             }
-            Stmt::Block(inner) => {
-                if block_contains_var_def(arena, *inner, name) {
-                    return true;
-                }
+            Stmt::Block(inner)
+                if block_contains_var_def(arena, *inner, name) =>
+            {
+                return true;
             }
             Stmt::If {
                 then_block,
@@ -530,10 +530,10 @@ fn block_contains_var_def(
                     return true;
                 }
             }
-            Stmt::Loop { body, .. } => {
-                if block_contains_var_def(arena, *body, name) {
-                    return true;
-                }
+            Stmt::Loop { body, .. }
+                if block_contains_var_def(arena, *body, name) =>
+            {
+                return true;
             }
             _ => {}
         }
