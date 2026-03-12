@@ -367,17 +367,6 @@ impl Compiler {
             // into the callee's frame to enforce value semantics.
             for arg in &args {
                 if let ArgKind::Named { name, .. } = &arg.kind {
-                    let type_info = ctx.get_node_typeinfo(NodeId::Def(def_id)).or_else(|| {
-                        let ti = TypeInfo::from_type_id(
-                            arena,
-                            match &arg.kind {
-                                ArgKind::Named { ty, .. } => *ty,
-                                _ => unreachable!(),
-                            },
-                        );
-                        Some(ti)
-                    });
-                    // Try direct lookup on the arg's type
                     let arg_name = arena[*name].name.clone();
                     let arg_type_info = {
                         let ty_id = match &arg.kind {
@@ -386,7 +375,6 @@ impl Compiler {
                         };
                         TypeInfo::from_type_id(arena, ty_id)
                     };
-                    let _ = type_info; // drop the def-level lookup
                     if let TypeInfoKind::Array(elem_type, _length) = &arg_type_info.kind {
                         let param_local = self
                             .locals_map

@@ -453,19 +453,6 @@ pub(crate) fn assert_function_signature(
             has_ret, has_return,
             "Function '{name}' return type mismatch"
         );
-        // Simpler check: returns.is_some() is what the old code tested
-        assert_eq!(
-            returns.is_some(),
-            has_return,
-            "Function '{}' return type: expected {}, found {}",
-            name,
-            if has_return { "present" } else { "absent" },
-            if returns.is_some() {
-                "present"
-            } else {
-                "absent"
-            }
-        );
     } else {
         panic!("DefId does not point to a function");
     }

@@ -485,6 +485,29 @@ mod walker_traversal_tests {
     }
 
     #[test]
+    fn a002_break_inside_exists_block() {
+        let source = r#"
+            fn main() -> i32 { return 0; }
+            fn foo() {
+                loop {
+                    exists {
+                        break;
+                    }
+                    break;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_nondet_break = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::BreakInsideNonDetBlock { .. }));
+        assert!(
+            has_nondet_break,
+            "expected BreakInsideNonDetBlock in exists block: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a005_return_inside_assume_block() {
         let source = r#"
             fn main() -> i32 { return 0; }
