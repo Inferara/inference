@@ -130,18 +130,16 @@ impl AstArena {
                 return true;
             }
             match &self[def_id].kind {
-                Def::Struct { methods, .. } => {
-                    if self.def_in_list(target, methods) {
-                        return true;
-                    }
+                Def::Struct { methods, .. }
+                    if self.def_in_list(target, methods) =>
+                {
+                    return true;
                 }
                 Def::Spec { defs, .. }
                 | Def::Module {
                     defs: Some(defs), ..
-                } => {
-                    if self.def_in_list(target, defs) {
-                        return true;
-                    }
+                } if self.def_in_list(target, defs) => {
+                    return true;
                 }
                 _ => {}
             }

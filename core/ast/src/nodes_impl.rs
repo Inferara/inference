@@ -59,10 +59,10 @@ impl AstArena {
         for &stmt_id in stmts {
             match &self[stmt_id].kind {
                 Stmt::Return { .. } => return true,
-                Stmt::Block(inner_block_id) => {
-                    if !self.block_is_void(*inner_block_id) {
-                        return true;
-                    }
+                Stmt::Block(inner_block_id)
+                    if !self.block_is_void(*inner_block_id) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
