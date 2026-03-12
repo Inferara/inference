@@ -380,7 +380,7 @@ mod tests {
             },
         });
         let max_name = alloc_ident(&mut arena, "MAX");
-        let i32_type = alloc_unit_type(&mut arena);
+        let unit_type = alloc_unit_type(&mut arena);
         let value_expr = arena.exprs.alloc(ExprData {
             location: dummy_location(),
             kind: Expr::NumberLiteral {
@@ -392,7 +392,7 @@ mod tests {
             kind: Def::Constant {
                 name: max_name,
                 vis: Visibility::default(),
-                ty: i32_type,
+                ty: unit_type,
                 value: value_expr,
             },
         });

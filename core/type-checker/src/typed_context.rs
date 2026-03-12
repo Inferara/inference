@@ -11,7 +11,7 @@ use crate::{
 use inference_ast::{
     arena::AstArena,
     ids::{DefId, NodeId},
-    nodes::{Location, SourceFileData},
+    nodes::SourceFileData,
 };
 use rustc_hash::FxHashMap;
 
@@ -93,13 +93,4 @@ impl TypedContext {
     }
 }
 
-/// Describes a value expression that has no [`TypeInfo`] entry after type checking.
-#[derive(Debug)]
-pub struct MissingExpressionType {
-    /// AST node ID of the untyped expression.
-    pub node_id: NodeId,
-    /// Human-readable name of the expression variant (e.g. `"Binary"`, `"FunctionCall"`).
-    pub kind: String,
-    /// Source location of the expression, for diagnostic output.
-    pub location: Location,
-}
+
