@@ -77,9 +77,9 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to, align_to_frame,
-    element_size, emit_array_param_copy, emit_sret_copy, emit_sret_element_addr,
-    emit_stack_epilogue, emit_stack_prologue,
+    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
+    align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
+    emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -514,36 +514,66 @@ impl Compiler {
         args: &[inference_ast::nodes::ArgData],
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
+        let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
         for arg in args {
             if let ArgKind::Named { name, ty, .. } = &arg.kind {
                 let type_info = TypeInfo::from_type_id(arena, *ty);
-                if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
-                    let elem_sz = element_size(&elem_type.kind);
-                    let byte_count = elem_sz.checked_mul(*length).expect(
-                        "Array byte count overflow: element size * length exceeds u32::MAX",
-                    );
-                    let aligned_offset = align_to(current_offset, elem_sz);
-                    let slot = ArraySlot {
-                        offset: aligned_offset,
-                        elem_size: elem_sz,
-                        length: *length,
-                    };
-                    let arg_name = arena[*name].name.clone();
-                    array_offsets.insert(arg_name, slot);
-                    current_offset = aligned_offset
-                        .checked_add(byte_count)
-                        .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
+                match &type_info.kind {
+                    TypeInfoKind::Array(elem_type, length) => {
+                        let elem_sz = element_size(&elem_type.kind);
+                        let byte_count = elem_sz.checked_mul(*length).expect(
+                            "Array byte count overflow: element size * length exceeds u32::MAX",
+                        );
+                        let aligned_offset = align_to(current_offset, elem_sz);
+                        let slot = ArraySlot {
+                            offset: aligned_offset,
+                            elem_size: elem_sz,
+                            length: *length,
+                        };
+                        let arg_name = arena[*name].name.clone();
+                        array_offsets.insert(arg_name, slot);
+                        current_offset = aligned_offset.checked_add(byte_count).expect(
+                            "Frame offset overflow: total array allocation exceeds u32::MAX",
+                        );
+                    }
+                    TypeInfoKind::Custom(custom_name) => {
+                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                            let (total_size, field_slots) =
+                                compute_struct_field_layout(&struct_info);
+                            if total_size > 0 {
+                                let max_field_align = field_slots
+                                    .iter()
+                                    .map(|f| element_size(&f.type_kind))
+                                    .max()
+                                    .unwrap_or(1);
+                                let aligned_offset = align_to(current_offset, max_field_align);
+                                let slot = StructSlot {
+                                    offset: aligned_offset,
+                                    total_size,
+                                    fields: field_slots,
+                                };
+                                let arg_name = arena[*name].name.clone();
+                                struct_offsets.insert(arg_name, slot);
+                                current_offset =
+                                    aligned_offset.checked_add(total_size).expect(
+                                        "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                    );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        Self::collect_array_slots(
+        Self::collect_compound_slots(
             arena,
             block_id,
             ctx,
             &mut array_offsets,
+            &mut struct_offsets,
             &mut current_offset,
         );
 
@@ -560,16 +590,18 @@ impl Compiler {
         Some(FrameLayout {
             total_size,
             array_offsets,
+            struct_offsets,
             frame_ptr_local: frame_ptr_local_idx,
         })
     }
 
-    /// Recursively walks a block collecting array variable declarations.
-    fn collect_array_slots(
+    /// Recursively walks a block collecting array and struct variable declarations.
+    fn collect_compound_slots(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         array_offsets: &mut FxHashMap<String, ArraySlot>,
+        struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
     ) {
         let block = &arena[block_id];
@@ -579,30 +611,60 @@ impl Compiler {
                     let type_info = ctx
                         .get_node_typeinfo(NodeId::Stmt(stmt_id))
                         .expect("Variable definition must have type info");
-                    if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
-                        let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz.checked_mul(*length).expect(
-                            "Array byte count overflow: element size * length exceeds u32::MAX",
-                        );
-                        let aligned_offset = align_to(*current_offset, elem_sz);
-                        let slot = ArraySlot {
-                            offset: aligned_offset,
-                            elem_size: elem_sz,
-                            length: *length,
-                        };
-                        let var_name = arena[*name].name.clone();
-                        array_offsets.insert(var_name, slot);
-                        *current_offset = aligned_offset.checked_add(byte_count).expect(
-                            "Frame offset overflow: total array allocation exceeds u32::MAX",
-                        );
+                    match &type_info.kind {
+                        TypeInfoKind::Array(elem_type, length) => {
+                            let elem_sz = element_size(&elem_type.kind);
+                            let byte_count = elem_sz.checked_mul(*length).expect(
+                                "Array byte count overflow: element size * length exceeds u32::MAX",
+                            );
+                            let aligned_offset = align_to(*current_offset, elem_sz);
+                            let slot = ArraySlot {
+                                offset: aligned_offset,
+                                elem_size: elem_sz,
+                                length: *length,
+                            };
+                            let var_name = arena[*name].name.clone();
+                            array_offsets.insert(var_name, slot);
+                            *current_offset = aligned_offset.checked_add(byte_count).expect(
+                                "Frame offset overflow: total array allocation exceeds u32::MAX",
+                            );
+                        }
+                        TypeInfoKind::Struct(struct_name) => {
+                            if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                                let (total_size, field_slots) =
+                                    compute_struct_field_layout(&struct_info);
+                                if total_size > 0 {
+                                    let max_field_align = field_slots
+                                        .iter()
+                                        .map(|f| element_size(&f.type_kind))
+                                        .max()
+                                        .unwrap_or(1);
+                                    let aligned_offset =
+                                        align_to(*current_offset, max_field_align);
+                                    let slot = StructSlot {
+                                        offset: aligned_offset,
+                                        total_size,
+                                        fields: field_slots,
+                                    };
+                                    let var_name = arena[*name].name.clone();
+                                    struct_offsets.insert(var_name, slot);
+                                    *current_offset =
+                                        aligned_offset.checked_add(total_size).expect(
+                                            "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                        );
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Stmt::Block(inner_block_id) => {
-                    Self::collect_array_slots(
+                    Self::collect_compound_slots(
                         arena,
                         *inner_block_id,
                         ctx,
                         array_offsets,
+                        struct_offsets,
                         current_offset,
                     );
                 }
@@ -611,25 +673,29 @@ impl Compiler {
                     else_block,
                     ..
                 } => {
-                    Self::collect_array_slots(
+                    Self::collect_compound_slots(
                         arena,
                         *then_block,
                         ctx,
                         array_offsets,
+                        struct_offsets,
                         current_offset,
                     );
                     if let Some(else_id) = else_block {
-                        Self::collect_array_slots(
+                        Self::collect_compound_slots(
                             arena,
                             *else_id,
                             ctx,
                             array_offsets,
+                            struct_offsets,
                             current_offset,
                         );
                     }
                 }
                 Stmt::Loop { body, .. } => {
-                    Self::collect_array_slots(arena, *body, ctx, array_offsets, current_offset);
+                    Self::collect_compound_slots(
+                        arena, *body, ctx, array_offsets, struct_offsets, current_offset,
+                    );
                 }
                 _ => {}
             }

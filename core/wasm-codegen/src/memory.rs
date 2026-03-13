@@ -147,7 +147,7 @@ pub(crate) fn compute_struct_field_layout(
     (total_size, field_slots)
 }
 
-/// Per-function stack frame layout for array allocations.
+/// Per-function stack frame layout for compound type allocations (arrays and structs).
 ///
 /// Stored on `Compiler` as per-function state: set at the start of
 /// `visit_function_definition` and cleared after the function body is compiled.
@@ -157,6 +157,8 @@ pub(crate) struct FrameLayout {
     pub total_size: u32,
     /// Maps source-level array variable names to their frame slots.
     pub array_offsets: FxHashMap<String, ArraySlot>,
+    /// Maps source-level struct variable names to their frame slots.
+    pub struct_offsets: FxHashMap<String, StructSlot>,
     /// WASM local index of the synthetic `__frame_ptr` local.
     pub frame_ptr_local: u32,
 }
@@ -634,6 +636,7 @@ mod tests {
         let layout = FrameLayout {
             total_size: 16,
             array_offsets: FxHashMap::default(),
+            struct_offsets: FxHashMap::default(),
             frame_ptr_local: 0,
         };
         assert_eq!(layout.total_size, 16);
