@@ -1046,7 +1046,9 @@ impl TypeChecker {
                     if let Some(struct_name) = struct_name {
                         let field_name = ctx.arena()[name].name.clone();
                         if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
-                            if let Some(field_info) = struct_info.fields.get(&field_name) {
+                            if let Some(field_info) =
+                                struct_info.get_field_info_by_name(&field_name)
+                            {
                                 self.check_and_report_visibility(
                                     &field_info.visibility,
                                     struct_info.definition_scope_id,

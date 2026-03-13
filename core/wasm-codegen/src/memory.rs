@@ -31,6 +31,7 @@
 //! | Section assembly        | `finish()` in compiler.rs           |
 
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+use inference_type_checker::StructInfo;
 use rustc_hash::FxHashMap;
 use wasm_encoder::{Function, Instruction, MemArg};
 
@@ -74,6 +75,76 @@ pub(crate) struct ArraySlot {
     pub elem_size: u32,
     /// Number of elements in the array.
     pub length: u32,
+}
+
+/// Describes a single struct field's location within a struct instance.
+#[derive(Debug, Clone)]
+pub(crate) struct StructFieldSlot {
+    /// The field name as declared in the struct definition.
+    pub name: String,
+    /// Byte offset from the start of the struct to this field.
+    pub offset: u32,
+    /// Size in bytes of this field.
+    pub size: u32,
+    /// The type kind of this field, used for load/store instruction selection.
+    pub type_kind: TypeInfoKind,
+}
+
+/// Describes a struct instance's location within a stack frame.
+#[derive(Debug, Clone)]
+pub(crate) struct StructSlot {
+    /// Byte offset from the frame pointer to the start of this struct.
+    pub offset: u32,
+    /// Total size in bytes of the struct (including internal padding, excluding trailing padding).
+    pub total_size: u32,
+    /// Per-field layout information, in declaration order.
+    pub fields: Vec<StructFieldSlot>,
+}
+
+/// Computes the byte layout for a struct's fields.
+///
+/// Iterates fields in declaration order, aligning each field to its natural
+/// alignment and computing running offsets. Returns `(total_size, field_slots)`.
+///
+/// The total size is the offset just past the last field's data, rounded up to
+/// the struct's overall alignment (the maximum alignment of any field). This
+/// matches C struct layout rules (`repr(C)`) and ensures arrays of structs
+/// would be correctly aligned.
+///
+/// # Panics
+///
+/// Panics if a field has an unsupported type for `element_size()`.
+#[must_use = "returns the computed struct layout"]
+pub(crate) fn compute_struct_field_layout(
+    struct_info: &StructInfo,
+) -> (u32, Vec<StructFieldSlot>) {
+    let mut current_offset: u32 = 0;
+    let mut max_align: u32 = 1;
+    let mut field_slots = Vec::with_capacity(struct_info.fields.len());
+
+    for field in &struct_info.fields {
+        let size = element_size(&field.type_info.kind);
+        let align = size;
+        let aligned_offset = align_to(current_offset, align);
+
+        if align > max_align {
+            max_align = align;
+        }
+
+        field_slots.push(StructFieldSlot {
+            name: field.name.clone(),
+            offset: aligned_offset,
+            size,
+            type_kind: field.type_info.kind.clone(),
+        });
+
+        current_offset = aligned_offset
+            .checked_add(size)
+            .expect("Struct field layout overflow: total size exceeds u32::MAX");
+    }
+
+    let total_size = align_to(current_offset, max_align);
+    (total_size, field_slots)
 }
 
 /// Per-function stack frame layout for array allocations.
@@ -499,6 +570,9 @@ pub(crate) fn emit_stack_epilogue(func: &mut Function, layout: &FrameLayout) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference_type_checker::type_info::TypeInfo;
+    use inference_type_checker::{StructFieldInfo, StructInfo};
+    use inference_ast::nodes::Visibility;
 
     #[test]
     fn align_to_frame_zero() {
@@ -708,5 +782,183 @@ mod tests {
         let mut func = Function::new(vec![]);
         let emitted = emit_sub_i32_narrowing(&mut func, &TypeInfoKind::Bool);
         assert!(!emitted, "should not emit narrowing for bool");
+    }
+
+    fn make_field(name: &str, kind: TypeInfoKind) -> StructFieldInfo {
+        StructFieldInfo {
+            name: name.to_string(),
+            type_info: TypeInfo {
+                kind,
+                type_params: vec![],
+            },
+            visibility: Visibility::Public,
+        }
+    }
+
+    fn make_struct_info(name: &str, fields: Vec<StructFieldInfo>) -> StructInfo {
+        StructInfo {
+            name: name.to_string(),
+            fields,
+            type_params: vec![],
+            visibility: Visibility::Public,
+            definition_scope_id: 0,
+        }
+    }
+
+    #[test]
+    fn struct_layout_single_i32_field() {
+        let layout = make_struct_info(
+            "Single",
+            vec![make_field("x", TypeInfoKind::Number(NumberType::I32))],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(total_size, 4);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 4);
+    }
+
+    #[test]
+    fn struct_layout_two_i32_fields() {
+        let layout = make_struct_info(
+            "Point",
+            vec![
+                make_field("x", TypeInfoKind::Number(NumberType::I32)),
+                make_field("y", TypeInfoKind::Number(NumberType::I32)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(total_size, 8);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "x");
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 4);
+        assert_eq!(fields[1].name, "y");
+        assert_eq!(fields[1].offset, 4);
+        assert_eq!(fields[1].size, 4);
+    }
+
+    #[test]
+    fn struct_layout_mixed_types_with_padding() {
+        let layout = make_struct_info(
+            "Mixed",
+            vec![
+                make_field("flag", TypeInfoKind::Bool),
+                make_field("val", TypeInfoKind::Number(NumberType::I64)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(fields[0].name, "flag");
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 1);
+        assert_eq!(fields[1].name, "val");
+        assert_eq!(fields[1].offset, 8);
+        assert_eq!(fields[1].size, 8);
+        assert_eq!(total_size, 16);
+    }
+
+    #[test]
+    fn struct_layout_all_primitive_types() {
+        let layout = make_struct_info(
+            "AllTypes",
+            vec![
+                make_field("a", TypeInfoKind::Bool),
+                make_field("b", TypeInfoKind::Number(NumberType::I8)),
+                make_field("c", TypeInfoKind::Number(NumberType::I16)),
+                make_field("d", TypeInfoKind::Number(NumberType::I32)),
+                make_field("e", TypeInfoKind::Number(NumberType::I64)),
+                make_field("f", TypeInfoKind::Number(NumberType::U8)),
+                make_field("g", TypeInfoKind::Number(NumberType::U16)),
+                make_field("h", TypeInfoKind::Number(NumberType::U32)),
+                make_field("i", TypeInfoKind::Number(NumberType::U64)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0].offset, 0); // bool: 1 byte
+        assert_eq!(fields[1].offset, 1); // i8: 1 byte, align 1
+        assert_eq!(fields[2].offset, 2); // i16: 2 bytes, align 2
+        assert_eq!(fields[3].offset, 4); // i32: 4 bytes, align 4
+        assert_eq!(fields[4].offset, 8); // i64: 8 bytes, align 8
+        assert_eq!(fields[5].offset, 16); // u8: 1 byte, align 1
+        assert_eq!(fields[6].offset, 18); // u16: 2 bytes, align 2
+        assert_eq!(fields[7].offset, 20); // u32: 4 bytes, align 4
+        assert_eq!(fields[8].offset, 24); // u64: 8 bytes, align 8
+        assert_eq!(total_size, 32);
+    }
+
+    #[test]
+    fn struct_layout_trailing_padding() {
+        let layout = make_struct_info(
+            "Trailing",
+            vec![
+                make_field("big", TypeInfoKind::Number(NumberType::I64)),
+                make_field("small", TypeInfoKind::Bool),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 8);
+        assert_eq!(fields[1].offset, 8);
+        assert_eq!(fields[1].size, 1);
+        assert_eq!(total_size, 16, "should pad to max alignment (8)");
+    }
+
+    #[test]
+    fn struct_layout_empty() {
+        let layout = make_struct_info("Empty", vec![]);
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(total_size, 0);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn struct_layout_single_bool() {
+        let layout = make_struct_info(
+            "Flag",
+            vec![make_field("b", TypeInfoKind::Bool)],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(total_size, 1);
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 1);
+    }
+
+    #[test]
+    fn struct_layout_i16_then_i32_padding() {
+        let layout = make_struct_info(
+            "Padded",
+            vec![
+                make_field("a", TypeInfoKind::Number(NumberType::I16)),
+                make_field("b", TypeInfoKind::Number(NumberType::I32)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(fields[0].offset, 0);
+        assert_eq!(fields[0].size, 2);
+        assert_eq!(fields[1].offset, 4);
+        assert_eq!(fields[1].size, 4);
+        assert_eq!(total_size, 8);
+    }
+
+    #[test]
+    fn struct_layout_preserves_field_type_kind() {
+        let layout = make_struct_info(
+            "Typed",
+            vec![
+                make_field("x", TypeInfoKind::Number(NumberType::I32)),
+                make_field("y", TypeInfoKind::Number(NumberType::I64)),
+            ],
+        );
+        let (_, fields) = compute_struct_field_layout(&layout);
+        assert_eq!(
+            fields[0].type_kind,
+            TypeInfoKind::Number(NumberType::I32)
+        );
+        assert_eq!(
+            fields[1].type_kind,
+            TypeInfoKind::Number(NumberType::I64)
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
-    symbol_table::SymbolTable,
+    symbol_table::{StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -75,6 +75,15 @@ impl TypedContext {
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn get_node_typeinfo(&self, node_id: NodeId) -> Option<TypeInfo> {
         self.node_types.get(&node_id).cloned()
+    }
+
+    /// Looks up a struct by name and returns its type information.
+    ///
+    /// Returns `None` if no struct with the given name exists in the current scope.
+    /// Fields in the returned [`StructInfo`] are in declaration order.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
+        self.symbol_table.lookup_struct(name)
     }
 
     pub(crate) fn set_node_typeinfo(&mut self, node_id: NodeId, type_info: TypeInfo) {
