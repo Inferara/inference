@@ -1,0 +1,26 @@
+struct Point { x: i32; y: i32; }
+
+pub fn set_and_get() -> i32 {
+    let mut p: Point = Point { x: 1, y: 2 };
+    p.x = 42;
+    return p.x;
+}
+
+pub fn swap_fields() -> i32 {
+    let mut p: Point = Point { x: 10, y: 20 };
+    let tmp: i32 = p.x;
+    p.x = p.y;
+    p.y = tmp;
+    return p.x + p.y;
+}
+
+struct Flagged { flag: bool; val: i32; }
+
+pub fn modify_bool() -> i32 {
+    let mut f: Flagged = Flagged { flag: false, val: 100 };
+    f.flag = true;
+    if f.flag {
+        return f.val;
+    }
+    return 0;
+}

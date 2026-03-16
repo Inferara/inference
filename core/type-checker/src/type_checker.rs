@@ -15,7 +15,7 @@
 use anyhow::bail;
 use inference_ast::arena::AstArena;
 use inference_ast::extern_prelude::ExternPrelude;
-use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
+use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode, UnaryOperatorKind,
     Visibility,
@@ -35,6 +35,7 @@ pub(crate) struct TypeChecker {
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
     reported_error_keys: FxHashSet<String>,
+    compound_literal_allowed: bool,
 }
 
 impl TypeChecker {
@@ -88,12 +89,31 @@ impl TypeChecker {
                 Def::Struct { name, methods, .. } => {
                     let struct_name = ctx.arena()[*name].name.clone();
                     let struct_type = TypeInfo {
-                        kind: TypeInfoKind::Struct(struct_name),
+                        kind: TypeInfoKind::Struct(struct_name.clone()),
                         type_params: vec![],
                     };
                     let method_ids: Vec<DefId> = methods.clone();
                     for method_id in method_ids {
                         self.infer_method_variables(method_id, struct_type.clone(), ctx);
+                        let arena = ctx.arena();
+                        let method_data = &arena[method_id];
+                        if let Def::Function {
+                            name: method_name,
+                            args,
+                            body,
+                            ..
+                        } = &method_data.kind
+                        {
+                            let has_self =
+                                args.iter().any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
+                            if has_self && !Self::body_references_self(arena, *body) {
+                                self.errors.push(TypeCheckError::MethodNeverAccessesSelf {
+                                    struct_name: struct_name.clone(),
+                                    method_name: arena[*method_name].name.clone(),
+                                    location: method_data.location,
+                                });
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -142,6 +162,12 @@ impl TypeChecker {
                     methods,
                 } => {
                     let struct_name = arena[*name].name.clone();
+                    if fields.is_empty() && methods.is_empty() {
+                        self.errors.push(TypeCheckError::EmptyStruct {
+                            name: struct_name.clone(),
+                            location,
+                        });
+                    }
                     let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
                         .iter()
                         .map(|f| {
@@ -583,6 +609,7 @@ impl TypeChecker {
 
         let return_type = returns_snapshot
             .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
+            .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
@@ -659,6 +686,7 @@ impl TypeChecker {
 
         let return_type = returns_snapshot
             .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
+            .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
@@ -677,15 +705,7 @@ impl TypeChecker {
         let kind = stmt_data.kind.clone();
         match kind {
             Stmt::Assign { left, right } => {
-                let arena = ctx.arena();
-                if let Expr::Identifier(ident_id) = &arena[left].kind {
-                    let name = arena[*ident_id].name.clone();
-                    if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
-                        self.errors
-                            .push(TypeCheckError::AssignToImmutable { name, location });
-                    }
-                } else if let Expr::ArrayIndexAccess { array, .. } = &arena[left].kind
-                    && let Some(name) = self.extract_root_array_name(ctx.arena(), *array)
+                if let Some(name) = self.extract_root_variable_name(ctx.arena(), left)
                     && let Some(false) = self.symbol_table.lookup_variable_is_mut(&name)
                 {
                     self.errors
@@ -698,8 +718,20 @@ impl TypeChecker {
                     if let Some(target) = &target_type
                         && let Expr::NumberLiteral { value } = &right_kind
                     {
-                        ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
-                        self.validate_literal_range(value, &target.kind, right_loc);
+                        if target.kind.is_number() {
+                            ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
+                            self.validate_literal_range(value, &target.kind, right_loc);
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::Assignment,
+                                location,
+                            });
+                        }
                     }
                 }
                 let arena = ctx.arena();
@@ -718,13 +750,18 @@ impl TypeChecker {
                         let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                         if let Some(ref fn_name) = func_name
                             && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                            && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                            && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                         {
                             self.errors
                                 .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
                                     location: ctx.arena()[right].location,
                                 });
                         }
+                    }
+                    let lhs_is_identifier =
+                        matches!(ctx.arena()[left].kind, Expr::Identifier(_));
+                    if lhs_is_identifier {
+                        self.compound_literal_allowed = true;
                     }
                     let value_type = self.infer_expression(right, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
@@ -754,7 +791,7 @@ impl TypeChecker {
                     let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                     if let Some(ref fn_name) = func_name
                         && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                     {
                         self.errors
                             .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
@@ -767,6 +804,7 @@ impl TypeChecker {
                 if let Expr::Uzumaki = &ctx.arena()[expr].kind {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
+                    self.compound_literal_allowed = true;
                     let value_type = self.infer_expression(expr, ctx);
                     if *return_type != value_type.clone().unwrap_or_default() {
                         self.errors.push(TypeCheckError::TypeMismatch {
@@ -856,8 +894,20 @@ impl TypeChecker {
                         value: ref num_value,
                     } = expr_kind
                     {
-                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                        self.validate_literal_range(num_value, &target_type.kind, expr_loc);
+                        if target_type.kind.is_number() {
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
+                            self.validate_literal_range(num_value, &target_type.kind, expr_loc);
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
                     if let Expr::ArrayLiteral { elements } = &expr_kind
                         && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
@@ -880,16 +930,30 @@ impl TypeChecker {
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
-                        && self.symbol_table.resolve_custom_type(init_type.clone()) != target_type
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target_type.clone(),
-                            found: init_type,
-                            context: TypeMismatchContext::VariableDefinition,
-                            location,
-                        });
+                    } else {
+                        self.compound_literal_allowed = true;
+                        if let Some(init_type) = self.infer_expression(expr_id, ctx)
+                            && self.symbol_table.resolve_custom_type(init_type.clone())
+                                != target_type
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: init_type,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
+                }
+                if self
+                    .symbol_table
+                    .lookup_variable_in_parent_scopes(&var_name)
+                    .is_some()
+                {
+                    self.errors.push(TypeCheckError::VariableShadowed {
+                        name: var_name.clone(),
+                        location,
+                    });
                 }
                 if let Err(err) =
                     self.symbol_table
@@ -943,6 +1007,16 @@ impl TypeChecker {
                         .symbol_table
                         .resolve_custom_type(TypeInfo::from_type_id(arena, *ty));
                     let value_id = *value;
+                    if self
+                        .symbol_table
+                        .lookup_variable_in_parent_scopes(&const_name)
+                        .is_some()
+                    {
+                        self.errors.push(TypeCheckError::VariableShadowed {
+                            name: const_name.clone(),
+                            location,
+                        });
+                    }
                     if let Err(err) = self.symbol_table.push_variable_to_scope(
                         &const_name,
                         constant_type.clone(),
@@ -956,12 +1030,39 @@ impl TypeChecker {
                         });
                     }
                     let arena = ctx.arena();
-                    if let Expr::NumberLiteral { value: num_value } = &arena[value_id].kind {
-                        self.validate_literal_range(
-                            num_value,
-                            &constant_type.kind,
-                            arena[value_id].location,
-                        );
+                    let value_kind = arena[value_id].kind.clone();
+                    let value_loc = arena[value_id].location;
+                    if let Expr::NumberLiteral { value: num_value } = &value_kind {
+                        if constant_type.kind.is_number() {
+                            self.validate_literal_range(
+                                num_value,
+                                &constant_type.kind,
+                                value_loc,
+                            );
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: constant_type.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
+                    } else {
+                        let init_type = self.infer_expression(value_id, ctx);
+                        if let Some(init) = init_type
+                            && self.symbol_table.resolve_custom_type(init.clone())
+                                != constant_type
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: constant_type.clone(),
+                                found: init,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
                     ctx.set_node_typeinfo(NodeId::Expr(value_id), constant_type.clone());
                     ctx.set_node_typeinfo(NodeId::Def(cdi), constant_type.clone());
@@ -973,6 +1074,8 @@ impl TypeChecker {
 
     #[allow(clippy::too_many_lines)]
     fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
+        let compound_literal_allowed =
+            std::mem::replace(&mut self.compound_literal_allowed, false);
         let arena = ctx.arena();
         let expr_data = &arena[expr_id];
         let location = expr_data.location;
@@ -984,7 +1087,7 @@ impl TypeChecker {
                     let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                     if let Some(ref fn_name) = func_name
                         && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                     {
                         self.errors
                             .push(TypeCheckError::ArrayReturnCallInExpressionPosition { location });
@@ -1030,7 +1133,26 @@ impl TypeChecker {
             Expr::MemberAccess { expr, name } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
-                } else if let Some(object_type) = self.infer_expression(expr, ctx) {
+                } else {
+                    if let Expr::FunctionCall { function, .. } = &ctx.arena()[expr].kind {
+                        let func_name = self.resolve_function_call_name(ctx.arena(), *function);
+                        if let Some(ref fn_name) = func_name
+                            && let Some(sig) = self.symbol_table.lookup_function(fn_name)
+                            && matches!(
+                                sig.return_type.kind,
+                                TypeInfoKind::Array(_, _)
+                                    | TypeInfoKind::Struct(_)
+                                    | TypeInfoKind::Custom(_)
+                            )
+                        {
+                            self.errors
+                                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                    location,
+                                });
+                            return None;
+                        }
+                    }
+                    if let Some(object_type) = self.infer_expression(expr, ctx) {
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -1046,7 +1168,9 @@ impl TypeChecker {
                     if let Some(struct_name) = struct_name {
                         let field_name = ctx.arena()[name].name.clone();
                         if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
-                            if let Some(field_info) = struct_info.fields.get(&field_name) {
+                            if let Some(field_info) =
+                                struct_info.get_field_info_by_name(&field_name)
+                            {
                                 self.check_and_report_visibility(
                                     &field_info.visibility,
                                     struct_info.definition_scope_id,
@@ -1084,6 +1208,7 @@ impl TypeChecker {
                     }
                 } else {
                     None
+                }
                 }
             }
             Expr::TypeMemberAccess {
@@ -1169,13 +1294,105 @@ impl TypeChecker {
                 type_params: call_type_params,
                 args,
             } => self.infer_function_call(expr_id, function, &call_type_params, &args, ctx),
-            Expr::StructLiteral { name, .. } => {
+            Expr::StructLiteral { name, fields } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
+                }
+                if !compound_literal_allowed {
+                    self.errors.push(TypeCheckError::CompoundLiteralInUnsupportedPosition {
+                        kind: "struct",
+                        location,
+                    });
+                    return None;
                 }
                 let struct_name = ctx.arena()[name].name.clone();
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
+                    if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
+                        let fields_copy: Vec<_> =
+                            fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                        let mut seen_fields = FxHashSet::default();
+                        for (field_name_id, field_value_expr) in &fields_copy {
+                            let field_name = ctx.arena()[*field_name_id].name.clone();
+                            let field_loc = ctx.arena()[*field_name_id].location;
+                            if !seen_fields.insert(field_name.clone()) {
+                                self.errors
+                                    .push(TypeCheckError::DuplicateStructField {
+                                        struct_name: struct_name.clone(),
+                                        field_name,
+                                        location: field_loc,
+                                    });
+                                continue;
+                            }
+                            if let Some(field_info) =
+                                struct_info.get_field_info_by_name(&field_name)
+                            {
+                                let field_type = field_info.type_info.clone();
+                                let (field_expr_kind, field_expr_loc) = {
+                                    let arena = ctx.arena();
+                                    (
+                                        arena[*field_value_expr].kind.clone(),
+                                        arena[*field_value_expr].location,
+                                    )
+                                };
+                                if let Expr::NumberLiteral {
+                                    value: ref num_value,
+                                } = field_expr_kind
+                                {
+                                    if field_type.kind.is_number() {
+                                        ctx.set_node_typeinfo(
+                                            NodeId::Expr(*field_value_expr),
+                                            field_type.clone(),
+                                        );
+                                        self.validate_literal_range(
+                                            num_value,
+                                            &field_type.kind,
+                                            field_expr_loc,
+                                        );
+                                    } else {
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: field_type.clone(),
+                                            found: TypeInfo {
+                                                kind: TypeInfoKind::Number(NumberType::I32),
+                                                type_params: vec![],
+                                            },
+                                            context: TypeMismatchContext::VariableDefinition,
+                                            location: field_expr_loc,
+                                        });
+                                    }
+                                } else {
+                                    self.compound_literal_allowed = true;
+                                    let init_type =
+                                        self.infer_expression(*field_value_expr, ctx);
+                                    if let Some(init) = init_type
+                                        && init != field_type
+                                    {
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: field_type.clone(),
+                                            found: init,
+                                            context: TypeMismatchContext::VariableDefinition,
+                                            location: field_expr_loc,
+                                        });
+                                    }
+                                }
+                            } else {
+                                self.errors.push(TypeCheckError::UnknownStructField {
+                                    struct_name: struct_name.clone(),
+                                    field_name,
+                                    location: field_loc,
+                                });
+                            }
+                        }
+                        for field_info in &struct_info.fields {
+                            if !seen_fields.contains(&field_info.name) {
+                                self.errors.push(TypeCheckError::MissingStructField {
+                                    struct_name: struct_name.clone(),
+                                    field_name: field_info.name.clone(),
+                                    location,
+                                });
+                            }
+                        }
+                    }
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), struct_type.clone());
                     return Some(struct_type);
                 }
@@ -1275,15 +1492,28 @@ impl TypeChecker {
                                 return None;
                             }
                         }
-                        OperatorKind::Eq
-                        | OperatorKind::Ne
-                        | OperatorKind::Lt
-                        | OperatorKind::Le
-                        | OperatorKind::Gt
-                        | OperatorKind::Ge => TypeInfo {
+                        OperatorKind::Eq | OperatorKind::Ne => TypeInfo {
                             kind: TypeInfoKind::Bool,
                             type_params: vec![],
                         },
+                        OperatorKind::Lt
+                        | OperatorKind::Le
+                        | OperatorKind::Gt
+                        | OperatorKind::Ge => {
+                            if !left_type.is_number() || !right_type.is_number() {
+                                self.errors.push(TypeCheckError::InvalidBinaryOperand {
+                                    operator: op.clone(),
+                                    expected_kind: "comparison",
+                                    operand_desc: "non-numeric types",
+                                    found_types: (left_type, right_type),
+                                    location,
+                                });
+                            }
+                            TypeInfo {
+                                kind: TypeInfoKind::Bool,
+                                type_params: vec![],
+                            }
+                        }
                         OperatorKind::Pow
                         | OperatorKind::Add
                         | OperatorKind::Sub
@@ -1304,14 +1534,6 @@ impl TypeChecker {
                                     location,
                                 });
                             }
-                            if left_type != right_type {
-                                self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
-                                    operator: op,
-                                    left: left_type.clone(),
-                                    right: right_type,
-                                    location,
-                                });
-                            }
                             left_type.clone()
                         }
                     };
@@ -1325,30 +1547,41 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                if !elements.is_empty()
-                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
-                {
-                    for &element_id in &elements[1..] {
-                        let element_type = self.infer_expression(element_id, ctx);
-                        if let Some(element_type) = element_type
-                            && element_type != element_type_info
-                        {
-                            self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                expected: element_type_info.clone(),
-                                found: element_type,
-                                location,
-                            });
+                if !compound_literal_allowed {
+                    self.errors.push(
+                        TypeCheckError::CompoundLiteralInUnsupportedPosition {
+                            kind: "array",
+                            location,
+                        },
+                    );
+                    return None;
+                }
+                if !elements.is_empty() {
+                    self.compound_literal_allowed = true;
+                    if let Some(element_type_info) = self.infer_expression(elements[0], ctx) {
+                        for &element_id in &elements[1..] {
+                            self.compound_literal_allowed = true;
+                            let element_type = self.infer_expression(element_id, ctx);
+                            if let Some(element_type) = element_type
+                                && element_type != element_type_info
+                            {
+                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                    expected: element_type_info.clone(),
+                                    found: element_type,
+                                    location,
+                                });
+                            }
                         }
+                        let array_type = TypeInfo {
+                            kind: TypeInfoKind::Array(
+                                Box::new(element_type_info),
+                                elements.len() as u32,
+                            ),
+                            type_params: vec![],
+                        };
+                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                        return Some(array_type);
                     }
-                    let array_type = TypeInfo {
-                        kind: TypeInfoKind::Array(
-                            Box::new(element_type_info),
-                            elements.len() as u32,
-                        ),
-                        type_params: vec![],
-                    };
-                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
-                    return Some(array_type);
                 }
                 None
             }
@@ -1784,11 +2017,16 @@ impl TypeChecker {
                 location: arena[arg_expr_id].location,
             });
         }
+        if let Expr::StructLiteral { .. } = &arena[arg_expr_id].kind {
+            self.errors.push(TypeCheckError::StructLiteralAsArgument {
+                location: arena[arg_expr_id].location,
+            });
+        }
         if let Expr::FunctionCall { function, .. } = &arena[arg_expr_id].kind {
             let func_name = self.resolve_function_call_name(arena, *function);
             if let Some(ref fn_name) = func_name
                 && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
             {
                 self.errors
                     .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
@@ -2316,13 +2554,18 @@ impl TypeChecker {
         substitutions
     }
 
-    /// Extracts the root identifier name from a potentially nested array index
-    /// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
-    /// also returns `Some("arr")`. Returns `None` for non-identifier bases.
-    fn extract_root_array_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
+    /// Extracts the root identifier name from a potentially nested access expression.
+    ///
+    /// Handles array index access (`arr[i]`), member access (`p.x`), and any
+    /// nesting thereof (`p.x[0]`, `arr[0].x`, `p.x.y`). Returns `None` for
+    /// non-identifier bases.
+    fn extract_root_variable_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
-            Expr::ArrayIndexAccess { array, .. } => self.extract_root_array_name(arena, *array),
+            Expr::ArrayIndexAccess { array, .. } => {
+                self.extract_root_variable_name(arena, *array)
+            }
+            Expr::MemberAccess { expr, .. } => self.extract_root_variable_name(arena, *expr),
             _ => None,
         }
     }
@@ -2389,5 +2632,87 @@ impl TypeChecker {
             self.reported_error_keys.insert(key);
         }
         self.errors.push(error);
+    }
+
+    /// Returns true if any statement in the block references `self`.
+    fn body_references_self(arena: &AstArena, block_id: BlockId) -> bool {
+        arena[block_id]
+            .stmts
+            .iter()
+            .any(|&stmt_id| Self::stmt_references_self(arena, stmt_id))
+    }
+
+    /// Returns true if the statement references `self` in any sub-expression.
+    fn stmt_references_self(arena: &AstArena, stmt_id: StmtId) -> bool {
+        match &arena[stmt_id].kind {
+            Stmt::Block(block_id) => Self::body_references_self(arena, *block_id),
+            Stmt::Expr(expr_id) => Self::expr_references_self(arena, *expr_id),
+            Stmt::Assign { left, right } => {
+                Self::expr_references_self(arena, *left)
+                    || Self::expr_references_self(arena, *right)
+            }
+            Stmt::Return { expr } => Self::expr_references_self(arena, *expr),
+            Stmt::Loop { condition, body } => {
+                condition
+                    .as_ref()
+                    .is_some_and(|c| Self::expr_references_self(arena, *c))
+                    || Self::body_references_self(arena, *body)
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                Self::expr_references_self(arena, *condition)
+                    || Self::body_references_self(arena, *then_block)
+                    || else_block.is_some_and(|b| Self::body_references_self(arena, b))
+            }
+            Stmt::VarDef { value, .. } => {
+                value.is_some_and(|v| Self::expr_references_self(arena, v))
+            }
+            Stmt::Assert { expr } => Self::expr_references_self(arena, *expr),
+            Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+        }
+    }
+
+    /// Returns true if the expression references `self` (directly or in sub-expressions).
+    fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
+            Expr::Binary { left, right, .. } => {
+                Self::expr_references_self(arena, *left)
+                    || Self::expr_references_self(arena, *right)
+            }
+            Expr::PrefixUnary { expr, .. } | Expr::Parenthesized { expr } => {
+                Self::expr_references_self(arena, *expr)
+            }
+            Expr::FunctionCall {
+                function, args, ..
+            } => {
+                Self::expr_references_self(arena, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg_expr)| Self::expr_references_self(arena, *arg_expr))
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_references_self(arena, *array)
+                    || Self::expr_references_self(arena, *index)
+            }
+            Expr::MemberAccess { expr, .. } | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_references_self(arena, *expr)
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, field_expr)| Self::expr_references_self(arena, *field_expr)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|elem| Self::expr_references_self(arena, *elem)),
+            Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
     }
 }

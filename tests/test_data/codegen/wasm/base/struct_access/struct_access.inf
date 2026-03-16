@@ -1,0 +1,30 @@
+struct Point { x: i32; y: i32; }
+
+pub fn get_x() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.x;
+}
+
+pub fn get_y() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.y;
+}
+
+pub fn sum_fields() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.x + p.y;
+}
+
+struct Single { val: i32; }
+
+pub fn get_single_val() -> i32 {
+    let s: Single = Single { val: 42 };
+    return s.val;
+}
+
+struct Mixed { flag: bool; val: i64; }
+
+pub fn get_mixed_val() -> i64 {
+    let m: Mixed = Mixed { flag: true, val: 100 };
+    return m.val;
+}

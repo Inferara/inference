@@ -46,22 +46,27 @@ pub(crate) struct FuncInfo {
 
 /// Information about a struct field.
 #[derive(Debug, Clone)]
-pub(crate) struct StructFieldInfo {
-    #[allow(dead_code)]
-    pub(crate) name: String,
-    pub(crate) type_info: TypeInfo,
-    pub(crate) visibility: Visibility,
+pub struct StructFieldInfo {
+    pub name: String,
+    pub type_info: TypeInfo,
+    pub visibility: Visibility,
 }
 
 /// Information about a struct type. Visibility and definition_scope_id are used
 /// for visibility checking during member access.
 #[derive(Debug, Clone)]
-pub(crate) struct StructInfo {
-    pub(crate) name: String,
-    pub(crate) fields: FxHashMap<String, StructFieldInfo>,
-    pub(crate) type_params: Vec<String>,
-    pub(crate) visibility: Visibility,
-    pub(crate) definition_scope_id: u32,
+pub struct StructInfo {
+    pub name: String,
+    pub fields: Vec<StructFieldInfo>,
+    pub type_params: Vec<String>,
+    pub visibility: Visibility,
+    pub definition_scope_id: u32,
+}
+
+impl StructInfo {
+    pub fn get_field_info_by_name(&self, name: &str) -> Option<&StructFieldInfo> {
+        self.fields.iter().find(|f| f.name == name)
+    }
 }
 
 /// Information about an enum type including its variants.
@@ -492,7 +497,13 @@ impl SymbolTable {
             None => name.to_string(),
         };
 
-        let new_scope = Scope::new(scope_id, name, full_path, visibility, parent.as_ref().map(Arc::downgrade));
+        let new_scope = Scope::new(
+            scope_id,
+            name,
+            full_path,
+            visibility,
+            parent.as_ref().map(Arc::downgrade),
+        );
 
         if let Some(current) = &parent {
             current.borrow_mut().add_child(Arc::clone(&new_scope));
@@ -510,11 +521,7 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn register_type(
-        &mut self,
-        name: &str,
-        ty: Option<TypeInfo>,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn register_type(&mut self, name: &str, ty: Option<TypeInfo>) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             let type_info = ty.unwrap_or_else(|| TypeInfo {
                 kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
@@ -537,20 +544,19 @@ impl SymbolTable {
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
-            let mut field_map = FxHashMap::default();
-            for (field_name, field_type, field_visibility) in fields {
-                field_map.insert(
-                    field_name.clone(),
-                    StructFieldInfo {
+            let fields = fields
+                .iter()
+                .map(
+                    |(field_name, field_type, field_visibility)| StructFieldInfo {
                         name: field_name.clone(),
                         type_info: field_type.clone(),
                         visibility: field_visibility.clone(),
                     },
-                );
-            }
+                )
+                .collect();
             let struct_info = StructInfo {
                 name: name.to_string(),
-                fields: field_map,
+                fields,
                 type_params,
                 visibility,
                 definition_scope_id: scope_id,
@@ -705,6 +711,19 @@ impl SymbolTable {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_variable_is_mut(name))
+    }
+
+    /// Checks whether a variable exists in any parent scope (skipping the current scope).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_in_parent_scopes(&self, name: &str) -> Option<TypeInfo> {
+        self.current_scope.as_ref().and_then(|scope| {
+            let scope = scope.borrow();
+            scope
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .and_then(|parent| parent.borrow().lookup_variable(name))
+        })
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -931,15 +950,12 @@ impl SymbolTable {
                         )
                     })
                     .collect();
-                self.register_struct(
-                    &arena[*name].name,
-                    &field_infos,
-                    vec![],
-                    vis.clone(),
-                )?;
+                self.register_struct(&arena[*name].name, &field_infos, vec![], vis.clone())?;
             }
             Def::Enum {
-                name, vis, variants,
+                name,
+                vis,
+                variants,
             } => {
                 let variant_names: Vec<&str> =
                     variants.iter().map(|v| arena[*v].name.as_str()).collect();
@@ -961,15 +977,15 @@ impl SymbolTable {
                 let param_types: Vec<TypeInfo> = args
                     .iter()
                     .filter_map(|a| match &a.kind {
-                        ArgKind::Named { ty, .. } => {
-                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
-                        }
-                        ArgKind::Ignored { ty } => {
-                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
-                        }
-                        ArgKind::TypeOnly(ty) => {
-                            Some(TypeInfo::from_type_id_with_type_params(arena, *ty, &tp_names))
-                        }
+                        ArgKind::Named { ty, .. } => Some(TypeInfo::from_type_id_with_type_params(
+                            arena, *ty, &tp_names,
+                        )),
+                        ArgKind::Ignored { ty } => Some(TypeInfo::from_type_id_with_type_params(
+                            arena, *ty, &tp_names,
+                        )),
+                        ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id_with_type_params(
+                            arena, *ty, &tp_names,
+                        )),
                         ArgKind::SelfRef { .. } => None,
                     })
                     .collect();
@@ -987,10 +1003,7 @@ impl SymbolTable {
                 .map_err(|e| anyhow::anyhow!(e))?;
             }
             Def::TypeAlias { name, ty, .. } => {
-                self.register_type(
-                    &arena[*name].name,
-                    Some(TypeInfo::from_type_id(arena, *ty)),
-                )?;
+                self.register_type(&arena[*name].name, Some(TypeInfo::from_type_id(arena, *ty)))?;
             }
             Def::Constant { .. } | Def::ExternFunction { .. } | Def::Module { .. } => {}
         }
@@ -1274,7 +1287,11 @@ mod tests {
             let child_id = table.push_scope();
             let child_scope = table.get_scope(child_id).unwrap();
             let parent_scope = table.get_scope(parent_id).unwrap();
-            let child_parent = child_scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+            let child_parent = child_scope
+                .borrow()
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade());
             assert!(
                 child_parent.is_some(),
                 "Anonymous child scope should have parent"

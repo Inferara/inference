@@ -145,7 +145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Propagates element type from `[i64; N]` annotation to number literals in array initializers
 - Add array element assignment mutability check ([#148])
   - `arr[i] = value` requires `arr` to be declared `mut`
-  - `extract_root_array_name` resolves root identifier from nested index access expressions
+  - `extract_root_variable_name` resolves root identifier from nested index access and member access expressions ([#149])
+  - Struct field assignment (`p.x = 42`) requires the struct variable to be declared `mut` ([#149])
+- Add `VariableShadowed` error: variable declaration that shadows a name from an outer scope is a hard error ([#149])
+  - Aligns with MISRA C Rule 5.3 and NASA Power of 10
+  - `lookup_variable_in_parent_scopes()` added to symbol table to detect shadowing before registration
 - Add `ArrayReturnCallInExpressionPosition` error: rejects array-returning function calls in unsupported positions ([#148])
   - Only `let x = foo()` and `return foo()` are permitted for sret calls
   - Standalone calls, argument positions, index access, and assignment RHS all rejected with clear diagnostic

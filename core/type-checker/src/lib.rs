@@ -108,6 +108,8 @@ mod type_checker;
 pub mod type_info;
 pub mod typed_context;
 
+pub use symbol_table::{StructFieldInfo, StructInfo};
+
 /// Marker state indicating builder has not yet been initialized with an arena.
 pub struct TypeCheckerInitState;
 

@@ -424,6 +424,13 @@ pub enum TypeCheckError {
     #[error("{location}: cannot assign to immutable variable `{name}`")]
     AssignToImmutable { name: String, location: Location },
 
+    /// Variable shadows a binding from an outer scope.
+    ///
+    /// Shadowing is prohibited to prevent ambiguity about which binding is
+    /// referenced. Rename the inner variable to avoid confusion.
+    #[error("{location}: variable `{name}` shadows a binding from an outer scope")]
+    VariableShadowed { name: String, location: Location },
+
     /// Numeric literal value is outside the valid range for the target type.
     ///
     /// For example, `let x: u8 = 256` or `let y: i8 = 200`.
@@ -447,6 +454,24 @@ pub enum TypeCheckError {
     )]
     ArrayLiteralAsArgument { location: Location },
 
+    /// Struct literal used directly as a function argument.
+    ///
+    /// Struct literals must be assigned to a variable before being passed
+    /// as function arguments. This is a codegen limitation.
+    #[error("{location}: struct literal cannot be used directly as a function argument; assign to a variable first")]
+    StructLiteralAsArgument { location: Location },
+
+    /// Compound literal (struct or array) used in an unsupported expression position.
+    ///
+    /// Compound literals can only appear as variable initializers, assignment
+    /// values, return values, or struct field values. They cannot be used in
+    /// arbitrary expression positions.
+    #[error("{location}: {kind} literals can only be used in variable declarations, assignments, return statements, or as struct field values")]
+    CompoundLiteralInUnsupportedPosition {
+        kind: &'static str,
+        location: Location,
+    },
+
     /// Array uzumaki (@) passed directly as a function argument.
     ///
     /// Array uzumaki must be assigned to a variable before passing to functions
@@ -456,13 +481,14 @@ pub enum TypeCheckError {
     )]
     ArrayUzumakiAsArgument { location: Location },
 
-    /// Array-returning function call used in an unsupported expression position.
+    /// Compound-returning function call used in an unsupported expression position.
     ///
-    /// Array-returning functions use the sret calling convention, which requires
-    /// the caller to provide a destination pointer. They can only appear in
-    /// variable definitions (`let x = foo()`) or return statements (`return foo()`).
+    /// Functions returning arrays or structs use the sret calling convention,
+    /// which requires the caller to provide a destination pointer. They can only
+    /// appear in variable definitions (`let x = foo()`) or return statements
+    /// (`return foo()`).
     #[error(
-        "{location}: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+        "{location}: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
     )]
     ArrayReturnCallInExpressionPosition { location: Location },
 
@@ -480,6 +506,46 @@ pub enum TypeCheckError {
         "{location}: invalid array size `{size}`; must be a positive integer that fits in 32 bits"
     )]
     InvalidArraySize { size: String, location: Location },
+
+    /// Method declares `self` but never references it in the body.
+    ///
+    /// If a method does not access `self`, it should be an associated function instead.
+    #[error("{location}: method `{struct_name}::{method_name}` declares `self` but never accesses it; consider making it an associated function")]
+    MethodNeverAccessesSelf {
+        struct_name: String,
+        method_name: String,
+        location: Location,
+    },
+
+    /// Struct has no fields and no methods.
+    ///
+    /// An empty struct serves no purpose; add fields or methods, or remove it.
+    #[error("{location}: struct `{name}` has no fields and no methods")]
+    EmptyStruct { name: String, location: Location },
+
+    /// A required field is missing from a struct literal.
+    #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
+    MissingStructField {
+        struct_name: String,
+        field_name: String,
+        location: Location,
+    },
+
+    /// An unknown field is provided in a struct literal.
+    #[error("{location}: unknown field `{field_name}` in struct literal `{struct_name}`")]
+    UnknownStructField {
+        struct_name: String,
+        field_name: String,
+        location: Location,
+    },
+
+    /// A field is provided more than once in a struct literal.
+    #[error("{location}: duplicate field `{field_name}` in struct literal `{struct_name}`")]
+    DuplicateStructField {
+        struct_name: String,
+        field_name: String,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -521,12 +587,20 @@ impl TypeCheckError {
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
             | TypeCheckError::AssignToImmutable { location, .. }
+            | TypeCheckError::VariableShadowed { location, .. }
             | TypeCheckError::LiteralOutOfRange { location, .. }
             | TypeCheckError::ArrayLiteralAsArgument { location, .. }
+            | TypeCheckError::StructLiteralAsArgument { location, .. }
+            | TypeCheckError::CompoundLiteralInUnsupportedPosition { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
             | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
-            | TypeCheckError::InvalidArraySize { location, .. } => location,
+            | TypeCheckError::InvalidArraySize { location, .. }
+            | TypeCheckError::MethodNeverAccessesSelf { location, .. }
+            | TypeCheckError::EmptyStruct { location, .. }
+            | TypeCheckError::MissingStructField { location, .. }
+            | TypeCheckError::UnknownStructField { location, .. }
+            | TypeCheckError::DuplicateStructField { location, .. } => location,
         }
     }
 }
@@ -1141,6 +1215,41 @@ mod tests {
     }
 
     #[test]
+    fn display_struct_literal_as_argument() {
+        let err = TypeCheckError::StructLiteralAsArgument {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct literal cannot be used directly as a function argument; assign to a variable first"
+        );
+    }
+
+    #[test]
+    fn display_struct_literal_in_unsupported_position() {
+        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
+            kind: "struct",
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct literals can only be used in variable declarations, assignments, return statements, or as struct field values"
+        );
+    }
+
+    #[test]
+    fn display_array_literal_in_unsupported_position() {
+        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
+            kind: "array",
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array literals can only be used in variable declarations, assignments, return statements, or as struct field values"
+        );
+    }
+
+    #[test]
     fn display_array_uzumaki_as_argument() {
         let err = TypeCheckError::ArrayUzumakiAsArgument {
             location: test_location(),
@@ -1158,7 +1267,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+            "1:5: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
         );
     }
 
@@ -1198,6 +1307,82 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: invalid array size `0`; must be a positive integer that fits in 32 bits"
+        );
+    }
+
+    #[test]
+    fn display_method_never_accesses_self() {
+        let err = TypeCheckError::MethodNeverAccessesSelf {
+            struct_name: "Counter".to_string(),
+            method_name: "reset".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: method `Counter::reset` declares `self` but never accesses it; consider making it an associated function"
+        );
+    }
+
+    #[test]
+    fn display_empty_struct() {
+        let err = TypeCheckError::EmptyStruct {
+            name: "Empty".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct `Empty` has no fields and no methods"
+        );
+    }
+
+    #[test]
+    fn display_variable_shadowed() {
+        let err = TypeCheckError::VariableShadowed {
+            name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: variable `x` shadows a binding from an outer scope"
+        );
+    }
+
+    #[test]
+    fn display_missing_struct_field() {
+        let err = TypeCheckError::MissingStructField {
+            struct_name: "Point".to_string(),
+            field_name: "y".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: missing field `y` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_unknown_struct_field() {
+        let err = TypeCheckError::UnknownStructField {
+            struct_name: "Point".to_string(),
+            field_name: "z".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: unknown field `z` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_duplicate_struct_field() {
+        let err = TypeCheckError::DuplicateStructField {
+            struct_name: "Point".to_string(),
+            field_name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: duplicate field `x` in struct literal `Point`"
         );
     }
 }

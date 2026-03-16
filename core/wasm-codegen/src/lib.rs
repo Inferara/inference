@@ -137,7 +137,7 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
             .copied()
             .filter(|&def_id| matches!(arena[def_id].kind, Def::Function { .. }))
             .collect();
-        compiler.build_func_name_to_idx(arena, &func_def_ids);
+        compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context);
         for &def_id in &func_def_ids {
             compiler.visit_function_definition(def_id, arena, typed_context);
         }

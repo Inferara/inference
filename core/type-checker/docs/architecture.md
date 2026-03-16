@@ -878,19 +878,23 @@ The `validate_type()` method no longer needs symbol table lookups for primitive 
 
 **Impact on Type Checking**: The validate_type method no longer needs to look up primitive types in the symbol table. The pattern match on `Type::Simple(_)` immediately recognizes these as valid builtin types, simplifying the validation logic.
 
-## Array Assignment Validation
+## Assignment Mutability Validation
 
-When an assignment targets an array index (e.g., `arr[i] = x;`), the type checker validates that the array itself is mutable. This requires extracting the root array name from nested index access expressions.
+When an assignment targets an array index (`arr[i] = x`) or a struct field (`p.x = 42`), the type checker validates that the root variable is mutable. This requires extracting the root variable name from the left-hand side expression, which may be arbitrarily nested.
 
-**Root Array Name Extraction**:
+**Root Variable Name Extraction**:
 
 ```rust
-fn extract_root_array_name(expr: &Expression) -> Option<String> {
+fn extract_root_variable_name(expr: &Expression) -> Option<String> {
     match expr {
         Expression::Identifier(id) => Some(id.name.clone()),
         Expression::ArrayIndexAccess(access) => {
             // Recursively extract from nested accesses: arr[i][j] -> arr
-            Self::extract_root_array_name(&access.array.borrow())
+            Self::extract_root_variable_name(&access.array.borrow())
+        }
+        Expression::MemberAccess(access) => {
+            // Recursively extract from struct field access: p.x -> p
+            Self::extract_root_variable_name(&access.expr.borrow())
         }
         _ => None,  // Non-identifier bases (function calls, etc.)
     }
@@ -899,22 +903,54 @@ fn extract_root_array_name(expr: &Expression) -> Option<String> {
 
 **Assignment Validation Process**:
 
-1. When an `AssignStatement` is encountered, check the left-hand side expression
-2. If it's an `ArrayIndexAccess`, extract the root array name
-3. Look up the variable in the symbol table to check if it's mutable
-4. If the variable is immutable, report `AssignToImmutable` error
+1. When an `AssignStatement` is encountered, call `extract_root_variable_name` on the left-hand side
+2. Look up the variable in the symbol table to check if it's mutable
+3. If the variable is immutable, report `AssignToImmutable` error
+
+This single unified call handles plain variable assignment (`x = 1`), array element assignment (`arr[i] = x`), struct field assignment (`p.x = 42`), and combinations (`arr[i].field = x`).
 
 **Example**:
 
 ```rust
-// Source code
+// Array element assignment requires mut
 let arr: [i32; 10] = [0; 10];
-arr[0] = 42;  // Error: cannot assign to immutable array
+arr[0] = 42;  // Error: cannot assign to immutable variable `arr`
 
 let mut arr: [i32; 10] = [0; 10];
-arr[0] = 42;  // OK: array is mutable
-arr[1][0] = 42;  // Error: arr[1] is an i32, not an array
+arr[0] = 42;  // OK
+
+// Struct field assignment also requires the struct variable to be mut
+struct Point { x: i32, y: i32 }
+
+let p = Point { x: 1, y: 2 };
+p.x = 10;  // Error: cannot assign to immutable variable `p`
+
+let mut p = Point { x: 1, y: 2 };
+p.x = 10;  // OK
 ```
+
+## Variable Shadowing Prohibition
+
+Inference prohibits variable shadowing: a variable declared in an inner scope may not share a name with any variable visible in an enclosing scope. This is a hard type-check error.
+
+**Rationale**: Shadowing is a common source of subtle bugs. Safety-critical coding standards such as MISRA C Rule 5.3 and NASA's Power of 10 prohibit it for the same reason.
+
+**Implementation**:
+
+Before registering a new `let` binding in the current scope, the type checker calls `lookup_variable_in_parent_scopes()` on the symbol table to search all ancestor scopes for a variable with the same name. If one is found, a `VariableShadowed` error is emitted rather than registering the new binding.
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 1;
+    {
+        let x: i32 = 2;  // Error: variable `x` shadows a binding from an outer scope
+    }
+}
+```
+
+Variables in sibling scopes (different branches of an `if/else`, separate `{...}` blocks at the same nesting level) are not considered shadowing because neither is in the other's ancestor chain.
 
 ## Testing Strategy
 

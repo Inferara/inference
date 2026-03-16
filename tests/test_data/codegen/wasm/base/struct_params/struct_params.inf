@@ -1,0 +1,42 @@
+struct Point { x: i32; y: i32; }
+
+pub fn sum_point(p: Point) -> i32 {
+    return p.x + p.y;
+}
+
+pub fn call_sum() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return sum_point(p);
+}
+
+pub fn modify_no_effect(mut p: Point) -> i32 {
+    p.x = 99;
+    return p.x;
+}
+
+pub fn verify_copy_semantics() -> i32 {
+    let p: Point = Point { x: 1, y: 2 };
+    let ignored: i32 = modify_no_effect(p);
+    return p.x;
+}
+
+struct Mixed { flag: bool; val: i64; }
+
+pub fn read_mixed(m: Mixed) -> i64 {
+    return m.val;
+}
+
+pub fn call_read_mixed() -> i64 {
+    let m: Mixed = Mixed { flag: true, val: 42 };
+    return read_mixed(m);
+}
+
+pub fn two_struct_params(a: Point, b: Point) -> i32 {
+    return a.x + a.y + b.x + b.y;
+}
+
+pub fn call_two_params() -> i32 {
+    let p1: Point = Point { x: 10, y: 20 };
+    let p2: Point = Point { x: 30, y: 40 };
+    return two_struct_params(p1, p2);
+}

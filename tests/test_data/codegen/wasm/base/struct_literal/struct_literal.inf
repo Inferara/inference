@@ -1,0 +1,20 @@
+struct Point { x: i32; y: i32; }
+
+pub fn make_point() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return 0;
+}
+
+struct Single { val: i32; }
+
+pub fn make_single() -> i32 {
+    let s: Single = Single { val: 42 };
+    return 0;
+}
+
+struct Mixed { flag: bool; val: i64; }
+
+pub fn make_mixed() -> i32 {
+    let m: Mixed = Mixed { flag: true, val: 100 };
+    return 0;
+}

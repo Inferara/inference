@@ -925,13 +925,13 @@ impl<'a> Builder<'a> {
                 let child = cursor.node();
                 if let Some(field) = cursor.field_name() {
                     match field {
-                        "field" => {
+                        "field_name" => {
                             let expr_id = self.build_expression(&child, code);
                             if let Expr::Identifier(ident_id) = self.arena[expr_id].kind {
                                 pending_name = Some(ident_id);
                             }
                         }
-                        "value" => {
+                        "field_value" => {
                             let expr_id = self.build_expression(&child, code);
                             let field_name = pending_name
                                 .take()

@@ -77,9 +77,10 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, align_to, align_to_frame,
-    element_size, emit_array_param_copy, emit_sret_copy, emit_sret_element_addr,
-    emit_stack_epilogue, emit_stack_prologue,
+    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
+    align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
+    emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
+    emit_struct_param_copy,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -111,6 +112,17 @@ struct ArrayReturnInfo {
     length: u32,
 }
 
+/// Metadata about a function that returns a struct type.
+///
+/// Populated during `build_func_name_to_idx` so that callers and callees
+/// know the sret calling convention parameters at code generation time.
+#[derive(Debug, Clone)]
+struct StructReturnInfo {
+    struct_name: String,
+    total_size: u32,
+    field_slots: Vec<memory::StructFieldSlot>,
+}
+
 /// WASM compiler for generating WebAssembly binary from typed AST.
 ///
 /// The compiler builds a complete WASM module in-process using `wasm-encoder`. Each function
@@ -140,6 +152,8 @@ pub(crate) struct Compiler {
     has_memory: bool,
     /// Maps function names to their array return type metadata.
     func_array_returns: FxHashMap<String, ArrayReturnInfo>,
+    /// Maps function names to their struct return type metadata.
+    func_struct_returns: FxHashMap<String, StructReturnInfo>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
     // Per-function state (set in visit_function_definition, used by lowering methods)
@@ -166,6 +180,7 @@ impl Compiler {
             func_name_to_idx: FxHashMap::default(),
             has_memory: false,
             func_array_returns: FxHashMap::default(),
+            func_struct_returns: FxHashMap::default(),
             current_fn_name: String::new(),
             func: None,
             locals_map: FxHashMap::default(),
@@ -185,7 +200,12 @@ impl Compiler {
     ///
     /// Must be called before `visit_function_definition` so that forward references
     /// resolve correctly during call lowering.
-    pub(crate) fn build_func_name_to_idx(&mut self, arena: &AstArena, func_def_ids: &[DefId]) {
+    pub(crate) fn build_func_name_to_idx(
+        &mut self,
+        arena: &AstArena,
+        func_def_ids: &[DefId],
+        ctx: &TypedContext,
+    ) {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
             let fn_name = arena.def_name(def_id).to_string();
@@ -196,16 +216,34 @@ impl Compiler {
                 && let Some(return_ty_id) = returns
             {
                 let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
-                if let TypeInfoKind::Array(ref elem_type, length) = return_type_info.kind {
-                    let elem_sz = element_size(&elem_type.kind);
-                    self.func_array_returns.insert(
-                        fn_name,
-                        ArrayReturnInfo {
-                            elem_kind: elem_type.kind.clone(),
-                            elem_size: elem_sz,
-                            length,
-                        },
-                    );
+                match &return_type_info.kind {
+                    TypeInfoKind::Array(elem_type, length) => {
+                        let elem_sz = element_size(&elem_type.kind);
+                        self.func_array_returns.insert(
+                            fn_name,
+                            ArrayReturnInfo {
+                                elem_kind: elem_type.kind.clone(),
+                                elem_size: elem_sz,
+                                length: *length,
+                            },
+                        );
+                    }
+                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                    TypeInfoKind::Custom(custom_name) => {
+                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                            let (total_size, field_slots) =
+                                compute_struct_field_layout(&struct_info);
+                            self.func_struct_returns.insert(
+                                fn_name,
+                                StructReturnInfo {
+                                    struct_name: custom_name.clone(),
+                                    total_size,
+                                    field_slots,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -214,7 +252,13 @@ impl Compiler {
     /// Maps an Inference type to the corresponding WASM `ValType`.
     ///
     /// Returns `None` for unit types because unit functions produce no WASM value.
-    fn val_type_from_type_id(arena: &AstArena, ty_id: TypeId) -> Option<ValType> {
+    /// Struct types (identified via `TypeNode::Custom` resolved against `TypedContext`)
+    /// are represented as `ValType::I32` pointers into linear memory.
+    fn val_type_from_type_id(
+        arena: &AstArena,
+        ty_id: TypeId,
+        ctx: &TypedContext,
+    ) -> Option<ValType> {
         match &arena[ty_id].kind {
             TypeNode::Simple(SimpleTypeKind::Unit) => None,
             TypeNode::Simple(
@@ -232,7 +276,14 @@ impl Compiler {
             TypeNode::Function { .. } => todo!(),
             TypeNode::QualifiedName { .. } => todo!(),
             TypeNode::Qualified { .. } => todo!(),
-            TypeNode::Custom(_) => todo!(),
+            TypeNode::Custom(ident_id) => {
+                let name = &arena[*ident_id].name;
+                if ctx.lookup_struct(name).is_some() {
+                    Some(ValType::I32)
+                } else {
+                    todo!("Unsupported custom type in WASM codegen: {name}")
+                }
+            }
         }
     }
 
@@ -260,12 +311,14 @@ impl Compiler {
         self.current_fn_name.clone_from(&fn_name);
 
         let is_array_return = self.func_array_returns.contains_key(&fn_name);
+        let is_struct_return = self.func_struct_returns.contains_key(&fn_name);
+        let is_sret = is_array_return || is_struct_return;
 
-        let results: Vec<ValType> = if is_array_return {
+        let results: Vec<ValType> = if is_sret {
             vec![]
         } else {
             returns
-                .and_then(|ty_id| Self::val_type_from_type_id(arena, ty_id))
+                .and_then(|ty_id| Self::val_type_from_type_id(arena, ty_id, ctx))
                 .into_iter()
                 .collect()
         };
@@ -276,7 +329,7 @@ impl Compiler {
         self.parent_blocks_stack.clear();
         let mut local_idx: u32 = 0;
 
-        if is_array_return {
+        if is_sret {
             params.push(ValType::I32);
             self.locals_map
                 .insert("sret".to_string(), (0, ValType::I32));
@@ -287,7 +340,7 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty)
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
                     let arg_name = arena[*name].name.clone();
@@ -312,14 +365,14 @@ impl Compiler {
         }
 
         let param_count = local_idx;
-        let has_return_value = is_array_return || !results.is_empty();
+        let has_return_value = is_sret || !results.is_empty();
 
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
         self.functions.push(type_idx);
 
-        if is_array_return {
+        if is_sret {
             self.has_memory = true;
         }
 
@@ -363,8 +416,8 @@ impl Compiler {
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
-            // Copy-on-entry: for each array-typed parameter, copy the caller's data
-            // into the callee's frame to enforce value semantics.
+            // Copy-on-entry: for each compound-typed parameter (array or struct),
+            // copy the caller's data into the callee's frame to enforce value semantics.
             for arg in &args {
                 if let ArgKind::Named { name, .. } = &arg.kind {
                     let arg_name = arena[*name].name.clone();
@@ -375,17 +428,32 @@ impl Compiler {
                         };
                         TypeInfo::from_type_id(arena, ty_id)
                     };
-                    if let TypeInfoKind::Array(elem_type, _length) = &arg_type_info.kind {
-                        let param_local = self
-                            .locals_map
-                            .get(&arg_name)
-                            .expect("Array parameter must be in locals_map")
-                            .0;
-                        let slot = layout
-                            .array_offsets
-                            .get(&arg_name)
-                            .expect("Array parameter must have a frame slot");
-                        emit_array_param_copy(func, layout, slot, param_local, &elem_type.kind);
+                    let param_local = self
+                        .locals_map
+                        .get(&arg_name)
+                        .expect("Compound parameter must be in locals_map")
+                        .0;
+                    match &arg_type_info.kind {
+                        TypeInfoKind::Array(elem_type, _length) => {
+                            let slot = layout
+                                .array_offsets
+                                .get(&arg_name)
+                                .expect("Array parameter must have a frame slot");
+                            emit_array_param_copy(
+                                func,
+                                layout,
+                                slot,
+                                param_local,
+                                &elem_type.kind,
+                            );
+                        }
+                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                        TypeInfoKind::Custom(_) => {
+                            if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                emit_struct_param_copy(func, layout, slot, param_local);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -514,36 +582,67 @@ impl Compiler {
         args: &[inference_ast::nodes::ArgData],
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
+        let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
         for arg in args {
             if let ArgKind::Named { name, ty, .. } = &arg.kind {
                 let type_info = TypeInfo::from_type_id(arena, *ty);
-                if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
-                    let elem_sz = element_size(&elem_type.kind);
-                    let byte_count = elem_sz.checked_mul(*length).expect(
-                        "Array byte count overflow: element size * length exceeds u32::MAX",
-                    );
-                    let aligned_offset = align_to(current_offset, elem_sz);
-                    let slot = ArraySlot {
-                        offset: aligned_offset,
-                        elem_size: elem_sz,
-                        length: *length,
-                    };
-                    let arg_name = arena[*name].name.clone();
-                    array_offsets.insert(arg_name, slot);
-                    current_offset = aligned_offset
-                        .checked_add(byte_count)
-                        .expect("Frame offset overflow: total array allocation exceeds u32::MAX");
+                match &type_info.kind {
+                    TypeInfoKind::Array(elem_type, length) => {
+                        let elem_sz = element_size(&elem_type.kind);
+                        let byte_count = elem_sz.checked_mul(*length).expect(
+                            "Array byte count overflow: element size * length exceeds u32::MAX",
+                        );
+                        let aligned_offset = align_to(current_offset, elem_sz);
+                        let slot = ArraySlot {
+                            offset: aligned_offset,
+                            elem_size: elem_sz,
+                            length: *length,
+                        };
+                        let arg_name = arena[*name].name.clone();
+                        array_offsets.insert(arg_name, slot);
+                        current_offset = aligned_offset.checked_add(byte_count).expect(
+                            "Frame offset overflow: total array allocation exceeds u32::MAX",
+                        );
+                    }
+                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                    TypeInfoKind::Custom(custom_name) => {
+                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                            let (total_size, field_slots) =
+                                compute_struct_field_layout(&struct_info);
+                            if total_size > 0 {
+                                let max_field_align = field_slots
+                                    .iter()
+                                    .map(|f| element_size(&f.type_kind))
+                                    .max()
+                                    .unwrap_or(1);
+                                let aligned_offset = align_to(current_offset, max_field_align);
+                                let slot = StructSlot {
+                                    offset: aligned_offset,
+                                    total_size,
+                                    fields: field_slots,
+                                };
+                                let arg_name = arena[*name].name.clone();
+                                struct_offsets.insert(arg_name, slot);
+                                current_offset =
+                                    aligned_offset.checked_add(total_size).expect(
+                                        "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                    );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        Self::collect_array_slots(
+        Self::collect_compound_slots(
             arena,
             block_id,
             ctx,
             &mut array_offsets,
+            &mut struct_offsets,
             &mut current_offset,
         );
 
@@ -560,16 +659,18 @@ impl Compiler {
         Some(FrameLayout {
             total_size,
             array_offsets,
+            struct_offsets,
             frame_ptr_local: frame_ptr_local_idx,
         })
     }
 
-    /// Recursively walks a block collecting array variable declarations.
-    fn collect_array_slots(
+    /// Recursively walks a block collecting array and struct variable declarations.
+    fn collect_compound_slots(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         array_offsets: &mut FxHashMap<String, ArraySlot>,
+        struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
     ) {
         let block = &arena[block_id];
@@ -579,30 +680,60 @@ impl Compiler {
                     let type_info = ctx
                         .get_node_typeinfo(NodeId::Stmt(stmt_id))
                         .expect("Variable definition must have type info");
-                    if let TypeInfoKind::Array(elem_type, length) = &type_info.kind {
-                        let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz.checked_mul(*length).expect(
-                            "Array byte count overflow: element size * length exceeds u32::MAX",
-                        );
-                        let aligned_offset = align_to(*current_offset, elem_sz);
-                        let slot = ArraySlot {
-                            offset: aligned_offset,
-                            elem_size: elem_sz,
-                            length: *length,
-                        };
-                        let var_name = arena[*name].name.clone();
-                        array_offsets.insert(var_name, slot);
-                        *current_offset = aligned_offset.checked_add(byte_count).expect(
-                            "Frame offset overflow: total array allocation exceeds u32::MAX",
-                        );
+                    match &type_info.kind {
+                        TypeInfoKind::Array(elem_type, length) => {
+                            let elem_sz = element_size(&elem_type.kind);
+                            let byte_count = elem_sz.checked_mul(*length).expect(
+                                "Array byte count overflow: element size * length exceeds u32::MAX",
+                            );
+                            let aligned_offset = align_to(*current_offset, elem_sz);
+                            let slot = ArraySlot {
+                                offset: aligned_offset,
+                                elem_size: elem_sz,
+                                length: *length,
+                            };
+                            let var_name = arena[*name].name.clone();
+                            array_offsets.insert(var_name, slot);
+                            *current_offset = aligned_offset.checked_add(byte_count).expect(
+                                "Frame offset overflow: total array allocation exceeds u32::MAX",
+                            );
+                        }
+                        TypeInfoKind::Struct(struct_name) => {
+                            if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                                let (total_size, field_slots) =
+                                    compute_struct_field_layout(&struct_info);
+                                if total_size > 0 {
+                                    let max_field_align = field_slots
+                                        .iter()
+                                        .map(|f| element_size(&f.type_kind))
+                                        .max()
+                                        .unwrap_or(1);
+                                    let aligned_offset =
+                                        align_to(*current_offset, max_field_align);
+                                    let slot = StructSlot {
+                                        offset: aligned_offset,
+                                        total_size,
+                                        fields: field_slots,
+                                    };
+                                    let var_name = arena[*name].name.clone();
+                                    struct_offsets.insert(var_name, slot);
+                                    *current_offset =
+                                        aligned_offset.checked_add(total_size).expect(
+                                            "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                        );
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Stmt::Block(inner_block_id) => {
-                    Self::collect_array_slots(
+                    Self::collect_compound_slots(
                         arena,
                         *inner_block_id,
                         ctx,
                         array_offsets,
+                        struct_offsets,
                         current_offset,
                     );
                 }
@@ -611,25 +742,29 @@ impl Compiler {
                     else_block,
                     ..
                 } => {
-                    Self::collect_array_slots(
+                    Self::collect_compound_slots(
                         arena,
                         *then_block,
                         ctx,
                         array_offsets,
+                        struct_offsets,
                         current_offset,
                     );
                     if let Some(else_id) = else_block {
-                        Self::collect_array_slots(
+                        Self::collect_compound_slots(
                             arena,
                             *else_id,
                             ctx,
                             array_offsets,
+                            struct_offsets,
                             current_offset,
                         );
                     }
                 }
                 Stmt::Loop { body, .. } => {
-                    Self::collect_array_slots(arena, *body, ctx, array_offsets, current_offset);
+                    Self::collect_compound_slots(
+                        arena, *body, ctx, array_offsets, struct_offsets, current_offset,
+                    );
                 }
                 _ => {}
             }
@@ -719,20 +854,38 @@ impl Compiler {
                             var_type_info.as_ref().map(|ti| &ti.kind),
                             Some(TypeInfoKind::Array(_, _))
                         );
+                        let is_struct_type = matches!(
+                            var_type_info.as_ref().map(|ti| &ti.kind),
+                            Some(TypeInfoKind::Struct(_))
+                        );
+                        let is_compound_type = is_array_type || is_struct_type;
 
-                        // Detect sret call
+                        // Detect sret call (array-returning or struct-returning function)
                         let is_sret_call =
-                            is_array_type && self.is_sret_function_call(arena, val_expr_id);
+                            is_compound_type && self.is_sret_function_call(arena, val_expr_id);
 
                         // Detect array-to-array copy
                         let is_array_copy =
                             is_array_type && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
+
+                        // Detect struct-to-struct copy
+                        let is_struct_copy = is_struct_type
+                            && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
 
                         if is_sret_call {
                             self.lower_sret_var_init(arena, val_expr_id, local_idx, &var_name, ctx);
                         } else if is_array_copy {
                             cov_mark::hit!(wasm_codegen_emit_array_copy);
                             self.lower_array_copy_var_init(
+                                arena,
+                                val_expr_id,
+                                local_idx,
+                                &var_name,
+                                ctx,
+                            );
+                        } else if is_struct_copy {
+                            cov_mark::hit!(wasm_codegen_emit_struct_copy);
+                            self.lower_struct_copy_var_init(
                                 arena,
                                 val_expr_id,
                                 local_idx,
@@ -765,18 +918,23 @@ impl Compiler {
         }
     }
 
-    /// Checks whether an expression is a function call to an sret function.
+    /// Checks whether an expression is a function call to an sret function (array or struct return).
     fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
             && let Expr::Identifier(callee_name_id) = &arena[*function].kind
         {
             let callee_name = &arena[*callee_name_id].name;
-            return self.func_array_returns.contains_key(callee_name);
+            return self.func_array_returns.contains_key(callee_name)
+                || self.func_struct_returns.contains_key(callee_name);
         }
         false
     }
 
     /// Lowers sret function call initialization for a variable definition.
+    ///
+    /// Works for both array-returning and struct-returning function calls.
+    /// Looks up the destination offset from either `array_offsets` or `struct_offsets`
+    /// in the frame layout.
     fn lower_sret_var_init(
         &mut self,
         arena: &AstArena,
@@ -788,12 +946,14 @@ impl Compiler {
         let layout = self
             .frame_layout
             .as_ref()
-            .expect("Array variable requires frame layout");
-        let dest_slot = layout
-            .array_offsets
-            .get(var_name)
-            .expect("Destination array not in frame layout");
-        let dest_offset = dest_slot.offset;
+            .expect("Compound variable requires frame layout");
+        let dest_offset = if let Some(array_slot) = layout.array_offsets.get(var_name) {
+            array_slot.offset
+        } else if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
+            struct_slot.offset
+        } else {
+            panic!("Destination variable '{var_name}' not found in array_offsets or struct_offsets");
+        };
         let frame_ptr_local = layout.frame_ptr_local;
 
         if let Expr::FunctionCall { function, args, .. } = &arena[val_expr_id].kind {
@@ -872,8 +1032,65 @@ impl Compiler {
         self.func()
             .instruction(&Instruction::I32Const(byte_size as i32));
         self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
+        });
+
+        // Set local to point to destination slot
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if dest_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+        self.func().instruction(&Instruction::LocalSet(local_idx));
+    }
+
+    /// Lowers struct copy initialization for a variable definition.
+    ///
+    /// Emits `memory.copy` from the source struct pointer to the destination
+    /// frame slot, then sets the local to point to the destination. This
+    /// preserves value semantics: modifying the copy does not affect the original.
+    fn lower_struct_copy_var_init(
+        &mut self,
+        arena: &AstArena,
+        val_expr_id: ExprId,
+        local_idx: u32,
+        var_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let layout = self
+            .frame_layout
+            .as_ref()
+            .expect("Struct variable requires frame layout");
+        let dest_slot = layout
+            .struct_offsets
+            .get(var_name)
+            .expect("Destination struct not in frame layout");
+        let byte_size = dest_slot.total_size;
+        let dest_offset = dest_slot.offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+
+        // dest = frame_ptr + dest_slot.offset
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if dest_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+        // src = lower_expression(identifier) -> source pointer
+        self.lower_expression(arena, val_expr_id, ctx, None);
+        // byte count
+        #[allow(clippy::cast_possible_wrap)]
+        self.func()
+            .instruction(&Instruction::I32Const(byte_size as i32));
+        self.func().instruction(&Instruction::MemoryCopy {
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
         });
 
         // Set local to point to destination slot
@@ -939,7 +1156,9 @@ impl Compiler {
             Expr::Binary { left, right, op } => {
                 self.lower_binary_expression(arena, expr_id, left, right, op, ctx);
             }
-            Expr::MemberAccess { .. } => todo!(),
+            Expr::MemberAccess { expr, name } => {
+                self.lower_member_access(arena, expr_id, expr, name, ctx);
+            }
             Expr::TypeMemberAccess { .. } => todo!(),
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
@@ -960,7 +1179,16 @@ impl Compiler {
                     Err(e) => panic!("function call lowering failed: {e}"),
                 }
             }
-            Expr::StructLiteral { .. } => todo!(),
+            Expr::StructLiteral { name: _, fields } => {
+                cov_mark::hit!(wasm_codegen_emit_struct_literal);
+                let var_name = enclosing_var_name.unwrap_or_else(|| {
+                    unreachable!(
+                        "struct literal in unsupported position should have been caught by type checker"
+                    )
+                });
+                let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                self.lower_struct_literal(arena, &fields, var_name, ctx);
+            }
             Expr::PrefixUnary { expr, op } => {
                 self.lower_prefix_unary_expression(arena, expr_id, expr, op, ctx);
             }
@@ -971,7 +1199,9 @@ impl Compiler {
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
                 let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    panic!("Array literal (expr_id={expr_id:?}) has no enclosing variable name")
+                    unreachable!(
+                        "array literal in unsupported position should have been caught by type checker"
+                    )
                 });
                 let elements = elements.clone();
                 self.lower_array_literal(arena, &elements, var_name, ctx);
@@ -995,27 +1225,39 @@ impl Compiler {
             Expr::Type(_) => todo!(),
             Expr::Uzumaki => {
                 let node_id = NodeId::Expr(expr_id);
-                if let Some(type_info) = ctx.get_node_typeinfo(node_id)
-                    && let TypeInfoKind::Array(ref elem_type, length) = type_info.kind
-                {
-                    cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
-                    let var_name = enclosing_var_name.unwrap_or_else(|| {
-                        panic!("Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name")
-                    });
-                    self.lower_array_uzumaki(arena, elem_type, length, var_name);
-                    return;
+                let type_info = ctx
+                    .get_node_typeinfo(node_id)
+                    .expect("Uzumaki expression must have type info");
+                match &type_info.kind {
+                    TypeInfoKind::Bool
+                    | TypeInfoKind::Number(
+                        NumberType::I8
+                        | NumberType::U8
+                        | NumberType::I16
+                        | NumberType::U16
+                        | NumberType::I32
+                        | NumberType::U32,
+                    ) => {
+                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
+                        self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                    }
+                    TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
+                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
+                        self.emit_uzumaki(UZUMAKI_I64_OPCODE);
+                    }
+                    TypeInfoKind::Array(elem_type, length) => {
+                        cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                        let length = *length;
+                        let elem_type = elem_type.clone();
+                        let var_name = enclosing_var_name.unwrap_or_else(|| {
+                            panic!(
+                                "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
+                            )
+                        });
+                        self.lower_array_uzumaki(arena, &elem_type, length, var_name);
+                    }
+                    _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
                 }
-                if ctx.is_node_i32(node_id) {
-                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
-                    self.emit_uzumaki(UZUMAKI_I32_OPCODE);
-                    return;
-                }
-                if ctx.is_node_i64(node_id) {
-                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
-                    self.emit_uzumaki(UZUMAKI_I64_OPCODE);
-                    return;
-                }
-                panic!("Unsupported Uzumaki expression type");
             }
         }
     }
@@ -1076,19 +1318,52 @@ impl Compiler {
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                self.lower_expression(arena, right, ctx, None);
-                self.func().instruction(&Instruction::LocalSet(local_idx));
+                let is_struct_literal =
+                    matches!(&arena[right].kind, Expr::StructLiteral { .. });
+                let is_struct_type = self
+                    .frame_layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.struct_offsets.contains_key(name));
+                if is_struct_literal {
+                    self.lower_expression(arena, right, ctx, Some(name));
+                    self.func().instruction(&Instruction::Drop);
+                } else if is_struct_type {
+                    let layout = self.frame_layout.as_ref().unwrap();
+                    let dest_slot = &layout.struct_offsets[name];
+                    let byte_size = dest_slot.total_size;
+                    // dest = local (already points to frame slot)
+                    self.func()
+                        .instruction(&Instruction::LocalGet(local_idx));
+                    // src = RHS expression (struct pointer)
+                    self.lower_expression(arena, right, ctx, None);
+                    // byte count
+                    #[allow(clippy::cast_possible_wrap)]
+                    self.func()
+                        .instruction(&Instruction::I32Const(byte_size as i32));
+                    self.func().instruction(&Instruction::MemoryCopy {
+                        src_mem: MEMORY_INDEX,
+                        dst_mem: MEMORY_INDEX,
+                    });
+                } else {
+                    self.lower_expression(arena, right, ctx, None);
+                    self.func().instruction(&Instruction::LocalSet(local_idx));
+                }
             }
             Expr::ArrayIndexAccess { array, index } => {
                 let array = *array;
                 let index = *index;
                 self.lower_array_index_write(arena, left, array, index, right, ctx);
             }
-            _ => todo!("Assignment to non-identifier targets (member access) not yet supported"),
+            Expr::MemberAccess { expr, name } => {
+                let expr = *expr;
+                let name = *name;
+                self.lower_member_access_write(arena, expr, name, right, ctx);
+            }
+            _ => todo!("Assignment to non-identifier targets not yet supported"),
         }
     }
 
-    /// Lowers the return expression in an sret function.
+    /// Lowers the return expression in an sret function (array or struct return).
     fn lower_sret_return(
         &mut self,
         arena: &AstArena,
@@ -1096,10 +1371,29 @@ impl Compiler {
         sret_idx: u32,
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
-        let return_info = self
-            .func_array_returns
-            .get(&self.current_fn_name)
-            .expect("sret function must have ArrayReturnInfo");
+        if let Some(return_info) = self.func_array_returns.get(&self.current_fn_name).cloned() {
+            self.lower_array_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
+        } else if let Some(return_info) =
+            self.func_struct_returns.get(&self.current_fn_name).cloned()
+        {
+            self.lower_struct_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
+        } else {
+            panic!(
+                "sret function '{}' has neither ArrayReturnInfo nor StructReturnInfo",
+                self.current_fn_name
+            );
+        }
+    }
+
+    /// Lowers a return expression in an array-returning sret function.
+    fn lower_array_sret_return(
+        &mut self,
+        arena: &AstArena,
+        return_expr_id: ExprId,
+        sret_idx: u32,
+        ctx: &TypedContext,
+        return_info: &ArrayReturnInfo,
+    ) -> Result<(), CodegenError> {
         let elem_size = return_info.elem_size;
         let byte_size = return_info.elem_size * return_info.length;
         let store_instr = memory::store_instruction(&return_info.elem_kind);
@@ -1125,32 +1419,96 @@ impl Compiler {
                 }
             }
             Expr::FunctionCall { function, args, .. } => {
-                let function = *function;
-                let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-                let callee_name = self
-                    .resolve_callee_name(arena, function)
-                    .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
-                if self.func_array_returns.contains_key(&callee_name) {
-                    // Zero-copy sret forwarding
-                    self.func().instruction(&Instruction::LocalGet(sret_idx));
-                    for (_label, arg_expr_id) in &args {
-                        self.lower_expression(arena, *arg_expr_id, ctx, None);
-                    }
-                    let func_idx = self
-                        .func_name_to_idx
-                        .get(&callee_name)
-                        .copied()
-                        .expect("Forwarded sret callee must be in func_name_to_idx");
-                    self.func().instruction(&Instruction::Call(func_idx));
-                } else {
-                    return Err(CodegenError::UnsupportedSretReturnExpression);
-                }
+                self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
             }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
             }
         }
 
+        Ok(())
+    }
+
+    /// Lowers a return expression in a struct-returning sret function.
+    fn lower_struct_sret_return(
+        &mut self,
+        arena: &AstArena,
+        return_expr_id: ExprId,
+        sret_idx: u32,
+        ctx: &TypedContext,
+        return_info: &StructReturnInfo,
+    ) -> Result<(), CodegenError> {
+        match &arena[return_expr_id].kind {
+            Expr::Identifier(ident_id) => {
+                let name = &arena[*ident_id].name;
+                let (source_local, _) = self
+                    .locals_map
+                    .get(name)
+                    .expect("Return identifier not found in locals_map");
+                let source_local = *source_local;
+                emit_sret_copy(self.func(), sret_idx, source_local, return_info.total_size);
+            }
+            Expr::StructLiteral { fields, .. } => {
+                let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                let field_slots = return_info.field_slots.clone();
+                for &(field_name_id, field_value_expr_id) in &fields {
+                    let field_name = &arena[field_name_id].name;
+                    let field_slot = field_slots
+                        .iter()
+                        .find(|fs| fs.name == *field_name)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Struct field '{field_name}' not found in sret return layout for \
+                                 struct '{}'",
+                                return_info.struct_name
+                            )
+                        });
+                    let store_instr = memory::store_instruction(&field_slot.type_kind);
+                    emit_sret_element_addr(self.func(), sret_idx, field_slot.offset);
+                    self.lower_expression(arena, field_value_expr_id, ctx, None);
+                    self.func().instruction(&store_instr);
+                }
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedSretReturnExpression);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Forwards the sret pointer to a callee that also uses sret convention.
+    fn lower_sret_return_call_forwarding(
+        &mut self,
+        arena: &AstArena,
+        function: ExprId,
+        args: &[(Option<IdentId>, ExprId)],
+        sret_idx: u32,
+        ctx: &TypedContext,
+    ) -> Result<(), CodegenError> {
+        let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
+        let callee_name = self
+            .resolve_callee_name(arena, function)
+            .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+        if self.func_array_returns.contains_key(&callee_name)
+            || self.func_struct_returns.contains_key(&callee_name)
+        {
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+            for (_label, arg_expr_id) in &args {
+                self.lower_expression(arena, *arg_expr_id, ctx, None);
+            }
+            let func_idx = self
+                .func_name_to_idx
+                .get(&callee_name)
+                .copied()
+                .expect("Forwarded sret callee must be in func_name_to_idx");
+            self.func().instruction(&Instruction::Call(func_idx));
+        } else {
+            return Err(CodegenError::UnsupportedSretReturnExpression);
+        }
         Ok(())
     }
 
@@ -1697,6 +2055,221 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
+    }
+
+    /// Lowers a struct literal expression to field-by-field stores into the frame slot.
+    ///
+    /// For each field in the literal, emits:
+    /// ```text
+    /// local.get $__frame_ptr
+    /// i32.const <struct_offset + field_offset>
+    /// i32.add
+    /// <lower field value expression>
+    /// <store instruction for field type>
+    /// ```
+    ///
+    /// After all fields are stored, pushes the struct pointer onto the stack:
+    /// ```text
+    /// local.get $__frame_ptr
+    /// i32.const <struct_offset>
+    /// i32.add
+    /// ```
+    fn lower_struct_literal(
+        &mut self,
+        arena: &AstArena,
+        fields: &[(IdentId, ExprId)],
+        enclosing_var_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let Some(ref layout) = self.frame_layout else {
+            unreachable!("struct literal requires frame layout");
+        };
+
+        let slot = layout
+            .struct_offsets
+            .get(enclosing_var_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Struct variable '{enclosing_var_name}' not found in frame layout struct_offsets"
+                )
+            });
+
+        let slot_offset = slot.offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let field_slots = slot.fields.clone();
+
+        for &(field_name_id, field_value_expr_id) in fields {
+            let field_name = &arena[field_name_id].name;
+            let field_slot = field_slots
+                .iter()
+                .find(|fs| fs.name == *field_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Struct field '{field_name}' not found in layout for variable \
+                         '{enclosing_var_name}'"
+                    )
+                });
+
+            #[allow(clippy::cast_possible_wrap)]
+            let byte_offset = (slot_offset + field_slot.offset) as i32;
+            let store_instr = memory::store_instruction(&field_slot.type_kind);
+
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func().instruction(&Instruction::I32Const(byte_offset));
+            self.func().instruction(&Instruction::I32Add);
+            self.lower_expression(arena, field_value_expr_id, ctx, None);
+            self.func().instruction(&store_instr);
+        }
+
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if slot_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Lowers a member access expression (e.g., `p.x`) to a load from struct pointer + field offset.
+    ///
+    /// The generated WASM code:
+    /// 1. Evaluates the struct expression (pushes the struct base pointer)
+    /// 2. Adds the field's byte offset
+    /// 3. Emits the appropriate load instruction for the field type
+    ///
+    /// ```text
+    /// <lower expr>           ;; struct pointer
+    /// i32.const <field_offset>
+    /// i32.add
+    /// <load instruction>     ;; load field value
+    /// ```
+    fn lower_member_access(
+        &mut self,
+        arena: &AstArena,
+        _member_access_expr_id: ExprId,
+        struct_expr_id: ExprId,
+        field_name_id: IdentId,
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_member_access_read);
+
+        let (field_offset, field_type_kind) =
+            self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let load_instr = memory::load_instruction(&field_type_kind);
+
+        self.lower_expression(arena, struct_expr_id, ctx, None);
+
+        if field_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(field_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+
+        self.func().instruction(&load_instr);
+    }
+
+    /// Lowers a member access write (e.g., `p.x = 42`) to a store at struct pointer + field offset.
+    ///
+    /// The generated WASM code:
+    /// 1. Evaluates the struct expression (pushes the struct base pointer)
+    /// 2. Adds the field's byte offset
+    /// 3. Evaluates the RHS value expression
+    /// 4. Emits the appropriate store instruction for the field type
+    ///
+    /// ```text
+    /// <lower expr>           ;; struct pointer
+    /// i32.const <field_offset>
+    /// i32.add
+    /// <lower RHS>            ;; value to store
+    /// <store instruction>    ;; store field value
+    /// ```
+    fn lower_member_access_write(
+        &mut self,
+        arena: &AstArena,
+        struct_expr_id: ExprId,
+        field_name_id: IdentId,
+        right_expr_id: ExprId,
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_member_access_write);
+
+        let (field_offset, field_type_kind) =
+            self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let store_instr = memory::store_instruction(&field_type_kind);
+
+        self.lower_expression(arena, struct_expr_id, ctx, None);
+
+        if field_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(field_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+
+        self.lower_expression(arena, right_expr_id, ctx, None);
+
+        self.func().instruction(&store_instr);
+    }
+
+    /// Resolves a struct field's byte offset and type kind for member access operations.
+    ///
+    /// Tries the precomputed layout in `frame_layout.struct_offsets` first (O(1) lookup
+    /// when the struct expression is a simple variable). Falls back to recomputing via
+    /// `compute_struct_field_layout` for parameters or complex expressions.
+    fn resolve_struct_field_offset(
+        &self,
+        arena: &AstArena,
+        struct_expr_id: ExprId,
+        field_name_id: IdentId,
+        ctx: &TypedContext,
+    ) -> (u32, TypeInfoKind) {
+        let field_name = &arena[field_name_id].name;
+
+        if let Some(ref layout) = self.frame_layout
+            && let Expr::Identifier(ident_id) = &arena[struct_expr_id].kind
+        {
+            let var_name = &arena[*ident_id].name;
+            if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
+                let field_slot = struct_slot
+                    .fields
+                    .iter()
+                    .find(|fs| fs.name == *field_name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Field '{field_name}' not found in cached layout for '{var_name}'"
+                        )
+                    });
+                return (field_slot.offset, field_slot.type_kind.clone());
+            }
+        }
+
+        let struct_type = ctx
+            .get_node_typeinfo(NodeId::Expr(struct_expr_id))
+            .expect("MemberAccess: struct expression must have type info");
+
+        let TypeInfoKind::Struct(struct_name) = &struct_type.kind else {
+            panic!(
+                "MemberAccess: struct expression has non-struct type: {:?}",
+                struct_type.kind
+            )
+        };
+
+        let struct_info = ctx
+            .lookup_struct(struct_name)
+            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+
+        let (_, field_slots) = compute_struct_field_layout(&struct_info);
+        let field_slot = field_slots
+            .iter()
+            .find(|fs| fs.name == *field_name)
+            .unwrap_or_else(|| {
+                panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
+            });
+
+        (field_slot.offset, field_slot.type_kind.clone())
     }
 
     fn emit_nondet_block_start(&mut self, opcode: u8) {

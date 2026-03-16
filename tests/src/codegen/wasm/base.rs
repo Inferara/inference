@@ -2491,6 +2491,707 @@ mod base_codegen_tests {
         let result = func.call(&mut store, ()).expect("test failed");
         assert_eq!(result, 60, "scale([1,2,3], 10) should give [10,20,30], sum=60");
     }
+
+    #[test]
+    fn struct_literal_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 3);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 3);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
+        let test_name = "struct_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_literal_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let make_point: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "make_point")
+            .expect("Failed to get 'make_point'");
+        let result = make_point.call(&mut store, ()).expect("make_point failed");
+        assert_eq!(result, 0, "make_point should return 0");
+
+        let make_single: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "make_single")
+            .expect("Failed to get 'make_single'");
+        let result = make_single.call(&mut store, ()).expect("make_single failed");
+        assert_eq!(result, 0, "make_single should return 0");
+
+        let make_mixed: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "make_mixed")
+            .expect("Failed to get 'make_mixed'");
+        let result = make_mixed.call(&mut store, ()).expect("make_mixed failed");
+        assert_eq!(result, 0, "make_mixed should return 0");
+
+        let _memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("memory export missing");
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        let sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn struct_literal_inline_validation() {
+        let source = r#"
+            struct Pair { a: i32; b: i32; }
+            pub fn test() -> i32 {
+                let p: Pair = Pair { a: 1, b: 2 };
+                return 0;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct literal inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_literal_mixed_field_types_validation() {
+        let source = r#"
+            struct Record { flag: bool; count: i32; big: i64; }
+            pub fn test() -> i32 {
+                let r: Record = Record { flag: false, count: 99, big: 1000 };
+                return 0;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Mixed struct literal WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_access_test() {
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 6);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
+        let test_name = "struct_access";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_access_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_access";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x")
+            .expect("Failed to get 'get_x'");
+        let result = get_x.call(&mut store, ()).expect("get_x failed");
+        assert_eq!(result, 10, "get_x should return 10 (p.x)");
+
+        let get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_y")
+            .expect("Failed to get 'get_y'");
+        let result = get_y.call(&mut store, ()).expect("get_y failed");
+        assert_eq!(result, 20, "get_y should return 20 (p.y)");
+
+        let sum_fields: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_fields")
+            .expect("Failed to get 'sum_fields'");
+        let result = sum_fields.call(&mut store, ()).expect("sum_fields failed");
+        assert_eq!(result, 30, "sum_fields should return 30 (p.x + p.y)");
+
+        let get_single_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_single_val")
+            .expect("Failed to get 'get_single_val'");
+        let result = get_single_val
+            .call(&mut store, ())
+            .expect("get_single_val failed");
+        assert_eq!(result, 42, "get_single_val should return 42 (s.val)");
+
+        let get_mixed_val: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "get_mixed_val")
+            .expect("Failed to get 'get_mixed_val'");
+        let result = get_mixed_val
+            .call(&mut store, ())
+            .expect("get_mixed_val failed");
+        assert_eq!(result, 100, "get_mixed_val should return 100 (m.val)");
+
+        let _memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("memory export missing");
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        let sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn struct_access_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 5, y: 10 };
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct member access inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_access_second_field_validation() {
+        let source = r#"
+            struct Pair { a: i32; b: i64; }
+            pub fn test() -> i64 {
+                let p: Pair = Pair { a: 1, b: 200 };
+                return p.b;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct second field access WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_assign_test() {
+        cov_mark::check_count!(wasm_codegen_emit_member_access_write, 4);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 7);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 3);
+        let test_name = "struct_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_assign_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let set_and_get: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "set_and_get")
+            .expect("Failed to get 'set_and_get'");
+        let result = set_and_get.call(&mut store, ()).expect("set_and_get failed");
+        assert_eq!(result, 42, "set_and_get should return 42 (p.x after p.x = 42)");
+
+        let swap_fields: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "swap_fields")
+            .expect("Failed to get 'swap_fields'");
+        let result = swap_fields.call(&mut store, ()).expect("swap_fields failed");
+        assert_eq!(
+            result, 30,
+            "swap_fields should return 30 (p.x + p.y after swapping 10 and 20)"
+        );
+
+        let modify_bool: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "modify_bool")
+            .expect("Failed to get 'modify_bool'");
+        let result = modify_bool.call(&mut store, ()).expect("modify_bool failed");
+        assert_eq!(
+            result, 100,
+            "modify_bool should return 100 (f.val when f.flag is set to true)"
+        );
+
+        let _memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("memory export missing");
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        let sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn struct_assign_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let mut p: Point = Point { x: 5, y: 10 };
+                p.x = 99;
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct member access write inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_assign_second_field_validation() {
+        let source = r#"
+            struct Pair { a: i32; b: i64; }
+            pub fn test() -> i64 {
+                let mut p: Pair = Pair { a: 1, b: 200 };
+                p.b = 999;
+                return p.b;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct second field assign WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_params_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 9);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_write, 1);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
+        let test_name = "struct_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_params_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // call_sum: sum_point(Point { x: 10, y: 20 }) -> 30
+        let call_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_sum")
+            .expect("Failed to get 'call_sum'");
+        let result = call_sum.call(&mut store, ()).expect("call_sum failed");
+        assert_eq!(result, 30, "sum_point(Point {{ x: 10, y: 20 }}) should be 30");
+
+        // verify_copy_semantics: pass Point { x: 1, y: 2 } to modify_no_effect
+        // which sets p.x = 99, but the original p.x should still be 1
+        let verify_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "verify_copy_semantics")
+            .expect("Failed to get 'verify_copy_semantics'");
+        let result = verify_copy
+            .call(&mut store, ())
+            .expect("verify_copy_semantics failed");
+        assert_eq!(
+            result, 1,
+            "After modify_no_effect, original p.x should still be 1 (copy semantics)"
+        );
+
+        // call_read_mixed: read_mixed(Mixed { flag: true, val: 42 }) -> 42
+        let call_read_mixed: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "call_read_mixed")
+            .expect("Failed to get 'call_read_mixed'");
+        let result = call_read_mixed
+            .call(&mut store, ())
+            .expect("call_read_mixed failed");
+        assert_eq!(result, 42, "read_mixed(Mixed {{ val: 42 }}) should be 42");
+
+        // call_two_params: two_struct_params(Point{10,20}, Point{30,40}) -> 100
+        let call_two: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_two_params")
+            .expect("Failed to get 'call_two_params'");
+        let result = call_two
+            .call(&mut store, ())
+            .expect("call_two_params failed");
+        assert_eq!(
+            result, 100,
+            "two_struct_params(Point{{10,20}}, Point{{30,40}}) should be 100"
+        );
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all struct param calls"
+        );
+    }
+
+    #[test]
+    fn struct_params_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn sum(p: Point) -> i32 {
+                return p.x + p.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct params inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_params_mixed_type_validation() {
+        let source = r#"
+            struct Mixed { flag: bool; val: i64; }
+            pub fn get_val(m: Mixed) -> i64 {
+                return m.val;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct params mixed type WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_return_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 1);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
+        let test_name = "struct_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_return_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // get_x_from_make: make_point() returns Point { x: 10, y: 20 }, read x -> 10
+        let get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_make")
+            .expect("Failed to get 'get_x_from_make'");
+        let result = get_x.call(&mut store, ()).expect("get_x_from_make failed");
+        assert_eq!(result, 10, "get_x_from_make should return 10");
+
+        // get_y_from_make: make_point() returns Point { x: 10, y: 20 }, read y -> 20
+        let get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_y_from_make")
+            .expect("Failed to get 'get_y_from_make'");
+        let result = get_y.call(&mut store, ()).expect("get_y_from_make failed");
+        assert_eq!(result, 20, "get_y_from_make should return 20");
+
+        // get_x_from_var: return_var() returns Point { x: 3, y: 4 }, read x -> 3
+        let get_x_var: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_var")
+            .expect("Failed to get 'get_x_from_var'");
+        let result = get_x_var
+            .call(&mut store, ())
+            .expect("get_x_from_var failed");
+        assert_eq!(result, 3, "get_x_from_var should return 3");
+
+        // get_x_from_forward: forward_point() -> make_point() -> Point { x: 10, y: 20 }
+        let get_x_fwd: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_forward")
+            .expect("Failed to get 'get_x_from_forward'");
+        let result = get_x_fwd
+            .call(&mut store, ())
+            .expect("get_x_from_forward failed");
+        assert_eq!(result, 10, "get_x_from_forward should return 10");
+
+        // get_val_from_mixed: make_mixed() returns Mixed { flag: true, val: 99 }, read val -> 99
+        let get_val: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "get_val_from_mixed")
+            .expect("Failed to get 'get_val_from_mixed'");
+        let result = get_val
+            .call(&mut store, ())
+            .expect("get_val_from_mixed failed");
+        assert_eq!(result, 99, "get_val_from_mixed should return 99");
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all struct return calls"
+        );
+    }
+
+    #[test]
+    fn struct_return_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make() -> Point {
+                return Point { x: 1, y: 2 };
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = make();
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_return_var_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn return_var() -> Point {
+                let p: Point = Point { x: 5, y: 6 };
+                return p;
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = return_var();
+                return p.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return var inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_return_forward_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make() -> Point {
+                return Point { x: 1, y: 2 };
+            }
+            pub fn forward() -> Point {
+                return make();
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = forward();
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return forward inline WASM is invalid: {e}"));
+    }
+
+    // -- S6: Struct-to-struct copy (value semantics) --
+
+    #[test]
+    fn struct_copy_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 4);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
+        let test_name = "struct_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_copy_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // copy_and_modify: p.x should still be 10 after q.x = 99
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_and_modify")
+            .expect("Failed to get 'copy_and_modify'");
+        let result = func.call(&mut store, ()).expect("copy_and_modify failed");
+        assert_eq!(
+            result, 10,
+            "p.x should still be 10 after modifying q.x (value semantics)"
+        );
+
+        // copy_values_match: q.x + q.y should be 3 + 7 = 10
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_values_match")
+            .expect("Failed to get 'copy_values_match'");
+        let result = func
+            .call(&mut store, ())
+            .expect("copy_values_match failed");
+        assert_eq!(result, 10, "q.x + q.y should be 3 + 7 = 10");
+
+        // independent_copies: p.x + p.y should still be 1 + 2 = 3
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "independent_copies")
+            .expect("Failed to get 'independent_copies'");
+        let result = func
+            .call(&mut store, ())
+            .expect("independent_copies failed");
+        assert_eq!(
+            result, 3,
+            "p.x + p.y should still be 1 + 2 = 3 after modifying copies"
+        );
+
+        // copy_mixed: n.val should be 42
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "copy_mixed")
+            .expect("Failed to get 'copy_mixed'");
+        let result = func.call(&mut store, ()).expect("copy_mixed failed");
+        assert_eq!(result, 42, "n.val should be 42");
+
+        // Stack pointer restoration is verified implicitly: if the stack is
+        // corrupted, subsequent calls would trap or return wrong values.
+    }
+
+    #[test]
+    fn struct_copy_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 5, y: 6 };
+                let q: Point = p;
+                return q.x + q.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct copy inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_copy_value_semantics_inline() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_copy, 1);
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 10, y: 20 };
+                let mut q: Point = p;
+                q.x = 99;
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 10,
+            "p.x should still be 10 after mutating q.x (value semantics)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -2961,5 +3662,125 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_literal_wasm() {
+        let dir = base_test_dir().join("struct_literal");
+        let source_code = std::fs::read_to_string(dir.join("struct_literal.inf"))
+            .expect("Failed to read struct_literal.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_literal.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_literal");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_access_wasm() {
+        let dir = base_test_dir().join("struct_access");
+        let source_code = std::fs::read_to_string(dir.join("struct_access.inf"))
+            .expect("Failed to read struct_access.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_access.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_access");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_assign_wasm() {
+        let dir = base_test_dir().join("struct_assign");
+        let source_code = std::fs::read_to_string(dir.join("struct_assign.inf"))
+            .expect("Failed to read struct_assign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_assign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_assign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_params_wasm() {
+        let dir = base_test_dir().join("struct_params");
+        let source_code = std::fs::read_to_string(dir.join("struct_params.inf"))
+            .expect("Failed to read struct_params.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_params.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_params");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_return_wasm() {
+        let dir = base_test_dir().join("struct_return");
+        let source_code = std::fs::read_to_string(dir.join("struct_return.inf"))
+            .expect("Failed to read struct_return.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_return.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_return");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_copy_wasm() {
+        let dir = base_test_dir().join("struct_copy");
+        let source_code = std::fs::read_to_string(dir.join("struct_copy.inf"))
+            .expect("Failed to read struct_copy.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_copy.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_copy");
     }
 }
