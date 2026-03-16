@@ -1320,9 +1320,30 @@ impl Compiler {
                 let local_idx = *local_idx;
                 let is_struct_literal =
                     matches!(&arena[right].kind, Expr::StructLiteral { .. });
+                let is_struct_type = self
+                    .frame_layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.struct_offsets.contains_key(name));
                 if is_struct_literal {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
+                } else if is_struct_type {
+                    let layout = self.frame_layout.as_ref().unwrap();
+                    let dest_slot = &layout.struct_offsets[name];
+                    let byte_size = dest_slot.total_size;
+                    // dest = local (already points to frame slot)
+                    self.func()
+                        .instruction(&Instruction::LocalGet(local_idx));
+                    // src = RHS expression (struct pointer)
+                    self.lower_expression(arena, right, ctx, None);
+                    // byte count
+                    #[allow(clippy::cast_possible_wrap)]
+                    self.func()
+                        .instruction(&Instruction::I32Const(byte_size as i32));
+                    self.func().instruction(&Instruction::MemoryCopy {
+                        src_mem: MEMORY_INDEX,
+                        dst_mem: MEMORY_INDEX,
+                    });
                 } else {
                     self.lower_expression(arena, right, ctx, None);
                     self.func().instruction(&Instruction::LocalSet(local_idx));
