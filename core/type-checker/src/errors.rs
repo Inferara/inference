@@ -481,13 +481,14 @@ pub enum TypeCheckError {
     )]
     ArrayUzumakiAsArgument { location: Location },
 
-    /// Array-returning function call used in an unsupported expression position.
+    /// Compound-returning function call used in an unsupported expression position.
     ///
-    /// Array-returning functions use the sret calling convention, which requires
-    /// the caller to provide a destination pointer. They can only appear in
-    /// variable definitions (`let x = foo()`) or return statements (`return foo()`).
+    /// Functions returning arrays or structs use the sret calling convention,
+    /// which requires the caller to provide a destination pointer. They can only
+    /// appear in variable definitions (`let x = foo()`) or return statements
+    /// (`return foo()`).
     #[error(
-        "{location}: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+        "{location}: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
     )]
     ArrayReturnCallInExpressionPosition { location: Location },
 
@@ -1266,7 +1267,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "1:5: array-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
+            "1:5: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
         );
     }
 

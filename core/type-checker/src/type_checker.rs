@@ -1133,7 +1133,26 @@ impl TypeChecker {
             Expr::MemberAccess { expr, name } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
-                } else if let Some(object_type) = self.infer_expression(expr, ctx) {
+                } else {
+                    if let Expr::FunctionCall { function, .. } = &ctx.arena()[expr].kind {
+                        let func_name = self.resolve_function_call_name(ctx.arena(), *function);
+                        if let Some(ref fn_name) = func_name
+                            && let Some(sig) = self.symbol_table.lookup_function(fn_name)
+                            && matches!(
+                                sig.return_type.kind,
+                                TypeInfoKind::Array(_, _)
+                                    | TypeInfoKind::Struct(_)
+                                    | TypeInfoKind::Custom(_)
+                            )
+                        {
+                            self.errors
+                                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                                    location,
+                                });
+                            return None;
+                        }
+                    }
+                    if let Some(object_type) = self.infer_expression(expr, ctx) {
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -1189,6 +1208,7 @@ impl TypeChecker {
                     }
                 } else {
                     None
+                }
                 }
             }
             Expr::TypeMemberAccess {
