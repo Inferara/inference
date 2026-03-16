@@ -866,11 +866,24 @@ impl Compiler {
                         let is_array_copy =
                             is_array_type && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
 
+                        // Detect struct-to-struct copy
+                        let is_struct_copy = is_struct_type
+                            && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
+
                         if is_sret_call {
                             self.lower_sret_var_init(arena, val_expr_id, local_idx, &var_name, ctx);
                         } else if is_array_copy {
                             cov_mark::hit!(wasm_codegen_emit_array_copy);
                             self.lower_array_copy_var_init(
+                                arena,
+                                val_expr_id,
+                                local_idx,
+                                &var_name,
+                                ctx,
+                            );
+                        } else if is_struct_copy {
+                            cov_mark::hit!(wasm_codegen_emit_struct_copy);
+                            self.lower_struct_copy_var_init(
                                 arena,
                                 val_expr_id,
                                 local_idx,
@@ -998,6 +1011,63 @@ impl Compiler {
             .get(var_name)
             .expect("Destination array not in frame layout");
         let byte_size = dest_slot.elem_size * dest_slot.length;
+        let dest_offset = dest_slot.offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+
+        // dest = frame_ptr + dest_slot.offset
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if dest_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+        // src = lower_expression(identifier) -> source pointer
+        self.lower_expression(arena, val_expr_id, ctx, None);
+        // byte count
+        #[allow(clippy::cast_possible_wrap)]
+        self.func()
+            .instruction(&Instruction::I32Const(byte_size as i32));
+        self.func().instruction(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+
+        // Set local to point to destination slot
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if dest_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(dest_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+        self.func().instruction(&Instruction::LocalSet(local_idx));
+    }
+
+    /// Lowers struct copy initialization for a variable definition.
+    ///
+    /// Emits `memory.copy` from the source struct pointer to the destination
+    /// frame slot, then sets the local to point to the destination. This
+    /// preserves value semantics: modifying the copy does not affect the original.
+    fn lower_struct_copy_var_init(
+        &mut self,
+        arena: &AstArena,
+        val_expr_id: ExprId,
+        local_idx: u32,
+        var_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let layout = self
+            .frame_layout
+            .as_ref()
+            .expect("Struct variable requires frame layout");
+        let dest_slot = layout
+            .struct_offsets
+            .get(var_name)
+            .expect("Destination struct not in frame layout");
+        let byte_size = dest_slot.total_size;
         let dest_offset = dest_slot.offset;
         let frame_ptr_local = layout.frame_ptr_local;
 

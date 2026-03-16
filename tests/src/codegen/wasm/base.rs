@@ -3068,6 +3068,136 @@ mod base_codegen_tests {
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct return forward inline WASM is invalid: {e}"));
     }
+
+    // -- S6: Struct-to-struct copy (value semantics) --
+
+    #[test]
+    fn struct_copy_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 4);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
+        let test_name = "struct_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_copy_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // copy_and_modify: p.x should still be 10 after q.x = 99
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_and_modify")
+            .expect("Failed to get 'copy_and_modify'");
+        let result = func.call(&mut store, ()).expect("copy_and_modify failed");
+        assert_eq!(
+            result, 10,
+            "p.x should still be 10 after modifying q.x (value semantics)"
+        );
+
+        // copy_values_match: q.x + q.y should be 3 + 7 = 10
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_values_match")
+            .expect("Failed to get 'copy_values_match'");
+        let result = func
+            .call(&mut store, ())
+            .expect("copy_values_match failed");
+        assert_eq!(result, 10, "q.x + q.y should be 3 + 7 = 10");
+
+        // independent_copies: p.x + p.y should still be 1 + 2 = 3
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "independent_copies")
+            .expect("Failed to get 'independent_copies'");
+        let result = func
+            .call(&mut store, ())
+            .expect("independent_copies failed");
+        assert_eq!(
+            result, 3,
+            "p.x + p.y should still be 1 + 2 = 3 after modifying copies"
+        );
+
+        // copy_mixed: n.val should be 42
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "copy_mixed")
+            .expect("Failed to get 'copy_mixed'");
+        let result = func.call(&mut store, ()).expect("copy_mixed failed");
+        assert_eq!(result, 42, "n.val should be 42");
+
+        // Stack pointer restoration is verified implicitly: if the stack is
+        // corrupted, subsequent calls would trap or return wrong values.
+    }
+
+    #[test]
+    fn struct_copy_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 5, y: 6 };
+                let q: Point = p;
+                return q.x + q.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct copy inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_copy_value_semantics_inline() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_copy, 1);
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 10, y: 20 };
+                let mut q: Point = p;
+                q.x = 99;
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes).expect("compile");
+        let mut store = Store::new(&engine, ());
+        let instance =
+            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test")
+            .expect("get func");
+        let result = func.call(&mut store, ()).expect("call");
+        assert_eq!(
+            result, 10,
+            "p.x should still be 10 after mutating q.x (value semantics)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3638,5 +3768,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_return");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_copy_wasm() {
+        let dir = base_test_dir().join("struct_copy");
+        let source_code = std::fs::read_to_string(dir.join("struct_copy.inf"))
+            .expect("Failed to read struct_copy.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_copy.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_copy");
     }
 }

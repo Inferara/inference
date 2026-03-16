@@ -1,0 +1,31 @@
+struct Point { x: i32; y: i32; }
+
+pub fn copy_and_modify() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let mut q: Point = p;
+    q.x = 99;
+    return p.x;
+}
+
+pub fn copy_values_match() -> i32 {
+    let p: Point = Point { x: 3, y: 7 };
+    let q: Point = p;
+    return q.x + q.y;
+}
+
+pub fn independent_copies() -> i32 {
+    let p: Point = Point { x: 1, y: 2 };
+    let mut a: Point = p;
+    let mut b: Point = p;
+    a.x = 100;
+    b.y = 200;
+    return p.x + p.y;
+}
+
+struct Mixed { flag: bool; val: i64; }
+
+pub fn copy_mixed() -> i64 {
+    let m: Mixed = Mixed { flag: true, val: 42 };
+    let n: Mixed = m;
+    return n.val;
+}
