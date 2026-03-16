@@ -1005,7 +1005,9 @@ impl Compiler {
             Expr::Binary { left, right, op } => {
                 self.lower_binary_expression(arena, expr_id, left, right, op, ctx);
             }
-            Expr::MemberAccess { .. } => todo!(),
+            Expr::MemberAccess { expr, name } => {
+                self.lower_member_access(arena, expr_id, expr, name, ctx);
+            }
             Expr::TypeMemberAccess { .. } => todo!(),
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
@@ -1848,6 +1850,69 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
+    }
+
+    /// Lowers a member access expression (e.g., `p.x`) to a load from struct pointer + field offset.
+    ///
+    /// The generated WASM code:
+    /// 1. Evaluates the struct expression (pushes the struct base pointer)
+    /// 2. Adds the field's byte offset
+    /// 3. Emits the appropriate load instruction for the field type
+    ///
+    /// ```text
+    /// <lower expr>           ;; struct pointer
+    /// i32.const <field_offset>
+    /// i32.add
+    /// <load instruction>     ;; load field value
+    /// ```
+    fn lower_member_access(
+        &mut self,
+        arena: &AstArena,
+        _member_access_expr_id: ExprId,
+        struct_expr_id: ExprId,
+        field_name_id: IdentId,
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_member_access_read);
+
+        let struct_type = ctx
+            .get_node_typeinfo(NodeId::Expr(struct_expr_id))
+            .expect("MemberAccess struct expression must have type info");
+
+        let struct_name = match &struct_type.kind {
+            TypeInfoKind::Struct(name) => name.clone(),
+            _ => panic!(
+                "MemberAccess struct expression has non-struct type: {:?}",
+                struct_type.kind
+            ),
+        };
+
+        let struct_info = ctx
+            .lookup_struct(&struct_name)
+            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+
+        let field_name = &arena[field_name_id].name;
+        let (_, field_slots) = compute_struct_field_layout(&struct_info);
+        let field_slot = field_slots
+            .iter()
+            .find(|fs| fs.name == *field_name)
+            .unwrap_or_else(|| {
+                panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
+            });
+
+        let field_offset = field_slot.offset;
+        let load_instr = memory::load_instruction(&field_slot.type_kind);
+
+        self.lower_expression(arena, struct_expr_id, ctx, None);
+
+        if field_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(field_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+
+        self.func().instruction(&load_instr);
     }
 
     fn emit_nondet_block_start(&mut self, opcode: u8) {

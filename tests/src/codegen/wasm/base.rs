@@ -2588,6 +2588,118 @@ mod base_codegen_tests {
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Mixed struct literal WASM is invalid: {e}"));
     }
+
+    #[test]
+    fn struct_access_test() {
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 6);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
+        let test_name = "struct_access";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_access_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_access";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x")
+            .expect("Failed to get 'get_x'");
+        let result = get_x.call(&mut store, ()).expect("get_x failed");
+        assert_eq!(result, 10, "get_x should return 10 (p.x)");
+
+        let get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_y")
+            .expect("Failed to get 'get_y'");
+        let result = get_y.call(&mut store, ()).expect("get_y failed");
+        assert_eq!(result, 20, "get_y should return 20 (p.y)");
+
+        let sum_fields: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_fields")
+            .expect("Failed to get 'sum_fields'");
+        let result = sum_fields.call(&mut store, ()).expect("sum_fields failed");
+        assert_eq!(result, 30, "sum_fields should return 30 (p.x + p.y)");
+
+        let get_single_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_single_val")
+            .expect("Failed to get 'get_single_val'");
+        let result = get_single_val
+            .call(&mut store, ())
+            .expect("get_single_val failed");
+        assert_eq!(result, 42, "get_single_val should return 42 (s.val)");
+
+        let get_mixed_val: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "get_mixed_val")
+            .expect("Failed to get 'get_mixed_val'");
+        let result = get_mixed_val
+            .call(&mut store, ())
+            .expect("get_mixed_val failed");
+        assert_eq!(result, 100, "get_mixed_val should return 100 (m.val)");
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("memory export missing");
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("__stack_pointer export missing");
+        let sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+
+        let _ = memory;
+    }
+
+    #[test]
+    fn struct_access_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() -> i32 {
+                let p: Point = Point { x: 5, y: 10 };
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct member access inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_access_second_field_validation() {
+        let source = r#"
+            struct Pair { a: i32; b: i64; }
+            pub fn test() -> i64 {
+                let p: Pair = Pair { a: 1, b: 200 };
+                return p.b;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct second field access WASM is invalid: {e}"));
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3078,5 +3190,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_literal");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_access_wasm() {
+        let dir = base_test_dir().join("struct_access");
+        let source_code = std::fs::read_to_string(dir.join("struct_access.inf"))
+            .expect("Failed to read struct_access.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_access.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_access");
     }
 }
