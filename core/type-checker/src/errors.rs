@@ -461,6 +461,17 @@ pub enum TypeCheckError {
     #[error("{location}: struct literal cannot be used directly as a function argument; assign to a variable first")]
     StructLiteralAsArgument { location: Location },
 
+    /// Compound literal (struct or array) used in an unsupported expression position.
+    ///
+    /// Compound literals can only appear as variable initializers, assignment
+    /// values, return values, or struct field values. They cannot be used in
+    /// arbitrary expression positions.
+    #[error("{location}: {kind} literals can only be used in variable declarations, assignments, return statements, or as struct field values")]
+    CompoundLiteralInUnsupportedPosition {
+        kind: &'static str,
+        location: Location,
+    },
+
     /// Array uzumaki (@) passed directly as a function argument.
     ///
     /// Array uzumaki must be assigned to a variable before passing to functions
@@ -579,6 +590,7 @@ impl TypeCheckError {
             | TypeCheckError::LiteralOutOfRange { location, .. }
             | TypeCheckError::ArrayLiteralAsArgument { location, .. }
             | TypeCheckError::StructLiteralAsArgument { location, .. }
+            | TypeCheckError::CompoundLiteralInUnsupportedPosition { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
             | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
@@ -1209,6 +1221,30 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: struct literal cannot be used directly as a function argument; assign to a variable first"
+        );
+    }
+
+    #[test]
+    fn display_struct_literal_in_unsupported_position() {
+        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
+            kind: "struct",
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct literals can only be used in variable declarations, assignments, return statements, or as struct field values"
+        );
+    }
+
+    #[test]
+    fn display_array_literal_in_unsupported_position() {
+        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
+            kind: "array",
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array literals can only be used in variable declarations, assignments, return statements, or as struct field values"
         );
     }
 

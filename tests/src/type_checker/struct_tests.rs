@@ -462,6 +462,91 @@ mod field_validation {
     }
 
     #[test]
+    fn test_struct_literal_as_standalone_expression() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() { Point { x: 1, y: 2 }; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Struct literal as standalone expression should fail"
+        );
+        if let Err(error) = result {
+            assert!(
+                error
+                    .to_string()
+                    .contains("struct literals can only be used"),
+                "Error should mention position restriction: {}",
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn test_struct_literal_in_binary_op() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() -> i32 {
+                let x: i32 = 1;
+                return x + Point { x: 1, y: 2 };
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Struct literal in binary expression should fail"
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_in_let_ok() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() -> i32 { let p: Point = Point { x: 1, y: 2 }; return p.x; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct literal in let binding should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_in_assign_ok() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() -> i32 {
+                let mut p: Point = Point { x: 1, y: 2 };
+                p = Point { x: 3, y: 4 };
+                return p.x;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct literal in assignment should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_in_return_ok() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make() -> Point { return Point { x: 1, y: 2 }; }
+            pub fn test() -> i32 { return 0; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct literal in return should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
     fn test_struct_return_call_in_expression_position() {
         let source = r#"
             struct Point { x: i32; y: i32; }

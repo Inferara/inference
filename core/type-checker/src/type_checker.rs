@@ -35,6 +35,7 @@ pub(crate) struct TypeChecker {
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
     reported_error_keys: FxHashSet<String>,
+    compound_literal_allowed: bool,
 }
 
 impl TypeChecker {
@@ -757,6 +758,11 @@ impl TypeChecker {
                                 });
                         }
                     }
+                    let lhs_is_identifier =
+                        matches!(ctx.arena()[left].kind, Expr::Identifier(_));
+                    if lhs_is_identifier {
+                        self.compound_literal_allowed = true;
+                    }
                     let value_type = self.infer_expression(right, ctx);
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
@@ -798,6 +804,7 @@ impl TypeChecker {
                 if let Expr::Uzumaki = &ctx.arena()[expr].kind {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
+                    self.compound_literal_allowed = true;
                     let value_type = self.infer_expression(expr, ctx);
                     if *return_type != value_type.clone().unwrap_or_default() {
                         self.errors.push(TypeCheckError::TypeMismatch {
@@ -923,15 +930,19 @@ impl TypeChecker {
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                    } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
-                        && self.symbol_table.resolve_custom_type(init_type.clone()) != target_type
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: target_type.clone(),
-                            found: init_type,
-                            context: TypeMismatchContext::VariableDefinition,
-                            location,
-                        });
+                    } else {
+                        self.compound_literal_allowed = true;
+                        if let Some(init_type) = self.infer_expression(expr_id, ctx)
+                            && self.symbol_table.resolve_custom_type(init_type.clone())
+                                != target_type
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: init_type,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
                 }
                 if self
@@ -1063,6 +1074,8 @@ impl TypeChecker {
 
     #[allow(clippy::too_many_lines)]
     fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
+        let compound_literal_allowed =
+            std::mem::replace(&mut self.compound_literal_allowed, false);
         let arena = ctx.arena();
         let expr_data = &arena[expr_id];
         let location = expr_data.location;
@@ -1265,6 +1278,13 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
+                if !compound_literal_allowed {
+                    self.errors.push(TypeCheckError::CompoundLiteralInUnsupportedPosition {
+                        kind: "struct",
+                        location,
+                    });
+                    return None;
+                }
                 let struct_name = ctx.arena()[name].name.clone();
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
@@ -1321,6 +1341,7 @@ impl TypeChecker {
                                         });
                                     }
                                 } else {
+                                    self.compound_literal_allowed = true;
                                     let init_type =
                                         self.infer_expression(*field_value_expr, ctx);
                                     if let Some(init) = init_type
@@ -1506,30 +1527,41 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                if !elements.is_empty()
-                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
-                {
-                    for &element_id in &elements[1..] {
-                        let element_type = self.infer_expression(element_id, ctx);
-                        if let Some(element_type) = element_type
-                            && element_type != element_type_info
-                        {
-                            self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                expected: element_type_info.clone(),
-                                found: element_type,
-                                location,
-                            });
+                if !compound_literal_allowed {
+                    self.errors.push(
+                        TypeCheckError::CompoundLiteralInUnsupportedPosition {
+                            kind: "array",
+                            location,
+                        },
+                    );
+                    return None;
+                }
+                if !elements.is_empty() {
+                    self.compound_literal_allowed = true;
+                    if let Some(element_type_info) = self.infer_expression(elements[0], ctx) {
+                        for &element_id in &elements[1..] {
+                            self.compound_literal_allowed = true;
+                            let element_type = self.infer_expression(element_id, ctx);
+                            if let Some(element_type) = element_type
+                                && element_type != element_type_info
+                            {
+                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                    expected: element_type_info.clone(),
+                                    found: element_type,
+                                    location,
+                                });
+                            }
                         }
+                        let array_type = TypeInfo {
+                            kind: TypeInfoKind::Array(
+                                Box::new(element_type_info),
+                                elements.len() as u32,
+                            ),
+                            type_params: vec![],
+                        };
+                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                        return Some(array_type);
                     }
-                    let array_type = TypeInfo {
-                        kind: TypeInfoKind::Array(
-                            Box::new(element_type_info),
-                            elements.len() as u32,
-                        ),
-                        type_params: vec![],
-                    };
-                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
-                    return Some(array_type);
                 }
                 None
             }

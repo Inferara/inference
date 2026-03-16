@@ -1182,8 +1182,8 @@ impl Compiler {
             Expr::StructLiteral { name: _, fields } => {
                 cov_mark::hit!(wasm_codegen_emit_struct_literal);
                 let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    panic!(
-                        "Struct literal (expr_id={expr_id:?}) has no enclosing variable name"
+                    unreachable!(
+                        "struct literal in unsupported position should have been caught by type checker"
                     )
                 });
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
@@ -1199,7 +1199,9 @@ impl Compiler {
             Expr::ArrayLiteral { ref elements } => {
                 cov_mark::hit!(wasm_codegen_emit_array_literal);
                 let var_name = enclosing_var_name.unwrap_or_else(|| {
-                    panic!("Array literal (expr_id={expr_id:?}) has no enclosing variable name")
+                    unreachable!(
+                        "array literal in unsupported position should have been caught by type checker"
+                    )
                 });
                 let elements = elements.clone();
                 self.lower_array_literal(arena, &elements, var_name, ctx);
