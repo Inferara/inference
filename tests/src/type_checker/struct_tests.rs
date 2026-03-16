@@ -460,4 +460,27 @@ mod field_validation {
             );
         }
     }
+
+    #[test]
+    fn test_struct_return_call_in_expression_position() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make() -> Point { return Point { x: 1, y: 2 }; }
+            fn takes_point(p: Point) -> i32 { return p.x; }
+            fn test() -> i32 { return takes_point(make()); }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Struct-returning call used as function argument should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("can only appear in `let` bindings or `return` statements"),
+                "Error should mention sret restriction: {}",
+                error_msg
+            );
+        }
+    }
 }

@@ -749,7 +749,7 @@ impl TypeChecker {
                         let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                         if let Some(ref fn_name) = func_name
                             && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                            && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                            && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                         {
                             self.errors
                                 .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
@@ -785,7 +785,7 @@ impl TypeChecker {
                     let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                     if let Some(ref fn_name) = func_name
                         && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                     {
                         self.errors
                             .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
@@ -1074,7 +1074,7 @@ impl TypeChecker {
                     let func_name = self.resolve_function_call_name(ctx.arena(), *function);
                     if let Some(ref fn_name) = func_name
                         && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
                     {
                         self.errors
                             .push(TypeCheckError::ArrayReturnCallInExpressionPosition { location });
@@ -1974,7 +1974,7 @@ impl TypeChecker {
             let func_name = self.resolve_function_call_name(arena, *function);
             if let Some(ref fn_name) = func_name
                 && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _))
+                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
             {
                 self.errors
                     .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
