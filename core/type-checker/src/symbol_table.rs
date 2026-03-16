@@ -713,6 +713,19 @@ impl SymbolTable {
             .and_then(|scope| scope.borrow().lookup_variable_is_mut(name))
     }
 
+    /// Checks whether a variable exists in any parent scope (skipping the current scope).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_in_parent_scopes(&self, name: &str) -> Option<TypeInfo> {
+        self.current_scope.as_ref().and_then(|scope| {
+            let scope = scope.borrow();
+            scope
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .and_then(|parent| parent.borrow().lookup_variable(name))
+        })
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_function(&self, name: &str) -> Option<FuncInfo> {
         self.current_scope

@@ -6,4 +6,5 @@ mod associated_functions;
 mod coverage;
 mod error_recovery;
 mod features;
+mod struct_tests;
 mod type_info_tests;

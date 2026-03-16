@@ -424,6 +424,13 @@ pub enum TypeCheckError {
     #[error("{location}: cannot assign to immutable variable `{name}`")]
     AssignToImmutable { name: String, location: Location },
 
+    /// Variable shadows a binding from an outer scope.
+    ///
+    /// Shadowing is prohibited to prevent ambiguity about which binding is
+    /// referenced. Rename the inner variable to avoid confusion.
+    #[error("{location}: variable `{name}` shadows a binding from an outer scope")]
+    VariableShadowed { name: String, location: Location },
+
     /// Numeric literal value is outside the valid range for the target type.
     ///
     /// For example, `let x: u8 = 256` or `let y: i8 = 200`.
@@ -547,6 +554,7 @@ impl TypeCheckError {
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
             | TypeCheckError::AssignToImmutable { location, .. }
+            | TypeCheckError::VariableShadowed { location, .. }
             | TypeCheckError::LiteralOutOfRange { location, .. }
             | TypeCheckError::ArrayLiteralAsArgument { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
@@ -1252,6 +1260,18 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: struct `Empty` has no fields and no methods"
+        );
+    }
+
+    #[test]
+    fn display_variable_shadowed() {
+        let err = TypeCheckError::VariableShadowed {
+            name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: variable `x` shadows a binding from an outer scope"
         );
     }
 

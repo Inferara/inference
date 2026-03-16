@@ -704,15 +704,7 @@ impl TypeChecker {
         let kind = stmt_data.kind.clone();
         match kind {
             Stmt::Assign { left, right } => {
-                let arena = ctx.arena();
-                if let Expr::Identifier(ident_id) = &arena[left].kind {
-                    let name = arena[*ident_id].name.clone();
-                    if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
-                        self.errors
-                            .push(TypeCheckError::AssignToImmutable { name, location });
-                    }
-                } else if let Expr::ArrayIndexAccess { array, .. } = &arena[left].kind
-                    && let Some(name) = self.extract_root_array_name(ctx.arena(), *array)
+                if let Some(name) = self.extract_root_variable_name(ctx.arena(), left)
                     && let Some(false) = self.symbol_table.lookup_variable_is_mut(&name)
                 {
                     self.errors
@@ -917,6 +909,16 @@ impl TypeChecker {
                             location,
                         });
                     }
+                }
+                if self
+                    .symbol_table
+                    .lookup_variable_in_parent_scopes(&var_name)
+                    .is_some()
+                {
+                    self.errors.push(TypeCheckError::VariableShadowed {
+                        name: var_name.clone(),
+                        location,
+                    });
                 }
                 if let Err(err) =
                     self.symbol_table
@@ -2394,13 +2396,18 @@ impl TypeChecker {
         substitutions
     }
 
-    /// Extracts the root identifier name from a potentially nested array index
-    /// access expression. For `arr[i]` returns `Some("arr")`, for `arr[i][j]`
-    /// also returns `Some("arr")`. Returns `None` for non-identifier bases.
-    fn extract_root_array_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
+    /// Extracts the root identifier name from a potentially nested access expression.
+    ///
+    /// Handles array index access (`arr[i]`), member access (`p.x`), and any
+    /// nesting thereof (`p.x[0]`, `arr[0].x`, `p.x.y`). Returns `None` for
+    /// non-identifier bases.
+    fn extract_root_variable_name(&self, arena: &AstArena, expr_id: ExprId) -> Option<String> {
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
-            Expr::ArrayIndexAccess { array, .. } => self.extract_root_array_name(arena, *array),
+            Expr::ArrayIndexAccess { array, .. } => {
+                self.extract_root_variable_name(arena, *array)
+            }
+            Expr::MemberAccess { expr, .. } => self.extract_root_variable_name(arena, *expr),
             _ => None,
         }
     }

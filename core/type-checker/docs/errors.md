@@ -4,7 +4,7 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 33 distinct error variants, each with specific context and location
+The type checker produces 34 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
 All errors include a precise source location in the form `line:column:` at the start of their
@@ -202,6 +202,29 @@ fn test() {
 ```
 
 **Solution**: Use an existing variant or add it to the enum definition.
+
+### `VariableShadowed`
+
+A variable declaration in an inner scope uses the same name as a variable already visible in
+an enclosing scope. Shadowing is unconditionally prohibited.
+
+**Message format**: `{location}: variable \`{name}\` shadows a binding from an outer scope`
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 1;
+    {
+        let x: i32 = 2;  // Error: variable `x` shadows a binding from an outer scope
+    }
+}
+```
+
+**Solution**: Rename the inner variable to a distinct name.
+
+Note: variables declared in sibling scopes (separate `if`/`else` arms, sequential blocks at the
+same nesting level) do not shadow each other and are not affected by this rule.
 
 ---
 
