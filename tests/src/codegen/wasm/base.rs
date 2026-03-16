@@ -2805,6 +2805,124 @@ mod base_codegen_tests {
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct second field assign WASM is invalid: {e}"));
     }
+
+    #[test]
+    fn struct_params_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 5);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 9);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_write, 1);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
+        let test_name = "struct_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_params_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // call_sum: sum_point(Point { x: 10, y: 20 }) -> 30
+        let call_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_sum")
+            .expect("Failed to get 'call_sum'");
+        let result = call_sum.call(&mut store, ()).expect("call_sum failed");
+        assert_eq!(result, 30, "sum_point(Point {{ x: 10, y: 20 }}) should be 30");
+
+        // verify_copy_semantics: pass Point { x: 1, y: 2 } to modify_no_effect
+        // which sets p.x = 99, but the original p.x should still be 1
+        let verify_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "verify_copy_semantics")
+            .expect("Failed to get 'verify_copy_semantics'");
+        let result = verify_copy
+            .call(&mut store, ())
+            .expect("verify_copy_semantics failed");
+        assert_eq!(
+            result, 1,
+            "After modify_no_effect, original p.x should still be 1 (copy semantics)"
+        );
+
+        // call_read_mixed: read_mixed(Mixed { flag: true, val: 42 }) -> 42
+        let call_read_mixed: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "call_read_mixed")
+            .expect("Failed to get 'call_read_mixed'");
+        let result = call_read_mixed
+            .call(&mut store, ())
+            .expect("call_read_mixed failed");
+        assert_eq!(result, 42, "read_mixed(Mixed {{ val: 42 }}) should be 42");
+
+        // call_two_params: two_struct_params(Point{10,20}, Point{30,40}) -> 100
+        let call_two: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "call_two_params")
+            .expect("Failed to get 'call_two_params'");
+        let result = call_two
+            .call(&mut store, ())
+            .expect("call_two_params failed");
+        assert_eq!(
+            result, 100,
+            "two_struct_params(Point{{10,20}}, Point{{30,40}}) should be 100"
+        );
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all struct param calls"
+        );
+    }
+
+    #[test]
+    fn struct_params_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn sum(p: Point) -> i32 {
+                return p.x + p.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct params inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_params_mixed_type_validation() {
+        let source = r#"
+            struct Mixed { flag: bool; val: i64; }
+            pub fn get_val(m: Mixed) -> i64 {
+                return m.val;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct params mixed type WASM is invalid: {e}"));
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3335,5 +3453,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_assign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_params_wasm() {
+        let dir = base_test_dir().join("struct_params");
+        let source_code = std::fs::read_to_string(dir.join("struct_params.inf"))
+            .expect("Failed to read struct_params.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_params.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_params");
     }
 }

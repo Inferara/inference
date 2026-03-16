@@ -80,6 +80,7 @@ use crate::memory::{
     self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
     align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
     emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
+    emit_struct_param_copy,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -214,7 +215,13 @@ impl Compiler {
     /// Maps an Inference type to the corresponding WASM `ValType`.
     ///
     /// Returns `None` for unit types because unit functions produce no WASM value.
-    fn val_type_from_type_id(arena: &AstArena, ty_id: TypeId) -> Option<ValType> {
+    /// Struct types (identified via `TypeNode::Custom` resolved against `TypedContext`)
+    /// are represented as `ValType::I32` pointers into linear memory.
+    fn val_type_from_type_id(
+        arena: &AstArena,
+        ty_id: TypeId,
+        ctx: &TypedContext,
+    ) -> Option<ValType> {
         match &arena[ty_id].kind {
             TypeNode::Simple(SimpleTypeKind::Unit) => None,
             TypeNode::Simple(
@@ -232,7 +239,14 @@ impl Compiler {
             TypeNode::Function { .. } => todo!(),
             TypeNode::QualifiedName { .. } => todo!(),
             TypeNode::Qualified { .. } => todo!(),
-            TypeNode::Custom(_) => todo!(),
+            TypeNode::Custom(ident_id) => {
+                let name = &arena[*ident_id].name;
+                if ctx.lookup_struct(name).is_some() {
+                    Some(ValType::I32)
+                } else {
+                    todo!("Unsupported custom type in WASM codegen: {name}")
+                }
+            }
         }
     }
 
@@ -265,7 +279,7 @@ impl Compiler {
             vec![]
         } else {
             returns
-                .and_then(|ty_id| Self::val_type_from_type_id(arena, ty_id))
+                .and_then(|ty_id| Self::val_type_from_type_id(arena, ty_id, ctx))
                 .into_iter()
                 .collect()
         };
@@ -287,7 +301,7 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty)
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
                     let arg_name = arena[*name].name.clone();
@@ -363,8 +377,8 @@ impl Compiler {
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
-            // Copy-on-entry: for each array-typed parameter, copy the caller's data
-            // into the callee's frame to enforce value semantics.
+            // Copy-on-entry: for each compound-typed parameter (array or struct),
+            // copy the caller's data into the callee's frame to enforce value semantics.
             for arg in &args {
                 if let ArgKind::Named { name, .. } = &arg.kind {
                     let arg_name = arena[*name].name.clone();
@@ -375,17 +389,32 @@ impl Compiler {
                         };
                         TypeInfo::from_type_id(arena, ty_id)
                     };
-                    if let TypeInfoKind::Array(elem_type, _length) = &arg_type_info.kind {
-                        let param_local = self
-                            .locals_map
-                            .get(&arg_name)
-                            .expect("Array parameter must be in locals_map")
-                            .0;
-                        let slot = layout
-                            .array_offsets
-                            .get(&arg_name)
-                            .expect("Array parameter must have a frame slot");
-                        emit_array_param_copy(func, layout, slot, param_local, &elem_type.kind);
+                    let param_local = self
+                        .locals_map
+                        .get(&arg_name)
+                        .expect("Compound parameter must be in locals_map")
+                        .0;
+                    match &arg_type_info.kind {
+                        TypeInfoKind::Array(elem_type, _length) => {
+                            let slot = layout
+                                .array_offsets
+                                .get(&arg_name)
+                                .expect("Array parameter must have a frame slot");
+                            emit_array_param_copy(
+                                func,
+                                layout,
+                                slot,
+                                param_local,
+                                &elem_type.kind,
+                            );
+                        }
+                        TypeInfoKind::Custom(custom_name) => {
+                            if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                let _ = custom_name;
+                                emit_struct_param_copy(func, layout, slot, param_local);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

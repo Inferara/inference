@@ -505,6 +505,70 @@ pub(crate) fn emit_array_param_copy(
     func.instruction(&Instruction::LocalSet(param_local));
 }
 
+/// Emits copy-on-entry code for one struct-typed parameter.
+///
+/// Copies `slot.total_size` bytes from the caller's pointer (`param_local`) into
+/// the callee's frame at `slot.offset` from `__frame_ptr`, then updates
+/// `param_local` to point to the callee's copy. This enforces value semantics:
+/// modifications to the struct parameter inside the callee do not affect the
+/// caller's original.
+///
+/// Unlike array param copy (which may unroll element-by-element for small arrays),
+/// struct param copy always uses `memory.copy` because structs have heterogeneous
+/// field types that cannot be unrolled with a single load/store instruction pair.
+///
+/// ```text
+/// local.get $__frame_ptr
+/// i32.const <offset>         ;; omitted when offset is 0
+/// i32.add                    ;; omitted when offset is 0
+/// local.get $param_ptr       ;; source
+/// i32.const <total_size>
+/// memory.copy
+///
+/// ;; update param local:
+/// local.get $__frame_ptr
+/// i32.const <offset>         ;; omitted when offset is 0
+/// i32.add                    ;; omitted when offset is 0
+/// local.set $param_ptr
+/// ```
+pub(crate) fn emit_struct_param_copy(
+    func: &mut Function,
+    layout: &FrameLayout,
+    slot: &StructSlot,
+    param_local: u32,
+) {
+    cov_mark::hit!(wasm_codegen_emit_struct_param_copy);
+
+    // destination: frame_ptr + slot.offset
+    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+    if slot.offset > 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(slot.offset as i32));
+        func.instruction(&Instruction::I32Add);
+    }
+
+    // source: param pointer
+    func.instruction(&Instruction::LocalGet(param_local));
+
+    // byte count
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(slot.total_size as i32));
+
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: MEMORY_INDEX,
+        dst_mem: MEMORY_INDEX,
+    });
+
+    // Update the parameter local to point to the callee's copy
+    func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
+    if slot.offset > 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        func.instruction(&Instruction::I32Const(slot.offset as i32));
+        func.instruction(&Instruction::I32Add);
+    }
+    func.instruction(&Instruction::LocalSet(param_local));
+}
+
 /// Emits a `memory.copy` from a source pointer to the sret destination.
 ///
 /// Used in `return arr` inside an sret function: copies the array data from
