@@ -1316,8 +1316,15 @@ impl Compiler {
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                self.lower_expression(arena, right, ctx, None);
-                self.func().instruction(&Instruction::LocalSet(local_idx));
+                let is_struct_literal =
+                    matches!(&arena[right].kind, Expr::StructLiteral { .. });
+                if is_struct_literal {
+                    self.lower_expression(arena, right, ctx, Some(name));
+                    self.func().instruction(&Instruction::Drop);
+                } else {
+                    self.lower_expression(arena, right, ctx, None);
+                    self.func().instruction(&Instruction::LocalSet(local_idx));
+                }
             }
             Expr::ArrayIndexAccess { array, index } => {
                 let array = *array;
