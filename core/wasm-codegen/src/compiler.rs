@@ -112,6 +112,17 @@ struct ArrayReturnInfo {
     length: u32,
 }
 
+/// Metadata about a function that returns a struct type.
+///
+/// Populated during `build_func_name_to_idx` so that callers and callees
+/// know the sret calling convention parameters at code generation time.
+#[derive(Debug, Clone)]
+struct StructReturnInfo {
+    struct_name: String,
+    total_size: u32,
+    field_slots: Vec<memory::StructFieldSlot>,
+}
+
 /// WASM compiler for generating WebAssembly binary from typed AST.
 ///
 /// The compiler builds a complete WASM module in-process using `wasm-encoder`. Each function
@@ -141,6 +152,8 @@ pub(crate) struct Compiler {
     has_memory: bool,
     /// Maps function names to their array return type metadata.
     func_array_returns: FxHashMap<String, ArrayReturnInfo>,
+    /// Maps function names to their struct return type metadata.
+    func_struct_returns: FxHashMap<String, StructReturnInfo>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
     // Per-function state (set in visit_function_definition, used by lowering methods)
@@ -167,6 +180,7 @@ impl Compiler {
             func_name_to_idx: FxHashMap::default(),
             has_memory: false,
             func_array_returns: FxHashMap::default(),
+            func_struct_returns: FxHashMap::default(),
             current_fn_name: String::new(),
             func: None,
             locals_map: FxHashMap::default(),
@@ -186,7 +200,12 @@ impl Compiler {
     ///
     /// Must be called before `visit_function_definition` so that forward references
     /// resolve correctly during call lowering.
-    pub(crate) fn build_func_name_to_idx(&mut self, arena: &AstArena, func_def_ids: &[DefId]) {
+    pub(crate) fn build_func_name_to_idx(
+        &mut self,
+        arena: &AstArena,
+        func_def_ids: &[DefId],
+        ctx: &TypedContext,
+    ) {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
             let fn_name = arena.def_name(def_id).to_string();
@@ -197,16 +216,33 @@ impl Compiler {
                 && let Some(return_ty_id) = returns
             {
                 let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
-                if let TypeInfoKind::Array(ref elem_type, length) = return_type_info.kind {
-                    let elem_sz = element_size(&elem_type.kind);
-                    self.func_array_returns.insert(
-                        fn_name,
-                        ArrayReturnInfo {
-                            elem_kind: elem_type.kind.clone(),
-                            elem_size: elem_sz,
-                            length,
-                        },
-                    );
+                match &return_type_info.kind {
+                    TypeInfoKind::Array(elem_type, length) => {
+                        let elem_sz = element_size(&elem_type.kind);
+                        self.func_array_returns.insert(
+                            fn_name,
+                            ArrayReturnInfo {
+                                elem_kind: elem_type.kind.clone(),
+                                elem_size: elem_sz,
+                                length: *length,
+                            },
+                        );
+                    }
+                    TypeInfoKind::Custom(custom_name) => {
+                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                            let (total_size, field_slots) =
+                                compute_struct_field_layout(&struct_info);
+                            self.func_struct_returns.insert(
+                                fn_name,
+                                StructReturnInfo {
+                                    struct_name: custom_name.clone(),
+                                    total_size,
+                                    field_slots,
+                                },
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -274,8 +310,10 @@ impl Compiler {
         self.current_fn_name.clone_from(&fn_name);
 
         let is_array_return = self.func_array_returns.contains_key(&fn_name);
+        let is_struct_return = self.func_struct_returns.contains_key(&fn_name);
+        let is_sret = is_array_return || is_struct_return;
 
-        let results: Vec<ValType> = if is_array_return {
+        let results: Vec<ValType> = if is_sret {
             vec![]
         } else {
             returns
@@ -290,7 +328,7 @@ impl Compiler {
         self.parent_blocks_stack.clear();
         let mut local_idx: u32 = 0;
 
-        if is_array_return {
+        if is_sret {
             params.push(ValType::I32);
             self.locals_map
                 .insert("sret".to_string(), (0, ValType::I32));
@@ -326,14 +364,14 @@ impl Compiler {
         }
 
         let param_count = local_idx;
-        let has_return_value = is_array_return || !results.is_empty();
+        let has_return_value = is_sret || !results.is_empty();
 
         #[allow(clippy::cast_possible_truncation)]
         let type_idx = self.types.len() as u32;
         self.types.push((params, results));
         self.functions.push(type_idx);
 
-        if is_array_return {
+        if is_sret {
             self.has_memory = true;
         }
 
@@ -814,10 +852,15 @@ impl Compiler {
                             var_type_info.as_ref().map(|ti| &ti.kind),
                             Some(TypeInfoKind::Array(_, _))
                         );
+                        let is_struct_type = matches!(
+                            var_type_info.as_ref().map(|ti| &ti.kind),
+                            Some(TypeInfoKind::Struct(_))
+                        );
+                        let is_compound_type = is_array_type || is_struct_type;
 
-                        // Detect sret call
+                        // Detect sret call (array-returning or struct-returning function)
                         let is_sret_call =
-                            is_array_type && self.is_sret_function_call(arena, val_expr_id);
+                            is_compound_type && self.is_sret_function_call(arena, val_expr_id);
 
                         // Detect array-to-array copy
                         let is_array_copy =
@@ -860,18 +903,23 @@ impl Compiler {
         }
     }
 
-    /// Checks whether an expression is a function call to an sret function.
+    /// Checks whether an expression is a function call to an sret function (array or struct return).
     fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
             && let Expr::Identifier(callee_name_id) = &arena[*function].kind
         {
             let callee_name = &arena[*callee_name_id].name;
-            return self.func_array_returns.contains_key(callee_name);
+            return self.func_array_returns.contains_key(callee_name)
+                || self.func_struct_returns.contains_key(callee_name);
         }
         false
     }
 
     /// Lowers sret function call initialization for a variable definition.
+    ///
+    /// Works for both array-returning and struct-returning function calls.
+    /// Looks up the destination offset from either `array_offsets` or `struct_offsets`
+    /// in the frame layout.
     fn lower_sret_var_init(
         &mut self,
         arena: &AstArena,
@@ -883,12 +931,14 @@ impl Compiler {
         let layout = self
             .frame_layout
             .as_ref()
-            .expect("Array variable requires frame layout");
-        let dest_slot = layout
-            .array_offsets
-            .get(var_name)
-            .expect("Destination array not in frame layout");
-        let dest_offset = dest_slot.offset;
+            .expect("Compound variable requires frame layout");
+        let dest_offset = if let Some(array_slot) = layout.array_offsets.get(var_name) {
+            array_slot.offset
+        } else if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
+            struct_slot.offset
+        } else {
+            panic!("Destination variable '{var_name}' not found in array_offsets or struct_offsets");
+        };
         let frame_ptr_local = layout.frame_ptr_local;
 
         if let Expr::FunctionCall { function, args, .. } = &arena[val_expr_id].kind {
@@ -1199,7 +1249,7 @@ impl Compiler {
         }
     }
 
-    /// Lowers the return expression in an sret function.
+    /// Lowers the return expression in an sret function (array or struct return).
     fn lower_sret_return(
         &mut self,
         arena: &AstArena,
@@ -1207,10 +1257,29 @@ impl Compiler {
         sret_idx: u32,
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
-        let return_info = self
-            .func_array_returns
-            .get(&self.current_fn_name)
-            .expect("sret function must have ArrayReturnInfo");
+        if let Some(return_info) = self.func_array_returns.get(&self.current_fn_name).cloned() {
+            self.lower_array_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
+        } else if let Some(return_info) =
+            self.func_struct_returns.get(&self.current_fn_name).cloned()
+        {
+            self.lower_struct_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
+        } else {
+            panic!(
+                "sret function '{}' has neither ArrayReturnInfo nor StructReturnInfo",
+                self.current_fn_name
+            );
+        }
+    }
+
+    /// Lowers a return expression in an array-returning sret function.
+    fn lower_array_sret_return(
+        &mut self,
+        arena: &AstArena,
+        return_expr_id: ExprId,
+        sret_idx: u32,
+        ctx: &TypedContext,
+        return_info: &ArrayReturnInfo,
+    ) -> Result<(), CodegenError> {
         let elem_size = return_info.elem_size;
         let byte_size = return_info.elem_size * return_info.length;
         let store_instr = memory::store_instruction(&return_info.elem_kind);
@@ -1236,32 +1305,96 @@ impl Compiler {
                 }
             }
             Expr::FunctionCall { function, args, .. } => {
-                let function = *function;
-                let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-                let callee_name = self
-                    .resolve_callee_name(arena, function)
-                    .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
-                if self.func_array_returns.contains_key(&callee_name) {
-                    // Zero-copy sret forwarding
-                    self.func().instruction(&Instruction::LocalGet(sret_idx));
-                    for (_label, arg_expr_id) in &args {
-                        self.lower_expression(arena, *arg_expr_id, ctx, None);
-                    }
-                    let func_idx = self
-                        .func_name_to_idx
-                        .get(&callee_name)
-                        .copied()
-                        .expect("Forwarded sret callee must be in func_name_to_idx");
-                    self.func().instruction(&Instruction::Call(func_idx));
-                } else {
-                    return Err(CodegenError::UnsupportedSretReturnExpression);
-                }
+                self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
             }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
             }
         }
 
+        Ok(())
+    }
+
+    /// Lowers a return expression in a struct-returning sret function.
+    fn lower_struct_sret_return(
+        &mut self,
+        arena: &AstArena,
+        return_expr_id: ExprId,
+        sret_idx: u32,
+        ctx: &TypedContext,
+        return_info: &StructReturnInfo,
+    ) -> Result<(), CodegenError> {
+        match &arena[return_expr_id].kind {
+            Expr::Identifier(ident_id) => {
+                let name = &arena[*ident_id].name;
+                let (source_local, _) = self
+                    .locals_map
+                    .get(name)
+                    .expect("Return identifier not found in locals_map");
+                let source_local = *source_local;
+                emit_sret_copy(self.func(), sret_idx, source_local, return_info.total_size);
+            }
+            Expr::StructLiteral { fields, .. } => {
+                let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                let field_slots = return_info.field_slots.clone();
+                for &(field_name_id, field_value_expr_id) in &fields {
+                    let field_name = &arena[field_name_id].name;
+                    let field_slot = field_slots
+                        .iter()
+                        .find(|fs| fs.name == *field_name)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Struct field '{field_name}' not found in sret return layout for \
+                                 struct '{}'",
+                                return_info.struct_name
+                            )
+                        });
+                    let store_instr = memory::store_instruction(&field_slot.type_kind);
+                    emit_sret_element_addr(self.func(), sret_idx, field_slot.offset);
+                    self.lower_expression(arena, field_value_expr_id, ctx, None);
+                    self.func().instruction(&store_instr);
+                }
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
+            }
+            _ => {
+                return Err(CodegenError::UnsupportedSretReturnExpression);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Forwards the sret pointer to a callee that also uses sret convention.
+    fn lower_sret_return_call_forwarding(
+        &mut self,
+        arena: &AstArena,
+        function: ExprId,
+        args: &[(Option<IdentId>, ExprId)],
+        sret_idx: u32,
+        ctx: &TypedContext,
+    ) -> Result<(), CodegenError> {
+        let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
+        let callee_name = self
+            .resolve_callee_name(arena, function)
+            .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+        if self.func_array_returns.contains_key(&callee_name)
+            || self.func_struct_returns.contains_key(&callee_name)
+        {
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+            for (_label, arg_expr_id) in &args {
+                self.lower_expression(arena, *arg_expr_id, ctx, None);
+            }
+            let func_idx = self
+                .func_name_to_idx
+                .get(&callee_name)
+                .copied()
+                .expect("Forwarded sret callee must be in func_name_to_idx");
+            self.func().instruction(&Instruction::Call(func_idx));
+        } else {
+            return Err(CodegenError::UnsupportedSretReturnExpression);
+        }
         Ok(())
     }
 

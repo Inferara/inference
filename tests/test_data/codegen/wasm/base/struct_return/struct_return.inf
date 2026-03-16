@@ -1,0 +1,45 @@
+struct Point { x: i32; y: i32; }
+
+pub fn make_point() -> Point {
+    return Point { x: 10, y: 20 };
+}
+
+pub fn get_x_from_make() -> i32 {
+    let p: Point = make_point();
+    return p.x;
+}
+
+pub fn get_y_from_make() -> i32 {
+    let p: Point = make_point();
+    return p.y;
+}
+
+pub fn return_var() -> Point {
+    let p: Point = Point { x: 3, y: 4 };
+    return p;
+}
+
+pub fn get_x_from_var() -> i32 {
+    let p: Point = return_var();
+    return p.x;
+}
+
+pub fn forward_point() -> Point {
+    return make_point();
+}
+
+pub fn get_x_from_forward() -> i32 {
+    let p: Point = forward_point();
+    return p.x;
+}
+
+struct Mixed { flag: bool; val: i64; }
+
+pub fn make_mixed() -> Mixed {
+    return Mixed { flag: true, val: 99 };
+}
+
+pub fn get_val_from_mixed() -> i64 {
+    let m: Mixed = make_mixed();
+    return m.val;
+}

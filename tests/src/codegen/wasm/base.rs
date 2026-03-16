@@ -2923,6 +2923,151 @@ mod base_codegen_tests {
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct params mixed type WASM is invalid: {e}"));
     }
+
+    #[test]
+    fn struct_return_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 1);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 5);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
+        let test_name = "struct_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_return_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // get_x_from_make: make_point() returns Point { x: 10, y: 20 }, read x -> 10
+        let get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_make")
+            .expect("Failed to get 'get_x_from_make'");
+        let result = get_x.call(&mut store, ()).expect("get_x_from_make failed");
+        assert_eq!(result, 10, "get_x_from_make should return 10");
+
+        // get_y_from_make: make_point() returns Point { x: 10, y: 20 }, read y -> 20
+        let get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_y_from_make")
+            .expect("Failed to get 'get_y_from_make'");
+        let result = get_y.call(&mut store, ()).expect("get_y_from_make failed");
+        assert_eq!(result, 20, "get_y_from_make should return 20");
+
+        // get_x_from_var: return_var() returns Point { x: 3, y: 4 }, read x -> 3
+        let get_x_var: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_var")
+            .expect("Failed to get 'get_x_from_var'");
+        let result = get_x_var
+            .call(&mut store, ())
+            .expect("get_x_from_var failed");
+        assert_eq!(result, 3, "get_x_from_var should return 3");
+
+        // get_x_from_forward: forward_point() -> make_point() -> Point { x: 10, y: 20 }
+        let get_x_fwd: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_x_from_forward")
+            .expect("Failed to get 'get_x_from_forward'");
+        let result = get_x_fwd
+            .call(&mut store, ())
+            .expect("get_x_from_forward failed");
+        assert_eq!(result, 10, "get_x_from_forward should return 10");
+
+        // get_val_from_mixed: make_mixed() returns Mixed { flag: true, val: 99 }, read val -> 99
+        let get_val: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "get_val_from_mixed")
+            .expect("Failed to get 'get_val_from_mixed'");
+        let result = get_val
+            .call(&mut store, ())
+            .expect("get_val_from_mixed failed");
+        assert_eq!(result, 99, "get_val_from_mixed should return 99");
+
+        // Verify stack pointer is fully restored after all calls
+        let final_sp = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            final_sp, initial_sp,
+            "Stack pointer should be restored after all struct return calls"
+        );
+    }
+
+    #[test]
+    fn struct_return_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make() -> Point {
+                return Point { x: 1, y: 2 };
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = make();
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_return_var_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn return_var() -> Point {
+                let p: Point = Point { x: 5, y: 6 };
+                return p;
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = return_var();
+                return p.y;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return var inline WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_return_forward_inline_validation() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make() -> Point {
+                return Point { x: 1, y: 2 };
+            }
+            pub fn forward() -> Point {
+                return make();
+            }
+            pub fn use_it() -> i32 {
+                let p: Point = forward();
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct return forward inline WASM is invalid: {e}"));
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3473,5 +3618,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_params");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_return_wasm() {
+        let dir = base_test_dir().join("struct_return");
+        let source_code = std::fs::read_to_string(dir.join("struct_return.inf"))
+            .expect("Failed to read struct_return.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_return.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_return");
     }
 }
