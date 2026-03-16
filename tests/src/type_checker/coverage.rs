@@ -1424,6 +1424,140 @@ mod edge_cases {
 }
 
 #[cfg(test)]
+mod type_mismatch_coverage {
+    use super::*;
+
+    #[test]
+    fn test_bool_assign_number_literal() {
+        let source = r#"fn test() { let x: bool = 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Number literal to bool should fail");
+    }
+
+    #[test]
+    fn test_bool_assign_number_literal_in_assignment() {
+        let source = r#"fn test() { let mut x: bool = true; x = 1; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Number literal assigned to bool variable should fail"
+        );
+    }
+
+    #[test]
+    fn test_const_type_mismatch_bool_to_int() {
+        let source = r#"fn test() -> i32 { const x: i32 = true; return x; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Bool literal for i32 const should fail");
+    }
+
+    #[test]
+    fn test_const_type_mismatch_int_to_bool() {
+        let source = r#"fn test() -> i32 { const x: bool = 42; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Number literal for bool const should fail"
+        );
+    }
+
+    #[test]
+    fn test_const_valid_number_literal() {
+        let source = r#"fn test() -> i32 { const x: i32 = 42; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Valid number literal for i32 const should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_const_valid_bool_literal() {
+        let source = r#"fn test() -> bool { const x: bool = true; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Bool literal for bool const should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_bool_ordering_comparison_rejected() {
+        let source = r#"fn test() -> bool { return true < false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Ordering comparison on bools should fail"
+        );
+    }
+
+    #[test]
+    fn test_bool_ordering_le_rejected() {
+        let source = r#"fn test() -> bool { return true <= false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Ordering comparison (<=) on bools should fail"
+        );
+    }
+
+    #[test]
+    fn test_bool_ordering_gt_rejected() {
+        let source = r#"fn test() -> bool { return true > false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Ordering comparison (>) on bools should fail"
+        );
+    }
+
+    #[test]
+    fn test_bool_ordering_ge_rejected() {
+        let source = r#"fn test() -> bool { return true >= false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Ordering comparison (>=) on bools should fail"
+        );
+    }
+
+    #[test]
+    fn test_bool_equality_ok() {
+        let source = r#"fn test() -> bool { return true == false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Equality on bools should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_bool_inequality_ok() {
+        let source = r#"fn test() -> bool { return true != false; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Inequality on bools should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_numeric_ordering_ok() {
+        let source = r#"fn test() -> bool { let a: i32 = 1; let b: i32 = 2; return a < b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Ordering comparison on numbers should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod cov_mark_coverage {
     use super::*;
 

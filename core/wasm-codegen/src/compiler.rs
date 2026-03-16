@@ -1223,27 +1223,39 @@ impl Compiler {
             Expr::Type(_) => todo!(),
             Expr::Uzumaki => {
                 let node_id = NodeId::Expr(expr_id);
-                if let Some(type_info) = ctx.get_node_typeinfo(node_id)
-                    && let TypeInfoKind::Array(ref elem_type, length) = type_info.kind
-                {
-                    cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
-                    let var_name = enclosing_var_name.unwrap_or_else(|| {
-                        panic!("Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name")
-                    });
-                    self.lower_array_uzumaki(arena, elem_type, length, var_name);
-                    return;
+                let type_info = ctx
+                    .get_node_typeinfo(node_id)
+                    .expect("Uzumaki expression must have type info");
+                match &type_info.kind {
+                    TypeInfoKind::Bool
+                    | TypeInfoKind::Number(
+                        NumberType::I8
+                        | NumberType::U8
+                        | NumberType::I16
+                        | NumberType::U16
+                        | NumberType::I32
+                        | NumberType::U32,
+                    ) => {
+                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
+                        self.emit_uzumaki(UZUMAKI_I32_OPCODE);
+                    }
+                    TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => {
+                        cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
+                        self.emit_uzumaki(UZUMAKI_I64_OPCODE);
+                    }
+                    TypeInfoKind::Array(elem_type, length) => {
+                        cov_mark::hit!(wasm_codegen_emit_array_uzumaki);
+                        let length = *length;
+                        let elem_type = elem_type.clone();
+                        let var_name = enclosing_var_name.unwrap_or_else(|| {
+                            panic!(
+                                "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
+                            )
+                        });
+                        self.lower_array_uzumaki(arena, &elem_type, length, var_name);
+                    }
+                    _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
                 }
-                if ctx.is_node_i32(node_id) {
-                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
-                    self.emit_uzumaki(UZUMAKI_I32_OPCODE);
-                    return;
-                }
-                if ctx.is_node_i64(node_id) {
-                    cov_mark::hit!(wasm_codegen_emit_uzumaki_i64);
-                    self.emit_uzumaki(UZUMAKI_I64_OPCODE);
-                    return;
-                }
-                panic!("Unsupported Uzumaki expression type");
             }
         }
     }
@@ -2113,35 +2125,9 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_member_access_read);
 
-        let struct_type = ctx
-            .get_node_typeinfo(NodeId::Expr(struct_expr_id))
-            .expect("MemberAccess struct expression must have type info");
-
-        let struct_name = match &struct_type.kind {
-            TypeInfoKind::Struct(name) => name.clone(),
-            _ => panic!(
-                "MemberAccess struct expression has non-struct type: {:?}",
-                struct_type.kind
-            ),
-        };
-
-        let struct_info = ctx
-            .lookup_struct(&struct_name)
-            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
-
-        let field_name = &arena[field_name_id].name;
-        // Layout is also precomputed in frame_layout.struct_offsets, but recomputing is
-        // simpler here and O(fields) with small field counts
-        let (_, field_slots) = compute_struct_field_layout(&struct_info);
-        let field_slot = field_slots
-            .iter()
-            .find(|fs| fs.name == *field_name)
-            .unwrap_or_else(|| {
-                panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
-            });
-
-        let field_offset = field_slot.offset;
-        let load_instr = memory::load_instruction(&field_slot.type_kind);
+        let (field_offset, field_type_kind) =
+            self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let load_instr = memory::load_instruction(&field_type_kind);
 
         self.lower_expression(arena, struct_expr_id, ctx, None);
 
@@ -2180,35 +2166,9 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_member_access_write);
 
-        let struct_type = ctx
-            .get_node_typeinfo(NodeId::Expr(struct_expr_id))
-            .expect("MemberAccess write: struct expression must have type info");
-
-        let struct_name = match &struct_type.kind {
-            TypeInfoKind::Struct(name) => name.clone(),
-            _ => panic!(
-                "MemberAccess write: struct expression has non-struct type: {:?}",
-                struct_type.kind
-            ),
-        };
-
-        let struct_info = ctx
-            .lookup_struct(&struct_name)
-            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
-
-        let field_name = &arena[field_name_id].name;
-        // Layout is also precomputed in frame_layout.struct_offsets, but recomputing is
-        // simpler here and O(fields) with small field counts
-        let (_, field_slots) = compute_struct_field_layout(&struct_info);
-        let field_slot = field_slots
-            .iter()
-            .find(|fs| fs.name == *field_name)
-            .unwrap_or_else(|| {
-                panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
-            });
-
-        let field_offset = field_slot.offset;
-        let store_instr = memory::store_instruction(&field_slot.type_kind);
+        let (field_offset, field_type_kind) =
+            self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
+        let store_instr = memory::store_instruction(&field_type_kind);
 
         self.lower_expression(arena, struct_expr_id, ctx, None);
 
@@ -2222,6 +2182,64 @@ impl Compiler {
         self.lower_expression(arena, right_expr_id, ctx, None);
 
         self.func().instruction(&store_instr);
+    }
+
+    /// Resolves a struct field's byte offset and type kind for member access operations.
+    ///
+    /// Tries the precomputed layout in `frame_layout.struct_offsets` first (O(1) lookup
+    /// when the struct expression is a simple variable). Falls back to recomputing via
+    /// `compute_struct_field_layout` for parameters or complex expressions.
+    fn resolve_struct_field_offset(
+        &self,
+        arena: &AstArena,
+        struct_expr_id: ExprId,
+        field_name_id: IdentId,
+        ctx: &TypedContext,
+    ) -> (u32, TypeInfoKind) {
+        let field_name = &arena[field_name_id].name;
+
+        if let Some(ref layout) = self.frame_layout
+            && let Expr::Identifier(ident_id) = &arena[struct_expr_id].kind
+        {
+            let var_name = &arena[*ident_id].name;
+            if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
+                let field_slot = struct_slot
+                    .fields
+                    .iter()
+                    .find(|fs| fs.name == *field_name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "Field '{field_name}' not found in cached layout for '{var_name}'"
+                        )
+                    });
+                return (field_slot.offset, field_slot.type_kind.clone());
+            }
+        }
+
+        let struct_type = ctx
+            .get_node_typeinfo(NodeId::Expr(struct_expr_id))
+            .expect("MemberAccess: struct expression must have type info");
+
+        let TypeInfoKind::Struct(struct_name) = &struct_type.kind else {
+            panic!(
+                "MemberAccess: struct expression has non-struct type: {:?}",
+                struct_type.kind
+            )
+        };
+
+        let struct_info = ctx
+            .lookup_struct(struct_name)
+            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+
+        let (_, field_slots) = compute_struct_field_layout(&struct_info);
+        let field_slot = field_slots
+            .iter()
+            .find(|fs| fs.name == *field_name)
+            .unwrap_or_else(|| {
+                panic!("Field '{field_name}' not found in struct '{struct_name}' layout")
+            });
+
+        (field_slot.offset, field_slot.type_kind.clone())
     }
 
     fn emit_nondet_block_start(&mut self, opcode: u8) {

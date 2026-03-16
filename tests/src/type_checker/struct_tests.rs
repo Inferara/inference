@@ -377,4 +377,87 @@ mod field_validation {
             result.err()
         );
     }
+
+    #[test]
+    fn test_struct_field_type_mismatch_bool_for_i32() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() { let p: Point = Point { x: true, y: 2 }; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Bool for i32 struct field should fail"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_type_mismatch_number_for_bool() {
+        let source = r#"
+            struct Flags { active: bool; count: i32; }
+            fn test() { let f: Flags = Flags { active: 42, count: 1 }; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Number literal for bool struct field should fail"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_correct_types_ok() {
+        let source = r#"
+            struct Flags { active: bool; count: i32; }
+            fn test() { let f: Flags = Flags { active: true, count: 1 }; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Correct struct field types should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_nested_struct_field_not_supported() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            struct Rect { origin: Point; size: Point; }
+            fn test() -> i32 {
+                let r: Rect = Rect { origin: Point { x: 0, y: 0 }, size: Point { x: 10, y: 20 } };
+                return 0;
+            }
+        "#;
+        let result = try_type_check(source);
+        // Nested structs are not yet supported. The type checker rejects struct-typed fields
+        // because struct literal field type matching does not handle struct types correctly
+        // (reports "expected Point, found Point"). Codegen would also panic in element_size.
+        // This test documents the current limitation at both levels.
+        assert!(
+            result.is_err(),
+            "Nested structs are not yet supported; type checker should reject struct-typed fields"
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_as_argument_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn takes_point(p: Point) -> i32 { return p.x; }
+            fn test() -> i32 { return takes_point(Point { x: 1, y: 2 }); }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Struct literal as direct argument should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("struct literal cannot be used directly"),
+                "Error should mention struct literal restriction: {}",
+                error_msg
+            );
+        }
+    }
 }

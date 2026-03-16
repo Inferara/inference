@@ -717,8 +717,20 @@ impl TypeChecker {
                     if let Some(target) = &target_type
                         && let Expr::NumberLiteral { value } = &right_kind
                     {
-                        ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
-                        self.validate_literal_range(value, &target.kind, right_loc);
+                        if target.kind.is_number() {
+                            ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
+                            self.validate_literal_range(value, &target.kind, right_loc);
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::Assignment,
+                                location,
+                            });
+                        }
                     }
                 }
                 let arena = ctx.arena();
@@ -875,8 +887,20 @@ impl TypeChecker {
                         value: ref num_value,
                     } = expr_kind
                     {
-                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                        self.validate_literal_range(num_value, &target_type.kind, expr_loc);
+                        if target_type.kind.is_number() {
+                            ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
+                            self.validate_literal_range(num_value, &target_type.kind, expr_loc);
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: target_type.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
                     if let Expr::ArrayLiteral { elements } = &expr_kind
                         && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
@@ -995,12 +1019,39 @@ impl TypeChecker {
                         });
                     }
                     let arena = ctx.arena();
-                    if let Expr::NumberLiteral { value: num_value } = &arena[value_id].kind {
-                        self.validate_literal_range(
-                            num_value,
-                            &constant_type.kind,
-                            arena[value_id].location,
-                        );
+                    let value_kind = arena[value_id].kind.clone();
+                    let value_loc = arena[value_id].location;
+                    if let Expr::NumberLiteral { value: num_value } = &value_kind {
+                        if constant_type.kind.is_number() {
+                            self.validate_literal_range(
+                                num_value,
+                                &constant_type.kind,
+                                value_loc,
+                            );
+                        } else {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: constant_type.clone(),
+                                found: TypeInfo {
+                                    kind: TypeInfoKind::Number(NumberType::I32),
+                                    type_params: vec![],
+                                },
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
+                    } else {
+                        let init_type = self.infer_expression(value_id, ctx);
+                        if let Some(init) = init_type
+                            && self.symbol_table.resolve_custom_type(init.clone())
+                                != constant_type
+                        {
+                            self.errors.push(TypeCheckError::TypeMismatch {
+                                expected: constant_type.clone(),
+                                found: init,
+                                context: TypeMismatchContext::VariableDefinition,
+                                location,
+                            });
+                        }
                     }
                     ctx.set_node_typeinfo(NodeId::Expr(value_id), constant_type.clone());
                     ctx.set_node_typeinfo(NodeId::Def(cdi), constant_type.clone());
@@ -1248,17 +1299,40 @@ impl TypeChecker {
                                     value: ref num_value,
                                 } = field_expr_kind
                                 {
-                                    ctx.set_node_typeinfo(
-                                        NodeId::Expr(*field_value_expr),
-                                        field_type.clone(),
-                                    );
-                                    self.validate_literal_range(
-                                        num_value,
-                                        &field_type.kind,
-                                        field_expr_loc,
-                                    );
+                                    if field_type.kind.is_number() {
+                                        ctx.set_node_typeinfo(
+                                            NodeId::Expr(*field_value_expr),
+                                            field_type.clone(),
+                                        );
+                                        self.validate_literal_range(
+                                            num_value,
+                                            &field_type.kind,
+                                            field_expr_loc,
+                                        );
+                                    } else {
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: field_type.clone(),
+                                            found: TypeInfo {
+                                                kind: TypeInfoKind::Number(NumberType::I32),
+                                                type_params: vec![],
+                                            },
+                                            context: TypeMismatchContext::VariableDefinition,
+                                            location: field_expr_loc,
+                                        });
+                                    }
                                 } else {
-                                    self.infer_expression(*field_value_expr, ctx);
+                                    let init_type =
+                                        self.infer_expression(*field_value_expr, ctx);
+                                    if let Some(init) = init_type
+                                        && init != field_type
+                                    {
+                                        self.errors.push(TypeCheckError::TypeMismatch {
+                                            expected: field_type.clone(),
+                                            found: init,
+                                            context: TypeMismatchContext::VariableDefinition,
+                                            location: field_expr_loc,
+                                        });
+                                    }
                                 }
                             } else {
                                 self.errors.push(TypeCheckError::UnknownStructField {
@@ -1377,15 +1451,28 @@ impl TypeChecker {
                                 return None;
                             }
                         }
-                        OperatorKind::Eq
-                        | OperatorKind::Ne
-                        | OperatorKind::Lt
-                        | OperatorKind::Le
-                        | OperatorKind::Gt
-                        | OperatorKind::Ge => TypeInfo {
+                        OperatorKind::Eq | OperatorKind::Ne => TypeInfo {
                             kind: TypeInfoKind::Bool,
                             type_params: vec![],
                         },
+                        OperatorKind::Lt
+                        | OperatorKind::Le
+                        | OperatorKind::Gt
+                        | OperatorKind::Ge => {
+                            if !left_type.is_number() || !right_type.is_number() {
+                                self.errors.push(TypeCheckError::InvalidBinaryOperand {
+                                    operator: op.clone(),
+                                    expected_kind: "comparison",
+                                    operand_desc: "non-numeric types",
+                                    found_types: (left_type, right_type),
+                                    location,
+                                });
+                            }
+                            TypeInfo {
+                                kind: TypeInfoKind::Bool,
+                                type_params: vec![],
+                            }
+                        }
                         OperatorKind::Pow
                         | OperatorKind::Add
                         | OperatorKind::Sub
@@ -1403,14 +1490,6 @@ impl TypeChecker {
                                     expected_kind: "arithmetic",
                                     operand_desc: "non-number types",
                                     found_types: (left_type.clone(), right_type.clone()),
-                                    location,
-                                });
-                            }
-                            if left_type != right_type {
-                                self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
-                                    operator: op,
-                                    left: left_type.clone(),
-                                    right: right_type,
                                     location,
                                 });
                             }
