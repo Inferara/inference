@@ -1167,7 +1167,7 @@ mod array_return_type_validation {
     #[test]
     fn test_method_array_return_accepted() {
         let source =
-            r#"struct Foo { x: i32; fn get_array(self) -> [i32; 2] { return [1, 2]; } }"#;
+            r#"struct Foo { x: i32; fn get_array(self) -> [i32; 2] { let a: [i32; 2] = [self.x, 2]; return a; } }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),

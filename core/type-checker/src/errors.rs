@@ -480,6 +480,32 @@ pub enum TypeCheckError {
         "{location}: invalid array size `{size}`; must be a positive integer that fits in 32 bits"
     )]
     InvalidArraySize { size: String, location: Location },
+
+    /// Method declares `self` but never references it in the body.
+    ///
+    /// If a method does not access `self`, it should be an associated function instead.
+    #[error("{location}: method `{struct_name}::{method_name}` declares `self` but never accesses it; consider making it an associated function")]
+    MethodNeverAccessesSelf {
+        struct_name: String,
+        method_name: String,
+        location: Location,
+    },
+
+    /// Struct has no fields and no methods.
+    ///
+    /// An empty struct serves no purpose; add fields or methods, or remove it.
+    #[error("{location}: struct `{name}` has no fields and no methods")]
+    EmptyStruct { name: String, location: Location },
+
+    /// Self-referential struct literal inside a method.
+    ///
+    /// Constructing an instance of the same struct type as `self` inside a method
+    /// creates a self-referential pattern that is not allowed.
+    #[error("{location}: cannot use `self` in struct literal `{struct_name}`")]
+    SelfReferenceInStructLiteral {
+        struct_name: String,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -526,7 +552,10 @@ impl TypeCheckError {
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
             | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
-            | TypeCheckError::InvalidArraySize { location, .. } => location,
+            | TypeCheckError::InvalidArraySize { location, .. }
+            | TypeCheckError::MethodNeverAccessesSelf { location, .. }
+            | TypeCheckError::EmptyStruct { location, .. }
+            | TypeCheckError::SelfReferenceInStructLiteral { location, .. } => location,
         }
     }
 }
@@ -1198,6 +1227,43 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: invalid array size `0`; must be a positive integer that fits in 32 bits"
+        );
+    }
+
+    #[test]
+    fn display_method_never_accesses_self() {
+        let err = TypeCheckError::MethodNeverAccessesSelf {
+            struct_name: "Counter".to_string(),
+            method_name: "reset".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: method `Counter::reset` declares `self` but never accesses it; consider making it an associated function"
+        );
+    }
+
+    #[test]
+    fn display_empty_struct() {
+        let err = TypeCheckError::EmptyStruct {
+            name: "Empty".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct `Empty` has no fields and no methods"
+        );
+    }
+
+    #[test]
+    fn display_self_reference_in_struct_literal() {
+        let err = TypeCheckError::SelfReferenceInStructLiteral {
+            struct_name: "Foo".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot use `self` in struct literal `Foo`"
         );
     }
 }

@@ -15,7 +15,7 @@
 use anyhow::bail;
 use inference_ast::arena::AstArena;
 use inference_ast::extern_prelude::ExternPrelude;
-use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
+use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode, UnaryOperatorKind,
     Visibility,
@@ -88,12 +88,31 @@ impl TypeChecker {
                 Def::Struct { name, methods, .. } => {
                     let struct_name = ctx.arena()[*name].name.clone();
                     let struct_type = TypeInfo {
-                        kind: TypeInfoKind::Struct(struct_name),
+                        kind: TypeInfoKind::Struct(struct_name.clone()),
                         type_params: vec![],
                     };
                     let method_ids: Vec<DefId> = methods.clone();
                     for method_id in method_ids {
                         self.infer_method_variables(method_id, struct_type.clone(), ctx);
+                        let arena = ctx.arena();
+                        let method_data = &arena[method_id];
+                        if let Def::Function {
+                            name: method_name,
+                            args,
+                            body,
+                            ..
+                        } = &method_data.kind
+                        {
+                            let has_self =
+                                args.iter().any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
+                            if has_self && !Self::body_references_self(arena, *body) {
+                                self.errors.push(TypeCheckError::MethodNeverAccessesSelf {
+                                    struct_name: struct_name.clone(),
+                                    method_name: arena[*method_name].name.clone(),
+                                    location: method_data.location,
+                                });
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -142,6 +161,12 @@ impl TypeChecker {
                     methods,
                 } => {
                     let struct_name = arena[*name].name.clone();
+                    if fields.is_empty() && methods.is_empty() {
+                        self.errors.push(TypeCheckError::EmptyStruct {
+                            name: struct_name.clone(),
+                            location,
+                        });
+                    }
                     let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
                         .iter()
                         .map(|f| {
@@ -583,6 +608,7 @@ impl TypeChecker {
 
         let return_type = returns_snapshot
             .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
+            .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
@@ -659,6 +685,7 @@ impl TypeChecker {
 
         let return_type = returns_snapshot
             .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
+            .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
@@ -1171,11 +1198,25 @@ impl TypeChecker {
                 type_params: call_type_params,
                 args,
             } => self.infer_function_call(expr_id, function, &call_type_params, &args, ctx),
-            Expr::StructLiteral { name, .. } => {
+            Expr::StructLiteral { name, fields } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
                 let struct_name = ctx.arena()[name].name.clone();
+                if let Some(self_type) = self.symbol_table.lookup_variable("self")
+                    && let TypeInfoKind::Struct(ref self_struct_name) = self_type.kind
+                    && *self_struct_name == struct_name
+                    && fields
+                        .iter()
+                        .any(|(_, field_expr)| Self::expr_references_self(ctx.arena(), *field_expr))
+                {
+                    self.errors
+                        .push(TypeCheckError::SelfReferenceInStructLiteral {
+                            struct_name: struct_name.clone(),
+                            location,
+                        });
+                    return None;
+                }
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), struct_type.clone());
@@ -2391,5 +2432,84 @@ impl TypeChecker {
             self.reported_error_keys.insert(key);
         }
         self.errors.push(error);
+    }
+
+    fn body_references_self(arena: &AstArena, block_id: BlockId) -> bool {
+        arena[block_id]
+            .stmts
+            .iter()
+            .any(|&stmt_id| Self::stmt_references_self(arena, stmt_id))
+    }
+
+    fn stmt_references_self(arena: &AstArena, stmt_id: StmtId) -> bool {
+        match &arena[stmt_id].kind {
+            Stmt::Block(block_id) => Self::body_references_self(arena, *block_id),
+            Stmt::Expr(expr_id) => Self::expr_references_self(arena, *expr_id),
+            Stmt::Assign { left, right } => {
+                Self::expr_references_self(arena, *left)
+                    || Self::expr_references_self(arena, *right)
+            }
+            Stmt::Return { expr } => Self::expr_references_self(arena, *expr),
+            Stmt::Loop { condition, body } => {
+                condition
+                    .as_ref()
+                    .is_some_and(|c| Self::expr_references_self(arena, *c))
+                    || Self::body_references_self(arena, *body)
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                Self::expr_references_self(arena, *condition)
+                    || Self::body_references_self(arena, *then_block)
+                    || else_block.is_some_and(|b| Self::body_references_self(arena, b))
+            }
+            Stmt::VarDef { value, .. } => {
+                value.is_some_and(|v| Self::expr_references_self(arena, v))
+            }
+            Stmt::Assert { expr } => Self::expr_references_self(arena, *expr),
+            Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+        }
+    }
+
+    fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
+            Expr::Binary { left, right, .. } => {
+                Self::expr_references_self(arena, *left)
+                    || Self::expr_references_self(arena, *right)
+            }
+            Expr::PrefixUnary { expr, .. } | Expr::Parenthesized { expr } => {
+                Self::expr_references_self(arena, *expr)
+            }
+            Expr::FunctionCall {
+                function, args, ..
+            } => {
+                Self::expr_references_self(arena, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg_expr)| Self::expr_references_self(arena, *arg_expr))
+            }
+            Expr::ArrayIndexAccess { array, index } => {
+                Self::expr_references_self(arena, *array)
+                    || Self::expr_references_self(arena, *index)
+            }
+            Expr::MemberAccess { expr, .. } | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_references_self(arena, *expr)
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, field_expr)| Self::expr_references_self(arena, *field_expr)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|elem| Self::expr_references_self(arena, *elem)),
+            Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
+        }
     }
 }

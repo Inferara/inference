@@ -9,6 +9,14 @@
 //! annotated node IDs. Type info is looked up via `NodeId::Expr(expr_id)` or
 //! `NodeId::Stmt(stmt_id)` etc.
 use crate::utils::build_ast;
+use inference_type_checker::TypeCheckerBuilder;
+
+fn try_type_check(
+    source: &str,
+) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+    let arena = build_ast(source.to_string());
+    Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
+}
 
 /// Tests that verify types are correctly inferred for various constructs.
 #[cfg(test)]
@@ -17,16 +25,7 @@ mod type_inference_tests {
     use crate::utils::{collect_all_exprs, collect_all_stmts, find_function_by_name};
     use inference_ast::ids::NodeId;
     use inference_ast::nodes::{ArgKind, Def, Expr, Stmt};
-    use inference_type_checker::TypeCheckerBuilder;
     use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
-
-    /// Helper function to run type checker, returning Result to handle WIP failures
-    fn try_type_check(
-        source: &str,
-    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
-        let arena = build_ast(source.to_string());
-        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
-    }
 
     /// Tests for primitive type inference with actual type checking
     mod primitives {
@@ -1540,7 +1539,7 @@ mod type_inference_tests {
             let source = r#"
             struct Counter {
                 value: i32;
-                fn get(self) -> i32 { return 42; }
+                fn get(self) -> i32 { return self.value; }
             }
             fn test(c: Counter) -> i32 { return c.get(); }
             "#;
@@ -1569,7 +1568,7 @@ mod type_inference_tests {
             let source = r#"
             struct Calculator {
                 value: i32;
-                fn add(self, x: i32) -> i32 { return x; }
+                fn add(self, x: i32) -> i32 { return self.value + x; }
             }
             fn test(c: Calculator) -> i32 { return c.add(10); }
             "#;
@@ -1598,7 +1597,7 @@ mod type_inference_tests {
             let source = r#"
             struct Checker {
                 valid: bool;
-                fn is_valid(self) -> bool { return true; }
+                fn is_valid(self) -> bool { return self.valid; }
             }
             fn test(c: Checker) -> bool { return c.is_valid(); }
             "#;
@@ -1626,8 +1625,8 @@ mod type_inference_tests {
                 x: i32;
                 y: i32;
 
-                fn get_x(self) -> i32 { return 1; }
-                fn get_y(self) -> i32 { return 2; }
+                fn get_x(self) -> i32 { return self.x; }
+                fn get_y(self) -> i32 { return self.y; }
             }
             fn test_x(d: Data) -> i32 { return d.get_x(); }
             fn test_y(d: Data) -> i32 { return d.get_y(); }
@@ -1674,7 +1673,7 @@ mod type_inference_tests {
             struct Math {
                 base: i32;
 
-                fn compute(self, a: i32, b: i32) -> i32 { return a; }
+                fn compute(self, a: i32, b: i32) -> i32 { return self.base + a + b; }
             }
             fn test(m: Math) -> i32 { return m.compute(1, 2); }
             "#;
@@ -1698,7 +1697,7 @@ mod type_inference_tests {
                 data: i32;
 
                 fn process(self) -> i32 {
-                    return 42;
+                    return self.data;
                 }
             }
             fn test(c: Container) -> i32 { return c.process(); }
@@ -1956,15 +1955,7 @@ mod type_inference_tests {
 /// Tests for unary operator type checking
 #[cfg(test)]
 mod unary_operator_tests {
-    use crate::utils::build_ast;
-    use inference_type_checker::TypeCheckerBuilder;
-
-    fn try_type_check(
-        source: &str,
-    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
-        let arena = build_ast(source.to_string());
-        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
-    }
+    use super::*;
 
     mod negation_operator {
         use super::*;
@@ -2271,15 +2262,7 @@ mod unary_operator_tests {
 /// Tests for binary division operator type checking
 #[cfg(test)]
 mod division_operator_tests {
-    use crate::utils::build_ast;
-    use inference_type_checker::TypeCheckerBuilder;
-
-    fn try_type_check(
-        source: &str,
-    ) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
-        let arena = build_ast(source.to_string());
-        Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
-    }
+    use super::*;
 
     #[test]
     fn test_divide_i32_succeeds() {
@@ -2369,4 +2352,376 @@ mod division_operator_tests {
             result.err()
         );
     }
+}
+
+/// Tests for EmptyStruct validation rule
+#[cfg(test)]
+mod empty_struct_tests {
+    use super::*;
+
+    #[test]
+    fn empty_struct_produces_error() {
+        let source = r#"struct Empty {} fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Empty struct should produce an error");
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("has no fields and no methods"),
+                "Error should mention empty struct, got: {err}"
+            );
+            assert!(
+                err.contains("Empty"),
+                "Error should mention struct name, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn struct_with_fields_only_passes() {
+        let source = r#"struct Point { x: i32; } fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct with fields should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn struct_with_associated_function_only_passes() {
+        let source = r#"struct Math { fn add(a: i32, b: i32) -> i32 { return a + b; } } fn main() -> i32 { return Math::add(1, 2); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct with associated function only should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn struct_with_fields_and_methods_passes() {
+        let source = r#"struct Counter { value: i32; fn get(self) -> i32 { return self.value; } } fn main(c: Counter) -> i32 { return c.get(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct with fields and methods should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+/// Tests for MethodNeverAccessesSelf validation rule
+#[cfg(test)]
+mod unused_self_tests {
+    use super::*;
+
+    #[test]
+    fn method_using_self_field_passes() {
+        let source = r#"struct Foo { x: i32; fn get(self) -> i32 { return self.x; } } fn main(f: Foo) -> i32 { return f.get(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Method accessing self.field should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn method_using_self_in_nested_if_passes() {
+        let source = r#"struct Foo { x: i32; fn check(self) -> i32 { if true { return self.x; } return 0; } } fn main(f: Foo) -> i32 { return f.check(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Method accessing self inside if should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn method_using_self_in_return_position_passes() {
+        let source = r#"struct Foo { x: i32; fn val(self) -> i32 { let v: i32 = self.x; return v; } } fn main(f: Foo) -> i32 { return f.val(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Method accessing self in variable init should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn method_declaring_self_but_never_using_it_errors() {
+        let source = r#"struct Foo { x: i32; fn noop(self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Method declaring self but not using it should produce an error"
+        );
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("declares `self` but never accesses it"),
+                "Error should mention unused self, got: {err}"
+            );
+            assert!(
+                err.contains("Foo") && err.contains("noop"),
+                "Error should mention struct and method names, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn associated_function_without_self_passes() {
+        let source = r#"struct Foo { x: i32; fn new() -> i32 { return 0; } } fn main() -> i32 { return Foo::new(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Associated function without self should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn method_using_self_in_loop_body_passes() {
+        let source = r#"struct Foo { x: i32; fn sum(self) -> i32 { let mut i: i32 = 0; loop { if i >= self.x { break; } i = i + 1; } return i; } } fn main(f: Foo) -> i32 { return f.sum(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Method accessing self inside loop should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn mut_self_never_used_errors() {
+        let source = r#"struct Foo { x: i32; fn noop(mut self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "mut self that's never used should error");
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("declares `self` but never accesses it"),
+                "Should catch unused mut self, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_methods_only_unused_one_errors() {
+        let source = r#"
+            struct Foo {
+                x: i32;
+                fn get(self) -> i32 { return self.x; }
+                fn bad(self) -> i32 { return 42; }
+            }
+            fn main(f: Foo) -> i32 { return f.get() + f.bad(); }
+        "#;
+        let result = try_type_check(source);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("bad") && err.contains("declares `self` but never accesses it"),
+                "Only the unused method should error, got: {err}"
+            );
+            assert!(
+                !err.contains("Foo::get"),
+                "The method that uses self should not error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn self_used_in_assert_passes() {
+        let source = r#"struct Foo { x: i32; fn check(self) { assert(self.x > 0); } } fn main(f: Foo) { f.check(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "self used in assert should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn self_used_as_function_argument_passes() {
+        let source = r#"struct Foo { x: i32; fn process(self) -> i32 { return bar(self.x); } } fn bar(v: i32) -> i32 { return v; } fn main(f: Foo) -> i32 { return f.process(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "self used as function argument should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn self_used_in_array_index_passes() {
+        let source = r#"struct Foo { idx: i32; fn get(self, a: [i32; 3]) -> i32 { return a[self.idx]; } } fn main(f: Foo) -> i32 { let a: [i32; 3] = [10, 20, 30]; return f.get(a); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "self used in array index should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn self_used_in_binary_expression_passes() {
+        let source = r#"struct Foo { x: i32; y: i32; fn sum(self) -> i32 { return self.x + self.y; } } fn main(f: Foo) -> i32 { return f.sum(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "self used in binary expression should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn method_with_empty_body_errors() {
+        let source = r#"struct Foo { x: i32; fn noop(self) {} } fn main(f: Foo) { f.noop(); }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Empty method body with self should error");
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("declares `self` but never accesses it"),
+                "Should catch self in empty body, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn self_deeply_nested_passes() {
+        let source = r#"
+            struct Foo {
+                x: i32;
+                fn deep(self) -> i32 {
+                    if true {
+                        if true {
+                            if true {
+                                return self.x;
+                            }
+                        }
+                    }
+                    return 0;
+                }
+            }
+            fn main(f: Foo) -> i32 { return f.deep(); }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Deeply nested self access should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+/// Tests for interaction between EmptyStruct and MethodNeverAccessesSelf
+#[cfg(test)]
+mod rule_interaction_tests {
+    use super::*;
+
+    #[test]
+    fn struct_with_only_unused_self_method_not_empty_struct_error() {
+        let source = r#"struct S { fn noop(self) -> i32 { return 42; } } fn main(s: S) -> i32 { return s.noop(); }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("declares `self` but never accesses it"),
+                "Should get MethodNeverAccessesSelf, got: {err}"
+            );
+            assert!(
+                !err.contains("has no fields and no methods"),
+                "Should NOT get EmptyStruct (has a method), got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_empty_structs_produce_separate_errors() {
+        let source = r#"struct A {} struct B {} fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(err.contains("A"), "Should mention struct A, got: {err}");
+            assert!(err.contains("B"), "Should mention struct B, got: {err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod self_in_struct_literal_tests {
+    use super::*;
+
+    #[test]
+    fn self_type_struct_literal_referencing_self_in_method_errors() {
+        let source = r#"struct Foo { x: i32; fn bad(self) -> Foo { return Foo { x: self.x }; } } fn main(f: Foo) -> i32 { return f.x; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("cannot use `self` in struct literal"),
+                "Expected SelfReferenceInStructLiteral error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn different_type_struct_literal_in_method_passes() {
+        let source = r#"
+            struct Bar { y: i32; }
+            struct Foo {
+                x: i32;
+                fn make(self) -> i32 { let v: i32 = self.x; let b: Bar = Bar { y: v }; return b.y; }
+            }
+            fn main(f: Foo) -> i32 { return f.make(); }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Constructing different-type struct literal should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn struct_literal_in_associated_function_passes() {
+        let source = r#"struct Foo { x: i32; fn new(v: i32) -> i32 { let f: Foo = Foo { x: v }; return f.x; } } fn main() -> i32 { return Foo::new(5); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Constructing struct literal in associated function (no self) should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn self_type_struct_literal_in_vardef_referencing_self_errors() {
+        let source = r#"struct Foo { x: i32; fn bad(self) -> i32 { let f: Foo = Foo { x: self.x }; return f.x; } } fn main(f: Foo) -> i32 { return f.bad(); }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            let err = error.to_string();
+            assert!(
+                err.contains("cannot use `self` in struct literal"),
+                "Expected SelfReferenceInStructLiteral error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_type_struct_literal_without_self_ref_passes() {
+        let source = r#"struct Foo { x: i32; fn make(self) -> i32 { let v: i32 = self.x; let f: Foo = Foo { x: 42 }; return f.x; } } fn main(f: Foo) -> i32 { return f.make(); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Constructing same-type struct literal without referencing self should pass, got: {:?}",
+            result.err()
+        );
+    }
+
 }
