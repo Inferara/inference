@@ -2657,17 +2657,14 @@ mod self_in_struct_literal_tests {
     use super::*;
 
     #[test]
-    fn self_type_struct_literal_referencing_self_in_method_errors() {
-        let source = r#"struct Foo { x: i32; fn bad(self) -> Foo { return Foo { x: self.x }; } } fn main(f: Foo) -> i32 { return f.x; }"#;
+    fn self_type_struct_literal_referencing_self_in_method_passes() {
+        let source = r#"struct Foo { x: i32; fn make(self) -> Foo { return Foo { x: self.x }; } } fn main(f: Foo) -> i32 { return f.x; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("cannot use `self` in struct literal"),
-                "Expected SelfReferenceInStructLiteral error, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Constructing same-type struct literal from self fields should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2700,17 +2697,14 @@ mod self_in_struct_literal_tests {
     }
 
     #[test]
-    fn self_type_struct_literal_in_vardef_referencing_self_errors() {
-        let source = r#"struct Foo { x: i32; fn bad(self) -> i32 { let f: Foo = Foo { x: self.x }; return f.x; } } fn main(f: Foo) -> i32 { return f.bad(); }"#;
+    fn self_type_struct_literal_in_vardef_referencing_self_passes() {
+        let source = r#"struct Foo { x: i32; fn make(self) -> i32 { let f: Foo = Foo { x: self.x }; return f.x; } } fn main(f: Foo) -> i32 { return f.make(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("cannot use `self` in struct literal"),
-                "Expected SelfReferenceInStructLiteral error, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Constructing same-type struct literal from self fields in vardef should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]

@@ -972,6 +972,16 @@ impl TypeChecker {
                         .symbol_table
                         .resolve_custom_type(TypeInfo::from_type_id(arena, *ty));
                     let value_id = *value;
+                    if self
+                        .symbol_table
+                        .lookup_variable_in_parent_scopes(&const_name)
+                        .is_some()
+                    {
+                        self.errors.push(TypeCheckError::VariableShadowed {
+                            name: const_name.clone(),
+                            location,
+                        });
+                    }
                     if let Err(err) = self.symbol_table.push_variable_to_scope(
                         &const_name,
                         constant_type.clone(),
@@ -1205,27 +1215,24 @@ impl TypeChecker {
                     return Some(type_info);
                 }
                 let struct_name = ctx.arena()[name].name.clone();
-                if let Some(self_type) = self.symbol_table.lookup_variable("self")
-                    && let TypeInfoKind::Struct(ref self_struct_name) = self_type.kind
-                    && *self_struct_name == struct_name
-                    && fields
-                        .iter()
-                        .any(|(_, field_expr)| Self::expr_references_self(ctx.arena(), *field_expr))
-                {
-                    self.errors
-                        .push(TypeCheckError::SelfReferenceInStructLiteral {
-                            struct_name: struct_name.clone(),
-                            location,
-                        });
-                    return None;
-                }
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
                     if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
                         let fields_copy: Vec<_> =
                             fields.iter().map(|(id, expr)| (*id, *expr)).collect();
-                        for (field_name_id, field_value_expr) in fields_copy {
-                            let field_name = ctx.arena()[field_name_id].name.clone();
+                        let mut seen_fields = FxHashSet::default();
+                        for (field_name_id, field_value_expr) in &fields_copy {
+                            let field_name = ctx.arena()[*field_name_id].name.clone();
+                            let field_loc = ctx.arena()[*field_name_id].location;
+                            if !seen_fields.insert(field_name.clone()) {
+                                self.errors
+                                    .push(TypeCheckError::DuplicateStructField {
+                                        struct_name: struct_name.clone(),
+                                        field_name,
+                                        location: field_loc,
+                                    });
+                                continue;
+                            }
                             if let Some(field_info) =
                                 struct_info.get_field_info_by_name(&field_name)
                             {
@@ -1233,8 +1240,8 @@ impl TypeChecker {
                                 let (field_expr_kind, field_expr_loc) = {
                                     let arena = ctx.arena();
                                     (
-                                        arena[field_value_expr].kind.clone(),
-                                        arena[field_value_expr].location,
+                                        arena[*field_value_expr].kind.clone(),
+                                        arena[*field_value_expr].location,
                                     )
                                 };
                                 if let Expr::NumberLiteral {
@@ -1242,7 +1249,7 @@ impl TypeChecker {
                                 } = field_expr_kind
                                 {
                                     ctx.set_node_typeinfo(
-                                        NodeId::Expr(field_value_expr),
+                                        NodeId::Expr(*field_value_expr),
                                         field_type.clone(),
                                     );
                                     self.validate_literal_range(
@@ -1251,8 +1258,23 @@ impl TypeChecker {
                                         field_expr_loc,
                                     );
                                 } else {
-                                    self.infer_expression(field_value_expr, ctx);
+                                    self.infer_expression(*field_value_expr, ctx);
                                 }
+                            } else {
+                                self.errors.push(TypeCheckError::UnknownStructField {
+                                    struct_name: struct_name.clone(),
+                                    field_name,
+                                    location: field_loc,
+                                });
+                            }
+                        }
+                        for field_info in &struct_info.fields {
+                            if !seen_fields.contains(&field_info.name) {
+                                self.errors.push(TypeCheckError::MissingStructField {
+                                    struct_name: struct_name.clone(),
+                                    field_name: field_info.name.clone(),
+                                    location,
+                                });
                             }
                         }
                     }
@@ -1861,6 +1883,11 @@ impl TypeChecker {
         let arena = ctx.arena();
         if let Expr::ArrayLiteral { .. } = &arena[arg_expr_id].kind {
             self.errors.push(TypeCheckError::ArrayLiteralAsArgument {
+                location: arena[arg_expr_id].location,
+            });
+        }
+        if let Expr::StructLiteral { .. } = &arena[arg_expr_id].kind {
+            self.errors.push(TypeCheckError::StructLiteralAsArgument {
                 location: arena[arg_expr_id].location,
             });
         }
@@ -2476,6 +2503,7 @@ impl TypeChecker {
         self.errors.push(error);
     }
 
+    /// Returns true if any statement in the block references `self`.
     fn body_references_self(arena: &AstArena, block_id: BlockId) -> bool {
         arena[block_id]
             .stmts
@@ -2483,6 +2511,7 @@ impl TypeChecker {
             .any(|&stmt_id| Self::stmt_references_self(arena, stmt_id))
     }
 
+    /// Returns true if the statement references `self` in any sub-expression.
     fn stmt_references_self(arena: &AstArena, stmt_id: StmtId) -> bool {
         match &arena[stmt_id].kind {
             Stmt::Block(block_id) => Self::body_references_self(arena, *block_id),
@@ -2515,6 +2544,7 @@ impl TypeChecker {
         }
     }
 
+    /// Returns true if the expression references `self` (directly or in sub-expressions).
     fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
         match &arena[expr_id].kind {
             Expr::Identifier(ident_id) => arena[*ident_id].name == "self",

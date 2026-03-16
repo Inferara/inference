@@ -2546,7 +2546,7 @@ mod base_codegen_tests {
         let result = make_mixed.call(&mut store, ()).expect("make_mixed failed");
         assert_eq!(result, 0, "make_mixed should return 0");
 
-        let memory = instance
+        let _memory = instance
             .get_memory(&mut store, "memory")
             .expect("memory export missing");
         let stack_pointer = instance
@@ -2557,8 +2557,6 @@ mod base_codegen_tests {
             sp, 65536,
             "Stack pointer should be restored to initial value after all calls"
         );
-
-        let _ = memory;
     }
 
     #[test]
@@ -2658,7 +2656,7 @@ mod base_codegen_tests {
             .expect("get_mixed_val failed");
         assert_eq!(result, 100, "get_mixed_val should return 100 (m.val)");
 
-        let memory = instance
+        let _memory = instance
             .get_memory(&mut store, "memory")
             .expect("memory export missing");
         let stack_pointer = instance
@@ -2669,8 +2667,6 @@ mod base_codegen_tests {
             sp, 65536,
             "Stack pointer should be restored to initial value after all calls"
         );
-
-        let _ = memory;
     }
 
     #[test]
@@ -2761,7 +2757,7 @@ mod base_codegen_tests {
             "modify_bool should return 100 (f.val when f.flag is set to true)"
         );
 
-        let memory = instance
+        let _memory = instance
             .get_memory(&mut store, "memory")
             .expect("memory export missing");
         let stack_pointer = instance
@@ -2772,8 +2768,6 @@ mod base_codegen_tests {
             sp, 65536,
             "Stack pointer should be restored to initial value after all calls"
         );
-
-        let _ = memory;
     }
 
     #[test]

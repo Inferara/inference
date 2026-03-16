@@ -204,6 +204,57 @@ mod shadowing {
     }
 
     #[test]
+    fn test_const_shadowing_in_inner_block() {
+        let source = r#"
+            fn test() {
+                let x: i32 = 1;
+                if true {
+                    const x: i32 = 2;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const shadowing variable in inner block should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("shadows a binding"),
+                "Error should mention shadowing: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_struct_variable_shadowing() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() {
+                let p: Point = Point { x: 1, y: 2 };
+                if true {
+                    let p: Point = Point { x: 3, y: 4 };
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Struct variable shadowing in inner block should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("shadows a binding"),
+                "Error should mention shadowing: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
     fn test_no_shadowing_sequential_blocks() {
         let source = r#"
             fn test() {
@@ -219,6 +270,110 @@ mod shadowing {
         assert!(
             result.is_ok(),
             "Same variable name in sequential blocks should not be shadowing, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_parameter_shadowed_in_inner_block() {
+        let source = r#"
+            fn test(x: i32) {
+                if true {
+                    let x: i32 = 2;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Variable shadowing function parameter in inner block should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("shadows a binding"),
+                "Error should mention shadowing: {}",
+                error_msg
+            );
+        }
+    }
+}
+
+mod field_validation {
+    use super::*;
+
+    #[test]
+    fn test_missing_struct_field() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() {
+                let p: Point = Point { x: 1 };
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Missing struct field should fail");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("missing field"),
+                "Error should mention missing field: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_struct_field() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() {
+                let p: Point = Point { x: 1, y: 2, z: 3 };
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Unknown struct field should fail");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("unknown field"),
+                "Error should mention unknown field: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_duplicate_struct_field() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() {
+                let p: Point = Point { x: 1, x: 2, y: 3 };
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Duplicate struct field should fail");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("duplicate field"),
+                "Error should mention duplicate field: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_fields_present_ok() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() {
+                let p: Point = Point { x: 1, y: 2 };
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "All fields present should succeed, got: {:?}",
             result.err()
         );
     }

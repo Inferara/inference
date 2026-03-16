@@ -77,7 +77,7 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
+    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
     align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
     emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
     emit_struct_param_copy,
@@ -228,6 +228,7 @@ impl Compiler {
                             },
                         );
                     }
+                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
                     TypeInfoKind::Custom(custom_name) => {
                         if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                             let (total_size, field_slots) =
@@ -446,9 +447,9 @@ impl Compiler {
                                 &elem_type.kind,
                             );
                         }
-                        TypeInfoKind::Custom(custom_name) => {
+                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                        TypeInfoKind::Custom(_) => {
                             if let Some(slot) = layout.struct_offsets.get(&arg_name) {
-                                let _ = custom_name;
                                 emit_struct_param_copy(func, layout, slot, param_local);
                             }
                         }
@@ -605,6 +606,7 @@ impl Compiler {
                             "Frame offset overflow: total array allocation exceeds u32::MAX",
                         );
                     }
+                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
                     TypeInfoKind::Custom(custom_name) => {
                         if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                             let (total_size, field_slots) =
@@ -1030,8 +1032,8 @@ impl Compiler {
         self.func()
             .instruction(&Instruction::I32Const(byte_size as i32));
         self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
         });
 
         // Set local to point to destination slot
@@ -1087,8 +1089,8 @@ impl Compiler {
         self.func()
             .instruction(&Instruction::I32Const(byte_size as i32));
         self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
         });
 
         // Set local to point to destination slot
@@ -2038,8 +2040,7 @@ impl Compiler {
         ctx: &TypedContext,
     ) {
         let Some(ref layout) = self.frame_layout else {
-            self.func().instruction(&Instruction::I32Const(0));
-            return;
+            unreachable!("struct literal requires frame layout");
         };
 
         let slot = layout
@@ -2129,6 +2130,8 @@ impl Compiler {
             .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
         let field_name = &arena[field_name_id].name;
+        // Layout is also precomputed in frame_layout.struct_offsets, but recomputing is
+        // simpler here and O(fields) with small field counts
         let (_, field_slots) = compute_struct_field_layout(&struct_info);
         let field_slot = field_slots
             .iter()
@@ -2194,6 +2197,8 @@ impl Compiler {
             .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
         let field_name = &arena[field_name_id].name;
+        // Layout is also precomputed in frame_layout.struct_offsets, but recomputing is
+        // simpler here and O(fields) with small field counts
         let (_, field_slots) = compute_struct_field_layout(&struct_info);
         let field_slot = field_slots
             .iter()

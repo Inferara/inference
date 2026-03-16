@@ -454,6 +454,13 @@ pub enum TypeCheckError {
     )]
     ArrayLiteralAsArgument { location: Location },
 
+    /// Struct literal used directly as a function argument.
+    ///
+    /// Struct literals must be assigned to a variable before being passed
+    /// as function arguments. This is a codegen limitation.
+    #[error("{location}: struct literal cannot be used directly as a function argument; assign to a variable first")]
+    StructLiteralAsArgument { location: Location },
+
     /// Array uzumaki (@) passed directly as a function argument.
     ///
     /// Array uzumaki must be assigned to a variable before passing to functions
@@ -504,13 +511,27 @@ pub enum TypeCheckError {
     #[error("{location}: struct `{name}` has no fields and no methods")]
     EmptyStruct { name: String, location: Location },
 
-    /// Self-referential struct literal inside a method.
-    ///
-    /// Constructing an instance of the same struct type as `self` inside a method
-    /// creates a self-referential pattern that is not allowed.
-    #[error("{location}: cannot use `self` in struct literal `{struct_name}`")]
-    SelfReferenceInStructLiteral {
+    /// A required field is missing from a struct literal.
+    #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
+    MissingStructField {
         struct_name: String,
+        field_name: String,
+        location: Location,
+    },
+
+    /// An unknown field is provided in a struct literal.
+    #[error("{location}: unknown field `{field_name}` in struct literal `{struct_name}`")]
+    UnknownStructField {
+        struct_name: String,
+        field_name: String,
+        location: Location,
+    },
+
+    /// A field is provided more than once in a struct literal.
+    #[error("{location}: duplicate field `{field_name}` in struct literal `{struct_name}`")]
+    DuplicateStructField {
+        struct_name: String,
+        field_name: String,
         location: Location,
     },
 }
@@ -557,13 +578,16 @@ impl TypeCheckError {
             | TypeCheckError::VariableShadowed { location, .. }
             | TypeCheckError::LiteralOutOfRange { location, .. }
             | TypeCheckError::ArrayLiteralAsArgument { location, .. }
+            | TypeCheckError::StructLiteralAsArgument { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
             | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::MethodNeverAccessesSelf { location, .. }
             | TypeCheckError::EmptyStruct { location, .. }
-            | TypeCheckError::SelfReferenceInStructLiteral { location, .. } => location,
+            | TypeCheckError::MissingStructField { location, .. }
+            | TypeCheckError::UnknownStructField { location, .. }
+            | TypeCheckError::DuplicateStructField { location, .. } => location,
         }
     }
 }
@@ -1178,6 +1202,17 @@ mod tests {
     }
 
     #[test]
+    fn display_struct_literal_as_argument() {
+        let err = TypeCheckError::StructLiteralAsArgument {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: struct literal cannot be used directly as a function argument; assign to a variable first"
+        );
+    }
+
+    #[test]
     fn display_array_uzumaki_as_argument() {
         let err = TypeCheckError::ArrayUzumakiAsArgument {
             location: test_location(),
@@ -1276,14 +1311,41 @@ mod tests {
     }
 
     #[test]
-    fn display_self_reference_in_struct_literal() {
-        let err = TypeCheckError::SelfReferenceInStructLiteral {
-            struct_name: "Foo".to_string(),
+    fn display_missing_struct_field() {
+        let err = TypeCheckError::MissingStructField {
+            struct_name: "Point".to_string(),
+            field_name: "y".to_string(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot use `self` in struct literal `Foo`"
+            "1:5: missing field `y` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_unknown_struct_field() {
+        let err = TypeCheckError::UnknownStructField {
+            struct_name: "Point".to_string(),
+            field_name: "z".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: unknown field `z` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_duplicate_struct_field() {
+        let err = TypeCheckError::DuplicateStructField {
+            struct_name: "Point".to_string(),
+            field_name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: duplicate field `x` in struct literal `Point`"
         );
     }
 }

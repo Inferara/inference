@@ -30,8 +30,8 @@
 //! | Prologue/epilogue       | `emit_stack_prologue()` / `emit_stack_epilogue()` here |
 //! | Section assembly        | `finish()` in compiler.rs           |
 
-use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::StructInfo;
+use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use rustc_hash::FxHashMap;
 use wasm_encoder::{Function, Instruction, MemArg};
 
@@ -64,7 +64,7 @@ pub(crate) const FRAME_ALIGNMENT: u32 = 16;
 const STACK_POINTER_GLOBAL: u32 = 0;
 
 /// WASM memory index (only one linear memory per module).
-const MEMORY_INDEX: u32 = 0;
+pub(crate) const MEMORY_INDEX: u32 = 0;
 
 /// Describes a single array's location within a stack frame.
 #[derive(Debug, Clone)]
@@ -84,8 +84,6 @@ pub(crate) struct StructFieldSlot {
     pub name: String,
     /// Byte offset from the start of the struct to this field.
     pub offset: u32,
-    /// Size in bytes of this field.
-    pub size: u32,
     /// The type kind of this field, used for load/store instruction selection.
     pub type_kind: TypeInfoKind,
 }
@@ -95,7 +93,7 @@ pub(crate) struct StructFieldSlot {
 pub(crate) struct StructSlot {
     /// Byte offset from the frame pointer to the start of this struct.
     pub offset: u32,
-    /// Total size in bytes of the struct (including internal padding, excluding trailing padding).
+    /// Total size in bytes of the struct (including internal and trailing padding for alignment).
     pub total_size: u32,
     /// Per-field layout information, in declaration order.
     pub fields: Vec<StructFieldSlot>,
@@ -115,9 +113,11 @@ pub(crate) struct StructSlot {
 ///
 /// Panics if a field has an unsupported type for `element_size()`.
 #[must_use = "returns the computed struct layout"]
-pub(crate) fn compute_struct_field_layout(
-    struct_info: &StructInfo,
-) -> (u32, Vec<StructFieldSlot>) {
+pub(crate) fn compute_struct_field_layout(struct_info: &StructInfo) -> (u32, Vec<StructFieldSlot>) {
+    debug_assert!(
+        !struct_info.fields.is_empty(),
+        "compute_struct_field_layout called with empty struct"
+    );
     let mut current_offset: u32 = 0;
     let mut max_align: u32 = 1;
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
@@ -134,7 +134,6 @@ pub(crate) fn compute_struct_field_layout(
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
             offset: aligned_offset,
-            size,
             type_kind: field.type_info.kind.clone(),
         });
 
@@ -636,9 +635,9 @@ pub(crate) fn emit_stack_epilogue(func: &mut Function, layout: &FrameLayout) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference_ast::nodes::Visibility;
     use inference_type_checker::type_info::TypeInfo;
     use inference_type_checker::{StructFieldInfo, StructInfo};
-    use inference_ast::nodes::Visibility;
 
     #[test]
     fn align_to_frame_zero() {
@@ -883,7 +882,7 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 4);
+
     }
 
     #[test]
@@ -900,10 +899,10 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 4);
+
         assert_eq!(fields[1].name, "y");
         assert_eq!(fields[1].offset, 4);
-        assert_eq!(fields[1].size, 4);
+
     }
 
     #[test]
@@ -918,10 +917,10 @@ mod tests {
         let (total_size, fields) = compute_struct_field_layout(&layout);
         assert_eq!(fields[0].name, "flag");
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 1);
+
         assert_eq!(fields[1].name, "val");
         assert_eq!(fields[1].offset, 8);
-        assert_eq!(fields[1].size, 8);
+
         assert_eq!(total_size, 16);
     }
 
@@ -966,30 +965,19 @@ mod tests {
         );
         let (total_size, fields) = compute_struct_field_layout(&layout);
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 8);
+
         assert_eq!(fields[1].offset, 8);
-        assert_eq!(fields[1].size, 1);
+
         assert_eq!(total_size, 16, "should pad to max alignment (8)");
     }
 
     #[test]
-    fn struct_layout_empty() {
-        let layout = make_struct_info("Empty", vec![]);
-        let (total_size, fields) = compute_struct_field_layout(&layout);
-        assert_eq!(total_size, 0);
-        assert!(fields.is_empty());
-    }
-
-    #[test]
     fn struct_layout_single_bool() {
-        let layout = make_struct_info(
-            "Flag",
-            vec![make_field("b", TypeInfoKind::Bool)],
-        );
+        let layout = make_struct_info("Flag", vec![make_field("b", TypeInfoKind::Bool)]);
         let (total_size, fields) = compute_struct_field_layout(&layout);
         assert_eq!(total_size, 1);
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 1);
+
     }
 
     #[test]
@@ -1003,9 +991,9 @@ mod tests {
         );
         let (total_size, fields) = compute_struct_field_layout(&layout);
         assert_eq!(fields[0].offset, 0);
-        assert_eq!(fields[0].size, 2);
+
         assert_eq!(fields[1].offset, 4);
-        assert_eq!(fields[1].size, 4);
+
         assert_eq!(total_size, 8);
     }
 
@@ -1019,13 +1007,7 @@ mod tests {
             ],
         );
         let (_, fields) = compute_struct_field_layout(&layout);
-        assert_eq!(
-            fields[0].type_kind,
-            TypeInfoKind::Number(NumberType::I32)
-        );
-        assert_eq!(
-            fields[1].type_kind,
-            TypeInfoKind::Number(NumberType::I64)
-        );
+        assert_eq!(fields[0].type_kind, TypeInfoKind::Number(NumberType::I32));
+        assert_eq!(fields[1].type_kind, TypeInfoKind::Number(NumberType::I64));
     }
 }
