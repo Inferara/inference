@@ -1026,7 +1026,16 @@ impl Compiler {
                     Err(e) => panic!("function call lowering failed: {e}"),
                 }
             }
-            Expr::StructLiteral { .. } => todo!(),
+            Expr::StructLiteral { name: _, fields } => {
+                cov_mark::hit!(wasm_codegen_emit_struct_literal);
+                let var_name = enclosing_var_name.unwrap_or_else(|| {
+                    panic!(
+                        "Struct literal (expr_id={expr_id:?}) has no enclosing variable name"
+                    )
+                });
+                let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                self.lower_struct_literal(arena, &fields, var_name, ctx);
+            }
             Expr::PrefixUnary { expr, op } => {
                 self.lower_prefix_unary_expression(arena, expr_id, expr, op, ctx);
             }
@@ -1752,6 +1761,82 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(byte_offset as i32));
             self.func().instruction(&Instruction::I32Add);
             self.lower_expression(arena, element_id, ctx, None);
+            self.func().instruction(&store_instr);
+        }
+
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if slot_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Lowers a struct literal expression to field-by-field stores into the frame slot.
+    ///
+    /// For each field in the literal, emits:
+    /// ```text
+    /// local.get $__frame_ptr
+    /// i32.const <struct_offset + field_offset>
+    /// i32.add
+    /// <lower field value expression>
+    /// <store instruction for field type>
+    /// ```
+    ///
+    /// After all fields are stored, pushes the struct pointer onto the stack:
+    /// ```text
+    /// local.get $__frame_ptr
+    /// i32.const <struct_offset>
+    /// i32.add
+    /// ```
+    fn lower_struct_literal(
+        &mut self,
+        arena: &AstArena,
+        fields: &[(IdentId, ExprId)],
+        enclosing_var_name: &str,
+        ctx: &TypedContext,
+    ) {
+        let Some(ref layout) = self.frame_layout else {
+            self.func().instruction(&Instruction::I32Const(0));
+            return;
+        };
+
+        let slot = layout
+            .struct_offsets
+            .get(enclosing_var_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Struct variable '{enclosing_var_name}' not found in frame layout struct_offsets"
+                )
+            });
+
+        let slot_offset = slot.offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let field_slots = slot.fields.clone();
+
+        for &(field_name_id, field_value_expr_id) in fields {
+            let field_name = &arena[field_name_id].name;
+            let field_slot = field_slots
+                .iter()
+                .find(|fs| fs.name == *field_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Struct field '{field_name}' not found in layout for variable \
+                         '{enclosing_var_name}'"
+                    )
+                });
+
+            #[allow(clippy::cast_possible_wrap)]
+            let byte_offset = (slot_offset + field_slot.offset) as i32;
+            let store_instr = memory::store_instruction(&field_slot.type_kind);
+
+            self.func()
+                .instruction(&Instruction::LocalGet(frame_ptr_local));
+            self.func().instruction(&Instruction::I32Const(byte_offset));
+            self.func().instruction(&Instruction::I32Add);
+            self.lower_expression(arena, field_value_expr_id, ctx, None);
             self.func().instruction(&store_instr);
         }
 

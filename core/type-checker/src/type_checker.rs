@@ -1219,6 +1219,41 @@ impl TypeChecker {
                 }
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
+                    if let Some(struct_info) = self.symbol_table.lookup_struct(&struct_name) {
+                        let fields_copy: Vec<_> =
+                            fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                        for (field_name_id, field_value_expr) in fields_copy {
+                            let field_name = ctx.arena()[field_name_id].name.clone();
+                            if let Some(field_info) =
+                                struct_info.get_field_info_by_name(&field_name)
+                            {
+                                let field_type = field_info.type_info.clone();
+                                let (field_expr_kind, field_expr_loc) = {
+                                    let arena = ctx.arena();
+                                    (
+                                        arena[field_value_expr].kind.clone(),
+                                        arena[field_value_expr].location,
+                                    )
+                                };
+                                if let Expr::NumberLiteral {
+                                    value: ref num_value,
+                                } = field_expr_kind
+                                {
+                                    ctx.set_node_typeinfo(
+                                        NodeId::Expr(field_value_expr),
+                                        field_type.clone(),
+                                    );
+                                    self.validate_literal_range(
+                                        num_value,
+                                        &field_type.kind,
+                                        field_expr_loc,
+                                    );
+                                } else {
+                                    self.infer_expression(field_value_expr, ctx);
+                                }
+                            }
+                        }
+                    }
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), struct_type.clone());
                     return Some(struct_type);
                 }
