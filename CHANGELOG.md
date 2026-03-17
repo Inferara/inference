@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Array return types via sret (struct-return) calling convention matching Rust/Zig: hidden `$sret` parameter at index 0, void WASM return, caller allocates destination in its own frame
   - Three sret return expression cases: identifier (`return arr` → `memory.copy`), array literal (`return [1,2,3]` → element-wise stores), function call (`return inner()` → zero-copy sret forwarding)
   - Sub-i32 narrowing after arithmetic: signed types use shift-left/arithmetic-shift-right, unsigned types use AND mask; skipped for comparisons, Mod, Shr, bitwise ops
+- Add struct type support with linear memory allocation ([#149])
+  - Struct fields laid out in declaration order with C-style natural alignment padding
+  - `compute_struct_field_layout()` computes per-field byte offsets and total struct size
+  - `StructSlot` and `StructFieldSlot` types in memory.rs for frame layout tracking
+  - Struct literal lowering: field-by-field stores into frame slot at computed offsets
+  - Member access read: struct pointer + field offset + load instruction for field type
+  - Member access write: struct pointer + field offset + store instruction, with cached layout lookup via `resolve_struct_field_offset()`
+  - Struct parameter copy-on-entry via `memory.copy` — callee copies entire struct into own frame
+  - Struct return via sret calling convention: hidden `$sret` param, void WASM return, field-by-field or `memory.copy` return
+  - Struct-to-struct copy: `let q = p` emits `memory.copy` preserving value semantics
+  - Struct reassignment: `p = q` uses `memory.copy` to destination frame slot (not pointer aliasing)
+  - Struct literal reassignment: `p = Point { x: 3, y: 4 }` writes fields directly to existing frame slot
+  - Uzumaki for all primitive types: bool, i8-u64 emit `i32.uzumaki` or `i64.uzumaki` as appropriate
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -154,6 +167,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Only `let x = foo()` and `return foo()` are permitted for sret calls
   - Standalone calls, argument positions, index access, and assignment RHS all rejected with clear diagnostic
   - Guards at 6 sites: Statement::Expression, ArrayIndexAccess, 3 argument validation loops, Statement::Assign
+- Add struct literal field validation ([#149])
+  - `MissingStructField`: reject struct literals missing required fields
+  - `UnknownStructField`: reject struct literals with fields not in the struct definition
+  - `DuplicateStructField`: reject struct literals with repeated field names
+  - Field value type mismatch: reject `Point { x: true }` when `x: i32`
+- Add `MethodNeverAccessesSelf` error: methods declaring `self` but never using it ([#149])
+- Add `EmptyStruct` error: reject struct definitions with no fields or methods ([#149])
+- Add `StructLiteralAsArgument` error: reject struct literals as direct function arguments ([#149])
+- Add `CompoundLiteralInUnsupportedPosition` error: reject struct/array literals in arbitrary expression positions ([#149])
+  - Compound literals allowed only in variable declarations, assignments, return statements, and struct field values
+- Extend `ArrayReturnCallInExpressionPosition` to also reject struct-returning calls in expression positions ([#149])
+  - Covers `MemberAccess` on sret-returning calls (e.g., `make_point().x`)
+  - Error message updated from "array-returning" to "compound-returning"
+- Add const initializer type validation: `const x: i32 = true;` now rejected ([#149])
+- Add number-to-bool assignment rejection: `let x: bool = 0;` now rejected ([#149])
+- Add ordering comparison validation: `true < false` now rejected; equality (`==`/`!=`) still allowed on all types ([#149])
+- Fix duplicate `BinaryOperandTypeMismatch` error for mixed-type arithmetic ([#149])
 - Remove dead code: `types_equal` function, `is_compatible_with` method, `param_names` field from `FuncInfo`
 - Add `find_enclosing_variable_name()` to `TypedContext` for walking AST parent chain to enclosing variable
 
@@ -180,6 +210,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 7 type-checker tests for `ArrayReturnCallInExpressionPosition`: let binding, return forwarding, standalone, argument, index access, assignment, non-array standalone ([#148])
 - Add 10 inline execution tests for array element types: i8, u8, i16, u16, u32, i64, large array params (N > 16), mixed-type arrays, mutable parameters ([#148])
 - Add runtime stack overflow trap test: two 32KB frames in 64KB stack verified to trap at runtime via Wasmtime ([#148])
+- Add 6 struct codegen test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#149])
+  - `struct_literal.inf`: two-field, single-field, and mixed-type struct creation
+  - `struct_access.inf`: field reads, arithmetic on fields, mixed-type alignment
+  - `struct_assign.inf`: field writes, field swaps, bool field modification
+  - `struct_params.inf`: copy-on-entry semantics, multiple struct params, mixed types
+  - `struct_return.inf`: sret literal return, variable return, call forwarding
+  - `struct_copy.inf`: value semantics, independent copies, mixed-type copy
+- Add ~30 type-checker tests for struct validation ([#149])
+  - Struct mutability: immutable/mutable variable and parameter field assignment
+  - Variable shadowing: inner blocks, if/else, loops, const, parameters, sequential blocks
+  - Struct field validation: missing, extra, duplicate fields, type mismatches
+  - Compound literal position restrictions, sret call restrictions
+  - Bool/number type mismatch, const initializer validation, ordering comparison rejection
 - Add 13 loop test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#152])
   - `simple_loop.inf`, `infinite_loop_break.inf`, `nested_loop.inf`, `loop_with_if.inf`, `loop_accumulator.inf`, `loop_break_early.inf`, `break_nested_if.inf`, `void_loop.inf`, `loop_zero_iters.inf`, `loop_with_array.inf`, `loop_in_nondet.inf`, `nondet_then_break.inf`, `loop_return_array.inf`
   - Execution tests via Wasmtime for all deterministic fixtures
@@ -476,4 +519,5 @@ Initial tagged release.
 [#146]: https://github.com/Inferara/inference/pull/146
 [#148]: https://github.com/Inferara/inference/pull/148
 [#152]: https://github.com/Inferara/inference/pull/152
+[#149]: https://github.com/Inferara/inference/pull/159
 [#156]: https://github.com/Inferara/inference/pull/156

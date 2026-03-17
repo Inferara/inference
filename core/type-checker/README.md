@@ -71,7 +71,7 @@ TypeCheckerBuilder
 
 - [`type_info`] - Type representation system with `TypeInfo` and `TypeInfoKind`
 - [`typed_context`] - Storage for type annotations on AST nodes
-- [`errors`] - Comprehensive error types with 33 distinct variants
+- [`errors`] - Comprehensive error types with 47 distinct variants
 - `symbol_table` (internal) - Hierarchical scope and symbol management
 - `type_checker` (internal) - Core type inference implementation
 
@@ -272,6 +272,7 @@ cargo test -p inference-tests type_checker::array_tests
 Test organization:
 - `tests/src/type_checker/type_checker.rs` - Core type inference tests
 - `tests/src/type_checker/array_tests.rs` - Array type checking
+- `tests/src/type_checker/struct_tests.rs` - Struct type checking (literals, field access, mutability, sret restrictions, shadowing, empty struct/unused self errors)
 - `tests/src/type_checker/coverage.rs` - Comprehensive coverage tests
 
 ## Recent Changes
@@ -312,6 +313,29 @@ Test organization:
 - Error deduplication to avoid repeated reports
 - Detailed error messages with context and location information
 - Precise source locations for all errors
+
+### Struct Type Support (Issue #149)
+
+**Struct Literal Validation**:
+- Struct literals (`Point { x: 10, y: 20 }`) are validated against the struct definition: each field name must exist (`UnknownStructField`), no field may appear twice (`DuplicateStructField`), and no required field may be omitted (`MissingStructField`)
+- Field value types are checked against declared field types; type mismatches produce `TypeMismatch` errors with `VariableDefinition` or `ArrayElement` context
+- Struct literals can only appear in variable initializer positions, assignment RHS, return statements, or as struct field values — use in other expression positions emits `CompoundLiteralInUnsupportedPosition`
+- Struct literals cannot be passed directly as function arguments; `StructLiteralAsArgument` is emitted instead
+
+**Struct Field Access and Mutation**:
+- Member access (`p.x`) validates that the receiver is a struct type (`ExpectedStructType`) and that the named field exists (`FieldNotFound`)
+- Assignment to a struct field (`p.x = v`) validates that the root variable is declared `mut` (`AssignToImmutable`) using the unified `extract_root_variable_name` helper that handles arbitrarily nested access chains (`arr[i].field`, `p.x.y`, etc.)
+
+**Struct Parameters and Return Types**:
+- Struct-typed function parameters are registered with `TypeInfoKind::Struct(name)` after `resolve_custom_type()` resolves the AST `Custom` node
+- Functions returning a struct emit `ArrayReturnCallInExpressionPosition` (renamed to handle both arrays and structs) when the call appears in an unsupported expression position
+
+**Struct Definition Validation**:
+- Empty structs (no fields, no methods) emit `EmptyStruct`
+- Methods that declare `self` but never reference it in the body emit `MethodNeverAccessesSelf`
+
+**Variable Shadowing in Struct Contexts**:
+- The shadowing prohibition applies to struct variable bindings: a `let p: Point = ...` in an inner scope shadows an outer `p` and emits `VariableShadowed`
 
 ### Fixed-Size Array Support (Issue #148)
 
@@ -405,7 +429,7 @@ Detailed documentation is available in the `docs/` directory:
 - [Architecture Guide](./docs/architecture.md) - Internal design, phase walkthrough, and implementation patterns
 - [API Guide](./docs/api-guide.md) - Practical examples and usage patterns for the type checker API
 - [Type System Reference](./docs/type-system.md) - Complete type system rules, operators, and type inference
-- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 33 error variants with examples
+- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 47 error variants with examples
 
 ## Related Documentation
 

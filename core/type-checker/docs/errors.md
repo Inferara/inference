@@ -7,6 +7,9 @@ Complete catalog of type checking errors with examples and solutions.
 The type checker produces 47 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
+Not all variants are covered in detail below. The authoritative list of variants and their
+`#[error]` messages is in `core/type-checker/src/errors.rs`.
+
 All errors include a precise source location in the form `line:column:` at the start of their
 message. The `TypeCheckError::location()` method returns the associated `Location` directly.
 
@@ -22,6 +25,9 @@ message. The `TypeCheckError::location()` method returns the associated `Locatio
 8. [Structural Errors](#structural-errors)
 9. [Generic Type Errors](#generic-type-errors)
 10. [Non-Deterministic Errors](#non-deterministic-errors)
+11. [Mutability and Shadowing Errors](#mutability-and-shadowing-errors)
+12. [Codegen Restriction Errors](#codegen-restriction-errors)
+13. [Struct Errors](#struct-errors)
 
 ---
 
@@ -655,6 +661,267 @@ forall {
     let x: i32 = @;  // OK: uzumaki produces an i32
 }
 ```
+
+---
+
+## Mutability and Shadowing Errors
+
+### `AssignToImmutable`
+
+Assignment to a variable or compound target that was declared without `mut`.
+
+**Message format**: `{location}: cannot assign to immutable variable \`{name}\``
+
+**Example**:
+
+```rust
+fn test() {
+    let x: i32 = 1;
+    x = 2;  // Error: cannot assign to immutable variable `x`
+
+    let arr: [i32; 3] = [1, 2, 3];
+    arr[0] = 99;  // Error: cannot assign to immutable variable `arr`
+
+    struct Point { x: i32, y: i32 }
+    let p: Point = Point { x: 1, y: 2 };
+    p.x = 10;  // Error: cannot assign to immutable variable `p`
+}
+```
+
+**Solution**: Declare the variable with `let mut`.
+
+The root variable name is extracted from the assignment left-hand side, including nested array index and member access expressions (`arr[i].field` extracts `arr`).
+
+### `VariableShadowed`
+
+A variable declared in an inner scope reuses a name already visible from an enclosing scope.
+
+See the [Symbol Resolution Errors](#symbol-resolution-errors) section for full documentation.
+
+### `LiteralOutOfRange`
+
+A numeric literal is outside the valid range for the declared type.
+
+**Message format**: `{location}: literal \`{value}\` is out of range for type \`{type_name}\` (valid range: {min}..={max})`
+
+**Example**:
+
+```rust
+fn test() {
+    let x: u8 = 300;   // Error: literal `300` is out of range for type `u8` (valid range: 0..=255)
+    let y: i8 = -200;  // Error: literal `-200` is out of range for type `i8` (valid range: -128..=127)
+}
+```
+
+**Solution**: Use a literal that fits within the type's range, or change the type annotation.
+
+---
+
+## Codegen Restriction Errors
+
+These errors describe constructs that are valid in the type system but cannot yet be lowered by the code generator. They are emitted by the type checker so that a user-visible error is produced before codegen is attempted.
+
+### `ArrayLiteralAsArgument`
+
+An array literal was passed directly as a function argument.
+
+**Example**:
+
+```rust
+fn take_arr(a: [i32; 3]) {}
+
+fn test() {
+    take_arr([1, 2, 3]);  // Error: array literals cannot be passed directly as function arguments
+}
+```
+
+**Solution**: Assign the array to a variable first: `let a = [1, 2, 3]; take_arr(a);`
+
+### `StructLiteralAsArgument`
+
+A struct literal was passed directly as a function argument.
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+fn take_point(p: Point) {}
+
+fn test() {
+    take_point(Point { x: 1, y: 2 });  // Error: struct literal cannot be used directly as a function argument
+}
+```
+
+**Solution**: Assign the struct to a variable first: `let p = Point { x: 1, y: 2 }; take_point(p);`
+
+### `CompoundLiteralInUnsupportedPosition`
+
+A struct or array literal appears in an expression position that does not correspond to a variable initializer, assignment RHS, return value, or struct field value.
+
+**Message format**: `{location}: {kind} literals can only be used in variable declarations, assignments, return statements, or as struct field values`
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p: Point = Point { x: 1, y: 2 };
+    // Using a struct literal as a binary operand is unsupported:
+    if Point { x: 0, y: 0 } == p { }  // Error
+}
+```
+
+### `ArrayUzumakiAsArgument`
+
+An array uzumaki (`@`) was passed directly as a function argument.
+
+**Example**:
+
+```rust
+fn take_arr(a: [i32; 3]) {}
+
+fn test() {
+    take_arr(@);  // Error: array uzumaki (@) cannot be used as a function argument
+}
+```
+
+**Solution**: Assign the uzumaki to a variable first: `let a: [i32; 3] = @; take_arr(a);`
+
+### `ArrayReturnCallInExpressionPosition`
+
+A call to a compound-returning function (one that returns an array or struct) appears in an expression position other than a `let` binding or `return` statement.
+
+**Example**:
+
+```rust
+fn make() -> [i32; 3] { return [1, 2, 3]; }
+
+fn test() {
+    let x: i32 = make()[0];  // Error: compound-returning function calls can only appear in `let` bindings
+}
+```
+
+**Solution**: Assign the result to a variable: `let arr = make(); let x = arr[0];`
+
+### `InvalidArraySize`
+
+The array size expression is zero, negative, or too large to fit in 32 bits.
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 0] = [];  // Error: invalid array size `0`
+}
+```
+
+### `ArrayIndex64Bit`
+
+The index expression in an array access has a 64-bit integer type. Array address computation uses 32-bit arithmetic.
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 5] = [1, 2, 3, 4, 5];
+    let i: i64 = 2;
+    let x = arr[i];  // Error: array index must be a 32-bit integer type, found `i64`
+}
+```
+
+---
+
+## Struct Errors
+
+### `EmptyStruct`
+
+A struct definition has no fields and no methods.
+
+**Message format**: `{location}: struct \`{name}\` has no fields and no methods`
+
+**Example**:
+
+```rust
+struct Empty {}  // Error: struct `Empty` has no fields and no methods
+```
+
+**Solution**: Add at least one field, add methods in an `impl` block, or remove the struct.
+
+### `MethodNeverAccessesSelf`
+
+A method declares a `self` parameter but never accesses it in the body.
+
+**Message format**: `{location}: method \`{struct_name}::{method_name}\` declares \`self\` but never accesses it; consider making it an associated function`
+
+**Example**:
+
+```rust
+struct Counter { value: i32 }
+
+impl Counter {
+    fn reset(&self) -> i32 {
+        return 0;  // never uses self
+        // Error: method `Counter::reset` declares `self` but never accesses it
+    }
+}
+```
+
+**Solution**: Either access `self` in the body, or remove the `self` parameter and call as `Counter::reset()`.
+
+### `MissingStructField`
+
+A struct literal omits a required field.
+
+**Message format**: `{location}: missing field \`{field_name}\` in struct literal \`{struct_name}\``
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p = Point { x: 1 };  // Error: missing field `y` in struct literal `Point`
+}
+```
+
+**Solution**: Provide all fields in the struct literal.
+
+### `UnknownStructField`
+
+A struct literal provides a field name that does not exist on the struct.
+
+**Message format**: `{location}: unknown field \`{field_name}\` in struct literal \`{struct_name}\``
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p = Point { x: 1, y: 2, z: 3 };  // Error: unknown field `z` in struct literal `Point`
+}
+```
+
+**Solution**: Remove the extra field or check for a typo.
+
+### `DuplicateStructField`
+
+A struct literal provides the same field name more than once.
+
+**Message format**: `{location}: duplicate field \`{field_name}\` in struct literal \`{struct_name}\``
+
+**Example**:
+
+```rust
+struct Point { x: i32, y: i32 }
+
+fn test() {
+    let p = Point { x: 1, x: 2, y: 3 };  // Error: duplicate field `x` in struct literal `Point`
+}
+```
+
+**Solution**: Provide each field exactly once.
 
 ---
 

@@ -90,7 +90,9 @@ fn lower_assign_statement(
    - Retrieve the local index
    - Lower the right-hand side expression via `lower_expression`
    - Emit `Instruction::LocalSet(local_idx)`
-3. **Unsupported paths** - Any other target form (member access, array index, etc.) → `todo!()`
+3. **Array index path** - If the target is an `Expression::ArrayIndexAccess`: compute element address (base + index * elem_size) and emit a store instruction via `lower_array_index_write`
+4. **Member access path** - If the target is an `Expression::MemberAccess`: compute field address (struct_ptr + field_offset) and emit a store instruction via `lower_member_access_write`
+5. **Unsupported paths** - Any other target form → `todo!()`
 
 ### Local Index Resolution
 
@@ -135,19 +137,20 @@ Covered test cases in `tests/test_data/codegen/wasm/base/assign/assign.inf`:
 - Assignment to mutable parameters: `fn foo(mut a: i32) { a = 99; }`
 - Assignments across all numeric types: i32, i64, bool
 
-### Member Access and Array Index Targets
+### Array Index Targets
 
-**Not yet implemented.** Assignments like:
+**Supported.** Assignments like `arr[i] = value;` are handled by `lower_array_index_write`.
+The element address is computed as `base_ptr + index * elem_size` using the same three-case
+constant-folding specialization as array reads (zero index, constant non-zero index, runtime
+variable index). See [arrays-and-memory.md](arrays-and-memory.md) for full details.
 
-```inference
-obj.field = value;     // todo!()
-arr[idx] = value;      // todo!()
-```
+### Member Access Targets
 
-currently emit a `todo!()` panic. These require:
-
-- Member access resolution (struct/object field lookup)
-- Array bounds tracking and index computation
+**Supported.** Assignments like `p.x = value;` are handled by `lower_member_access_write`.
+The field address is computed as `struct_ptr + field_offset`, where `field_offset` is resolved
+from the precomputed `FrameLayout::struct_offsets` map (O(1)) or recomputed via
+`compute_struct_field_layout` for parameters and complex expressions. See
+[arrays-and-memory.md](arrays-and-memory.md) for full details.
 
 ## Coverage Markers
 
@@ -204,10 +207,9 @@ so any side effects from assignments are preserved correctly.
 
 ## Limitations and Future Work
 
-- **Complex targets** - Member access (`obj.field = x`) and array index (`arr[i] = x`) targets are not yet supported
 - **Tuple unpacking** - Pattern-based destructuring assignments are not yet supported
-- **Validation** - The compiler does not yet validate that an assignment target is actually mutable;
-  type-checker enforcement is relied upon
+- **Validation** - The compiler does not validate that an assignment target is mutable at the codegen
+  level; this is enforced by the type-checker (`AssignToImmutable` error) before codegen runs
 
 ## Examples
 

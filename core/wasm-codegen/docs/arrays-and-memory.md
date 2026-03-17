@@ -122,8 +122,11 @@ This module contains all memory-related helpers:
 
 | Function/Type | Purpose |
 |---|---|
-| `FrameLayout` | Data structure: `total_size`, `array_offsets`, `frame_ptr_local` |
+| `FrameLayout` | Data structure: `total_size`, `array_offsets`, `struct_offsets`, `frame_ptr_local` |
 | `ArraySlot` | Per-array metadata: `offset`, `elem_size`, `length` |
+| `StructSlot` | Per-struct metadata: `offset`, `total_size`, `fields` (Vec of `StructFieldSlot`) |
+| `StructFieldSlot` | Per-field metadata: `name`, `offset` (from struct base), `type_kind` |
+| `compute_struct_field_layout()` | Compute C-compatible field offsets and total size for a struct |
 | `element_size()` | Map `TypeInfoKind` → byte size (1, 2, 4, or 8) |
 | `align_to_frame()` | Round up to 16-byte boundary |
 | `store_instruction()` | Select `i32.store8`, `i32.store16`, `i32.store`, or `i64.store` |
@@ -131,6 +134,7 @@ This module contains all memory-related helpers:
 | `emit_stack_prologue()` | Generate frame allocation code |
 | `emit_stack_epilogue()` | Generate frame deallocation code |
 | `emit_array_param_copy()` | Copy caller's array data into callee's frame |
+| `emit_struct_param_copy()` | Copy caller's struct data into callee's frame via `memory.copy` |
 
 ### `compiler.rs` Additions
 
@@ -620,16 +624,136 @@ struct ArrayReturnInfo {
 
 `func_array_returns: FxHashMap<String, ArrayReturnInfo>` is populated during `build_func_name_to_idx` (before any code emission) so that both callers and callees see consistent sret metadata.
 
+### `StructReturnInfo` and `func_struct_returns`
+
+```rust
+struct StructReturnInfo {
+    struct_name: String,
+    total_size: u32,
+    field_slots: Vec<StructFieldSlot>,
+}
+```
+
+`func_struct_returns: FxHashMap<String, StructReturnInfo>` is populated in parallel with `func_array_returns` during the same pre-scan phase. When the return type is a `Custom` name that resolves to a struct in the symbol table, `compute_struct_field_layout` is called and the result cached here. Both callers and callees use this map to emit correct sret code.
+
+## Struct Layout and Field Access
+
+Structs in Inference are stack-allocated in the same shadow stack frame as arrays. Each struct variable gets a `StructSlot` entry in `FrameLayout::struct_offsets`.
+
+### Field Layout
+
+`compute_struct_field_layout` visits fields in declaration order and assigns each field a byte offset aligned to its natural size (matching C `repr(C)` rules):
+
+```
+struct Point { x: i32; y: i32; }   →  total_size=8
+  field x: offset=0, size=4
+  field y: offset=4, size=4
+
+struct Mixed { flag: bool; val: i64; }  →  total_size=16
+  field flag:  offset=0,  size=1
+  (7 bytes padding)
+  field val:   offset=8,  size=8
+```
+
+The total size is rounded up to the struct's maximum field alignment (e.g., `Mixed` above aligns to 8 because `i64` requires 8-byte alignment).
+
+### Struct Literal Lowering (`lower_struct_literal`)
+
+A struct literal (`Point { x: 10, y: 20 }`) is lowered by storing each field at `frame_ptr + struct_offset + field_offset`, then pushing the struct base pointer onto the WASM stack:
+
+```wasm
+local.get $__frame_ptr
+i32.const <struct_offset + field_x_offset>
+i32.add
+i32.const 10
+i32.store                    ;; p.x = 10
+
+local.get $__frame_ptr
+i32.const <struct_offset + field_y_offset>
+i32.add
+i32.const 20
+i32.store                    ;; p.y = 20
+
+local.get $__frame_ptr       ;; push struct pointer
+i32.const <struct_offset>
+i32.add
+local.set $p
+```
+
+### Member Access Read (`lower_member_access`)
+
+Reading `p.x` loads the field value from the struct's memory location:
+
+```wasm
+local.get $p               ;; struct base pointer
+i32.const <field_offset>   ;; omitted when offset is 0
+i32.add
+i32.load                   ;; or i64.load, i32.load8_u, etc.
+```
+
+`resolve_struct_field_offset` first checks `frame_layout.struct_offsets` for O(1) lookup when the struct expression is a simple identifier. It falls back to recomputing via `compute_struct_field_layout` for parameters or complex expressions.
+
+### Member Access Write (`lower_member_access_write`)
+
+Writing `p.x = v` stores the RHS value at the same address:
+
+```wasm
+local.get $p               ;; struct base pointer
+i32.const <field_offset>
+i32.add
+<lower RHS expression>
+i32.store
+```
+
+### Struct Parameter Copy (`emit_struct_param_copy`)
+
+Struct-typed parameters arrive as i32 pointers (the caller's copy). The callee copies the data into its own frame slot using `memory.copy`, then updates the parameter local to point to the callee's copy:
+
+```wasm
+local.get $__frame_ptr
+i32.const <slot_offset>    ;; omitted when offset is 0
+i32.add                    ;; destination: callee frame slot
+local.get $param           ;; source: caller's pointer
+i32.const <total_size>
+memory.copy
+
+local.get $__frame_ptr
+i32.const <slot_offset>
+i32.add
+local.set $param           ;; update param to point to callee's copy
+```
+
+This enforces value semantics: mutations inside the callee do not affect the caller's struct.
+
+### Struct-to-Struct Copy (`lower_struct_copy_var_init`)
+
+When a struct variable is initialized from another struct identifier (`let b = a;`), a `memory.copy` copies the source's data into the destination's frame slot:
+
+```wasm
+local.get $__frame_ptr
+i32.const <dest_offset>
+i32.add                    ;; destination slot
+local.get $a               ;; source pointer (value of $a)
+i32.const <total_size>
+memory.copy
+
+local.get $__frame_ptr
+i32.const <dest_offset>
+i32.add
+local.set $b               ;; b now points to its own copy
+```
+
 ## Known Limitations
 
 1. **Nested arrays**: `[[i32; 3]; 2]` not yet supported (type-checker restriction)
-2. **Array member types**: Structs/custom types as array elements not yet supported
-3. **Partial initialization**: `let arr: [i32; 5] = [1, 2, _, _, _];` not yet supported (would require optional elements or sparse initialization)
-4. **Recursion with arrays**: Functions using arrays cannot currently recurse (no stack overflow protection, analysis pass needed)
+2. **Arrays of structs**: Struct types as array elements not yet supported
+3. **Structs with array fields**: Array-typed struct fields not yet supported
+4. **Partial initialization**: `let arr: [i32; 5] = [1, 2, _, _, _];` not yet supported (would require optional elements or sparse initialization)
+5. **Recursion with arrays or structs**: Functions using compound types cannot currently recurse (no stack overflow protection, analysis pass needed)
 
 ## Cov Mark Coverage
 
-Coverage marks for testing array-related code:
+Coverage marks for testing array- and struct-related code:
 
 | Mark | Location | Meaning |
 |---|---|---|
@@ -639,6 +763,11 @@ Coverage marks for testing array-related code:
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
+| `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
+| `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |
+| `wasm_codegen_emit_struct_copy` | `lower_struct_copy_var_init()` | Struct-to-struct copy via `memory.copy` |
+| `wasm_codegen_emit_member_access_read` | `lower_member_access()` | Struct field read via load |
+| `wasm_codegen_emit_member_access_write` | `lower_member_access_write()` | Struct field write via store |
 
 ## Examples
 

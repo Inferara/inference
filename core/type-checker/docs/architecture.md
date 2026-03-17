@@ -290,7 +290,7 @@ VariableDefinition handler
 
 This is a form of **bidirectional type checking**: information flows from the declaration site (the annotation) down into the initializer expression, rather than bottom-up synthesis from the literal value alone.
 
-**Current limitation**: Range validation is not yet performed. A literal that is out of range for the declared type (for example `let a: i8 = 200;`) will compile without error. The out-of-range value is silently truncated during WASM instruction emission. Range checking is tracked separately and will be addressed in a future pass.
+**Range validation**: The type checker emits `LiteralOutOfRange` when a literal's value exceeds the declared type's range (for example, `let a: i8 = 200;` produces an error). This check runs after contextual type propagation so the declared type is known. Negative numeric literals expressed as a `Neg` unary expression wrapping a positive literal are not yet range-checked at this stage.
 
 #### Array Element Type Propagation
 
@@ -959,6 +959,7 @@ The type checker has comprehensive test coverage across multiple dimensions:
 ### Test Organization
 - `type_checker.rs` - Core type inference tests
 - `array_tests.rs` - Array-specific type checking
+- `struct_tests.rs` - Struct type checking (literals, field access, mutability, sret restrictions, shadowing, empty struct/unused self errors)
 - `coverage.rs` - Comprehensive operator and statement coverage
 
 ### Test Categories
@@ -1026,7 +1027,7 @@ fn test_feature() {
 - No compile-time computation of array bounds
 
 **Numeric Literal Range Validation**:
-- Out-of-range literals are not rejected. For example `let a: i8 = 200;` compiles without error. The value is silently truncated when the WASM instruction is emitted by the code generator. Contextual type propagation (see the Phase 5 section above) ensures the declared type reaches the code generator, but no range check is performed before that point.
+- Out-of-range literals are rejected. For example, `let a: i8 = 200;` produces a `LiteralOutOfRange` error. The contextual type propagation mechanism (see the Phase 5 section above) provides the declared type to the range checker. Negative literals parsed with a leading `-` unary operator are not yet range-checked (the type checker sees a `Neg` expression wrapping a positive literal, not a negative literal directly).
 
 **Pattern Matching**:
 - No destructuring of structs or arrays

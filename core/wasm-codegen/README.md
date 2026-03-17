@@ -25,10 +25,11 @@ Typed AST (TypedContext)
    function section indices before the main compilation pass. This enables forward references
    — a caller defined before its callee in source can still emit a valid `call` instruction.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
-3. **Array Frame Layout** - For functions with array-typed variables or parameters, compute
-   a stack frame layout by walking the entire function body and collecting array declarations
-   and parameter types. This pre-computation determines memory offsets for each array and
-   allocates a synthetic `__frame_ptr` WASM local. See [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
+3. **Compound Frame Layout** - For functions with array- or struct-typed variables or parameters,
+   compute a stack frame layout by walking the entire function body and collecting array and struct
+   declarations and parameter types. This pre-computation determines memory offsets for each compound
+   value and allocates a synthetic `__frame_ptr` WASM local. Struct fields are laid out with C-compatible
+   natural alignment (`compute_struct_field_layout`). See [docs/arrays-and-memory.md](docs/arrays-and-memory.md).
 4. **Local Pre-scan** - Walk the entire function body once to collect all `let` and `const`
    declarations and assign them sequential WASM local indices before any instructions are
    emitted. This step is mandatory because the WebAssembly binary format requires all local
@@ -38,14 +39,18 @@ Typed AST (TypedContext)
 5. **Instruction Emission** - Lower functions, statements, and expressions to WASM
    instructions. `let` definitions are lowered via a push instruction followed by
    `local.set`; `const` definitions use the same path. Supported initializer expression
-   kinds are literals, identifiers, uzumaki (`@`) expressions, function calls, and array
-   literals. Array variables automatically get frame allocation code (prologue) and deallocation
-   code (epilogue). Array index access (read/write) compiles to load/store instructions with
-   computed addresses. Function calls push arguments in positional order and emit a `call <func_idx>`
-   instruction. Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
+   kinds are literals, identifiers, uzumaki (`@`) expressions, function calls, array
+   literals, and struct literals. Array and struct variables automatically get frame
+   allocation code (prologue) and deallocation code (epilogue). Array index access
+   (read/write) compiles to load/store instructions with computed addresses. Struct field
+   access (`p.x`) compiles to a load at `struct_pointer + field_offset`; struct field
+   assignment (`p.x = v`) compiles to a store at the same address. Function calls push
+   arguments in positional order and emit a `call <func_idx>` instruction. Struct-typed
+   parameters are copied into the callee's frame on entry (value semantics).
+   Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
    evaluating the right-hand side expression and emitting `local.set` to store the result.
-   Array index assignment (`arr[i] = value;`) computes the element address and emits a store instruction.
-   `if`/`else` statements emit WASM structured `if`/`else`/`end` blocks with
+   Array index assignment (`arr[i] = value;`) computes the element address and emits a store
+   instruction. `if`/`else` statements emit WASM structured `if`/`else`/`end` blocks with
    `BlockType::Empty` because Inference `if` is a statement, not an expression.
    Loop statements emit the standard WASM `block`+`loop` double-nesting pattern with a
    `br_if` exit check for conditional loops and `br 0` unconditional back-edge; `break`
@@ -55,8 +60,9 @@ Typed AST (TypedContext)
    satisfy the WASM validator when all paths exit through explicit `return` instructions.
    See [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
 6. **Module Assembly** - Assemble TypeSection, FunctionSection, ExportSection, CodeSection,
-   NameSection, and (if arrays are present) MemorySection and GlobalSection into a complete
-   WASM binary. Memory and globals are only emitted when at least one function uses arrays.
+   NameSection, and (if any function uses linear memory) MemorySection and GlobalSection into
+   a complete WASM binary. Memory and globals are only emitted when at least one function uses
+   arrays or structs.
 
 ## Non-Deterministic Extensions
 
@@ -145,8 +151,9 @@ Inference types map to WebAssembly types:
 | `i32`, `u32`   | i32       |
 | `i64`, `u64`   | i64       |
 | `[T; N]`       | i32       |
+| `struct S`     | i32       |
 
-WebAssembly only supports `i32`, `i64`, `f32`, and `f64` as value types. Smaller integer types use `i32` with appropriate truncation and extension during operations. Arrays are represented as i32 pointers to linear memory; the compiler manages a shadow stack and emits prologue/epilogue code for frame allocation.
+WebAssembly only supports `i32`, `i64`, `f32`, and `f64` as value types. Smaller integer types use `i32` with appropriate truncation and extension during operations. Arrays and structs are represented as i32 pointers to linear memory; the compiler manages a shadow stack and emits prologue/epilogue code for frame allocation. Struct fields are laid out with C-compatible natural alignment.
 
 ## WebAssembly Execution Model
 
@@ -205,11 +212,10 @@ The `codegen` function:
 
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
-- **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets and array index targets; assignments to struct fields (member access) are deferred to struct support.
-- **Expression types** - Limited support for complex expressions (binary operations, structs). Fixed-size arrays with scalar element types are now supported, including array-returning functions via the sret calling convention. Nested arrays, arrays of structs/custom types, partial initialization syntax, and mutable array parameters are not yet implemented. Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
-- **Compound types** - Structs and custom types are not yet implemented
+- **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
+- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar fields are supported: struct literals, member access read/write, struct parameters (copy-on-entry), and struct-returning functions via sret. Nested arrays, arrays of structs, arrays of arrays, partial initialization syntax, and mutable array parameters are not yet implemented. Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
-- **Recursion with arrays** - Functions using arrays cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
+- **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The compiler does not yet emit a compile-time error for non-void functions missing a return on all paths. An `unreachable` trap is emitted as a runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
 
 ## Documentation
@@ -229,8 +235,10 @@ Detailed design documents live in `docs/`:
   statements are lowered to WASM structured control flow and why `unreachable` is emitted
   before the `end` of every non-void function.
 - [docs/arrays-and-memory.md](docs/arrays-and-memory.md) - Stack allocation and shadow
-  stack infrastructure for fixed-size arrays, including frame layout computation, prologue/epilogue
-  emission, load/store instruction selection, and copy-on-entry semantics for array parameters.
+  stack infrastructure for fixed-size arrays and structs, including frame layout computation,
+  prologue/epilogue emission, load/store instruction selection, copy-on-entry semantics for
+  array and struct parameters, struct field layout (`compute_struct_field_layout`), member
+  access lowering, and struct literal lowering.
 - [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
   lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
   tracking, and interaction with non-det blocks, if-statements, and array frames.
@@ -239,7 +247,7 @@ Detailed design documents live in `docs/`:
 
 - `lib.rs` - Public API and AST traversal
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
-- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, prologue/epilogue emission, load/store instruction selection
+- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `compute_struct_field_layout`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
 - `errors.rs` - `CodegenError` enum for function call lowering failures
 - `output.rs` - `CodegenOutput` containing WASM bytes and metadata
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`)
@@ -304,6 +312,21 @@ Test data includes:
 - `array_nondet.inf` - Arrays inside non-deterministic blocks (forall, exists) and
   non-deterministic array initialization (`@`) inside blocks; validated against `inf_wasmparser`
   (non-det modules skip WAT comparison)
+- `struct_literal.inf` - Struct literal initialization: simple structs with i32 fields, single-field
+  structs, and mixed-type structs (`bool`, `i64`); validated against `inf_wasmparser` and executed
+  via wasmtime
+- `struct_access.inf` - Struct field read access (`p.x`, `p.y`, `p.x + p.y`) for i32, bool, and
+  i64 field types; validated and executed via wasmtime
+- `struct_assign.inf` - Assignment to struct fields on mutable struct variables (`p.x = 42`,
+  field swapping, bool field mutation); validated and executed via wasmtime
+- `struct_params.inf` - Struct-typed function parameters: copy-on-entry value semantics
+  (callee mutations don't affect caller's struct), mixed-type struct params, multiple struct
+  params; validated and executed via wasmtime
+- `struct_return.inf` - Functions returning struct types via sret convention: return of struct
+  literal, return of a variable, chained calls (`return make_point()`), and mixed-type struct
+  returns; validated and executed via wasmtime
+- `struct_copy.inf` - Struct-to-struct copy (`let b = a;`) preserving value semantics:
+  modifications to the copy do not affect the original; validated and executed via wasmtime
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit
