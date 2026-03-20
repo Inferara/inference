@@ -154,6 +154,11 @@ pub(crate) struct Compiler {
     func_array_returns: FxHashMap<String, ArrayReturnInfo>,
     /// Maps function names to their struct return type metadata.
     func_struct_returns: FxHashMap<String, StructReturnInfo>,
+    /// Maps `(type_name, method_name)` to the mangled WASM function name.
+    method_mangled_names: FxHashMap<(String, String), String>,
+    /// When compiling a method body, holds the struct type name (e.g. `"Point"`).
+    /// `None` when compiling a top-level function.
+    current_method_struct: Option<String>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
     // Per-function state (set in visit_function_definition, used by lowering methods)
@@ -181,6 +186,8 @@ impl Compiler {
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
+            method_mangled_names: FxHashMap::default(),
+            current_method_struct: None,
             current_fn_name: String::new(),
             func: None,
             locals_map: FxHashMap::default(),
@@ -194,6 +201,59 @@ impl Compiler {
         self.func
             .as_mut()
             .expect("func() called outside function compilation")
+    }
+
+    /// Returns the WASM function index that the first method will occupy,
+    /// given the number of top-level functions that precede it.
+    pub(crate) fn func_idx_after_toplevel(&self, toplevel_count: u32) -> u32 {
+        self.func_idx + toplevel_count
+    }
+
+    /// Sets or clears the struct name for the method currently being compiled.
+    pub(crate) fn set_current_method_struct(&mut self, name: Option<String>) {
+        self.current_method_struct = name;
+    }
+
+    /// Registers sret metadata for a function that returns a compound type (array or struct).
+    ///
+    /// If the return type is an array, inserts into `func_array_returns`.
+    /// If the return type is a custom (struct), computes the field layout and inserts
+    /// into `func_struct_returns`. Otherwise does nothing.
+    fn register_sret_if_compound(
+        &mut self,
+        name: String,
+        return_ty_id: TypeId,
+        arena: &AstArena,
+        ctx: &TypedContext,
+    ) {
+        let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
+        match &return_type_info.kind {
+            TypeInfoKind::Array(elem_type, length) => {
+                let elem_sz = element_size(&elem_type.kind);
+                self.func_array_returns.insert(
+                    name,
+                    ArrayReturnInfo {
+                        elem_kind: elem_type.kind.clone(),
+                        elem_size: elem_sz,
+                        length: *length,
+                    },
+                );
+            }
+            TypeInfoKind::Custom(custom_name) => {
+                if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
+                    self.func_struct_returns.insert(
+                        name,
+                        StructReturnInfo {
+                            struct_name: custom_name.clone(),
+                            total_size,
+                            field_slots,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
@@ -215,36 +275,45 @@ impl Compiler {
             if let Def::Function { returns, .. } = &arena[def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
-                match &return_type_info.kind {
-                    TypeInfoKind::Array(elem_type, length) => {
-                        let elem_sz = element_size(&elem_type.kind);
-                        self.func_array_returns.insert(
-                            fn_name,
-                            ArrayReturnInfo {
-                                elem_kind: elem_type.kind.clone(),
-                                elem_size: elem_sz,
-                                length: *length,
-                            },
-                        );
-                    }
-                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                    TypeInfoKind::Custom(custom_name) => {
-                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                            let (total_size, field_slots) =
-                                compute_struct_field_layout(&struct_info);
-                            self.func_struct_returns.insert(
-                                fn_name,
-                                StructReturnInfo {
-                                    struct_name: custom_name.clone(),
-                                    total_size,
-                                    field_slots,
-                                },
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+                self.register_sret_if_compound(fn_name, *return_ty_id, arena, ctx);
+            }
+        }
+    }
+
+    /// Builds the method name-to-WASM-index map from struct definitions.
+    ///
+    /// For each struct that has methods, this function:
+    /// 1. Computes a mangled name `"{struct_name}__{method_name}"` for each method
+    /// 2. Inserts the mangled name into `func_name_to_idx` with the next available index
+    /// 3. Records the `(struct_name, method_name) -> mangled_name` mapping
+    /// 4. Detects sret return types and populates `func_array_returns`/`func_struct_returns`
+    ///
+    /// Must be called after `build_func_name_to_idx` so that method indices follow
+    /// top-level function indices. Must be called before any body compilation so that
+    /// forward references (methods calling functions and vice versa) resolve correctly.
+    pub(crate) fn build_method_name_to_idx(
+        &mut self,
+        arena: &AstArena,
+        method_defs: &[(String, DefId)],
+        ctx: &TypedContext,
+        base_idx: u32,
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
+            let method_name = arena.def_name(*def_id).to_string();
+            let mangled_name = format!("{struct_name}__{method_name}");
+
+            self.func_name_to_idx
+                .insert(mangled_name.clone(), base_idx + i as u32);
+            self.method_mangled_names.insert(
+                (struct_name.clone(), method_name),
+                mangled_name.clone(),
+            );
+
+            if let Def::Function { returns, .. } = &arena[*def_id].kind
+                && let Some(return_ty_id) = returns
+            {
+                self.register_sret_if_compound(mangled_name, *return_ty_id, arena, ctx);
             }
         }
     }
@@ -307,7 +376,14 @@ impl Compiler {
             _ => return,
         };
 
-        let fn_name = arena[fn_name_id].name.clone();
+        let raw_name = arena[fn_name_id].name.clone();
+        // For methods, use the mangled name for sret lookups, debug names, and current_fn_name.
+        // For top-level functions, fn_name == raw_name.
+        let fn_name = if let Some(ref struct_name) = self.current_method_struct {
+            format!("{struct_name}__{raw_name}")
+        } else {
+            raw_name
+        };
         self.current_fn_name.clone_from(&fn_name);
 
         let is_array_return = self.func_array_returns.contains_key(&fn_name);
@@ -376,13 +452,14 @@ impl Compiler {
             self.has_memory = true;
         }
 
+        let is_method = self.current_method_struct.is_some();
         let is_main = fn_name == "main";
-        let should_export = vis == Visibility::Public && !is_main;
+        let should_export = vis == Visibility::Public && !is_main && !is_method;
         if should_export {
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if is_main && vis == Visibility::Public {
+        if is_main && vis == Visibility::Public && !is_method {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));

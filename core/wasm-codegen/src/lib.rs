@@ -127,19 +127,63 @@ pub fn codegen(
     ))
 }
 
-/// Traverses the typed AST and compiles all function definitions.
+/// Traverses the typed AST and compiles all function and method definitions.
+///
+/// The traversal proceeds in two stages to ensure all WASM function indices are
+/// known before any body is compiled (required for forward references):
+///
+/// 1. **Index registration** -- `build_func_name_to_idx` registers top-level
+///    functions, then `build_method_name_to_idx` registers struct methods with
+///    mangled names (`TypeName__method_name`).
+/// 2. **Body compilation** -- top-level functions are compiled first, then
+///    method bodies are compiled with `current_method_struct` set so that
+///    `self` parameter handling (Phase 3+) knows which struct type is in scope.
 fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
     let arena = typed_context.arena();
     for source_file in typed_context.source_files() {
+        // Collect top-level function DefIds
         let func_def_ids: Vec<DefId> = source_file
             .defs
             .iter()
             .copied()
             .filter(|&def_id| matches!(arena[def_id].kind, Def::Function { .. }))
             .collect();
+
+        // Collect method DefIds with their parent struct name
+        let mut method_defs: Vec<(String, DefId)> = Vec::new();
+        for &def_id in &source_file.defs {
+            if let Def::Struct {
+                name, methods, ..
+            } = &arena[def_id].kind
+            {
+                let struct_name = arena[*name].name.clone();
+                for &method_def_id in methods {
+                    method_defs.push((struct_name.clone(), method_def_id));
+                }
+            }
+        }
+
+        // Stage 1: Register all indices before any body compilation
         compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context);
+        #[allow(clippy::cast_possible_truncation)]
+        let method_base_idx = compiler.func_idx_after_toplevel(func_def_ids.len() as u32);
+        compiler.build_method_name_to_idx(
+            arena,
+            &method_defs,
+            typed_context,
+            method_base_idx,
+        );
+
+        // Stage 2: Compile top-level function bodies
         for &def_id in &func_def_ids {
             compiler.visit_function_definition(def_id, arena, typed_context);
+        }
+
+        // Stage 2b: Compile method bodies
+        for (struct_name, method_def_id) in &method_defs {
+            compiler.set_current_method_struct(Some(struct_name.clone()));
+            compiler.visit_function_definition(*method_def_id, arena, typed_context);
+            compiler.set_current_method_struct(None);
         }
     }
 }
