@@ -3311,6 +3311,119 @@ mod base_codegen_tests {
             "test_on_param: method call on struct parameter should return p.x = 10"
         );
     }
+    // --- Method codegen: associated function call tests ---
+
+    #[test]
+    fn method_assoc_test() {
+        cov_mark::check_count!(wasm_codegen_emit_associated_function_call, 3);
+        let test_name = "method_assoc";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_assoc_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_assoc";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_new: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_new")
+            .expect("Failed to get 'test_new'");
+        let result = test_new.call(&mut store, ()).expect("test_new failed");
+        assert_eq!(result, 3, "Point::new(3, 7).get_x() should return 3");
+
+        let test_new_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_new_y")
+            .expect("Failed to get 'test_new_y'");
+        let result = test_new_y
+            .call(&mut store, ())
+            .expect("test_new_y failed");
+        assert_eq!(result, 7, "Point::new(3, 7).get_y() should return 7");
+
+        let test_origin: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_origin")
+            .expect("Failed to get 'test_origin'");
+        let result = test_origin
+            .call(&mut store, ())
+            .expect("test_origin failed");
+        assert_eq!(
+            result, 0,
+            "Point::origin().get_x() + Point::origin().get_y() should return 0"
+        );
+
+        let test_sum_of: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_sum_of")
+            .expect("Failed to get 'test_sum_of'");
+        let result = test_sum_of
+            .call(&mut store, ())
+            .expect("test_sum_of failed");
+        assert_eq!(result, 30, "Point::sum_of(10, 20) should return 30");
+
+        let test_mixed: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_mixed")
+            .expect("Failed to get 'test_mixed'");
+        let result = test_mixed
+            .call(&mut store, ())
+            .expect("test_mixed failed");
+        assert_eq!(
+            result, 8,
+            "Point::new(5, 15).get_x() + Point::sum_of(1, 2) should return 8"
+        );
+
+        let test_return_new_get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_return_new_get_x")
+            .expect("Failed to get 'test_return_new_get_x'");
+        let result = test_return_new_get_x
+            .call(&mut store, ())
+            .expect("test_return_new_get_x failed");
+        assert_eq!(
+            result, 10,
+            "test_return_new(10, 20).get_x() should return 10"
+        );
+
+        let test_return_new_get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_return_new_get_y")
+            .expect("Failed to get 'test_return_new_get_y'");
+        let result = test_return_new_get_y
+            .call(&mut store, ())
+            .expect("test_return_new_get_y failed");
+        assert_eq!(
+            result, 20,
+            "test_return_new(10, 20).get_y() should return 20"
+        );
+
+        let test_standalone: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_standalone")
+            .expect("Failed to get 'test_standalone'");
+        let result = test_standalone
+            .call(&mut store, ())
+            .expect("test_standalone failed");
+        assert_eq!(
+            result, 42,
+            "test_standalone should return 42 after discarding Point::sum_of(1, 2)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3921,5 +4034,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "method_instance");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_assoc_wasm() {
+        let dir = base_test_dir().join("method_assoc");
+        let source_code = std::fs::read_to_string(dir.join("method_assoc.inf"))
+            .expect("Failed to read method_assoc.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_assoc.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_assoc");
     }
 }

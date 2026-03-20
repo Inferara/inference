@@ -1,0 +1,61 @@
+struct Point { x: i32; y: i32;
+    fn new(x: i32, y: i32) -> Point {
+        return Point { x: x, y: y };
+    }
+    fn origin() -> Point {
+        return Point { x: 0, y: 0 };
+    }
+    fn sum_of(a: i32, b: i32) -> i32 {
+        return a + b;
+    }
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+}
+
+pub fn test_new() -> i32 {
+    let p: Point = Point::new(3, 7);
+    return p.get_x();
+}
+
+pub fn test_new_y() -> i32 {
+    let p: Point = Point::new(3, 7);
+    return p.get_y();
+}
+
+pub fn test_origin() -> i32 {
+    let p: Point = Point::origin();
+    return p.get_x() + p.get_y();
+}
+
+pub fn test_sum_of() -> i32 {
+    return Point::sum_of(10, 20);
+}
+
+pub fn test_mixed() -> i32 {
+    let p: Point = Point::new(5, 15);
+    return p.get_x() + Point::sum_of(1, 2);
+}
+
+pub fn test_return_new(x: i32, y: i32) -> Point {
+    let p: Point = Point::new(x, y);
+    return p;
+}
+
+pub fn test_return_new_get_x() -> i32 {
+    let p: Point = test_return_new(10, 20);
+    return p.get_x();
+}
+
+pub fn test_return_new_get_y() -> i32 {
+    let p: Point = test_return_new(10, 20);
+    return p.get_y();
+}
+
+pub fn test_standalone() -> i32 {
+    Point::sum_of(1, 2);
+    return 42;
+}

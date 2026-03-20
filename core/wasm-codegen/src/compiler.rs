@@ -959,6 +959,20 @@ impl Compiler {
                              should have been rejected by the type checker",
                         );
                     }
+                    if let Expr::TypeMemberAccess {
+                        expr: type_expr,
+                        name: method_name,
+                    } = &arena[*function].kind
+                        && let Some(mangled) =
+                            self.resolve_associated_mangled_name(arena, *type_expr, *method_name)
+                    {
+                        assert!(
+                            !self.func_array_returns.contains_key(&mangled)
+                                && !self.func_struct_returns.contains_key(&mangled),
+                            "standalone call to compound-returning associated function \
+                             '{mangled}' should have been rejected by the type checker",
+                        );
+                    }
                 }
                 self.lower_expression(arena, expr_id, ctx, None);
                 let expr_produces_value = ctx
@@ -1029,9 +1043,9 @@ impl Compiler {
                         );
                         let is_compound_type = is_array_type || is_struct_type;
 
-                        // Detect sret call (array-returning or struct-returning function)
+                        // Detect sret call (array-returning or struct-returning function/method)
                         let is_sret_call =
-                            is_compound_type && self.is_sret_function_call(arena, val_expr_id);
+                            is_compound_type && self.is_sret_function_call(arena, val_expr_id, ctx);
 
                         // Detect array-to-array copy
                         let is_array_copy =
@@ -1089,16 +1103,37 @@ impl Compiler {
 
     /// Checks whether an expression is a function call to an sret function (array or struct return).
     ///
-    /// NOTE: Method calls (`MemberAccess` callees) are intentionally not handled here.
-    /// Method sret support is planned for Phase 6 of issue #162.
-    /// Until then, `lower_instance_method_call` guards against sret methods with a `todo!()`.
-    fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
-        if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
-            && let Expr::Identifier(callee_name_id) = &arena[*function].kind
-        {
-            let callee_name = &arena[*callee_name_id].name;
-            return self.func_array_returns.contains_key(callee_name)
-                || self.func_struct_returns.contains_key(callee_name);
+    /// Handles three callee patterns:
+    /// - `Expr::Identifier` (top-level function calls)
+    /// - `Expr::TypeMemberAccess` (associated function calls like `Point::new()`)
+    /// - `Expr::MemberAccess` (instance method calls like `p.translate()`)
+    fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId, ctx: &TypedContext) -> bool {
+        if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind {
+            if let Expr::Identifier(callee_name_id) = &arena[*function].kind {
+                let callee_name = &arena[*callee_name_id].name;
+                return self.func_array_returns.contains_key(callee_name)
+                    || self.func_struct_returns.contains_key(callee_name);
+            }
+            if let Expr::TypeMemberAccess {
+                expr: type_expr,
+                name: method_name,
+            } = &arena[*function].kind
+                && let Some(mangled) =
+                    self.resolve_associated_mangled_name(arena, *type_expr, *method_name)
+            {
+                return self.func_array_returns.contains_key(&mangled)
+                    || self.func_struct_returns.contains_key(&mangled);
+            }
+            if let Expr::MemberAccess {
+                expr: receiver,
+                name: method_name,
+            } = &arena[*function].kind
+                && let Some(mangled) =
+                    self.resolve_method_mangled_name(arena, *receiver, *method_name, ctx)
+            {
+                return self.func_array_returns.contains_key(&mangled)
+                    || self.func_struct_returns.contains_key(&mangled);
+            }
         }
         false
     }
@@ -1141,13 +1176,44 @@ impl Compiler {
                     .instruction(&Instruction::I32Const(dest_offset as i32));
                 self.func().instruction(&Instruction::I32Add);
             }
+
+            // Resolve callee name and detect receiver (pure name resolution, no emission)
+            let (callee_name, receiver_expr) =
+                if let Some(name) = self.resolve_callee_name(arena, function) {
+                    (name, None)
+                } else if let Expr::TypeMemberAccess {
+                    expr: type_expr,
+                    name: method_name,
+                } = &arena[function].kind
+                {
+                    let name = self
+                        .resolve_associated_mangled_name(arena, *type_expr, *method_name)
+                        .expect(
+                            "sret callee TypeMemberAccess must resolve to a mangled method name",
+                        );
+                    (name, None)
+                } else if let Expr::MemberAccess {
+                    expr: receiver,
+                    name: method_name,
+                } = &arena[function].kind
+                {
+                    let name = self
+                        .resolve_method_mangled_name(arena, *receiver, *method_name, ctx)
+                        .expect("sret callee MemberAccess must resolve to a mangled method name");
+                    (name, Some(*receiver))
+                } else {
+                    panic!("sret callee must be an identifier, TypeMemberAccess, or MemberAccess");
+                };
+
+            // For instance methods, push receiver as self argument after sret pointer
+            if let Some(receiver) = receiver_expr {
+                self.lower_expression(arena, receiver, ctx, None);
+            }
+
             // Push regular arguments
             for (_label, arg_expr_id) in &args {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
-            let callee_name = self
-                .resolve_callee_name(arena, function)
-                .expect("sret callee must be an identifier");
             let func_idx = self
                 .func_name_to_idx
                 .get(&callee_name)
@@ -1332,7 +1398,13 @@ impl Compiler {
             Expr::MemberAccess { expr, name } => {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
             }
-            Expr::TypeMemberAccess { .. } => todo!(),
+            Expr::TypeMemberAccess { .. } => {
+                panic!(
+                    "TypeMemberAccess (Type::member) is not a standalone expression; \
+                     it should only appear as the callee of a FunctionCall. \
+                     If this is reached, it indicates a compiler bug."
+                );
+            }
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
                 if let Expr::MemberAccess {
@@ -1344,6 +1416,16 @@ impl Compiler {
                     let method_name = *method_name;
                     self.lower_instance_method_call(
                         arena, receiver, method_name, &args, ctx,
+                    );
+                } else if let Expr::TypeMemberAccess {
+                    expr: type_expr,
+                    name: method_name,
+                } = &arena[function].kind
+                {
+                    let type_expr = *type_expr;
+                    let method_name = *method_name;
+                    self.lower_associated_function_call(
+                        arena, type_expr, method_name, &args, ctx,
                     );
                 } else {
                     match self.lower_function_call(arena, function, &args, ctx) {
@@ -1564,6 +1646,92 @@ impl Compiler {
         self.func().instruction(&Instruction::Call(func_idx));
     }
 
+    /// Extracts the type name from the `expr` part of a `TypeMemberAccess` expression.
+    ///
+    /// Handles `Expr::Type(TypeId)` with `TypeNode::Custom(ident_id)` and
+    /// `Expr::Identifier(ident_id)` patterns, matching the type-checker's resolution logic.
+    fn extract_type_name_from_type_expr(arena: &AstArena, type_expr_id: ExprId) -> Option<String> {
+        match &arena[type_expr_id].kind {
+            Expr::Type(ty_id) => match &arena[*ty_id].kind {
+                TypeNode::Custom(ident_id) => Some(arena[*ident_id].name.clone()),
+                _ => None,
+            },
+            Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Resolves the mangled WASM function name for an associated function call (`Type::method()`).
+    ///
+    /// Extracts the type name from the expression, then looks up the mangled name
+    /// in `method_mangled_names`. Returns `None` if the type name cannot be extracted
+    /// or the method is not registered.
+    fn resolve_associated_mangled_name(
+        &self,
+        arena: &AstArena,
+        type_expr_id: ExprId,
+        method_name_id: IdentId,
+    ) -> Option<String> {
+        let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
+        let method_name = &arena[method_name_id].name;
+        self.method_mangled_names
+            .get(&(type_name, method_name.clone()))
+            .cloned()
+    }
+
+    /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
+    ///
+    /// Associated functions have no `self` parameter. The callee is resolved via
+    /// the type name and method name, looked up in `method_mangled_names`, and
+    /// called with only the user-provided arguments.
+    ///
+    /// For methods returning compound types (structs/arrays), the sret calling
+    /// convention is used: a destination pointer is pushed as the first argument.
+    fn lower_associated_function_call(
+        &mut self,
+        arena: &AstArena,
+        type_expr_id: ExprId,
+        method_name_id: IdentId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_associated_function_call);
+
+        let mangled_name = self
+            .resolve_associated_mangled_name(arena, type_expr_id, method_name_id)
+            .unwrap_or_else(|| {
+                let method_name = &arena[method_name_id].name;
+                panic!(
+                    "Associated function call: could not resolve mangled name for \
+                     method '{method_name}' (type expression has no resolvable type name)"
+                )
+            });
+
+        if self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name)
+        {
+            todo!(
+                "Associated function call to '{mangled_name}' returns a compound type \
+                 (array or struct). Method sret calling convention is not yet \
+                 implemented (planned for Phase 6 of issue #162)."
+            );
+        }
+
+        let func_idx = self
+            .func_name_to_idx
+            .get(&mangled_name)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+            });
+
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        self.func().instruction(&Instruction::Call(func_idx));
+    }
+
     /// Lowers an assignment statement.
     fn lower_assign_statement(
         &mut self,
@@ -1744,6 +1912,16 @@ impl Compiler {
     }
 
     /// Forwards the sret pointer to a callee that also uses sret convention.
+    ///
+    /// Handles three callee patterns:
+    /// - `Expr::Identifier` (top-level function calls)
+    /// - `Expr::TypeMemberAccess` (associated function calls like `Point::new()`)
+    /// - `Expr::MemberAccess` (instance method calls like `p.translate()`)
+    ///
+    /// NOTE: The `TypeMemberAccess` and `MemberAccess` branches are currently unreachable
+    /// because the type checker rejects `return Type::method(args)` and `return obj.method(args)`
+    /// when the method returns a struct (Custom/Struct type mismatch at registration time).
+    /// These branches are proactively implemented for when the type checker bug is fixed.
     fn lower_sret_return_call_forwarding(
         &mut self,
         arena: &AstArena,
@@ -1753,13 +1931,45 @@ impl Compiler {
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-        let callee_name = self
-            .resolve_callee_name(arena, function)
-            .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+
+        // Resolve callee name: handles Identifier, TypeMemberAccess, and MemberAccess
+        let (callee_name, has_receiver) =
+            if let Some(name) = self.resolve_callee_name(arena, function) {
+                (name, false)
+            } else if let Expr::TypeMemberAccess {
+                expr: type_expr,
+                name: method_name,
+            } = &arena[function].kind
+            {
+                let name = self
+                    .resolve_associated_mangled_name(arena, *type_expr, *method_name)
+                    .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+                (name, false)
+            } else if let Expr::MemberAccess {
+                expr: receiver,
+                name: method_name,
+            } = &arena[function].kind
+            {
+                let name = self
+                    .resolve_method_mangled_name(arena, *receiver, *method_name, ctx)
+                    .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+                (name, true)
+            } else {
+                return Err(CodegenError::UnsupportedSretReturnExpression);
+            };
+
         if self.func_array_returns.contains_key(&callee_name)
             || self.func_struct_returns.contains_key(&callee_name)
         {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
+
+            // For instance methods, push receiver as self argument after sret pointer
+            if has_receiver
+                && let Expr::MemberAccess { expr: receiver, .. } = &arena[function].kind
+            {
+                self.lower_expression(arena, *receiver, ctx, None);
+            }
+
             for (_label, arg_expr_id) in &args {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
