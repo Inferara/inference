@@ -3193,11 +3193,12 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: self parameter handling tests (Phase 3) ---
+    // --- Method codegen: self parameter handling and instance method call tests ---
 
     #[test]
     fn method_instance_test() {
-        cov_mark::check_count!(wasm_codegen_emit_self_param, 3);
+        cov_mark::check_count!(wasm_codegen_emit_self_param, 4);
+        cov_mark::check_count!(wasm_codegen_emit_instance_method_call, 9);
         let test_name = "method_instance";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -3210,6 +3211,105 @@ mod base_codegen_tests {
             .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
         assert_wasms_modules_equivalence(&expected, &actual);
         assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_instance_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_instance";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_get_x")
+            .expect("Failed to get 'test_get_x'");
+        let result = test_get_x.call(&mut store, ()).expect("test_get_x failed");
+        assert_eq!(result, 10, "p.get_x() should return 10 (p.x)");
+
+        let test_get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_get_y")
+            .expect("Failed to get 'test_get_y'");
+        let result = test_get_y.call(&mut store, ()).expect("test_get_y failed");
+        assert_eq!(result, 20, "p.get_y() should return 20 (p.y)");
+
+        let test_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_sum")
+            .expect("Failed to get 'test_sum'");
+        let result = test_sum.call(&mut store, ()).expect("test_sum failed");
+        assert_eq!(result, 30, "p.sum() should return 30 (p.x + p.y)");
+
+        let test_sum_with: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_sum_with")
+            .expect("Failed to get 'test_sum_with'");
+        let result = test_sum_with
+            .call(&mut store, ())
+            .expect("test_sum_with failed");
+        assert_eq!(
+            result, 35,
+            "p.sum_with(5) should return 35 (p.x + p.y + 5)"
+        );
+
+        let test_let_binding: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_let_binding")
+            .expect("Failed to get 'test_let_binding'");
+        let result = test_let_binding
+            .call(&mut store, ())
+            .expect("test_let_binding failed");
+        assert_eq!(
+            result, 10,
+            "test_let_binding: let x = p.get_x() should return 10"
+        );
+
+        let test_standalone: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_standalone")
+            .expect("Failed to get 'test_standalone'");
+        let result = test_standalone
+            .call(&mut store, ())
+            .expect("test_standalone failed");
+        assert_eq!(
+            result, 42,
+            "test_standalone: p.get_x() as standalone, then return 42"
+        );
+
+        let test_binary_op: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_binary_op")
+            .expect("Failed to get 'test_binary_op'");
+        let result = test_binary_op
+            .call(&mut store, ())
+            .expect("test_binary_op failed");
+        assert_eq!(
+            result, 30,
+            "test_binary_op: p.get_x() + p.get_y() should return 30"
+        );
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should export 'memory'");
+        let data_addr: u32 = 0;
+        memory.data_mut(&mut store)[data_addr as usize..data_addr as usize + 4]
+            .copy_from_slice(&10_i32.to_le_bytes());
+        memory.data_mut(&mut store)[data_addr as usize + 4..data_addr as usize + 8]
+            .copy_from_slice(&20_i32.to_le_bytes());
+        let test_on_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "test_on_param")
+            .expect("Failed to get 'test_on_param'");
+        let result = test_on_param
+            .call(&mut store, data_addr as i32)
+            .expect("test_on_param failed");
+        assert_eq!(
+            result, 10,
+            "test_on_param: method call on struct parameter should return p.x = 10"
+        );
     }
 }
 

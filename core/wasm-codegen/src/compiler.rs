@@ -95,6 +95,9 @@ const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
 
+/// Separator used in mangled method names: `"{StructName}__{method_name}"`.
+const METHOD_SEPARATOR: &str = "__";
+
 #[derive(Default)]
 struct LoopContext {
     wasm_block_depth: u32,
@@ -301,7 +304,7 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
             let method_name = arena.def_name(*def_id).to_string();
-            let mangled_name = format!("{struct_name}__{method_name}");
+            let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
 
             self.func_name_to_idx
                 .insert(mangled_name.clone(), base_idx + i as u32);
@@ -380,7 +383,7 @@ impl Compiler {
         // For methods, use the mangled name for sret lookups, debug names, and current_fn_name.
         // For top-level functions, fn_name == raw_name.
         let fn_name = if let Some(ref struct_name) = self.current_method_struct {
-            format!("{struct_name}__{raw_name}")
+            format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
         } else {
             raw_name
         };
@@ -930,16 +933,32 @@ impl Compiler {
                 self.lower_block(arena, block_id, ctx);
             }
             Stmt::Expr(expr_id) => {
-                // The type checker rejects standalone calls to array-returning
-                // functions, so this path should be unreachable.
-                if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
-                    && let Expr::Identifier(callee_name_id) = &arena[*function].kind
-                {
-                    let callee_name = &arena[*callee_name_id].name;
-                    assert!(
-                        !self.func_array_returns.contains_key(callee_name),
-                        "standalone call to array-returning function should have been rejected by the type checker",
-                    );
+                // The type checker rejects standalone calls to compound-returning
+                // functions/methods, so these paths should be unreachable.
+                if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind {
+                    if let Expr::Identifier(callee_name_id) = &arena[*function].kind {
+                        let callee_name = &arena[*callee_name_id].name;
+                        assert!(
+                            !self.func_array_returns.contains_key(callee_name)
+                                && !self.func_struct_returns.contains_key(callee_name),
+                            "standalone call to compound-returning function \
+                             should have been rejected by the type checker",
+                        );
+                    }
+                    if let Expr::MemberAccess {
+                        expr: receiver,
+                        name: method_name,
+                    } = &arena[*function].kind
+                        && let Some(mangled) =
+                            self.resolve_method_mangled_name(arena, *receiver, *method_name, ctx)
+                    {
+                        assert!(
+                            !self.func_array_returns.contains_key(&mangled)
+                                && !self.func_struct_returns.contains_key(&mangled),
+                            "standalone call to compound-returning method '{mangled}' \
+                             should have been rejected by the type checker",
+                        );
+                    }
                 }
                 self.lower_expression(arena, expr_id, ctx, None);
                 let expr_produces_value = ctx
@@ -1069,6 +1088,10 @@ impl Compiler {
     }
 
     /// Checks whether an expression is a function call to an sret function (array or struct return).
+    ///
+    /// NOTE: Method calls (`MemberAccess` callees) are intentionally not handled here.
+    /// Method sret support is planned for Phase 6 of issue #162.
+    /// Until then, `lower_instance_method_call` guards against sret methods with a `todo!()`.
     fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
             && let Expr::Identifier(callee_name_id) = &arena[*function].kind
@@ -1312,21 +1335,33 @@ impl Compiler {
             Expr::TypeMemberAccess { .. } => todo!(),
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-                match self.lower_function_call(arena, function, &args, ctx) {
-                    Ok(()) => {}
-                    Err(CodegenError::UnsupportedCalleeKind) => {
-                        todo!(
-                            "Non-identifier function calls (method calls, higher-order) \
-                             are not yet implemented"
-                        )
+                if let Expr::MemberAccess {
+                    expr: receiver,
+                    name: method_name,
+                } = &arena[function].kind
+                {
+                    let receiver = *receiver;
+                    let method_name = *method_name;
+                    self.lower_instance_method_call(
+                        arena, receiver, method_name, &args, ctx,
+                    );
+                } else {
+                    match self.lower_function_call(arena, function, &args, ctx) {
+                        Ok(()) => {}
+                        Err(CodegenError::UnsupportedCalleeKind) => {
+                            todo!(
+                                "Non-identifier function calls (higher-order) \
+                                 are not yet implemented"
+                            )
+                        }
+                        Err(CodegenError::UnknownFunction(name)) => {
+                            panic!(
+                                "Function '{name}' not found in name-to-index map; \
+                                 the type-checker should have caught undefined functions"
+                            )
+                        }
+                        Err(e) => panic!("function call lowering failed: {e}"),
                     }
-                    Err(CodegenError::UnknownFunction(name)) => {
-                        panic!(
-                            "Function '{name}' not found in name-to-index map; \
-                             the type-checker should have caught undefined functions"
-                        )
-                    }
-                    Err(e) => panic!("function call lowering failed: {e}"),
                 }
             }
             Expr::StructLiteral { name: _, fields } => {
@@ -1449,6 +1484,84 @@ impl Compiler {
 
         self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Resolves the mangled WASM function name for an instance method call.
+    ///
+    /// Given the receiver expression and method name, determines the receiver's struct type
+    /// from the type context and looks up the corresponding mangled name in `method_mangled_names`.
+    /// Returns `None` if the receiver has no type info or the method is not registered.
+    fn resolve_method_mangled_name(
+        &self,
+        arena: &AstArena,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+        ctx: &TypedContext,
+    ) -> Option<String> {
+        let method_name = &arena[method_name_id].name;
+        let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
+        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+            &receiver_type.kind
+        else {
+            return None;
+        };
+        self.method_mangled_names
+            .get(&(struct_name.clone(), method_name.clone()))
+            .cloned()
+    }
+
+    /// Lowers an instance method call (`receiver.method(args)`) to WASM instructions.
+    ///
+    /// Resolves the receiver's struct type, looks up the mangled method name
+    /// (`TypeName__method_name`), pushes the receiver as the implicit `self`
+    /// argument, then pushes user arguments, and emits `call`.
+    fn lower_instance_method_call(
+        &mut self,
+        arena: &AstArena,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_instance_method_call);
+
+        let mangled_name = self
+            .resolve_method_mangled_name(arena, receiver_expr_id, method_name_id, ctx)
+            .unwrap_or_else(|| {
+                let method_name = &arena[method_name_id].name;
+                panic!(
+                    "Instance method call: could not resolve mangled name for method \
+                     '{method_name}' (receiver has no type info or non-struct type)"
+                )
+            });
+
+        if self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name)
+        {
+            todo!(
+                "Instance method call to '{mangled_name}' returns a compound type \
+                 (array or struct). Method sret calling convention is not yet \
+                 implemented (planned for Phase 6 of issue #162)."
+            );
+        }
+
+        let func_idx = self
+            .func_name_to_idx
+            .get(&mangled_name)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+            });
+
+        // Push receiver as the implicit `self` argument
+        self.lower_expression(arena, receiver_expr_id, ctx, None);
+
+        // Push user arguments
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        self.func().instruction(&Instruction::Call(func_idx));
     }
 
     /// Lowers an assignment statement.
