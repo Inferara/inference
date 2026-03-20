@@ -1148,10 +1148,117 @@ mod codegen_validation_tests {
         );
     }
 
+    // --- Method codegen: self parameter handling tests (Phase 3) ---
+
+    #[test]
+    fn method_immutable_self_compiles_and_validates() {
+        cov_mark::check!(wasm_codegen_emit_self_param);
+        let source = r#"struct Point { x: i32; y: i32; fn get_x(self) -> i32 { return self.x; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Immutable self method WASM is invalid: {e}"));
+        let wat = wasmprinter::print_bytes(wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("Point__get_x"),
+            "WAT should contain mangled method name 'Point__get_x'\n{wat}"
+        );
+    }
+
+    #[test]
+    fn method_mutable_self_compiles_and_validates() {
+        cov_mark::check!(wasm_codegen_emit_self_param);
+        cov_mark::check!(wasm_codegen_emit_self_copy_on_entry);
+        let source = r#"struct Counter { value: i32; fn increment(mut self) { self.value = self.value + 1; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Mutable self method WASM is invalid: {e}"));
+        let wat = wasmprinter::print_bytes(wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        assert!(
+            wat.contains("Counter__increment"),
+            "WAT should contain mangled method name 'Counter__increment'\n{wat}"
+        );
+    }
+
+    #[test]
+    fn method_immutable_self_no_frame_copy() {
+        let source = r#"struct Point { x: i32; y: i32; fn get_x(self) -> i32 { return self.x; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Immutable self method WASM is invalid: {e}"));
+        let wat = wasmprinter::print_bytes(wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let get_x_func = extract_function_body(&wat, "Point__get_x");
+        assert!(
+            !get_x_func.contains("memory.copy"),
+            "Immutable self method should NOT have memory.copy (no frame copy):\n{get_x_func}"
+        );
+    }
+
+    #[test]
+    fn method_mutable_self_has_frame_copy() {
+        let source = r#"struct Counter { value: i32; fn set_value(mut self, v: i32) { self.value = v; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Mutable self method WASM is invalid: {e}"));
+        let wat = wasmprinter::print_bytes(wasm)
+            .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
+        let set_value_func = extract_function_body(&wat, "Counter__set_value");
+        assert!(
+            set_value_func.contains("memory.copy"),
+            "Mutable self method should have memory.copy (frame copy):\n{set_value_func}"
+        );
+    }
+
+    #[test]
+    fn method_self_with_return_value_compiles() {
+        let source = r#"struct Point { x: i32; y: i32; fn sum(self) -> i32 { return self.x + self.y; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Self method with return value WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn method_self_with_extra_params_compiles() {
+        let source = r#"struct Point { x: i32; y: i32; fn add(self, dx: i32, dy: i32) -> i32 { return self.x + dx + self.y + dy; } } pub fn main() -> i32 { return 0; }"#;
+        let output = codegen_output(source);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Self method with extra params WASM is invalid: {e}"));
+    }
+
     // --- Helper functions ---
 
     /// Checks if a byte slice contains a given subsequence of bytes.
     fn wasm_contains_bytes(wasm: &[u8], needle: &[u8]) -> bool {
         wasm.windows(needle.len()).any(|window| window == needle)
+    }
+
+    /// Extracts the WAT text for a specific function by name from a full WAT module.
+    fn extract_function_body(wat: &str, func_name: &str) -> String {
+        let marker = format!("${func_name}");
+        let mut in_func = false;
+        let mut depth = 0i32;
+        let mut lines = Vec::new();
+        for line in wat.lines() {
+            if line.contains(&marker) && line.contains("(func") {
+                in_func = true;
+            }
+            if in_func {
+                lines.push(line);
+                depth += line.matches('(').count() as i32;
+                depth -= line.matches(')').count() as i32;
+                if depth <= 0 {
+                    break;
+                }
+            }
+        }
+        lines.join("\n")
     }
 }

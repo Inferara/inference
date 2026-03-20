@@ -1,0 +1,26 @@
+struct Point { x: i32; y: i32;
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+    fn sum(self) -> i32 {
+        return self.x + self.y;
+    }
+}
+
+pub fn test_get_x() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.x;
+}
+
+pub fn test_get_y() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.y;
+}
+
+pub fn test_sum() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.x + p.y;
+}

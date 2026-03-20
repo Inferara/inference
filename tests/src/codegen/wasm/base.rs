@@ -3192,6 +3192,25 @@ mod base_codegen_tests {
             "p.x should still be 10 after mutating q.x (value semantics)"
         );
     }
+
+    // --- Method codegen: self parameter handling tests (Phase 3) ---
+
+    #[test]
+    fn method_instance_test() {
+        cov_mark::check_count!(wasm_codegen_emit_self_param, 3);
+        let test_name = "method_instance";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
 }
 
 /// Test data regeneration helpers.
@@ -3782,5 +3801,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_copy");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_instance_wasm() {
+        let dir = base_test_dir().join("method_instance");
+        let source_code = std::fs::read_to_string(dir.join("method_instance.inf"))
+            .expect("Failed to read method_instance.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_instance.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_instance");
     }
 }

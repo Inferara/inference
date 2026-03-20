@@ -429,7 +429,19 @@ impl Compiler {
                     local_idx += 1;
                 }
                 ArgKind::SelfRef { .. } => {
-                    todo!("Self-reference parameters are not yet supported in WASM codegen")
+                    cov_mark::hit!(wasm_codegen_emit_self_param);
+                    params.push(ValType::I32);
+                    let prev =
+                        self.locals_map
+                            .insert("self".to_string(), (local_idx, ValType::I32));
+                    assert!(
+                        prev.is_none(),
+                        "parameter `self` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected duplicate parameter names",
+                    );
+                    local_idx += 1;
+                    // self is a struct pointer; method body will use memory loads/stores
+                    self.has_memory = true;
                 }
                 ArgKind::Ignored { .. } => {
                     todo!("Ignore arguments are not yet supported in WASM codegen")
@@ -467,7 +479,14 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout = Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args);
+        self.frame_layout = Self::compute_frame_layout(
+            arena,
+            body_id,
+            ctx,
+            local_idx,
+            &args,
+            self.current_method_struct.as_deref(),
+        );
 
         if self.frame_layout.is_some() {
             self.has_memory = true;
@@ -493,45 +512,59 @@ impl Compiler {
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
-            // Copy-on-entry: for each compound-typed parameter (array or struct),
+            // Copy-on-entry: for each compound-typed parameter (array, struct, or mut self),
             // copy the caller's data into the callee's frame to enforce value semantics.
             for arg in &args {
-                if let ArgKind::Named { name, .. } = &arg.kind {
-                    let arg_name = arena[*name].name.clone();
-                    let arg_type_info = {
-                        let ty_id = match &arg.kind {
-                            ArgKind::Named { ty, .. } => *ty,
-                            _ => unreachable!(),
+                match &arg.kind {
+                    ArgKind::Named { name, .. } => {
+                        let arg_name = arena[*name].name.clone();
+                        let arg_type_info = {
+                            let ty_id = match &arg.kind {
+                                ArgKind::Named { ty, .. } => *ty,
+                                _ => unreachable!(),
+                            };
+                            TypeInfo::from_type_id(arena, ty_id)
                         };
-                        TypeInfo::from_type_id(arena, ty_id)
-                    };
-                    let param_local = self
-                        .locals_map
-                        .get(&arg_name)
-                        .expect("Compound parameter must be in locals_map")
-                        .0;
-                    match &arg_type_info.kind {
-                        TypeInfoKind::Array(elem_type, _length) => {
-                            let slot = layout
-                                .array_offsets
-                                .get(&arg_name)
-                                .expect("Array parameter must have a frame slot");
-                            emit_array_param_copy(
-                                func,
-                                layout,
-                                slot,
-                                param_local,
-                                &elem_type.kind,
-                            );
-                        }
-                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                        TypeInfoKind::Custom(_) => {
-                            if let Some(slot) = layout.struct_offsets.get(&arg_name) {
-                                emit_struct_param_copy(func, layout, slot, param_local);
+                        let param_local = self
+                            .locals_map
+                            .get(&arg_name)
+                            .expect("Compound parameter must be in locals_map")
+                            .0;
+                        match &arg_type_info.kind {
+                            TypeInfoKind::Array(elem_type, _length) => {
+                                let slot = layout
+                                    .array_offsets
+                                    .get(&arg_name)
+                                    .expect("Array parameter must have a frame slot");
+                                emit_array_param_copy(
+                                    func,
+                                    layout,
+                                    slot,
+                                    param_local,
+                                    &elem_type.kind,
+                                );
                             }
+                            // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                            TypeInfoKind::Custom(_) => {
+                                if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                    emit_struct_param_copy(func, layout, slot, param_local);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    ArgKind::SelfRef { is_mut: true } => {
+                        cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
+                        if let Some(slot) = layout.struct_offsets.get("self") {
+                            let self_local = self
+                                .locals_map
+                                .get("self")
+                                .expect("`self` must be in locals_map for mut self method")
+                                .0;
+                            emit_struct_param_copy(func, layout, slot, self_local);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -651,41 +684,81 @@ impl Compiler {
     }
 
     /// Computes the stack frame layout for a function.
+    ///
+    /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
+    /// a method body, so that `ArgKind::SelfRef { is_mut: true }` can look up the
+    /// struct layout and allocate a frame slot for the mutable `self` copy.
+    #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         frame_ptr_local_idx: u32,
         args: &[inference_ast::nodes::ArgData],
+        method_struct_name: Option<&str>,
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
         for arg in args {
-            if let ArgKind::Named { name, ty, .. } = &arg.kind {
-                let type_info = TypeInfo::from_type_id(arena, *ty);
-                match &type_info.kind {
-                    TypeInfoKind::Array(elem_type, length) => {
-                        let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz.checked_mul(*length).expect(
-                            "Array byte count overflow: element size * length exceeds u32::MAX",
-                        );
-                        let aligned_offset = align_to(current_offset, elem_sz);
-                        let slot = ArraySlot {
-                            offset: aligned_offset,
-                            elem_size: elem_sz,
-                            length: *length,
-                        };
-                        let arg_name = arena[*name].name.clone();
-                        array_offsets.insert(arg_name, slot);
-                        current_offset = aligned_offset.checked_add(byte_count).expect(
-                            "Frame offset overflow: total array allocation exceeds u32::MAX",
-                        );
+            match &arg.kind {
+                ArgKind::Named { name, ty, .. } => {
+                    let type_info = TypeInfo::from_type_id(arena, *ty);
+                    match &type_info.kind {
+                        TypeInfoKind::Array(elem_type, length) => {
+                            let elem_sz = element_size(&elem_type.kind);
+                            let byte_count = elem_sz.checked_mul(*length).expect(
+                                "Array byte count overflow: element size * length exceeds u32::MAX",
+                            );
+                            let aligned_offset = align_to(current_offset, elem_sz);
+                            let slot = ArraySlot {
+                                offset: aligned_offset,
+                                elem_size: elem_sz,
+                                length: *length,
+                            };
+                            let arg_name = arena[*name].name.clone();
+                            array_offsets.insert(arg_name, slot);
+                            current_offset = aligned_offset.checked_add(byte_count).expect(
+                                "Frame offset overflow: total array allocation exceeds u32::MAX",
+                            );
+                        }
+                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                        TypeInfoKind::Custom(custom_name) => {
+                            if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                                let (total_size, field_slots) =
+                                    compute_struct_field_layout(&struct_info);
+                                if total_size > 0 {
+                                    let max_field_align = field_slots
+                                        .iter()
+                                        .map(|f| element_size(&f.type_kind))
+                                        .max()
+                                        .unwrap_or(1);
+                                    let aligned_offset = align_to(current_offset, max_field_align);
+                                    let slot = StructSlot {
+                                        offset: aligned_offset,
+                                        total_size,
+                                        fields: field_slots,
+                                    };
+                                    let arg_name = arena[*name].name.clone();
+                                    struct_offsets.insert(arg_name, slot);
+                                    current_offset =
+                                        aligned_offset.checked_add(total_size).expect(
+                                            "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                        );
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                    TypeInfoKind::Custom(custom_name) => {
-                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                }
+                ArgKind::SelfRef { is_mut } => {
+                    if *is_mut {
+                        let struct_name = method_struct_name.expect(
+                            "ArgKind::SelfRef encountered but no method_struct_name provided; \
+                             this indicates a bug in traverse_t_ast_with_compiler",
+                        );
+                        if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                             let (total_size, field_slots) =
                                 compute_struct_field_layout(&struct_info);
                             if total_size > 0 {
@@ -700,8 +773,7 @@ impl Compiler {
                                     total_size,
                                     fields: field_slots,
                                 };
-                                let arg_name = arena[*name].name.clone();
-                                struct_offsets.insert(arg_name, slot);
+                                struct_offsets.insert("self".to_string(), slot);
                                 current_offset =
                                     aligned_offset.checked_add(total_size).expect(
                                         "Frame offset overflow: struct allocation exceeds u32::MAX",
@@ -709,8 +781,9 @@ impl Compiler {
                             }
                         }
                     }
-                    _ => {}
+                    // Immutable self: no frame slot needed -- reads directly from caller pointer
                 }
+                _ => {}
             }
         }
 
