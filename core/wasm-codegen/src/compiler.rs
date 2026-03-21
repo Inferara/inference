@@ -1415,7 +1415,7 @@ impl Compiler {
                     let receiver = *receiver;
                     let method_name = *method_name;
                     self.lower_instance_method_call(
-                        arena, receiver, method_name, &args, ctx,
+                        arena, receiver, method_name, &args, ctx, None,
                     );
                 } else if let Expr::TypeMemberAccess {
                     expr: type_expr,
@@ -1425,7 +1425,7 @@ impl Compiler {
                     let type_expr = *type_expr;
                     let method_name = *method_name;
                     self.lower_associated_function_call(
-                        arena, type_expr, method_name, &args, ctx,
+                        arena, type_expr, method_name, &args, ctx, None,
                     );
                 } else {
                     match self.lower_function_call(arena, function, &args, ctx) {
@@ -1597,6 +1597,13 @@ impl Compiler {
     /// Resolves the receiver's struct type, looks up the mangled method name
     /// (`TypeName__method_name`), pushes the receiver as the implicit `self`
     /// argument, then pushes user arguments, and emits `call`.
+    ///
+    /// When the method returns a compound type (struct or array), the sret calling
+    /// convention is used. If `sret_local` is `Some(local_idx)`, the local at that
+    /// index holds the sret destination pointer and is pushed as the first WASM
+    /// argument before the receiver. If `sret_local` is `None` and the method
+    /// returns a compound type, this is a codegen limitation (expression-position
+    /// compound-returning method calls require temporary frame allocation).
     fn lower_instance_method_call(
         &mut self,
         arena: &AstArena,
@@ -1604,6 +1611,7 @@ impl Compiler {
         method_name_id: IdentId,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
+        sret_local: Option<u32>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_instance_method_call);
 
@@ -1617,15 +1625,8 @@ impl Compiler {
                 )
             });
 
-        if self.func_array_returns.contains_key(&mangled_name)
-            || self.func_struct_returns.contains_key(&mangled_name)
-        {
-            todo!(
-                "Instance method call to '{mangled_name}' returns a compound type \
-                 (array or struct). Method sret calling convention is not yet \
-                 implemented (planned for Phase 6 of issue #162)."
-            );
-        }
+        let is_sret = self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name);
 
         let func_idx = self
             .func_name_to_idx
@@ -1634,6 +1635,18 @@ impl Compiler {
             .unwrap_or_else(|| {
                 panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
             });
+
+        if is_sret {
+            cov_mark::hit!(wasm_codegen_emit_instance_method_sret);
+            let sret_idx = sret_local.unwrap_or_else(|| {
+                panic!(
+                    "Instance method call to compound-returning method '{mangled_name}' \
+                     in expression position without sret destination. This requires \
+                     temporary frame allocation (Phase 7 of issue #162)."
+                )
+            });
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+        }
 
         // Push receiver as the implicit `self` argument
         self.lower_expression(arena, receiver_expr_id, ctx, None);
@@ -1685,8 +1698,12 @@ impl Compiler {
     /// the type name and method name, looked up in `method_mangled_names`, and
     /// called with only the user-provided arguments.
     ///
-    /// For methods returning compound types (structs/arrays), the sret calling
-    /// convention is used: a destination pointer is pushed as the first argument.
+    /// When the method returns a compound type (struct or array), the sret calling
+    /// convention is used. If `sret_local` is `Some(local_idx)`, the local at that
+    /// index holds the sret destination pointer and is pushed as the first WASM
+    /// argument. If `sret_local` is `None` and the method returns a compound type,
+    /// this is a codegen limitation (expression-position compound-returning method
+    /// calls require temporary frame allocation).
     fn lower_associated_function_call(
         &mut self,
         arena: &AstArena,
@@ -1694,6 +1711,7 @@ impl Compiler {
         method_name_id: IdentId,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
+        sret_local: Option<u32>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_associated_function_call);
 
@@ -1707,15 +1725,8 @@ impl Compiler {
                 )
             });
 
-        if self.func_array_returns.contains_key(&mangled_name)
-            || self.func_struct_returns.contains_key(&mangled_name)
-        {
-            todo!(
-                "Associated function call to '{mangled_name}' returns a compound type \
-                 (array or struct). Method sret calling convention is not yet \
-                 implemented (planned for Phase 6 of issue #162)."
-            );
-        }
+        let is_sret = self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name);
 
         let func_idx = self
             .func_name_to_idx
@@ -1724,6 +1735,18 @@ impl Compiler {
             .unwrap_or_else(|| {
                 panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
             });
+
+        if is_sret {
+            cov_mark::hit!(wasm_codegen_emit_associated_function_sret);
+            let sret_idx = sret_local.unwrap_or_else(|| {
+                panic!(
+                    "Associated function call to compound-returning method '{mangled_name}' \
+                     in expression position without sret destination. This requires \
+                     temporary frame allocation (Phase 7 of issue #162)."
+                )
+            });
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+        }
 
         for (_label, arg_expr_id) in call_args {
             self.lower_expression(arena, *arg_expr_id, ctx, None);

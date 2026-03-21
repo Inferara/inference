@@ -3446,6 +3446,142 @@ mod base_codegen_tests {
             "test_standalone should return 42 after discarding Point::sum_of(1, 2)"
         );
     }
+
+    // --- Method codegen: methods returning structs (sret) ---
+
+    #[test]
+    fn method_return_struct_test() {
+        cov_mark::check_count!(wasm_codegen_emit_instance_method_call, 10);
+        let test_name = "method_return_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_return_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_return_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_translate_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_translate_x")
+            .expect("Failed to get 'test_translate_x'");
+        let result = test_translate_x
+            .call(&mut store, ())
+            .expect("test_translate_x failed");
+        assert_eq!(
+            result, 15,
+            "Point(10,20).translate(5,3).get_x() should return 15"
+        );
+
+        let test_translate_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_translate_y")
+            .expect("Failed to get 'test_translate_y'");
+        let result = test_translate_y
+            .call(&mut store, ())
+            .expect("test_translate_y failed");
+        assert_eq!(
+            result, 23,
+            "Point(10,20).translate(5,3).get_y() should return 23"
+        );
+
+        let test_scale_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_scale_x")
+            .expect("Failed to get 'test_scale_x'");
+        let result = test_scale_x
+            .call(&mut store, ())
+            .expect("test_scale_x failed");
+        assert_eq!(
+            result, 12,
+            "Point(3,7).scale(4).get_x() should return 12"
+        );
+
+        let test_scale_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_scale_y")
+            .expect("Failed to get 'test_scale_y'");
+        let result = test_scale_y
+            .call(&mut store, ())
+            .expect("test_scale_y failed");
+        assert_eq!(
+            result, 28,
+            "Point(3,7).scale(4).get_y() should return 28"
+        );
+
+        let test_original_unchanged_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_original_unchanged_x")
+            .expect("Failed to get 'test_original_unchanged_x'");
+        let result = test_original_unchanged_x
+            .call(&mut store, ())
+            .expect("test_original_unchanged_x failed");
+        assert_eq!(
+            result, 10,
+            "Original point should be unchanged after translate: x should still be 10"
+        );
+
+        let test_original_unchanged_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_original_unchanged_y")
+            .expect("Failed to get 'test_original_unchanged_y'");
+        let result = test_original_unchanged_y
+            .call(&mut store, ())
+            .expect("test_original_unchanged_y failed");
+        assert_eq!(
+            result, 20,
+            "Original point should be unchanged after translate: y should still be 20"
+        );
+
+        let test_new_returns_struct_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_new_returns_struct_x")
+            .expect("Failed to get 'test_new_returns_struct_x'");
+        let result = test_new_returns_struct_x
+            .call(&mut store, ())
+            .expect("test_new_returns_struct_x failed");
+        assert_eq!(
+            result, 42,
+            "Point::new(42, 99).get_x() should return 42"
+        );
+
+        let test_new_returns_struct_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_new_returns_struct_y")
+            .expect("Failed to get 'test_new_returns_struct_y'");
+        let result = test_new_returns_struct_y
+            .call(&mut store, ())
+            .expect("test_new_returns_struct_y failed");
+        assert_eq!(
+            result, 99,
+            "Point::new(42, 99).get_y() should return 99"
+        );
+
+        let test_return_translated: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_return_translated")
+            .expect("Failed to get 'test_return_translated'");
+        let result = test_return_translated
+            .call(&mut store, ())
+            .expect("test_return_translated failed");
+        assert_eq!(
+            result, 33,
+            "Point(1,2).translate(10,20): get_x() + get_y() should return 11 + 22 = 33"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -4076,5 +4212,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "method_assoc");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_return_struct_wasm() {
+        let dir = base_test_dir().join("method_return_struct");
+        let source_code = std::fs::read_to_string(dir.join("method_return_struct.inf"))
+            .expect("Failed to read method_return_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_return_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_return_struct");
     }
 }
