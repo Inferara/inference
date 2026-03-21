@@ -216,8 +216,10 @@ impl TypeChecker {
                                     ArgKind::Named { ty, .. }
                                     | ArgKind::Ignored { ty }
                                     | ArgKind::TypeOnly(ty) => {
-                                        Some(TypeInfo::from_type_id_with_type_params(
-                                            arena, *ty, &tp_names,
+                                        Some(self.symbol_table.resolve_custom_type(
+                                            TypeInfo::from_type_id_with_type_params(
+                                                arena, *ty, &tp_names,
+                                            ),
                                         ))
                                     }
                                 })
@@ -227,6 +229,7 @@ impl TypeChecker {
                                 .map(|r| {
                                     TypeInfo::from_type_id_with_type_params(arena, r, &tp_names)
                                 })
+                                .map(|ti| self.symbol_table.resolve_custom_type(ti))
                                 .unwrap_or_default();
 
                             let definition_scope_id =

@@ -45,6 +45,10 @@ pub fn test_return_new(x: i32, y: i32) -> Point {
     return p;
 }
 
+pub fn test_return_new_direct(x: i32, y: i32) -> Point {
+    return Point::new(x, y);
+}
+
 pub fn test_return_new_get_x() -> i32 {
     let p: Point = test_return_new(10, 20);
     return p.get_x();
@@ -52,6 +56,16 @@ pub fn test_return_new_get_x() -> i32 {
 
 pub fn test_return_new_get_y() -> i32 {
     let p: Point = test_return_new(10, 20);
+    return p.get_y();
+}
+
+pub fn test_return_new_direct_get_x() -> i32 {
+    let p: Point = test_return_new_direct(10, 20);
+    return p.get_x();
+}
+
+pub fn test_return_new_direct_get_y() -> i32 {
+    let p: Point = test_return_new_direct(10, 20);
     return p.get_y();
 }
 

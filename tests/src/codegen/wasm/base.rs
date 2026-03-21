@@ -3413,6 +3413,28 @@ mod base_codegen_tests {
             "test_return_new(10, 20).get_y() should return 20"
         );
 
+        let test_return_new_direct_get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_return_new_direct_get_x")
+            .expect("Failed to get 'test_return_new_direct_get_x'");
+        let result = test_return_new_direct_get_x
+            .call(&mut store, ())
+            .expect("test_return_new_direct_get_x failed");
+        assert_eq!(
+            result, 10,
+            "test_return_new_direct(10, 20).get_x() should return 10"
+        );
+
+        let test_return_new_direct_get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_return_new_direct_get_y")
+            .expect("Failed to get 'test_return_new_direct_get_y'");
+        let result = test_return_new_direct_get_y
+            .call(&mut store, ())
+            .expect("test_return_new_direct_get_y failed");
+        assert_eq!(
+            result, 20,
+            "test_return_new_direct(10, 20).get_y() should return 20"
+        );
+
         let test_standalone: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_standalone")
             .expect("Failed to get 'test_standalone'");

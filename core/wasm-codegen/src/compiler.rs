@@ -1917,11 +1917,6 @@ impl Compiler {
     /// - `Expr::Identifier` (top-level function calls)
     /// - `Expr::TypeMemberAccess` (associated function calls like `Point::new()`)
     /// - `Expr::MemberAccess` (instance method calls like `p.translate()`)
-    ///
-    /// NOTE: The `TypeMemberAccess` and `MemberAccess` branches are currently unreachable
-    /// because the type checker rejects `return Type::method(args)` and `return obj.method(args)`
-    /// when the method returns a struct (Custom/Struct type mismatch at registration time).
-    /// These branches are proactively implemented for when the type checker bug is fixed.
     fn lower_sret_return_call_forwarding(
         &mut self,
         arena: &AstArena,
