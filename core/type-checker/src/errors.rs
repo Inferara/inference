@@ -546,6 +546,16 @@ pub enum TypeCheckError {
         field_name: String,
         location: Location,
     },
+
+    /// Method call chain on a compound-returning function call.
+    ///
+    /// Chaining method calls on struct/array-returning functions creates implicit
+    /// temporaries that cannot be named in formal proofs. Assign the intermediate
+    /// result to a variable first.
+    #[error(
+        "{location}: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
+    )]
+    MethodCallChainOnCompoundReturn { location: Location },
 }
 
 impl TypeCheckError {
@@ -600,7 +610,8 @@ impl TypeCheckError {
             | TypeCheckError::EmptyStruct { location, .. }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
-            | TypeCheckError::DuplicateStructField { location, .. } => location,
+            | TypeCheckError::DuplicateStructField { location, .. }
+            | TypeCheckError::MethodCallChainOnCompoundReturn { location, .. } => location,
         }
     }
 }

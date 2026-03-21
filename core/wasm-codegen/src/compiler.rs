@@ -1205,7 +1205,6 @@ impl Compiler {
                     panic!("sret callee must be an identifier, TypeMemberAccess, or MemberAccess");
                 };
 
-            // For instance methods, push receiver as self argument after sret pointer
             if let Some(receiver) = receiver_expr {
                 self.lower_expression(arena, receiver, ctx, None);
             }
@@ -1981,7 +1980,6 @@ impl Compiler {
         {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
 
-            // For instance methods, push receiver as self argument after sret pointer
             if has_receiver
                 && let Expr::MemberAccess { expr: receiver, .. } = &arena[function].kind
             {
@@ -2741,7 +2739,9 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(struct_expr_id))
             .expect("MemberAccess: struct expression must have type info");
 
-        let TypeInfoKind::Struct(struct_name) = &struct_type.kind else {
+        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+            &struct_type.kind
+        else {
             panic!(
                 "MemberAccess: struct expression has non-struct type: {:?}",
                 struct_type.kind

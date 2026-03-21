@@ -3582,6 +3582,7 @@ mod base_codegen_tests {
             "Point(1,2).translate(10,20): get_x() + get_y() should return 11 + 22 = 33"
         );
     }
+
 }
 
 /// Test data regeneration helpers.
@@ -4233,4 +4234,5 @@ mod regenerate {
         );
         regenerate_wat(&actual, &dir, "method_return_struct");
     }
+
 }

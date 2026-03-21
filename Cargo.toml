@@ -55,7 +55,7 @@ inf-wast = { path = "./tools/inf-wast", version = "0.0.9" }
 inf-wasmparser = { path = "./tools/inf-wasmparser", version = "0.0.9" }
 
 tree-sitter = "0.26.5"
-tree-sitter-inference = "0.0.38"
+tree-sitter-inference = "0.0.39"
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive", "rc"] }

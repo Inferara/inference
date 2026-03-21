@@ -1765,6 +1765,21 @@ impl TypeChecker {
 
             let receiver_type = self.infer_expression(receiver_expr, ctx);
 
+            // Prohibit method call chains on compound-returning calls.
+            if let Expr::FunctionCall { .. } = &ctx.arena()[receiver_expr].kind
+                && let Some(ref recv_type) = receiver_type
+                && matches!(
+                    recv_type.kind,
+                    TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+                )
+            {
+                self.errors
+                    .push(TypeCheckError::MethodCallChainOnCompoundReturn {
+                        location: ctx.arena()[call_expr_id].location,
+                    });
+                return None;
+            }
+
             if let Some(receiver_type) = receiver_type {
                 let type_name = match &receiver_type.kind {
                     TypeInfoKind::Struct(name) => Some(name.clone()),

@@ -569,3 +569,40 @@ mod field_validation {
         }
     }
 }
+
+mod method_call_chain {
+    use super::*;
+
+    /// Verifies that chaining a method call on a compound-returning function call
+    /// is rejected by the type checker.
+    #[test]
+    fn method_chain_on_compound_return_errors() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    return Point { x: self.x + dx, y: self.y + dy };
+                }
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test() -> i32 {
+                let p: Point = Point { x: 10, y: 20 };
+                return p.translate(5, 3).get_x();
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Chaining method calls on compound-returning functions should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains(
+                    "cannot chain method calls on compound-returning functions"
+                ),
+                "Error should mention compound-returning chain restriction: {}",
+                error_msg
+            );
+        }
+    }
+}
