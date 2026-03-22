@@ -490,7 +490,7 @@ pub enum TypeCheckError {
     #[error(
         "{location}: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
     )]
-    ArrayReturnCallInExpressionPosition { location: Location },
+    CompoundReturnCallInExpressionPosition { location: Location },
 
     /// Array index expression uses a 64-bit integer type.
     ///
@@ -567,6 +567,7 @@ pub enum TypeCheckError {
         "{location}: cannot assign from a compound-returning function call; use a new variable binding instead"
     )]
     CompoundReturnCallInAssignment { location: Location },
+
 }
 
 impl TypeCheckError {
@@ -614,7 +615,7 @@ impl TypeCheckError {
             | TypeCheckError::StructLiteralAsArgument { location, .. }
             | TypeCheckError::CompoundLiteralInUnsupportedPosition { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
-            | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
+            | TypeCheckError::CompoundReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::MethodNeverAccessesSelf { location, .. }
@@ -1285,7 +1286,7 @@ mod tests {
 
     #[test]
     fn display_array_return_call_in_expression_position() {
-        let err = TypeCheckError::ArrayReturnCallInExpressionPosition {
+        let err = TypeCheckError::CompoundReturnCallInExpressionPosition {
             location: test_location(),
         };
         assert_eq!(
@@ -1419,4 +1420,16 @@ mod tests {
             "1:5: cannot assign from a compound-returning function call; use a new variable binding instead"
         );
     }
+
+    #[test]
+    fn display_method_call_chain_on_compound_return() {
+        let err = TypeCheckError::MethodCallChainOnCompoundReturn {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
+        );
+    }
+
 }

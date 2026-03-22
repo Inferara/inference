@@ -45,7 +45,7 @@
     local.get $__frame_ptr
     local.set $v
     local.get $v
-    call $Vec2__sum
+    call $Vec2.sum
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -81,7 +81,7 @@
     local.get $__frame_ptr
     local.set $v
     local.get $v
-    call $Vec2__get_x
+    call $Vec2.get_x
     call $double
     local.get $__frame_ptr
     i32.const 16
@@ -108,11 +108,11 @@
     local.get $__frame_ptr
     i32.const 4
     i32.const 6
-    call $Vec2__new
+    call $Vec2.new
     local.get $__frame_ptr
     local.set $v
     local.get $v
-    call $Vec2__get_y
+    call $Vec2.get_y
     call $double
     local.get $__frame_ptr
     i32.const 16
@@ -125,13 +125,13 @@
     global.set 0
     unreachable
   )
-  (func $Vec2__get_x (;4;) (type 4) (param $self i32) (result i32)
+  (func $Vec2.get_x (;4;) (type 4) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Vec2__get_y (;5;) (type 5) (param $self i32) (result i32)
+  (func $Vec2.get_y (;5;) (type 5) (param $self i32) (result i32)
     local.get $self
     i32.const 4
     i32.add
@@ -139,16 +139,16 @@
     return
     unreachable
   )
-  (func $Vec2__sum (;6;) (type 6) (param $self i32) (result i32)
+  (func $Vec2.sum (;6;) (type 6) (param $self i32) (result i32)
     local.get $self
-    call $Vec2__get_x
+    call $Vec2.get_x
     local.get $self
-    call $Vec2__get_y
+    call $Vec2.get_y
     i32.add
     return
     unreachable
   )
-  (func $Vec2__new (;7;) (type 7) (param $sret i32) (param $x i32) (param $y i32)
+  (func $Vec2.new (;7;) (type 7) (param $sret i32) (param $x i32) (param $y i32)
     local.get $sret
     local.get $x
     i32.store

@@ -46,11 +46,11 @@
     local.get $__frame_ptr
     i32.const 3
     i32.const 7
-    call $Point__new
+    call $Point.new
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -76,11 +76,11 @@
     local.get $__frame_ptr
     i32.const 3
     i32.const 7
-    call $Point__new
+    call $Point.new
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -104,13 +104,13 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    call $Point__origin
+    call $Point.origin
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     i32.add
     local.get $__frame_ptr
     i32.const 16
@@ -126,7 +126,7 @@
   (func $test_sum_of (;3;) (type 3) (result i32)
     i32.const 10
     i32.const 20
-    call $Point__sum_of
+    call $Point.sum_of
     return
     unreachable
   )
@@ -144,14 +144,14 @@
     local.get $__frame_ptr
     i32.const 5
     i32.const 15
-    call $Point__new
+    call $Point.new
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     i32.const 1
     i32.const 2
-    call $Point__sum_of
+    call $Point.sum_of
     i32.add
     local.get $__frame_ptr
     i32.const 16
@@ -178,7 +178,7 @@
     local.get $__frame_ptr
     local.get $x
     local.get $y
-    call $Point__new
+    call $Point.new
     local.get $__frame_ptr
     local.set $p
     local.get $sret
@@ -200,7 +200,7 @@
     local.get $sret
     local.get $x
     local.get $y
-    call $Point__new
+    call $Point.new
     return
     unreachable
   )
@@ -222,7 +222,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -252,7 +252,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -282,7 +282,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -312,7 +312,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -327,13 +327,13 @@
   (func $test_standalone (;11;) (type 11) (result i32)
     i32.const 1
     i32.const 2
-    call $Point__sum_of
+    call $Point.sum_of
     drop
     i32.const 42
     return
     unreachable
   )
-  (func $Point__new (;12;) (type 12) (param $sret i32) (param $x i32) (param $y i32)
+  (func $Point.new (;12;) (type 12) (param $sret i32) (param $x i32) (param $y i32)
     local.get $sret
     local.get $x
     i32.store
@@ -345,7 +345,7 @@
     return
     unreachable
   )
-  (func $Point__origin (;13;) (type 13) (param $sret i32)
+  (func $Point.origin (;13;) (type 13) (param $sret i32)
     local.get $sret
     i32.const 0
     i32.store
@@ -357,20 +357,20 @@
     return
     unreachable
   )
-  (func $Point__sum_of (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
+  (func $Point.sum_of (;14;) (type 14) (param $a i32) (param $b i32) (result i32)
     local.get $a
     local.get $b
     i32.add
     return
     unreachable
   )
-  (func $Point__get_x (;15;) (type 15) (param $self i32) (result i32)
+  (func $Point.get_x (;15;) (type 15) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Point__get_y (;16;) (type 16) (param $self i32) (result i32)
+  (func $Point.get_y (;16;) (type 16) (param $self i32) (result i32)
     local.get $self
     i32.const 4
     i32.add

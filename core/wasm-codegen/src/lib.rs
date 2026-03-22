@@ -134,7 +134,7 @@ pub fn codegen(
 ///
 /// 1. **Index registration** -- `build_func_name_to_idx` registers top-level
 ///    functions, then `build_method_name_to_idx` registers struct methods with
-///    mangled names (`TypeName__method_name`).
+///    mangled names (`TypeName.method_name`).
 /// 2. **Body compilation** -- top-level functions are compiled first, then
 ///    method bodies are compiled with `current_method_struct` set so that
 ///    `self` parameter handling (Phase 3+) knows which struct type is in scope.

@@ -328,7 +328,7 @@ Test organization:
 
 **Struct Parameters and Return Types**:
 - Struct-typed function parameters are registered with `TypeInfoKind::Struct(name)` after `resolve_custom_type()` resolves the AST `Custom` node
-- Functions returning a struct emit `ArrayReturnCallInExpressionPosition` (renamed to handle both arrays and structs) when the call appears in an unsupported expression position
+- Functions returning a struct emit `CompoundReturnCallInExpressionPosition` when the call appears in an unsupported expression position
 
 **Struct Definition Validation**:
 - Empty structs (no fields, no methods) emit `EmptyStruct`

@@ -802,7 +802,7 @@ impl TypeChecker {
                     )
                 {
                     self.errors
-                        .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                        .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
                             location: ctx.arena()[expr_id].location,
                         });
                 }
@@ -1102,7 +1102,7 @@ impl TypeChecker {
                         )
                     {
                         self.errors
-                            .push(TypeCheckError::ArrayReturnCallInExpressionPosition { location });
+                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition { location });
                     }
                     if let Some(index_type) = self.infer_expression(index, ctx) {
                         if !index_type.is_number() {
@@ -1152,7 +1152,7 @@ impl TypeChecker {
                         )
                     {
                         self.errors
-                            .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
                                 location,
                             });
                         return None;
@@ -2074,7 +2074,7 @@ impl TypeChecker {
             )
         {
             self.errors
-                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
+                .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
                     location: ctx.arena()[arg_expr_id].location,
                 });
         }

@@ -36,7 +36,7 @@
     local.get $__frame_ptr
     local.set $c
     local.get $c
-    call $Counter__get
+    call $Counter.get
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -67,9 +67,9 @@
     local.get $__frame_ptr
     local.set $c
     local.get $c
-    call $Counter__increment
+    call $Counter.increment
     local.get $c
-    call $Counter__get
+    call $Counter.get
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -101,9 +101,9 @@
     local.set $c
     local.get $c
     i32.const 5
-    call $Counter__add
+    call $Counter.add
     local.get $c
-    call $Counter__get
+    call $Counter.get
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -128,16 +128,16 @@
     memory.fill
     local.get $__frame_ptr
     i32.const 42
-    call $Counter__new
+    call $Counter.new
     local.get $__frame_ptr
     local.set $c
     local.get $c
-    call $Counter__increment
+    call $Counter.increment
     local.get $c
     i32.const 100
-    call $Counter__add
+    call $Counter.add
     local.get $c
-    call $Counter__get
+    call $Counter.get
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -162,17 +162,17 @@
     memory.fill
     local.get $__frame_ptr
     i32.const 0
-    call $Counter__new
+    call $Counter.new
     local.get $__frame_ptr
     local.set $c
     local.get $c
-    call $Counter__increment
+    call $Counter.increment
     local.get $c
-    call $Counter__increment
+    call $Counter.increment
     local.get $c
-    call $Counter__increment
+    call $Counter.increment
     local.get $c
-    call $Counter__get
+    call $Counter.get
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -184,13 +184,13 @@
     global.set 0
     unreachable
   )
-  (func $Counter__get (;5;) (type 5) (param $self i32) (result i32)
+  (func $Counter.get (;5;) (type 5) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Counter__increment (;6;) (type 6) (param $self i32)
+  (func $Counter.increment (;6;) (type 6) (param $self i32)
     (local $__frame_ptr i32)
     global.get 0
     i32.const 16
@@ -218,7 +218,7 @@
     i32.add
     global.set 0
   )
-  (func $Counter__add (;7;) (type 7) (param $self i32) (param $n i32)
+  (func $Counter.add (;7;) (type 7) (param $self i32) (param $n i32)
     (local $__frame_ptr i32)
     global.get 0
     i32.const 16
@@ -246,7 +246,7 @@
     i32.add
     global.set 0
   )
-  (func $Counter__new (;8;) (type 8) (param $sret i32) (param $v i32)
+  (func $Counter.new (;8;) (type 8) (param $sret i32) (param $v i32)
     local.get $sret
     local.get $v
     i32.store

@@ -1067,8 +1067,8 @@ mod codegen_validation_tests {
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Method codegen WASM is invalid: {e}"));
         assert!(
-            wasm_contains_bytes(wasm, b"Point__new"),
-            "WASM should contain mangled method name 'Point__new'"
+            wasm_contains_bytes(wasm, b"Point.new"),
+            "WASM should contain mangled method name 'Point.new'"
         );
     }
 
@@ -1082,8 +1082,8 @@ mod codegen_validation_tests {
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
-            wat.contains("Point__create"),
-            "WAT should contain mangled method name 'Point__create'\n{wat}"
+            wat.contains("Point.create"),
+            "WAT should contain mangled method name 'Point.create'\n{wat}"
         );
     }
 
@@ -1095,12 +1095,12 @@ mod codegen_validation_tests {
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Multiple methods codegen WASM is invalid: {e}"));
         assert!(
-            wasm_contains_bytes(wasm, b"Counter__zero"),
-            "WASM should contain mangled name 'Counter__zero'"
+            wasm_contains_bytes(wasm, b"Counter.zero"),
+            "WASM should contain mangled name 'Counter.zero'"
         );
         assert!(
-            wasm_contains_bytes(wasm, b"Counter__with_value"),
-            "WASM should contain mangled name 'Counter__with_value'"
+            wasm_contains_bytes(wasm, b"Counter.with_value"),
+            "WASM should contain mangled name 'Counter.with_value'"
         );
     }
 
@@ -1114,13 +1114,13 @@ mod codegen_validation_tests {
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
-            wat.contains("Point__origin"),
-            "WAT should contain mangled method name 'Point__origin'\n{wat}"
+            wat.contains("Point.origin"),
+            "WAT should contain mangled method name 'Point.origin'\n{wat}"
         );
         let origin_line = wat
             .lines()
-            .find(|line| line.contains("$Point__origin"))
-            .unwrap_or_else(|| panic!("No line with $Point__origin in WAT:\n{wat}"));
+            .find(|line| line.contains("$Point.origin"))
+            .unwrap_or_else(|| panic!("No line with $Point.origin in WAT:\n{wat}"));
         assert!(
             origin_line.contains("(param") && origin_line.contains("i32)"),
             "sret function should have an i32 param (sret pointer):\n{origin_line}"
@@ -1139,12 +1139,12 @@ mod codegen_validation_tests {
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Multi-struct method codegen WASM is invalid: {e}"));
         assert!(
-            wasm_contains_bytes(wasm, b"Point__origin"),
-            "WASM should contain mangled name 'Point__origin'"
+            wasm_contains_bytes(wasm, b"Point.origin"),
+            "WASM should contain mangled name 'Point.origin'"
         );
         assert!(
-            wasm_contains_bytes(wasm, b"Size__zero"),
-            "WASM should contain mangled name 'Size__zero'"
+            wasm_contains_bytes(wasm, b"Size.zero"),
+            "WASM should contain mangled name 'Size.zero'"
         );
     }
 
@@ -1161,8 +1161,8 @@ mod codegen_validation_tests {
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
-            wat.contains("Point__get_x"),
-            "WAT should contain mangled method name 'Point__get_x'\n{wat}"
+            wat.contains("Point.get_x"),
+            "WAT should contain mangled method name 'Point.get_x'\n{wat}"
         );
     }
 
@@ -1178,8 +1178,8 @@ mod codegen_validation_tests {
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
-            wat.contains("Counter__increment"),
-            "WAT should contain mangled method name 'Counter__increment'\n{wat}"
+            wat.contains("Counter.increment"),
+            "WAT should contain mangled method name 'Counter.increment'\n{wat}"
         );
     }
 
@@ -1192,7 +1192,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Immutable self method WASM is invalid: {e}"));
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
-        let get_x_func = extract_function_body(&wat, "Point__get_x");
+        let get_x_func = extract_function_body(&wat, "Point.get_x");
         assert!(
             !get_x_func.contains("memory.copy"),
             "Immutable self method should NOT have memory.copy (no frame copy):\n{get_x_func}"
@@ -1208,7 +1208,7 @@ mod codegen_validation_tests {
             .unwrap_or_else(|e| panic!("Mutable self method WASM is invalid: {e}"));
         let wat = wasmprinter::print_bytes(wasm)
             .unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
-        let set_value_func = extract_function_body(&wat, "Counter__set_value");
+        let set_value_func = extract_function_body(&wat, "Counter.set_value");
         assert!(
             set_value_func.contains("memory.copy"),
             "Mutable self method should have memory.copy (frame copy):\n{set_value_func}"

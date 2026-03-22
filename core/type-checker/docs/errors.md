@@ -788,7 +788,7 @@ fn test() {
 
 **Solution**: Assign the uzumaki to a variable first: `let a: [i32; 3] = @; take_arr(a);`
 
-### `ArrayReturnCallInExpressionPosition`
+### `CompoundReturnCallInExpressionPosition`
 
 A call to a compound-returning function (one that returns an array or struct) appears in an expression position other than a `let` binding or `return` statement.
 

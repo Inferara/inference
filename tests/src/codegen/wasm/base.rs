@@ -3315,6 +3315,7 @@ mod base_codegen_tests {
 
     #[test]
     fn method_assoc_test() {
+        cov_mark::check_count!(wasm_codegen_emit_associated_function_sret, 0);
         cov_mark::check_count!(wasm_codegen_emit_associated_function_call, 3);
         let test_name = "method_assoc";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -3451,6 +3452,7 @@ mod base_codegen_tests {
 
     #[test]
     fn method_return_struct_test() {
+        cov_mark::check_count!(wasm_codegen_emit_instance_method_sret, 0);
         cov_mark::check_count!(wasm_codegen_emit_instance_method_call, 10);
         let test_name = "method_return_struct";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -3805,6 +3807,172 @@ mod base_codegen_tests {
             result, 12,
             "double(v.get_y()) should return 12 (6 * 2) via associated fn constructor + method + top-level fn"
         );
+    }
+
+    // --- Method codegen: method returning array (sret + instance method) ---
+
+    #[test]
+    fn method_array_return_test() {
+        let test_name = "method_array_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_array_return_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_array_return";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_first: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_to_array_first")
+            .expect("Failed to get 'test_to_array_first'");
+        let result = test_first
+            .call(&mut store, ())
+            .expect("test_to_array_first failed");
+        assert_eq!(result, 10, "p.to_array()[0] should return 10 (p.x)");
+
+        let test_second: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_to_array_second")
+            .expect("Failed to get 'test_to_array_second'");
+        let result = test_second
+            .call(&mut store, ())
+            .expect("test_to_array_second failed");
+        assert_eq!(result, 20, "p.to_array()[1] should return 20 (p.y)");
+    }
+
+    // --- Method codegen: i64 struct fields ---
+
+    #[test]
+    fn method_i64_fields_test() {
+        let test_name = "method_i64_fields";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_i64_fields_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_i64_fields";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_get_a: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_get_a")
+            .expect("Failed to get 'test_get_a'");
+        let result = test_get_a.call(&mut store, ()).expect("test_get_a failed");
+        assert_eq!(result, 100i64, "p.get_a() should return 100");
+
+        let test_get_b: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_get_b")
+            .expect("Failed to get 'test_get_b'");
+        let result = test_get_b.call(&mut store, ()).expect("test_get_b failed");
+        assert_eq!(result, 200i64, "p.get_b() should return 200");
+
+        let test_sum: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_sum")
+            .expect("Failed to get 'test_sum'");
+        let result = test_sum.call(&mut store, ()).expect("test_sum failed");
+        assert_eq!(result, 300i64, "p.sum() should return 300 (100 + 200)");
+    }
+
+    // --- Method codegen: three-field struct ---
+
+    #[test]
+    fn method_three_fields_test() {
+        let test_name = "method_three_fields";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn method_three_fields_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "method_three_fields";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_get_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_get_x")
+            .expect("Failed to get 'test_get_x'");
+        let result = test_get_x.call(&mut store, ()).expect("test_get_x failed");
+        assert_eq!(result, 1, "v.get_x() should return 1");
+
+        let test_get_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_get_y")
+            .expect("Failed to get 'test_get_y'");
+        let result = test_get_y.call(&mut store, ()).expect("test_get_y failed");
+        assert_eq!(result, 2, "v.get_y() should return 2");
+
+        let test_get_z: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_get_z")
+            .expect("Failed to get 'test_get_z'");
+        let result = test_get_z.call(&mut store, ()).expect("test_get_z failed");
+        assert_eq!(result, 3, "v.get_z() should return 3");
+
+        let test_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_sum")
+            .expect("Failed to get 'test_sum'");
+        let result = test_sum.call(&mut store, ()).expect("test_sum failed");
+        assert_eq!(result, 6, "v.sum() should return 6 (1 + 2 + 3)");
     }
 
 }
@@ -4517,6 +4685,66 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "method_cross_call");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_array_return_wasm() {
+        let dir = base_test_dir().join("method_array_return");
+        let source_code = std::fs::read_to_string(dir.join("method_array_return.inf"))
+            .expect("Failed to read method_array_return.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_array_return.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_array_return");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_i64_fields_wasm() {
+        let dir = base_test_dir().join("method_i64_fields");
+        let source_code = std::fs::read_to_string(dir.join("method_i64_fields.inf"))
+            .expect("Failed to read method_i64_fields.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_i64_fields.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_i64_fields");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_method_three_fields_wasm() {
+        let dir = base_test_dir().join("method_three_fields");
+        let source_code = std::fs::read_to_string(dir.join("method_three_fields.inf"))
+            .expect("Failed to read method_three_fields.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("method_three_fields.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "method_three_fields");
     }
 
 }

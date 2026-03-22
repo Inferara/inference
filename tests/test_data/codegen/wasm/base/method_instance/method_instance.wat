@@ -47,7 +47,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -83,7 +83,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -119,7 +119,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__sum
+    call $Point.sum
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -156,7 +156,7 @@
     local.set $p
     local.get $p
     i32.const 5
-    call $Point__sum_with
+    call $Point.sum_with
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -192,7 +192,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.set $x
     local.get $x
     local.get $__frame_ptr
@@ -230,7 +230,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     drop
     i32.const 42
     local.get $__frame_ptr
@@ -268,9 +268,9 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $p
-    call $Point__get_y
+    call $Point.get_y
     i32.add
     local.get $__frame_ptr
     i32.const 16
@@ -301,7 +301,7 @@
     local.get $__frame_ptr
     local.set $p
     local.get $p
-    call $Point__get_x
+    call $Point.get_x
     local.get $__frame_ptr
     i32.const 16
     i32.add
@@ -313,13 +313,13 @@
     global.set 0
     unreachable
   )
-  (func $Point__get_x (;8;) (type 8) (param $self i32) (result i32)
+  (func $Point.get_x (;8;) (type 8) (param $self i32) (result i32)
     local.get $self
     i32.load
     return
     unreachable
   )
-  (func $Point__get_y (;9;) (type 9) (param $self i32) (result i32)
+  (func $Point.get_y (;9;) (type 9) (param $self i32) (result i32)
     local.get $self
     i32.const 4
     i32.add
@@ -327,7 +327,7 @@
     return
     unreachable
   )
-  (func $Point__sum (;10;) (type 10) (param $self i32) (result i32)
+  (func $Point.sum (;10;) (type 10) (param $self i32) (result i32)
     local.get $self
     i32.load
     local.get $self
@@ -338,7 +338,7 @@
     return
     unreachable
   )
-  (func $Point__sum_with (;11;) (type 11) (param $self i32) (param $extra i32) (result i32)
+  (func $Point.sum_with (;11;) (type 11) (param $self i32) (param $extra i32) (result i32)
     local.get $self
     i32.load
     local.get $self

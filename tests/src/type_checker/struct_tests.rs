@@ -605,6 +605,29 @@ mod method_call_chain {
             );
         }
     }
+
+    #[test]
+    fn method_chain_on_associated_function_return_errors() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    return Point { x: x, y: y };
+                }
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test() -> i32 {
+                return Point::new(1, 2).get_x();
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Chaining method calls on associated function return should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("cannot chain method calls on compound-returning functions"),
+            "Error should mention compound-returning chain restriction: {error_msg}"
+        );
+    }
 }
 
 mod compound_return_call_in_assignment {

@@ -1,0 +1,29 @@
+struct BigPair {
+    a: i64;
+    b: i64;
+
+    fn get_a(self) -> i64 {
+        return self.a;
+    }
+    fn get_b(self) -> i64 {
+        return self.b;
+    }
+    fn sum(self) -> i64 {
+        return self.a + self.b;
+    }
+}
+
+pub fn test_get_a() -> i64 {
+    let p: BigPair = BigPair { a: 100, b: 200 };
+    return p.get_a();
+}
+
+pub fn test_get_b() -> i64 {
+    let p: BigPair = BigPair { a: 100, b: 200 };
+    return p.get_b();
+}
+
+pub fn test_sum() -> i64 {
+    let p: BigPair = BigPair { a: 100, b: 200 };
+    return p.sum();
+}
