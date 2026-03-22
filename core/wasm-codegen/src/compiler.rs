@@ -801,37 +801,37 @@ impl Compiler {
                         _ => {}
                     }
                 }
-                ArgKind::SelfRef { is_mut } => {
-                    if *is_mut {
-                        let struct_name = method_struct_name.expect(
-                            "ArgKind::SelfRef encountered but no method_struct_name provided; \
-                             this indicates a bug in traverse_t_ast_with_compiler",
-                        );
-                        if let Some(struct_info) = ctx.lookup_struct(struct_name) {
-                            let (total_size, field_slots) =
-                                compute_struct_field_layout(&struct_info);
-                            if total_size > 0 {
-                                let max_field_align = field_slots
-                                    .iter()
-                                    .map(|f| element_size(&f.type_kind))
-                                    .max()
-                                    .unwrap_or(1);
-                                let aligned_offset = align_to(current_offset, max_field_align);
-                                let slot = StructSlot {
-                                    offset: aligned_offset,
-                                    total_size,
-                                    fields: field_slots,
-                                };
-                                struct_offsets.insert("self".to_string(), slot);
-                                current_offset =
-                                    aligned_offset.checked_add(total_size).expect(
-                                        "Frame offset overflow: struct allocation exceeds u32::MAX",
-                                    );
-                            }
+                ArgKind::SelfRef { is_mut }
+                    if *is_mut =>
+                {
+                    let struct_name = method_struct_name.expect(
+                        "ArgKind::SelfRef encountered but no method_struct_name provided; \
+                         this indicates a bug in traverse_t_ast_with_compiler",
+                    );
+                    if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                        let (total_size, field_slots) =
+                            compute_struct_field_layout(&struct_info);
+                        if total_size > 0 {
+                            let max_field_align = field_slots
+                                .iter()
+                                .map(|f| element_size(&f.type_kind))
+                                .max()
+                                .unwrap_or(1);
+                            let aligned_offset = align_to(current_offset, max_field_align);
+                            let slot = StructSlot {
+                                offset: aligned_offset,
+                                total_size,
+                                fields: field_slots,
+                            };
+                            struct_offsets.insert("self".to_string(), slot);
+                            current_offset =
+                                aligned_offset.checked_add(total_size).expect(
+                                    "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                );
                         }
                     }
-                    // Immutable self: no frame slot needed -- reads directly from caller pointer
                 }
+                // Immutable self or non-self args: no frame slot needed
                 _ => {}
             }
         }
