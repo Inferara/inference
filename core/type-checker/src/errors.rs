@@ -567,7 +567,6 @@ pub enum TypeCheckError {
         "{location}: cannot assign from a compound-returning function call; use a new variable binding instead"
     )]
     CompoundReturnCallInAssignment { location: Location },
-
 }
 
 impl TypeCheckError {
@@ -1431,5 +1430,4 @@ mod tests {
             "1:5: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
         );
     }
-
 }

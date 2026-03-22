@@ -324,7 +324,7 @@ impl Compiler {
     /// Builds the method name-to-WASM-index map from struct definitions.
     ///
     /// For each struct that has methods, this function:
-    /// 1. Computes a mangled name `"{struct_name}__{method_name}"` for each method
+    /// 1. Computes a mangled name `"{struct_name}.{method_name}"` for each method
     /// 2. Inserts the mangled name into `func_name_to_idx` with the next available index
     /// 3. Records the `(struct_name, method_name) -> mangled_name` mapping
     /// 4. Detects sret return types and populates `func_array_returns`/`func_struct_returns`

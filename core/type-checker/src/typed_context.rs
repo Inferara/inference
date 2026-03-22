@@ -27,6 +27,7 @@ use rustc_hash::FxHashMap;
 #[derive(Debug, Clone)]
 pub struct MethodMetadata {
     pub name: String,
+    /// Parameter types, excluding `self`. See `has_self` for whether the method takes a receiver.
     pub param_types: Vec<TypeInfo>,
     pub return_type: TypeInfo,
     pub has_self: bool,
