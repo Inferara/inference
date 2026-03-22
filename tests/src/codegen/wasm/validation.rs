@@ -1247,7 +1247,8 @@ mod codegen_validation_tests {
         let mut depth = 0i32;
         let mut lines = Vec::new();
         for line in wat.lines() {
-            if line.contains(&marker) && line.contains("(func") {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("(func ") && trimmed.contains(&marker) {
                 in_func = true;
             }
             if in_func {

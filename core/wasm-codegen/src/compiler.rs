@@ -1378,10 +1378,9 @@ impl Compiler {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
             }
             Expr::TypeMemberAccess { .. } => {
-                panic!(
-                    "TypeMemberAccess (Type::member) is not a standalone expression; \
-                     it should only appear as the callee of a FunctionCall. \
-                     If this is reached, it indicates a compiler bug."
+                todo!(
+                    "TypeMemberAccess expressions (including enum variant access like \
+                     `Enum::Variant`) are not yet supported in wasm codegen"
                 );
             }
             Expr::FunctionCall { function, args, .. } => {
