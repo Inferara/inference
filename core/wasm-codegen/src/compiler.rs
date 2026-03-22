@@ -306,6 +306,11 @@ impl Compiler {
             let method_name = arena.def_name(*def_id).to_string();
             let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
 
+            assert!(
+                !self.func_name_to_idx.contains_key(&mangled_name),
+                "Mangled method name '{mangled_name}' collides with an existing function; \
+                 top-level functions must not use the `TypeName__method_name` naming pattern"
+            );
             self.func_name_to_idx
                 .insert(mangled_name.clone(), base_idx + i as u32);
             self.method_mangled_names.insert(
@@ -1640,8 +1645,9 @@ impl Compiler {
             let sret_idx = sret_local.unwrap_or_else(|| {
                 panic!(
                     "Instance method call to compound-returning method '{mangled_name}' \
-                     in expression position without sret destination. This requires \
-                     temporary frame allocation (Phase 7 of issue #162)."
+                     in expression position without sret destination. \
+                     Compound-returning calls are only supported in variable initialization \
+                     and return positions."
                 )
             });
             self.func().instruction(&Instruction::LocalGet(sret_idx));
@@ -1740,8 +1746,9 @@ impl Compiler {
             let sret_idx = sret_local.unwrap_or_else(|| {
                 panic!(
                     "Associated function call to compound-returning method '{mangled_name}' \
-                     in expression position without sret destination. This requires \
-                     temporary frame allocation (Phase 7 of issue #162)."
+                     in expression position without sret destination. \
+                     Compound-returning calls are only supported in variable initialization \
+                     and return positions."
                 )
             });
             self.func().instruction(&Instruction::LocalGet(sret_idx));

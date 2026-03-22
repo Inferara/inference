@@ -1,0 +1,48 @@
+struct Counter {
+    value: i32;
+
+    fn get(self) -> i32 {
+        return self.value;
+    }
+    fn increment(mut self) {
+        self.value = self.value + 1;
+    }
+    fn add(mut self, n: i32) {
+        self.value = self.value + n;
+    }
+    fn new(v: i32) -> Counter {
+        return Counter { value: v };
+    }
+}
+
+pub fn test_get() -> i32 {
+    let c: Counter = Counter { value: 10 };
+    return c.get();
+}
+
+pub fn test_increment_value_semantics() -> i32 {
+    let c: Counter = Counter { value: 10 };
+    c.increment();
+    return c.get();
+}
+
+pub fn test_add_value_semantics() -> i32 {
+    let c: Counter = Counter { value: 10 };
+    c.add(5);
+    return c.get();
+}
+
+pub fn test_mut_self_does_not_affect_caller() -> i32 {
+    let c: Counter = Counter::new(42);
+    c.increment();
+    c.add(100);
+    return c.get();
+}
+
+pub fn test_multiple_increments() -> i32 {
+    let c: Counter = Counter::new(0);
+    c.increment();
+    c.increment();
+    c.increment();
+    return c.get();
+}

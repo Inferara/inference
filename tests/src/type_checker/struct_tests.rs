@@ -606,3 +606,305 @@ mod method_call_chain {
         }
     }
 }
+
+mod compound_return_call_in_assignment {
+    use super::*;
+
+    /// Verifies that assigning from a plain function returning a struct is rejected.
+    #[test]
+    fn plain_function_returning_struct() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make_point(x: i32, y: i32) -> Point {
+                return Point { x: x, y: y };
+            }
+            fn test() {
+                let mut p: Point = Point { x: 0, y: 0 };
+                p = make_point(1, 2);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Assigning from a compound-returning function should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("cannot assign from a compound-returning function call"),
+            "Error should mention compound-returning assignment restriction: {error_msg}"
+        );
+    }
+
+    /// Verifies that assigning from an instance method returning a struct is rejected.
+    #[test]
+    fn instance_method_returning_struct() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    return Point { x: self.x + dx, y: self.y + dy };
+                }
+            }
+            fn test() {
+                let mut p: Point = Point { x: 1, y: 2 };
+                p = p.translate(5, 3);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Assigning from a compound-returning instance method should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("cannot assign from a compound-returning function call"),
+            "Error should mention compound-returning assignment restriction: {error_msg}"
+        );
+    }
+
+    /// Verifies that assigning from an associated function returning a struct is rejected.
+    #[test]
+    fn associated_function_returning_struct() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    return Point { x: x, y: y };
+                }
+            }
+            fn test() {
+                let mut p: Point = Point { x: 0, y: 0 };
+                p = Point::new(1, 2);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Assigning from a compound-returning associated function should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("cannot assign from a compound-returning function call"),
+            "Error should mention compound-returning assignment restriction: {error_msg}"
+        );
+    }
+}
+
+mod compound_return_call_in_expression_position {
+    use super::*;
+
+    #[test]
+    fn instance_method_returning_struct_as_standalone_expression() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    let p: Point = Point { x: self.x + dx, y: self.y + dy };
+                    return p;
+                }
+            }
+            fn test(p: Point) {
+                p.translate(5, 3);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Standalone instance method call returning struct should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("compound-returning function calls can only appear"),
+            "Error should mention compound-returning restriction: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn associated_function_returning_struct_as_standalone_expression() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    let p: Point = Point { x: x, y: y };
+                    return p;
+                }
+            }
+            fn test() {
+                Point::new(1, 2);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Standalone associated function call returning struct should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("compound-returning function calls can only appear"),
+            "Error should mention compound-returning restriction: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn instance_method_returning_struct_as_argument() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    let p: Point = Point { x: self.x + dx, y: self.y + dy };
+                    return p;
+                }
+            }
+            fn consume(p: Point) -> i32 { return p.x; }
+            fn test(p: Point) -> i32 {
+                return consume(p.translate(5, 3));
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Instance method returning struct passed as argument should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("compound-returning function calls can only appear"),
+            "Error should mention compound-returning restriction: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn associated_function_returning_struct_as_argument() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    let p: Point = Point { x: x, y: y };
+                    return p;
+                }
+            }
+            fn consume(p: Point) -> i32 { return p.x; }
+            fn test() -> i32 {
+                return consume(Point::new(1, 2));
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Associated function returning struct passed as argument should fail");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("compound-returning function calls can only appear"),
+            "Error should mention compound-returning restriction: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn instance_method_returning_primitive_as_standalone_is_ok() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test(p: Point) {
+                p.get_x();
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Instance method returning primitive as standalone should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn associated_function_returning_primitive_as_standalone_is_ok() {
+        let source = r#"
+            struct Math {
+                fn add(a: i32, b: i32) -> i32 { return a + b; }
+            }
+            fn test() {
+                Math::add(1, 2);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Associated function returning primitive as standalone should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn instance_method_returning_struct_in_let_binding_is_ok() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    let p: Point = Point { x: self.x + dx, y: self.y + dy };
+                    return p;
+                }
+            }
+            fn test(p: Point) {
+                let q: Point = p.translate(5, 3);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Instance method returning struct in let binding should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn associated_function_returning_struct_in_let_binding_is_ok() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    let p: Point = Point { x: x, y: y };
+                    return p;
+                }
+            }
+            fn test() {
+                let p: Point = Point::new(1, 2);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Associated function returning struct in let binding should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn instance_method_returning_struct_in_return_is_ok() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    let p: Point = Point { x: self.x + dx, y: self.y + dy };
+                    return p;
+                }
+            }
+            fn test(p: Point) -> Point {
+                return p.translate(5, 3);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Instance method returning struct in return should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn associated_function_returning_struct_in_return_is_ok() {
+        let source = r#"
+            struct Point {
+                x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    let p: Point = Point { x: x, y: y };
+                    return p;
+                }
+            }
+            fn test() -> Point {
+                return Point::new(1, 2);
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Associated function returning struct in return should succeed, got: {:?}",
+            result.err()
+        );
+    }
+}

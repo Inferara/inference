@@ -1516,18 +1516,14 @@ mod array_return_call_position {
     #[test]
     fn assignment_rejected() {
         let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; } fn test() -> i32 { let mut a: [i32; 3] = [0, 0, 0]; a = make(); return a[0]; }"#;
-        let result = try_type_check(source);
+        let Err(error) = try_type_check(source) else {
+            panic!("array-returning call in assignment should be rejected");
+        };
+        let msg = error.to_string();
         assert!(
-            result.is_err(),
-            "array-returning call in assignment should be rejected"
+            msg.contains("cannot assign from a compound-returning function call"),
+            "Error should mention compound-returning assignment restriction: {msg}"
         );
-        if let Err(error) = result {
-            let msg = error.to_string();
-            assert!(
-                msg.contains("let") && msg.contains("return"),
-                "Error should mention let/return: {msg}"
-            );
-        }
     }
 
     #[test]

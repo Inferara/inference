@@ -556,6 +556,17 @@ pub enum TypeCheckError {
         "{location}: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
     )]
     MethodCallChainOnCompoundReturn { location: Location },
+
+    /// Compound-returning function call used in assignment RHS.
+    ///
+    /// Functions returning arrays or structs use the sret calling convention,
+    /// which requires the caller to provide a destination pointer. Assignment
+    /// targets already have an address, but the codegen cannot wire it as an
+    /// sret destination. Use a fresh `let` binding instead.
+    #[error(
+        "{location}: cannot assign from a compound-returning function call; use a new variable binding instead"
+    )]
+    CompoundReturnCallInAssignment { location: Location },
 }
 
 impl TypeCheckError {
@@ -611,7 +622,8 @@ impl TypeCheckError {
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
             | TypeCheckError::DuplicateStructField { location, .. }
-            | TypeCheckError::MethodCallChainOnCompoundReturn { location, .. } => location,
+            | TypeCheckError::MethodCallChainOnCompoundReturn { location, .. }
+            | TypeCheckError::CompoundReturnCallInAssignment { location, .. } => location,
         }
     }
 }
@@ -1394,6 +1406,17 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: duplicate field `x` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_compound_return_call_in_assignment() {
+        let err = TypeCheckError::CompoundReturnCallInAssignment {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot assign from a compound-returning function call; use a new variable binding instead"
         );
     }
 }
