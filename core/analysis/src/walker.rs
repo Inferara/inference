@@ -5,8 +5,8 @@
 //! to access node data.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Stmt};
+use inference_ast::ids::{BlockId, DefId, ExprId, StmtId};
+use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
 use inference_type_checker::typed_context::TypedContext;
 
 /// Context passed to visitor callbacks during AST walking.
@@ -48,6 +48,83 @@ pub(crate) fn walk_function_bodies(
             assert!(walk_ctx.nondet_block_kind.is_none(), "nondet_block_kind leaked");
             walk_block(arena, body_id, &mut walk_ctx, visitor);
         });
+    }
+}
+
+/// Extracts top-level expressions from a statement and calls the callback
+/// for each one. Covers variable definitions, expression statements,
+/// assignments, returns, asserts, if conditions, and loop conditions.
+/// Does not recurse into sub-expressions.
+pub(crate) fn for_each_stmt_expr(
+    stmt: &Stmt,
+    callback: &mut dyn FnMut(ExprId),
+) {
+    match stmt {
+        Stmt::VarDef {
+            value: Some(expr_id),
+            ..
+        }
+        | Stmt::Expr(expr_id) => callback(*expr_id),
+        Stmt::Assign { left, right } => {
+            callback(*left);
+            callback(*right);
+        }
+        Stmt::Return { expr } | Stmt::Assert { expr } => callback(*expr),
+        Stmt::If { condition, .. } => callback(*condition),
+        Stmt::Loop {
+            condition: Some(cond_expr),
+            ..
+        } => callback(*cond_expr),
+        _ => {}
+    }
+}
+
+/// Recursively visits all sub-expressions in pre-order, calling `visitor`
+/// for every node including the root.
+pub(crate) fn walk_expr(
+    arena: &AstArena,
+    expr_id: ExprId,
+    visitor: &mut dyn FnMut(ExprId),
+) {
+    visitor(expr_id);
+    match &arena[expr_id].kind {
+        Expr::FunctionCall {
+            function, args, ..
+        } => {
+            walk_expr(arena, *function, visitor);
+            for (_, arg_expr) in args {
+                walk_expr(arena, *arg_expr, visitor);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            walk_expr(arena, *left, visitor);
+            walk_expr(arena, *right, visitor);
+        }
+        Expr::PrefixUnary { expr, .. }
+        | Expr::Parenthesized { expr }
+        | Expr::MemberAccess { expr, .. }
+        | Expr::TypeMemberAccess { expr, .. } => walk_expr(arena, *expr, visitor),
+        Expr::ArrayIndexAccess { array, index } => {
+            walk_expr(arena, *array, visitor);
+            walk_expr(arena, *index, visitor);
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for (_, field_expr) in fields {
+                walk_expr(arena, *field_expr, visitor);
+            }
+        }
+        Expr::ArrayLiteral { elements } => {
+            for elem in elements {
+                walk_expr(arena, *elem, visitor);
+            }
+        }
+        Expr::Identifier(_)
+        | Expr::NumberLiteral { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::StringLiteral { .. }
+        | Expr::UnitLiteral
+        | Expr::Uzumaki
+        | Expr::Type(_) => {}
     }
 }
 

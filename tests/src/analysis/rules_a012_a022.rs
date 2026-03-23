@@ -1,8 +1,7 @@
 /// Integration tests for analysis rules A012-A022.
 ///
 /// These rules were migrated from the type checker to the analysis phase:
-/// - A012: ArrayLiteralAsArgument
-/// - A013: StructLiteralAsArgument
+/// - A012: CompoundLiteralAsArgument (array and struct)
 /// - A014: ArrayUzumakiAsArgument
 /// - A015: CompoundLiteralInUnsupportedPosition
 /// - A016: CompoundReturnCallInExpressionPosition
@@ -35,7 +34,7 @@ mod analysis_rules_tests {
             .to_vec()
     }
 
-    // --- A012: ArrayLiteralAsArgument ---
+    // --- A012: CompoundLiteralAsArgument ---
 
     #[test]
     fn a012_array_literal_as_argument_rejected() {
@@ -46,10 +45,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a012 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::ArrayLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Array", .. }));
         assert!(
             has_a012,
-            "expected ArrayLiteralAsArgument, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Array), got: {errors:?}"
         );
     }
 
@@ -67,15 +66,13 @@ mod analysis_rules_tests {
             let has_a012 = errors
                 .errors()
                 .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::ArrayLiteralAsArgument { .. }));
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Array", .. }));
             assert!(
                 !has_a012,
                 "array variable as argument should NOT trigger A012, got: {errors}"
             );
         }
     }
-
-    // --- A013: StructLiteralAsArgument ---
 
     #[test]
     fn a013_struct_literal_as_argument_rejected() {
@@ -87,10 +84,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a013 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::StructLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Struct", .. }));
         assert!(
             has_a013,
-            "expected StructLiteralAsArgument, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Struct), got: {errors:?}"
         );
     }
 
@@ -109,10 +106,10 @@ mod analysis_rules_tests {
             let has_a013 = errors
                 .errors()
                 .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::StructLiteralAsArgument { .. }));
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Struct", .. }));
             assert!(
                 !has_a013,
-                "struct variable as argument should NOT trigger A013, got: {errors}"
+                "struct variable as argument should NOT trigger A012, got: {errors}"
             );
         }
     }
@@ -763,10 +760,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a012 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::ArrayLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Array", .. }));
         assert!(
             has_a012,
-            "expected ArrayLiteralAsArgument in if condition, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Array) in if condition, got: {errors:?}"
         );
     }
 
@@ -782,10 +779,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a012 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::ArrayLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Array", .. }));
         assert!(
             has_a012,
-            "expected ArrayLiteralAsArgument in loop condition, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Array) in loop condition, got: {errors:?}"
         );
     }
 
@@ -802,10 +799,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a013 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::StructLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Struct", .. }));
         assert!(
             has_a013,
-            "expected StructLiteralAsArgument in if condition, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Struct) in if condition, got: {errors:?}"
         );
     }
 
@@ -822,10 +819,10 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a013 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::StructLiteralAsArgument { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Struct", .. }));
         assert!(
             has_a013,
-            "expected StructLiteralAsArgument in loop condition, got: {errors:?}"
+            "expected CompoundLiteralAsArgument(Struct) in loop condition, got: {errors:?}"
         );
     }
 

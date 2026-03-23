@@ -1,11 +1,12 @@
 pub mod array_index_64bit;
-pub mod array_literal_as_argument;
 pub mod array_uzumaki_as_argument;
+pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
 pub mod break_outside_loop;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
 pub mod compound_return_call_position;
+pub mod dead_code;
 pub mod empty_enum_definition;
 pub mod empty_struct_definition;
 pub mod extern_function_call;
@@ -17,18 +18,18 @@ pub mod missing_return;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod standalone_uzumaki;
-pub mod struct_literal_as_argument;
 pub mod uzumaki_in_reassignment;
 pub mod uzumaki_outside_nondet_block;
 
 use array_index_64bit::ArrayIndex64Bit;
-use array_literal_as_argument::ArrayLiteralAsArgument;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
+use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
 use break_outside_loop::BreakOutsideLoop;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
 use compound_return_call_position::CompoundReturnCallPosition;
+use dead_code::DeadCode;
 use empty_enum_definition::EmptyEnumDefinition;
 use empty_struct_definition::EmptyStructDefinition;
 use extern_function_call::ExternFunctionCall;
@@ -40,7 +41,6 @@ use missing_return::MissingReturn;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use standalone_uzumaki::StandaloneUzumaki;
-use struct_literal_as_argument::StructLiteralAsArgument;
 use uzumaki_in_reassignment::UzumakiInReassignment;
 use uzumaki_outside_nondet_block::UzumakiOutsideNonDetBlock;
 
@@ -64,14 +64,14 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &EmptyEnumDefinition,
         &MethodNeverAccessesSelf,
         &EmptyStructDefinition,
-        &ArrayLiteralAsArgument,
-        &StructLiteralAsArgument,
+        &CompoundLiteralAsArgument,
         &ArrayUzumakiAsArgument,
         &CompoundLiteralPosition,
         &CompoundReturnCallPosition,
         &CompoundReturnCallAssignment,
         &MethodCallChainCompound,
         &ArrayIndex64Bit,
+        &DeadCode,
         &LiteralOutOfRange,
         &UzumakiInReassignment,
         &ExternFunctionCall,

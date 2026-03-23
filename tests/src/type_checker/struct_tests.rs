@@ -449,7 +449,7 @@ mod field_validation {
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
-            "struct literal as argument check migrated to analysis (A013), got: {:?}",
+            "struct literal as argument check migrated to analysis (A012), got: {:?}",
             result.err()
         );
     }

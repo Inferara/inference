@@ -94,11 +94,11 @@ pub enum AnalysisDiagnostic {
     #[error("struct `{name}` has no fields and no methods")]
     EmptyStructDefinition { name: String, location: Location },
 
-    #[error("array literals cannot be passed directly as function arguments; assign to a variable first")]
-    ArrayLiteralAsArgument { location: Location },
-
-    #[error("struct literal cannot be used directly as a function argument; assign to a variable first")]
-    StructLiteralAsArgument { location: Location },
+    #[error("{kind} literal cannot be used directly as a function argument; assign to a variable first")]
+    CompoundLiteralAsArgument {
+        kind: &'static str,
+        location: Location,
+    },
 
     #[error("array uzumaki (@) cannot be used as a function argument; assign to a variable first")]
     ArrayUzumakiAsArgument { location: Location },
@@ -117,6 +117,12 @@ pub enum AnalysisDiagnostic {
 
     #[error("cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first")]
     MethodCallChainOnCompoundReturn { location: Location },
+
+    #[error("unreachable code after `{terminator}`")]
+    DeadCode {
+        terminator: &'static str,
+        location: Location,
+    },
 
     #[error("array index must be a 32-bit integer type, found `{found}`")]
     ArrayIndex64Bit { found: String, location: Location },
@@ -153,13 +159,13 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::EmptyEnumDefinition { location, .. }
             | AnalysisDiagnostic::MethodNeverAccessesSelf { location, .. }
             | AnalysisDiagnostic::EmptyStructDefinition { location, .. }
-            | AnalysisDiagnostic::ArrayLiteralAsArgument { location }
-            | AnalysisDiagnostic::StructLiteralAsArgument { location }
+            | AnalysisDiagnostic::CompoundLiteralAsArgument { location, .. }
             | AnalysisDiagnostic::ArrayUzumakiAsArgument { location }
             | AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { location, .. }
             | AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { location }
             | AnalysisDiagnostic::CompoundReturnCallInAssignment { location }
             | AnalysisDiagnostic::MethodCallChainOnCompoundReturn { location }
+            | AnalysisDiagnostic::DeadCode { location, .. }
             | AnalysisDiagnostic::ArrayIndex64Bit { location, .. }
             | AnalysisDiagnostic::LiteralOutOfRange { location, .. }
             | AnalysisDiagnostic::UzumakiInReassignment { location }
@@ -182,14 +188,16 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::EmptyEnumDefinition { .. } => "A009",
             AnalysisDiagnostic::MethodNeverAccessesSelf { .. } => "A010",
             AnalysisDiagnostic::EmptyStructDefinition { .. } => "A011",
-            AnalysisDiagnostic::ArrayLiteralAsArgument { .. } => "A012",
-            AnalysisDiagnostic::StructLiteralAsArgument { .. } => "A013",
+            AnalysisDiagnostic::CompoundLiteralAsArgument { .. } => "A012",
+            // A013: merged into A012 (CompoundLiteralAsArgument)
             AnalysisDiagnostic::ArrayUzumakiAsArgument { .. } => "A014",
             AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. } => "A015",
             AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { .. } => "A016",
             AnalysisDiagnostic::CompoundReturnCallInAssignment { .. } => "A017",
             AnalysisDiagnostic::MethodCallChainOnCompoundReturn { .. } => "A018",
             AnalysisDiagnostic::ArrayIndex64Bit { .. } => "A019",
+            AnalysisDiagnostic::DeadCode { .. } => "A020",
+            // A021: reserved for future use
             AnalysisDiagnostic::LiteralOutOfRange { .. } => "A022",
             AnalysisDiagnostic::UzumakiInReassignment { .. } => "A023",
             AnalysisDiagnostic::ExternFunctionCall { .. } => "A024",

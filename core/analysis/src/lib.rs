@@ -28,13 +28,16 @@
 //! - A010: Method declares `self` but never accesses it
 //! - A011: Struct definition with no fields and no methods
 //!
+//! ### Dead Code (A020)
+//!
+//! - A020: Unreachable code after `return` or `break`
+//!
 //! ### Codegen Restrictions (A012–A019, A022–A024)
 //!
 //! These rules describe constructs that are valid in the type system but cannot
 //! be lowered by the current code generator.
 //!
-//! - A012: Array literal passed directly as a function argument
-//! - A013: Struct literal passed directly as a function argument
+//! - A012: Compound literal (array or struct) passed directly as a function argument
 //! - A014: Array uzumaki passed directly as a function argument
 //! - A015: Compound literal (array or struct) in an unsupported expression position
 //! - A016: Compound-returning function call in a general expression position
@@ -129,14 +132,14 @@ mod tests {
             AnalysisDiagnostic::EmptyEnumDefinition { name: "E".to_string(), location: dummy_location() },
             AnalysisDiagnostic::MethodNeverAccessesSelf { struct_name: "S".to_string(), method_name: "m".to_string(), location: dummy_location() },
             AnalysisDiagnostic::EmptyStructDefinition { name: "S".to_string(), location: dummy_location() },
-            AnalysisDiagnostic::ArrayLiteralAsArgument { location: dummy_location() },
-            AnalysisDiagnostic::StructLiteralAsArgument { location: dummy_location() },
+            AnalysisDiagnostic::CompoundLiteralAsArgument { kind: "Array", location: dummy_location() },
             AnalysisDiagnostic::ArrayUzumakiAsArgument { location: dummy_location() },
             AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { kind: "struct", location: dummy_location() },
             AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { location: dummy_location() },
             AnalysisDiagnostic::CompoundReturnCallInAssignment { location: dummy_location() },
             AnalysisDiagnostic::MethodCallChainOnCompoundReturn { location: dummy_location() },
             AnalysisDiagnostic::ArrayIndex64Bit { found: "i64".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::DeadCode { terminator: "return", location: dummy_location() },
             AnalysisDiagnostic::LiteralOutOfRange { value: "256".to_string(), type_name: "u8".to_string(), min: 0, max: 255, location: dummy_location() },
             AnalysisDiagnostic::UzumakiInReassignment { location: dummy_location() },
             AnalysisDiagnostic::ExternFunctionCall { name: "print".to_string(), location: dummy_location() },

@@ -76,19 +76,29 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
 }
 
 /// Checks whether a block returns on all code paths.
+///
+/// Scans all statements in order. If any statement is a definitive terminator
+/// (return, if-else where both branches return, infinite loop that returns or
+/// has no break), the block returns on all paths. Statements after a terminator
+/// are dead code but do not affect the return analysis.
 fn returns_on_all_paths(arena: &AstArena, block_id: BlockId) -> bool {
     let block = &arena[block_id];
-    let Some(last_stmt_id) = block.stmts.last() else {
-        return false;
-    };
-    match &arena[*last_stmt_id].kind {
+    for &stmt_id in &block.stmts {
+        if stmt_returns_on_all_paths(arena, stmt_id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_returns_on_all_paths(arena: &AstArena, stmt_id: StmtId) -> bool {
+    match &arena[stmt_id].kind {
+        Stmt::Return { .. } => true,
         Stmt::If {
             then_block,
             else_block: Some(else_id),
             ..
         } => returns_on_all_paths(arena, *then_block) && returns_on_all_paths(arena, *else_id),
-        // Explicit return — control never falls through
-        Stmt::Return { .. } => true,
         Stmt::Loop {
             condition: None,
             body,

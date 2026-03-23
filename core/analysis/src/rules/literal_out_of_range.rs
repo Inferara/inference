@@ -19,90 +19,36 @@ crate::rule! {
     pub struct LiteralOutOfRange;
     fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
         let mut errors = Vec::new();
+        let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
-            visit_stmt(ctx, &ctx.arena()[stmt_id].kind, &mut errors);
+            let stmt = &arena[stmt_id].kind;
+
+            if let Stmt::ConstDef(def_id) = stmt
+                && let inference_ast::nodes::Def::Constant { value, .. } = &arena[*def_id].kind
+            {
+                check_number_literal(ctx, *value, &mut errors);
+            }
+
+            walker::for_each_stmt_expr(stmt, &mut |expr_id| {
+                walker::walk_expr(arena, expr_id, &mut |sub_id| {
+                    check_number_literal(ctx, sub_id, &mut errors);
+                });
+            });
         });
         errors
     }
 }
 
-fn visit_stmt(
-    ctx: &TypedContext,
-    stmt: &Stmt,
-    errors: &mut Vec<AnalysisDiagnostic>,
-) {
-    match stmt {
-        Stmt::VarDef { value: Some(expr_id), .. } | Stmt::Expr(expr_id) => {
-            check_expr(ctx, *expr_id, errors);
-        }
-        Stmt::Assign { left, right } => {
-            check_expr(ctx, *left, errors);
-            check_expr(ctx, *right, errors);
-        }
-        Stmt::Return { expr } | Stmt::Assert { expr } => check_expr(ctx, *expr, errors),
-        Stmt::ConstDef(def_id) => {
-            if let inference_ast::nodes::Def::Constant { value, .. } = &ctx.arena()[*def_id].kind {
-                check_expr(ctx, *value, errors);
-            }
-        }
-        Stmt::If { condition, .. } => {
-            check_expr(ctx, *condition, errors);
-        }
-        Stmt::Loop { condition: Some(cond_expr), .. } => {
-            check_expr(ctx, *cond_expr, errors);
-        }
-        _ => {}
-    }
-}
-
-fn check_expr(
+fn check_number_literal(
     ctx: &TypedContext,
     expr_id: ExprId,
     errors: &mut Vec<AnalysisDiagnostic>,
 ) {
     let arena = ctx.arena();
-    match &arena[expr_id].kind {
-        Expr::NumberLiteral { value } => {
-            if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
-                validate_literal_range(value, &ti.kind, arena[expr_id].location, errors);
-            }
-        }
-        Expr::FunctionCall { function, args, .. } => {
-            check_expr(ctx, *function, errors);
-            for (_, arg_expr) in args {
-                check_expr(ctx, *arg_expr, errors);
-            }
-        }
-        Expr::Binary { left, right, .. } => {
-            check_expr(ctx, *left, errors);
-            check_expr(ctx, *right, errors);
-        }
-        Expr::PrefixUnary { expr, .. }
-        | Expr::Parenthesized { expr }
-        | Expr::MemberAccess { expr, .. }
-        | Expr::TypeMemberAccess { expr, .. } => {
-            check_expr(ctx, *expr, errors);
-        }
-        Expr::ArrayIndexAccess { array, index } => {
-            check_expr(ctx, *array, errors);
-            check_expr(ctx, *index, errors);
-        }
-        Expr::StructLiteral { fields, .. } => {
-            for (_, field_expr) in fields {
-                check_expr(ctx, *field_expr, errors);
-            }
-        }
-        Expr::ArrayLiteral { elements } => {
-            for elem in elements {
-                check_expr(ctx, *elem, errors);
-            }
-        }
-        Expr::Identifier(_)
-        | Expr::BoolLiteral { .. }
-        | Expr::StringLiteral { .. }
-        | Expr::UnitLiteral
-        | Expr::Uzumaki
-        | Expr::Type(_) => {}
+    if let Expr::NumberLiteral { value } = &arena[expr_id].kind
+        && let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id))
+    {
+        validate_literal_range(value, &ti.kind, arena[expr_id].location, errors);
     }
 }
 
