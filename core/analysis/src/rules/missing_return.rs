@@ -87,8 +87,8 @@ fn returns_on_all_paths(arena: &AstArena, block_id: BlockId) -> bool {
             else_block: Some(else_id),
             ..
         } => returns_on_all_paths(arena, *then_block) && returns_on_all_paths(arena, *else_id),
-        // Infinite loop — control never falls through, so considered "returning"
-        Stmt::Return { .. } | Stmt::Loop { condition: None, .. } => true,
+        // Explicit return — control never falls through
+        Stmt::Return { .. } => true,
         Stmt::Block(inner) => returns_on_all_paths(arena, *inner),
         _ => false,
     }

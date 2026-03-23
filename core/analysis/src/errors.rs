@@ -69,7 +69,7 @@ pub enum AnalysisDiagnostic {
         block_kind: &'static str,
     },
 
-    #[error("uzumaki (@) is only valid inside a non-deterministic block (forall, exists, unique); move it inside a non-deterministic block")]
+    #[error("uzumaki (@) is only valid inside a non-deterministic block (forall, exists, unique, assume); move it inside a non-deterministic block")]
     UzumakiOutsideNonDetBlock { location: Location },
 
     #[error("function `{function_name}` has return type but not all code paths return a value")]

@@ -2252,9 +2252,11 @@ impl Compiler {
             let struct_info = ctx
                 .lookup_struct(struct_name)
                 .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
-            let (_, computed_fields) = compute_struct_field_layout(&struct_info);
-            for field in &computed_fields {
-                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+            if !struct_info.fields.is_empty() {
+                let (_, computed_fields) = compute_struct_field_layout(&struct_info);
+                for field in &computed_fields {
+                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+                }
             }
         } else {
             for field in &field_slots {

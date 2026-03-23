@@ -240,7 +240,7 @@ mod analysis_rules_tests {
     }
 
     #[test]
-    fn a007_infinite_loop_counts_as_returning() {
+    fn a007_loop_with_break_does_not_count_as_returning() {
         let source = r#"
             fn main() -> i32 {
                 loop {
@@ -248,11 +248,13 @@ mod analysis_rules_tests {
                 }
             }
         "#;
-        let result = analyze(source);
+        let errors = expect_errors(source);
+        let has_missing_return = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. }));
         assert!(
-            result.is_ok(),
-            "infinite loop should count as 'returning', got: {:?}",
-            result.err()
+            has_missing_return,
+            "loop with break can fall through, should report MissingReturn, got: {errors:?}"
         );
     }
 
