@@ -344,7 +344,7 @@ impl Compiler {
             let method_name = arena.def_name(*def_id).to_string();
             let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
 
-            debug_assert!(
+            assert!(
                 !self.func_name_to_idx.contains_key(&mangled_name),
                 "Mangled method name '{mangled_name}' collides with an existing function; \
                  top-level functions must not use the `TypeName.method_name` naming pattern"
