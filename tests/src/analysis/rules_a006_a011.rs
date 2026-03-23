@@ -259,6 +259,62 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a007_infinite_loop_without_break_counts_as_diverging() {
+        let source = r#"
+            fn main() -> i32 {
+                loop {
+                    let x: i32 = 1;
+                }
+            }
+        "#;
+        // Infinite loop with no break diverges — should NOT trigger MissingReturn.
+        // Will trigger A004 (InfiniteLoopWithoutBreak) instead.
+        let result = analyze(source);
+        match result {
+            Ok(_) => panic!("expected A004 error for infinite loop without break"),
+            Err(errors) => {
+                let has_missing_return = errors
+                    .errors()
+                    .iter()
+                    .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. }));
+                assert!(
+                    !has_missing_return,
+                    "infinite loop without break diverges, should not trigger MissingReturn, got: {:?}",
+                    errors.errors()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a007_infinite_loop_with_return_counts_as_returning() {
+        let source = r#"
+            fn main() -> i32 {
+                loop {
+                    return 42;
+                }
+            }
+        "#;
+        // Loop body returns on all paths — should NOT trigger MissingReturn.
+        // Will trigger A003 (ReturnInsideLoop) instead.
+        let result = analyze(source);
+        match result {
+            Ok(_) => panic!("expected A003 error for return inside loop"),
+            Err(errors) => {
+                let has_missing_return = errors
+                    .errors()
+                    .iter()
+                    .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. }));
+                assert!(
+                    !has_missing_return,
+                    "loop with return in body should not trigger MissingReturn, got: {:?}",
+                    errors.errors()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a007_missing_return_in_struct_method() {
         let source = r#"
             fn main() -> i32 { return 0; }

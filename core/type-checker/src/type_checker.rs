@@ -154,13 +154,14 @@ impl TypeChecker {
                         .collect();
                     {
                         let mut seen_fields = FxHashSet::default();
-                        for (field_name, _, _) in &field_infos {
+                        for field in fields {
+                            let field_name = arena[field.name].name.clone();
                             if !seen_fields.insert(field_name.clone()) {
                                 self.errors.push(
                                     TypeCheckError::DuplicateStructFieldDefinition {
                                         struct_name: struct_name.clone(),
-                                        field_name: field_name.clone(),
-                                        location,
+                                        field_name,
+                                        location: arena[field.name].location,
                                     },
                                 );
                             }
@@ -260,12 +261,13 @@ impl TypeChecker {
                         variants.iter().map(|v| arena[*v].name.as_str()).collect();
                     {
                         let mut seen_variants = FxHashSet::default();
-                        for variant_name in &variant_names {
-                            if !seen_variants.insert(*variant_name) {
+                        for variant_id in variants {
+                            let variant_name = arena[*variant_id].name.as_str();
+                            if !seen_variants.insert(variant_name) {
                                 self.errors.push(TypeCheckError::DuplicateEnumVariant {
                                     enum_name: enum_name.clone(),
-                                    variant_name: (*variant_name).to_string(),
-                                    location,
+                                    variant_name: variant_name.to_string(),
+                                    location: arena[*variant_id].location,
                                 });
                             }
                         }
@@ -316,7 +318,6 @@ impl TypeChecker {
             .collect();
         for def_id in &all_def_ids {
             let def_data = &arena[*def_id];
-            let location = def_data.location;
             if let Def::Struct { name, fields, .. } = &def_data.kind {
                 let struct_name = arena[*name].name.clone();
                 for field in fields {
@@ -332,7 +333,7 @@ impl TypeChecker {
                             struct_name: struct_name.clone(),
                             field_name,
                             field_type: resolved.to_string(),
-                            location,
+                            location: arena[field.name].location,
                         });
                     }
                 }
@@ -1478,6 +1479,8 @@ impl TypeChecker {
                 }
                 let left_type = self.infer_expression(left, ctx);
                 let right_type = self.infer_expression(right, ctx);
+                // NOTE: Only detects division by literal zero (e.g., `x / 0`).
+                // Constant expressions and const-declared zero values are not detected.
                 if matches!(op, OperatorKind::Div | OperatorKind::Mod) {
                     let right_expr = &ctx.arena()[right].kind;
                     if let Expr::NumberLiteral { value } = right_expr

@@ -2701,6 +2701,17 @@ mod recursive_struct_tests {
     }
 
     #[test]
+    fn test_recursive_struct_location_points_to_field() {
+        let source = r#"struct Node { val: i32; next: Node; }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the recursive field, not the struct definition. got: {err}"
+        );
+    }
+
+    #[test]
     fn test_recursive_struct_mutual() {
         let source = r#"struct A { b: B; } struct B { a: A; }"#;
         let result = try_type_check(source);
@@ -2785,6 +2796,17 @@ mod duplicate_enum_variant_tests {
     }
 
     #[test]
+    fn test_duplicate_enum_variant_location_points_to_variant() {
+        let source = r#"enum Color { Red, Red }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the duplicate variant, not the enum definition. got: {err}"
+        );
+    }
+
+    #[test]
     fn test_unique_enum_variants_passes() {
         let source =
             r#"enum Color { Red, Green, Blue } fn main() -> i32 { return 0; }"#;
@@ -2830,6 +2852,17 @@ mod duplicate_struct_field_definition_tests {
         assert!(
             err.contains("duplicate field") && err.contains("struct definition"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_struct_field_location_points_to_field() {
+        let source = r#"struct S { x: i32; x: bool; }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the duplicate field, not the struct definition. got: {err}"
         );
     }
 }

@@ -5,8 +5,8 @@
 //! performs whole-body analysis rather than per-statement checks.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{BlockId, DefId};
-use inference_ast::nodes::{Def, Stmt};
+use inference_ast::ids::{BlockId, DefId, StmtId};
+use inference_ast::nodes::{BlockKind, Def, Stmt};
 
 use crate::errors::AnalysisDiagnostic;
 
@@ -89,7 +89,58 @@ fn returns_on_all_paths(arena: &AstArena, block_id: BlockId) -> bool {
         } => returns_on_all_paths(arena, *then_block) && returns_on_all_paths(arena, *else_id),
         // Explicit return — control never falls through
         Stmt::Return { .. } => true,
+        Stmt::Loop {
+            condition: None,
+            body,
+        } => returns_on_all_paths(arena, *body) || !contains_break_for_this_loop(arena, *body),
         Stmt::Block(inner) => returns_on_all_paths(arena, *inner),
         _ => false,
+    }
+}
+
+fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
+    let block = &arena[block_id];
+    if block.block_kind != BlockKind::Regular {
+        return false;
+    }
+    contains_break_in_statements(arena, &block.stmts)
+}
+
+fn contains_break_in_statements(arena: &AstArena, stmt_ids: &[StmtId]) -> bool {
+    for &stmt_id in stmt_ids {
+        if contains_break_in_statement(arena, stmt_id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_break_in_statement(arena: &AstArena, stmt_id: StmtId) -> bool {
+    match &arena[stmt_id].kind {
+        Stmt::Break => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_break_for_this_loop(arena, *then_block)
+                || else_block
+                    .is_some_and(|b| contains_break_for_this_loop(arena, b))
+        }
+        Stmt::Block(block_id) => {
+            let block = &arena[*block_id];
+            if block.block_kind != BlockKind::Regular {
+                return false;
+            }
+            contains_break_in_statements(arena, &block.stmts)
+        }
+        Stmt::Loop { .. }
+        | Stmt::Return { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::VarDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Assert { .. }
+        | Stmt::ConstDef(_) => false,
     }
 }
