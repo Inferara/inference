@@ -3,7 +3,7 @@ mod base_codegen_tests {
     use crate::utils::{
         assert_wasms_modules_equivalence, assert_wat_equivalence, codegen_output,
         get_test_file_path, get_test_wasm_path, regenerate_wat, wasm_codegen,
-        wasm_codegen_with_target,
+        wasm_codegen_no_analysis, wasm_codegen_with_target,
     };
 
     #[test]
@@ -75,7 +75,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -92,7 +92,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -281,7 +281,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -915,7 +915,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -1587,7 +1587,7 @@ mod base_codegen_tests {
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
             .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
         let expected = get_test_wasm_path(module_path!(), test_name);
@@ -3193,6 +3193,75 @@ mod base_codegen_tests {
         );
     }
 
+    // --- Struct uzumaki (non-deterministic initialization) tests ---
+
+    #[test]
+    fn struct_nondet_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 3);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 3);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 3);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 3);
+        let test_name = "struct_nondet";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn struct_uzumaki_i32_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() {
+                forall {
+                    let p: Point = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(&source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct uzumaki i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_uzumaki_i64_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Wide { a: i64; b: i64; }
+            pub fn test() {
+                forall {
+                    let w: Wide = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(&source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct uzumaki i64 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_uzumaki_mixed_fields_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Mixed { flag: bool; count: i32; big: i64; }
+            pub fn test() {
+                forall {
+                    let m: Mixed = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(&source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct uzumaki mixed fields WASM is invalid: {e}"));
+    }
+
     // --- Method codegen: self parameter handling and instance method call tests ---
 
     #[test]
@@ -4745,6 +4814,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "method_three_fields");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_nondet_wasm() {
+        let dir = base_test_dir().join("struct_nondet");
+        let source_code = std::fs::read_to_string(dir.join("struct_nondet.inf"))
+            .expect("Failed to read struct_nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_nondet");
     }
 
 }

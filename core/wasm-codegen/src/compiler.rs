@@ -1504,6 +1504,16 @@ impl Compiler {
                         });
                         self.lower_array_uzumaki(arena, &elem_type, length, var_name);
                     }
+                    TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                        cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
+                        let name = name.clone();
+                        let var_name = enclosing_var_name.unwrap_or_else(|| {
+                            panic!(
+                                "Struct uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
+                            )
+                        });
+                        self.lower_struct_uzumaki(ctx, &name, var_name);
+                    }
                     _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
                 }
             }
@@ -2207,6 +2217,84 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
+    }
+
+    /// Lowers a struct-typed uzumaki expression to field-wise non-deterministic stores.
+    ///
+    /// For each field in the struct layout, emits the appropriate uzumaki opcode
+    /// followed by a store at the field's memory offset. The result is that every
+    /// field of the struct variable is filled with a non-deterministic value.
+    fn lower_struct_uzumaki(
+        &mut self,
+        ctx: &TypedContext,
+        struct_name: &str,
+        enclosing_var_name: &str,
+    ) {
+        let layout = self
+            .frame_layout
+            .as_ref()
+            .expect("Struct uzumaki requires a frame layout");
+
+        let slot = layout
+            .struct_offsets
+            .get(enclosing_var_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Struct variable '{enclosing_var_name}' not found in frame layout struct_offsets"
+                )
+            });
+
+        let slot_offset = slot.offset;
+        let frame_ptr_local = layout.frame_ptr_local;
+        let field_slots = slot.fields.clone();
+
+        if field_slots.is_empty() {
+            let struct_info = ctx
+                .lookup_struct(struct_name)
+                .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+            let (_, computed_fields) = compute_struct_field_layout(&struct_info);
+            for field in &computed_fields {
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+            }
+        } else {
+            for field in &field_slots {
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+            }
+        }
+
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        if slot_offset > 0 {
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(slot_offset as i32));
+            self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Emits a uzumaki opcode + store for a single struct field at its memory offset.
+    fn emit_struct_field_uzumaki(
+        &mut self,
+        frame_ptr_local: u32,
+        struct_base_offset: u32,
+        field: &memory::StructFieldSlot,
+    ) {
+        let uzumaki_opcode = if Self::is_i64_type(&field.type_kind) {
+            UZUMAKI_I64_OPCODE
+        } else {
+            UZUMAKI_I32_OPCODE
+        };
+        let store_instr = memory::store_instruction(&field.type_kind);
+
+        #[allow(clippy::cast_possible_wrap)]
+        let byte_offset = (struct_base_offset + field.offset) as i32;
+
+        self.func()
+            .instruction(&Instruction::LocalGet(frame_ptr_local));
+        self.func().instruction(&Instruction::I32Const(byte_offset));
+        self.func().instruction(&Instruction::I32Add);
+        self.emit_uzumaki(uzumaki_opcode);
+        self.func().instruction(&store_instr);
     }
 
     /// Lowers a binary expression to WASM stack instructions.

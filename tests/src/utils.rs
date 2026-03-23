@@ -46,6 +46,22 @@ pub(crate) fn codegen_output(source_code: &str) -> inference_wasm_codegen::Codeg
         .unwrap()
 }
 
+/// Generates codegen output from source code, skipping analysis.
+///
+/// Use this for codegen tests that exercise patterns the analysis pass
+/// would reject (e.g. uzumaki outside non-det blocks). These tests verify
+/// codegen correctness in isolation.
+pub(crate) fn codegen_output_no_analysis(source_code: &str) -> inference_wasm_codegen::CodegenOutput {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level())
+        .unwrap()
+}
+
 /// Generates codegen output from source code with an explicit compilation mode.
 ///
 /// Uses `Wasm32` target with the specified mode.
@@ -72,6 +88,33 @@ pub(crate) fn codegen_with_target_mode(
     let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     let opt_level = target.default_opt_level();
     inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+}
+
+/// Generates codegen output with explicit target and mode, skipping analysis.
+///
+/// Use for codegen tests that exercise patterns the analysis pass would reject.
+pub(crate) fn codegen_with_target_mode_no_analysis(
+    source_code: &str,
+    target: inference_wasm_codegen::Target,
+    mode: inference_wasm_codegen::CompilationMode,
+) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let opt_level = target.default_opt_level();
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+}
+
+/// Generates codegen output with explicit mode, skipping analysis.
+///
+/// Use for codegen tests that exercise patterns the analysis pass would reject.
+pub(crate) fn codegen_output_with_mode_no_analysis(
+    source_code: &str,
+    mode: inference_wasm_codegen::CompilationMode,
+) -> inference_wasm_codegen::CodegenOutput {
+    let target = inference_wasm_codegen::Target::Wasm32;
+    codegen_with_target_mode_no_analysis(source_code, target, mode).unwrap()
 }
 
 /// Generates codegen output from source code with explicit target, mode, and optimization level.
@@ -116,6 +159,14 @@ pub(crate) fn wasm_codegen_with_target(
 /// via `wasm-encoder`, no external binaries are needed.
 pub(crate) fn wasm_codegen(source_code: &str) -> Vec<u8> {
     let output = codegen_output(source_code);
+    output.wasm().to_vec()
+}
+
+/// Generates WebAssembly bytes from source code, skipping analysis.
+///
+/// Use for codegen tests that exercise patterns the analysis pass would reject.
+pub(crate) fn wasm_codegen_no_analysis(source_code: &str) -> Vec<u8> {
+    let output = codegen_output_no_analysis(source_code);
     output.wasm().to_vec()
 }
 
@@ -762,6 +813,31 @@ pub(crate) fn try_codegen(source_code: &str) -> Result<inference_wasm_codegen::C
         .unwrap()
         .typed_context();
     let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level())
+    }))
+    .map_err(|panic| {
+        if let Some(s) = panic.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        }
+    })?
+    .map_err(|e| e.to_string())
+}
+
+/// Attempts codegen without analysis, catching panics.
+///
+/// Use for codegen negative tests with inputs that would be rejected by analysis.
+pub(crate) fn try_codegen_no_analysis(source_code: &str) -> Result<inference_wasm_codegen::CodegenOutput, String> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

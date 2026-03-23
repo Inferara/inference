@@ -92,6 +92,23 @@ mod tests {
             AnalysisDiagnostic::ReturnInsideLoop { location: dummy_location() },
             AnalysisDiagnostic::InfiniteLoopWithoutBreak { location: dummy_location() },
             AnalysisDiagnostic::ReturnInsideNonDetBlock { location: dummy_location(), block_kind: "forall" },
+            AnalysisDiagnostic::UzumakiOutsideNonDetBlock { location: dummy_location() },
+            AnalysisDiagnostic::MissingReturn { function_name: "f".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::StandaloneUzumaki { location: dummy_location() },
+            AnalysisDiagnostic::EmptyEnumDefinition { name: "E".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::MethodNeverAccessesSelf { struct_name: "S".to_string(), method_name: "m".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::EmptyStructDefinition { name: "S".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::ArrayLiteralAsArgument { location: dummy_location() },
+            AnalysisDiagnostic::StructLiteralAsArgument { location: dummy_location() },
+            AnalysisDiagnostic::ArrayUzumakiAsArgument { location: dummy_location() },
+            AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { kind: "struct", location: dummy_location() },
+            AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { location: dummy_location() },
+            AnalysisDiagnostic::CompoundReturnCallInAssignment { location: dummy_location() },
+            AnalysisDiagnostic::MethodCallChainOnCompoundReturn { location: dummy_location() },
+            AnalysisDiagnostic::ArrayIndex64Bit { found: "i64".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::LiteralOutOfRange { value: "256".to_string(), type_name: "u8".to_string(), min: 0, max: 255, location: dummy_location() },
+            AnalysisDiagnostic::UzumakiInReassignment { location: dummy_location() },
+            AnalysisDiagnostic::ExternFunctionCall { name: "print".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

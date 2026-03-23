@@ -938,7 +938,7 @@ mod type_inference_tests {
                 let c: i32 = @;
                 let d: i64 = @;
 
-                let mut e: u8;
+                let mut e: u8 = 0;
                 e = @;
                 let f: u16 = @;
                 let g: u32 = @;
@@ -2354,27 +2354,21 @@ mod division_operator_tests {
     }
 }
 
-/// Tests for EmptyStruct validation rule
+/// Tests that empty struct no longer produces a type checker error.
+/// The check has been migrated to analysis rule A011.
 #[cfg(test)]
 mod empty_struct_tests {
     use super::*;
 
     #[test]
-    fn empty_struct_produces_error() {
+    fn empty_struct_passes_type_check() {
         let source = r#"struct Empty {} fn main() -> i32 { return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Empty struct should produce an error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("has no fields and no methods"),
-                "Error should mention empty struct, got: {err}"
-            );
-            assert!(
-                err.contains("Empty"),
-                "Error should mention struct name, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Empty struct check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2411,7 +2405,9 @@ mod empty_struct_tests {
     }
 }
 
-/// Tests for MethodNeverAccessesSelf validation rule
+/// Tests for MethodNeverAccessesSelf validation rule.
+/// The check has been migrated to analysis rule A010.
+/// Type checker should now pass for all these cases.
 #[cfg(test)]
 mod unused_self_tests {
     use super::*;
@@ -2450,24 +2446,14 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn method_declaring_self_but_never_using_it_errors() {
+    fn method_declaring_self_but_never_using_it_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Method declaring self but not using it should produce an error"
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Error should mention unused self, got: {err}"
-            );
-            assert!(
-                err.contains("Foo") && err.contains("noop"),
-                "Error should mention struct and method names, got: {err}"
-            );
-        }
     }
 
     #[test]
@@ -2493,21 +2479,18 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn mut_self_never_used_errors() {
+    fn mut_self_never_used_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(mut self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "mut self that's never used should error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should catch unused mut self, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused mut self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn multiple_methods_only_unused_one_errors() {
+    fn multiple_methods_only_unused_one_passes_type_check() {
         let source = r#"
             struct Foo {
                 x: i32;
@@ -2517,18 +2500,11 @@ mod unused_self_tests {
             fn main(f: Foo) -> i32 { return f.get() + f.bad(); }
         "#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("bad") && err.contains("declares `self` but never accesses it"),
-                "Only the unused method should error, got: {err}"
-            );
-            assert!(
-                !err.contains("Foo::get"),
-                "The method that uses self should not error, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2576,17 +2552,14 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn method_with_empty_body_errors() {
+    fn method_with_empty_body_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(self) {} } fn main(f: Foo) { f.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Empty method body with self should error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should catch self in empty body, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2616,39 +2589,31 @@ mod unused_self_tests {
     }
 }
 
-/// Tests for interaction between EmptyStruct and MethodNeverAccessesSelf
+/// Tests that migrated checks no longer produce type checker errors.
 #[cfg(test)]
 mod rule_interaction_tests {
     use super::*;
 
     #[test]
-    fn struct_with_only_unused_self_method_not_empty_struct_error() {
+    fn struct_with_only_unused_self_method_passes_type_check() {
         let source = r#"struct S { fn noop(self) -> i32 { return 42; } } fn main(s: S) -> i32 { return s.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should get MethodNeverAccessesSelf, got: {err}"
-            );
-            assert!(
-                !err.contains("has no fields and no methods"),
-                "Should NOT get EmptyStruct (has a method), got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "MethodNeverAccessesSelf check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn multiple_empty_structs_produce_separate_errors() {
+    fn multiple_empty_structs_pass_type_check() {
         let source = r#"struct A {} struct B {} fn main() -> i32 { return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(err.contains("A"), "Should mention struct A, got: {err}");
-            assert!(err.contains("B"), "Should mention struct B, got: {err}");
-        }
+        assert!(
+            result.is_ok(),
+            "EmptyStruct check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 }
 
@@ -2717,5 +2682,230 @@ mod self_in_struct_literal_tests {
             result.err()
         );
     }
+}
 
+#[cfg(test)]
+mod recursive_struct_tests {
+    use super::*;
+
+    #[test]
+    fn test_recursive_struct_direct() {
+        let source = r#"struct Node { val: i32; next: Node; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Direct recursive struct should be rejected");
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_mutual() {
+        let source = r#"struct A { b: B; } struct B { a: A; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Mutually recursive structs should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_recursive_struct_passes() {
+        let source =
+            r#"struct Point { x: i32; } struct Line { p: Point; } fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive struct composition should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod division_by_zero_tests {
+    use super::*;
+
+    #[test]
+    fn test_division_by_zero_literal() {
+        let source = r#"fn main() -> i32 { return 42 / 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Division by literal zero should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("division by zero"), "got: {err}");
+    }
+
+    #[test]
+    fn test_modulo_by_zero_literal() {
+        let source = r#"fn main() -> i32 { return 10 % 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Modulo by literal zero should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("division by zero"), "got: {err}");
+    }
+
+    #[test]
+    fn test_division_by_nonzero_passes() {
+        let source = r#"fn main() -> i32 { return 42 / 1; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division by nonzero literal should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_enum_variant_tests {
+    use super::*;
+
+    #[test]
+    fn test_duplicate_enum_variant() {
+        let source = r#"enum Color { Red, Red }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Duplicate enum variant should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("duplicate variant"), "got: {err}");
+    }
+
+    #[test]
+    fn test_unique_enum_variants_passes() {
+        let source =
+            r#"enum Color { Red, Green, Blue } fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Unique enum variants should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod invalid_assignment_target_tests {
+    use super::*;
+
+    #[test]
+    fn test_assignment_to_function_call() {
+        let source = r#"fn get() -> i32 { return 1; } fn main() -> i32 { get() = 10; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to function call should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("invalid assignment target"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_struct_field_definition_tests {
+    use super::*;
+
+    #[test]
+    fn test_duplicate_struct_field_in_definition() {
+        let source = r#"struct S { x: i32; x: bool; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Duplicate struct field in definition should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("duplicate field") && err.contains("struct definition"),
+            "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod const_type_mismatch_tests {
+    use super::*;
+
+    #[test]
+    fn test_const_bool_assigned_number() {
+        let source = r#"const X: bool = 42;"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assigning number to bool const should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("type mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn test_const_number_assigned_bool() {
+        let source = r#"const X: i32 = true;"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assigning bool to i32 const should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("type mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn test_valid_const_passes() {
+        let source = r#"const X: i32 = 42; fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Valid const declaration should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod case_sensitive_type_tests {
+    use super::*;
+
+    #[test]
+    fn test_capitalized_type_rejected() {
+        let source = r#"fn foo(x: I32) -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Capitalized builtin type I32 should be rejected as unknown type"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("unknown type") && err.contains("I32"),
+            "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod external_function_tests {
+    use super::*;
+
+    #[test]
+    fn test_external_fn_params_counted() {
+        let source = r#"external fn add(a: i32, b: i32) -> i32; fn main() -> i32 { return add(1, 2); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "External function with correct arg count should pass, got: {:?}",
+            result.err()
+        );
+    }
 }

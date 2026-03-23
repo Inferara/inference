@@ -1,5 +1,8 @@
 pub fn hello_uzumaki() -> i32 {
-    return @;
+    forall {
+        let x: i32 = @;
+    }
+    return 0;
 }
 
 pub fn hello_world() {

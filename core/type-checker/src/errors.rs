@@ -431,73 +431,10 @@ pub enum TypeCheckError {
     #[error("{location}: variable `{name}` shadows a binding from an outer scope")]
     VariableShadowed { name: String, location: Location },
 
-    /// Numeric literal value is outside the valid range for the target type.
-    ///
-    /// For example, `let x: u8 = 256` or `let y: i8 = 200`.
-    #[error(
-        "{location}: literal `{value}` is out of range for type `{type_name}` (valid range: {min}..={max})"
-    )]
-    LiteralOutOfRange {
-        value: String,
-        type_name: String,
-        min: i128,
-        max: i128,
-        location: Location,
-    },
-
-    /// Array literal passed directly as a function argument.
-    ///
-    /// Array literals must be assigned to a variable before passing to functions
-    /// because the codegen requires a named variable for frame slot allocation.
-    #[error(
-        "{location}: array literals cannot be passed directly as function arguments; assign to a variable first"
-    )]
-    ArrayLiteralAsArgument { location: Location },
-
-    /// Struct literal used directly as a function argument.
-    ///
-    /// Struct literals must be assigned to a variable before being passed
-    /// as function arguments. This is a codegen limitation.
-    #[error("{location}: struct literal cannot be used directly as a function argument; assign to a variable first")]
-    StructLiteralAsArgument { location: Location },
-
-    /// Compound literal (struct or array) used in an unsupported expression position.
-    ///
-    /// Compound literals can only appear as variable initializers, assignment
-    /// values, return values, or struct field values. They cannot be used in
-    /// arbitrary expression positions.
-    #[error("{location}: {kind} literals can only be used in variable declarations, assignments, return statements, or as struct field values")]
-    CompoundLiteralInUnsupportedPosition {
-        kind: &'static str,
-        location: Location,
-    },
-
-    /// Array uzumaki (@) passed directly as a function argument.
-    ///
-    /// Array uzumaki must be assigned to a variable before passing to functions
-    /// because the codegen requires a named variable for frame slot allocation.
-    #[error(
-        "{location}: array uzumaki (@) cannot be used as a function argument; assign to a variable first"
-    )]
-    ArrayUzumakiAsArgument { location: Location },
-
-    /// Compound-returning function call used in an unsupported expression position.
-    ///
-    /// Functions returning arrays or structs use the sret calling convention,
-    /// which requires the caller to provide a destination pointer. They can only
-    /// appear in variable definitions (`let x = foo()`) or return statements
-    /// (`return foo()`).
-    #[error(
-        "{location}: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
-    )]
-    CompoundReturnCallInExpressionPosition { location: Location },
-
-    /// Array index expression uses a 64-bit integer type.
-    ///
-    /// WASM array indexing uses `i32.mul` for address computation, so the index
-    /// must be a 32-bit (or sub-32-bit) integer type.
-    #[error("{location}: array index must be a 32-bit integer type, found `{found}`")]
-    ArrayIndex64Bit { found: TypeInfo, location: Location },
+    // LiteralOutOfRange, ArrayLiteralAsArgument, StructLiteralAsArgument,
+    // CompoundLiteralInUnsupportedPosition, ArrayUzumakiAsArgument,
+    // CompoundReturnCallInExpressionPosition, ArrayIndex64Bit:
+    // Migrated to analysis rules A012-A019, A022.
 
     /// Array size is invalid: zero, negative, or exceeds `u32::MAX`.
     ///
@@ -506,22 +443,6 @@ pub enum TypeCheckError {
         "{location}: invalid array size `{size}`; must be a positive integer that fits in 32 bits"
     )]
     InvalidArraySize { size: String, location: Location },
-
-    /// Method declares `self` but never references it in the body.
-    ///
-    /// If a method does not access `self`, it should be an associated function instead.
-    #[error("{location}: method `{struct_name}::{method_name}` declares `self` but never accesses it; consider making it an associated function")]
-    MethodNeverAccessesSelf {
-        struct_name: String,
-        method_name: String,
-        location: Location,
-    },
-
-    /// Struct has no fields and no methods.
-    ///
-    /// An empty struct serves no purpose; add fields or methods, or remove it.
-    #[error("{location}: struct `{name}` has no fields and no methods")]
-    EmptyStruct { name: String, location: Location },
 
     /// A required field is missing from a struct literal.
     #[error("{location}: missing field `{field_name}` in struct literal `{struct_name}`")]
@@ -547,26 +468,69 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    /// Method call chain on a compound-returning function call.
-    ///
-    /// Chaining method calls on struct/array-returning functions creates implicit
-    /// temporaries that cannot be named in formal proofs. Assign the intermediate
-    /// result to a variable first.
-    #[error(
-        "{location}: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
-    )]
-    MethodCallChainOnCompoundReturn { location: Location },
+    // MethodCallChainOnCompoundReturn, CompoundReturnCallInAssignment:
+    // Migrated to analysis rules A017-A018.
 
-    /// Compound-returning function call used in assignment RHS.
+    /// Duplicate field name in a struct definition.
     ///
-    /// Functions returning arrays or structs use the sret calling convention,
-    /// which requires the caller to provide a destination pointer. Assignment
-    /// targets already have an address, but the codegen cannot wire it as an
-    /// sret destination. Use a fresh `let` binding instead.
+    /// Each field in a struct definition must have a unique name.
+    #[error("{location}: duplicate field `{field_name}` in struct definition `{struct_name}`")]
+    DuplicateStructFieldDefinition {
+        struct_name: String,
+        field_name: String,
+        location: Location,
+    },
+
+    /// Recursive struct definition where a field's type references the struct itself.
+    ///
+    /// Struct types must have a finite size, so a struct cannot contain itself
+    /// (directly or transitively) as a field.
     #[error(
-        "{location}: cannot assign from a compound-returning function call; use a new variable binding instead"
+        "{location}: recursive struct definition: field `{field_name}` of struct `{struct_name}` has type `{field_type}` which creates a cycle"
     )]
-    CompoundReturnCallInAssignment { location: Location },
+    RecursiveStructDefinition {
+        struct_name: String,
+        field_name: String,
+        field_type: String,
+        location: Location,
+    },
+
+    /// Assignment target is not a valid lvalue.
+    ///
+    /// Only identifiers, array index accesses, and struct member accesses can
+    /// appear on the left side of an assignment.
+    #[error("{location}: invalid assignment target; expected a variable, array element, or struct field")]
+    InvalidAssignmentTarget { location: Location },
+
+    /// Variable declared without an initializer.
+    ///
+    /// All variables must be initialized at their declaration site.
+    #[error("{location}: variable `{name}` must be initialized at declaration")]
+    UninitializedVariable { name: String, location: Location },
+
+    /// Array literal size does not match the declared array type size.
+    #[error(
+        "{location}: array literal has {actual} elements but the declared type expects {expected}"
+    )]
+    ArrayLiteralSizeMismatch {
+        expected: u32,
+        actual: usize,
+        location: Location,
+    },
+
+    /// Division or modulo by literal zero.
+    #[error("{location}: division by zero")]
+    DivisionByZero { location: Location },
+
+    /// Duplicate variant name in an enum definition.
+    ///
+    /// Each variant in an enum definition must have a unique name.
+    #[error("{location}: duplicate variant `{variant_name}` in enum definition `{enum_name}`")]
+    DuplicateEnumVariant {
+        enum_name: String,
+        variant_name: String,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -609,21 +573,17 @@ impl TypeCheckError {
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
             | TypeCheckError::AssignToImmutable { location, .. }
             | TypeCheckError::VariableShadowed { location, .. }
-            | TypeCheckError::LiteralOutOfRange { location, .. }
-            | TypeCheckError::ArrayLiteralAsArgument { location, .. }
-            | TypeCheckError::StructLiteralAsArgument { location, .. }
-            | TypeCheckError::CompoundLiteralInUnsupportedPosition { location, .. }
-            | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
-            | TypeCheckError::CompoundReturnCallInExpressionPosition { location, .. }
-            | TypeCheckError::ArrayIndex64Bit { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
-            | TypeCheckError::MethodNeverAccessesSelf { location, .. }
-            | TypeCheckError::EmptyStruct { location, .. }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
             | TypeCheckError::DuplicateStructField { location, .. }
-            | TypeCheckError::MethodCallChainOnCompoundReturn { location, .. }
-            | TypeCheckError::CompoundReturnCallInAssignment { location, .. } => location,
+            | TypeCheckError::DuplicateStructFieldDefinition { location, .. }
+            | TypeCheckError::RecursiveStructDefinition { location, .. }
+            | TypeCheckError::InvalidAssignmentTarget { location, .. }
+            | TypeCheckError::UninitializedVariable { location, .. }
+            | TypeCheckError::ArrayLiteralSizeMismatch { location, .. }
+            | TypeCheckError::DivisionByZero { location, .. }
+            | TypeCheckError::DuplicateEnumVariant { location, .. } => location,
         }
     }
 }
@@ -1211,103 +1171,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn display_literal_out_of_range() {
-        let err = TypeCheckError::LiteralOutOfRange {
-            value: "200".to_string(),
-            type_name: "i8".to_string(),
-            min: -128,
-            max: 127,
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: literal `200` is out of range for type `i8` (valid range: -128..=127)"
-        );
-    }
-
-    #[test]
-    fn display_array_literal_as_argument() {
-        let err = TypeCheckError::ArrayLiteralAsArgument {
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: array literals cannot be passed directly as function arguments; assign to a variable first"
-        );
-    }
-
-    #[test]
-    fn display_struct_literal_as_argument() {
-        let err = TypeCheckError::StructLiteralAsArgument {
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: struct literal cannot be used directly as a function argument; assign to a variable first"
-        );
-    }
-
-    #[test]
-    fn display_struct_literal_in_unsupported_position() {
-        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
-            kind: "struct",
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: struct literals can only be used in variable declarations, assignments, return statements, or as struct field values"
-        );
-    }
-
-    #[test]
-    fn display_array_literal_in_unsupported_position() {
-        let err = TypeCheckError::CompoundLiteralInUnsupportedPosition {
-            kind: "array",
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: array literals can only be used in variable declarations, assignments, return statements, or as struct field values"
-        );
-    }
-
-    #[test]
-    fn display_array_uzumaki_as_argument() {
-        let err = TypeCheckError::ArrayUzumakiAsArgument {
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: array uzumaki (@) cannot be used as a function argument; assign to a variable first"
-        );
-    }
-
-    #[test]
-    fn display_array_return_call_in_expression_position() {
-        let err = TypeCheckError::CompoundReturnCallInExpressionPosition {
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
-        );
-    }
-
-    #[test]
-    fn display_array_index_64bit() {
-        let err = TypeCheckError::ArrayIndex64Bit {
-            found: TypeInfo {
-                kind: TypeInfoKind::Number(NumberType::I64),
-                type_params: vec![],
-            },
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: array index must be a 32-bit integer type, found `i64`"
-        );
-    }
+    // Tests for migrated error variants (A012-A019, A022) removed.
+    // See analysis rules tests for coverage.
 
     #[test]
     fn display_invalid_array_size_overflow() {
@@ -1330,31 +1195,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: invalid array size `0`; must be a positive integer that fits in 32 bits"
-        );
-    }
-
-    #[test]
-    fn display_method_never_accesses_self() {
-        let err = TypeCheckError::MethodNeverAccessesSelf {
-            struct_name: "Counter".to_string(),
-            method_name: "reset".to_string(),
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: method `Counter::reset` declares `self` but never accesses it; consider making it an associated function"
-        );
-    }
-
-    #[test]
-    fn display_empty_struct() {
-        let err = TypeCheckError::EmptyStruct {
-            name: "Empty".to_string(),
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: struct `Empty` has no fields and no methods"
         );
     }
 
@@ -1410,24 +1250,89 @@ mod tests {
     }
 
     #[test]
-    fn display_compound_return_call_in_assignment() {
-        let err = TypeCheckError::CompoundReturnCallInAssignment {
+    fn display_duplicate_struct_field_definition() {
+        let err = TypeCheckError::DuplicateStructFieldDefinition {
+            struct_name: "Point".to_string(),
+            field_name: "x".to_string(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot assign from a compound-returning function call; use a new variable binding instead"
+            "1:5: duplicate field `x` in struct definition `Point`"
         );
     }
 
     #[test]
-    fn display_method_call_chain_on_compound_return() {
-        let err = TypeCheckError::MethodCallChainOnCompoundReturn {
+    fn display_recursive_struct_definition() {
+        let err = TypeCheckError::RecursiveStructDefinition {
+            struct_name: "Node".to_string(),
+            field_name: "next".to_string(),
+            field_type: "Node".to_string(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
+            "1:5: recursive struct definition: field `next` of struct `Node` has type `Node` which creates a cycle"
         );
     }
+
+    #[test]
+    fn display_invalid_assignment_target() {
+        let err = TypeCheckError::InvalidAssignmentTarget {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: invalid assignment target; expected a variable, array element, or struct field"
+        );
+    }
+
+    #[test]
+    fn display_uninitialized_variable() {
+        let err = TypeCheckError::UninitializedVariable {
+            name: "x".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: variable `x` must be initialized at declaration"
+        );
+    }
+
+    #[test]
+    fn display_array_literal_size_mismatch() {
+        let err = TypeCheckError::ArrayLiteralSizeMismatch {
+            expected: 3,
+            actual: 5,
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: array literal has 5 elements but the declared type expects 3"
+        );
+    }
+
+    #[test]
+    fn display_division_by_zero() {
+        let err = TypeCheckError::DivisionByZero {
+            location: test_location(),
+        };
+        assert_eq!(err.to_string(), "1:5: division by zero");
+    }
+
+    #[test]
+    fn display_duplicate_enum_variant() {
+        let err = TypeCheckError::DuplicateEnumVariant {
+            enum_name: "Color".to_string(),
+            variant_name: "Red".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: duplicate variant `Red` in enum definition `Color`"
+        );
+    }
+
+    // Tests for CompoundReturnCallInAssignment and MethodCallChainOnCompoundReturn
+    // migrated to analysis rules A017 and A018.
 }

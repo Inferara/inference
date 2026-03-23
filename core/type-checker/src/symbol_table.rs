@@ -688,13 +688,10 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_type(&self, name: &str) -> Option<TypeInfo> {
-        if let Some(scope) = &self.current_scope {
-            if let Some(symbol) = scope.borrow().lookup_symbol(name) {
-                return symbol.as_type_info();
-            }
-            if let Some(symbol) = scope.borrow().lookup_symbol(&name.to_lowercase()) {
-                return symbol.as_type_info();
-            }
+        if let Some(scope) = &self.current_scope
+            && let Some(symbol) = scope.borrow().lookup_symbol(name)
+        {
+            return symbol.as_type_info();
         }
         None
     }

@@ -393,11 +393,19 @@ impl<'a> Builder<'a> {
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
         let mut returns = None;
 
-        let mut cursor = node.walk();
-        let args: Vec<ArgData> = node
-            .children_by_field_name("argument", &mut cursor)
-            .map(|segment| self.build_argument_data(&segment, code))
-            .collect();
+        let args: Vec<ArgData> =
+            if let Some(argument_list_node) = node.child_by_field_name("argument_list") {
+                let mut cursor = argument_list_node.walk();
+                argument_list_node
+                    .children_by_field_name("argument", &mut cursor)
+                    .map(|segment| self.build_argument_data(&segment, code))
+                    .collect()
+            } else {
+                let mut cursor = node.walk();
+                node.children_by_field_name("argument", &mut cursor)
+                    .map(|segment| self.build_argument_data(&segment, code))
+                    .collect()
+            };
 
         if let Some(returns_node) = node.child_by_field_name("returns") {
             returns = Some(self.build_type(&returns_node, code));

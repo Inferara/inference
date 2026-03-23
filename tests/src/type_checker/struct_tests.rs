@@ -440,7 +440,7 @@ mod field_validation {
     }
 
     #[test]
-    fn test_struct_literal_as_argument_rejected() {
+    fn test_struct_literal_as_argument_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             fn takes_point(p: Point) -> i32 { return p.x; }
@@ -448,39 +448,24 @@ mod field_validation {
         "#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Struct literal as direct argument should fail"
+            result.is_ok(),
+            "struct literal as argument check migrated to analysis (A013), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("struct literal cannot be used directly"),
-                "Error should mention struct literal restriction: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
-    fn test_struct_literal_as_standalone_expression() {
+    fn test_struct_literal_as_standalone_expression_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             fn test() { Point { x: 1, y: 2 }; }
         "#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Struct literal as standalone expression should fail"
+            result.is_ok(),
+            "compound literal position check migrated to analysis (A015), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            assert!(
-                error
-                    .to_string()
-                    .contains("struct literals can only be used"),
-                "Error should mention position restriction: {}",
-                error
-            );
-        }
     }
 
     #[test]
@@ -547,7 +532,7 @@ mod field_validation {
     }
 
     #[test]
-    fn test_struct_return_call_in_expression_position() {
+    fn test_struct_return_call_in_expression_position_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             fn make() -> Point { return Point { x: 1, y: 2 }; }
@@ -556,27 +541,20 @@ mod field_validation {
         "#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Struct-returning call used as function argument should fail"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("can only appear in `let` bindings or `return` statements"),
-                "Error should mention sret restriction: {}",
-                error_msg
-            );
-        }
     }
 }
 
 mod method_call_chain {
+    //! Method call chain on compound-returning functions has been migrated to
+    //! analysis rule A018. These tests verify the type checker accepts them.
     use super::*;
 
-    /// Verifies that chaining a method call on a compound-returning function call
-    /// is rejected by the type checker.
     #[test]
-    fn method_chain_on_compound_return_errors() {
+    fn method_chain_on_compound_return_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32;
                 fn translate(self, dx: i32, dy: i32) -> Point {
@@ -591,25 +569,14 @@ mod method_call_chain {
         "#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Chaining method calls on compound-returning functions should fail"
+            result.is_ok(),
+            "method chain on compound return check migrated to analysis (A018), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains(
-                    "cannot chain method calls on compound-returning functions"
-                ),
-                "Error should mention compound-returning chain restriction: {}",
-                error_msg
-            );
-        }
     }
 
-    /// Verifies that argument errors in a chained method call are still reported
-    /// alongside the `MethodCallChainOnCompoundReturn` error.
     #[test]
-    fn method_chain_on_compound_return_reports_argument_errors() {
+    fn method_chain_on_compound_return_with_unknown_var_still_fails() {
         let source = r#"
             struct Point { x: i32; y: i32;
                 fn translate(self, dx: i32, dy: i32) -> Point {
@@ -623,21 +590,17 @@ mod method_call_chain {
             }
         "#;
         let Err(error) = try_type_check(source) else {
-            panic!("Should fail with both compound-return chain and undefined variable errors");
+            panic!("undefined variable should still be caught by type checker");
         };
         let error_msg = error.to_string();
         assert!(
-            error_msg.contains("cannot chain method calls on compound-returning functions"),
-            "Should report compound-returning chain restriction: {error_msg}"
-        );
-        assert!(
             error_msg.contains("unknown_var"),
-            "Should also report the undefined variable in chained call arguments: {error_msg}"
+            "Should report the undefined variable: {error_msg}"
         );
     }
 
     #[test]
-    fn method_chain_on_associated_function_return_errors() {
+    fn method_chain_on_associated_function_return_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32;
                 fn new(x: i32, y: i32) -> Point {
@@ -649,23 +612,22 @@ mod method_call_chain {
                 return Point::new(1, 2).get_x();
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Chaining method calls on associated function return should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("cannot chain method calls on compound-returning functions"),
-            "Error should mention compound-returning chain restriction: {error_msg}"
+            result.is_ok(),
+            "method chain on compound return check migrated to analysis (A018), got: {:?}",
+            result.err()
         );
     }
 }
 
 mod compound_return_call_in_assignment {
+    //! Compound return call in assignment has been migrated to analysis rule A017.
+    //! These tests verify the type checker accepts them.
     use super::*;
 
-    /// Verifies that assigning from a plain function returning a struct is rejected.
     #[test]
-    fn plain_function_returning_struct() {
+    fn plain_function_returning_struct_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             fn make_point(x: i32, y: i32) -> Point {
@@ -676,19 +638,16 @@ mod compound_return_call_in_assignment {
                 p = make_point(1, 2);
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Assigning from a compound-returning function should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("cannot assign from a compound-returning function call"),
-            "Error should mention compound-returning assignment restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call assignment check migrated to analysis (A017), got: {:?}",
+            result.err()
         );
     }
 
-    /// Verifies that assigning from an instance method returning a struct is rejected.
     #[test]
-    fn instance_method_returning_struct() {
+    fn instance_method_returning_struct_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32;
                 fn translate(self, dx: i32, dy: i32) -> Point {
@@ -700,19 +659,16 @@ mod compound_return_call_in_assignment {
                 p = p.translate(5, 3);
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Assigning from a compound-returning instance method should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("cannot assign from a compound-returning function call"),
-            "Error should mention compound-returning assignment restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call assignment check migrated to analysis (A017), got: {:?}",
+            result.err()
         );
     }
 
-    /// Verifies that assigning from an associated function returning a struct is rejected.
     #[test]
-    fn associated_function_returning_struct() {
+    fn associated_function_returning_struct_passes_type_checker() {
         let source = r#"
             struct Point { x: i32; y: i32;
                 fn new(x: i32, y: i32) -> Point {
@@ -724,13 +680,11 @@ mod compound_return_call_in_assignment {
                 p = Point::new(1, 2);
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Assigning from a compound-returning associated function should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("cannot assign from a compound-returning function call"),
-            "Error should mention compound-returning assignment restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call assignment check migrated to analysis (A017), got: {:?}",
+            result.err()
         );
     }
 }
@@ -739,7 +693,7 @@ mod compound_return_call_in_expression_position {
     use super::*;
 
     #[test]
-    fn instance_method_returning_struct_as_standalone_expression() {
+    fn instance_method_returning_struct_as_standalone_passes_type_checker() {
         let source = r#"
             struct Point {
                 x: i32; y: i32;
@@ -752,18 +706,16 @@ mod compound_return_call_in_expression_position {
                 p.translate(5, 3);
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Standalone instance method call returning struct should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("compound-returning function calls can only appear"),
-            "Error should mention compound-returning restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
     }
 
     #[test]
-    fn associated_function_returning_struct_as_standalone_expression() {
+    fn associated_function_returning_struct_as_standalone_passes_type_checker() {
         let source = r#"
             struct Point {
                 x: i32; y: i32;
@@ -776,18 +728,16 @@ mod compound_return_call_in_expression_position {
                 Point::new(1, 2);
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Standalone associated function call returning struct should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("compound-returning function calls can only appear"),
-            "Error should mention compound-returning restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
     }
 
     #[test]
-    fn instance_method_returning_struct_as_argument() {
+    fn instance_method_returning_struct_as_argument_passes_type_checker() {
         let source = r#"
             struct Point {
                 x: i32; y: i32;
@@ -801,18 +751,16 @@ mod compound_return_call_in_expression_position {
                 return consume(p.translate(5, 3));
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Instance method returning struct passed as argument should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("compound-returning function calls can only appear"),
-            "Error should mention compound-returning restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
     }
 
     #[test]
-    fn associated_function_returning_struct_as_argument() {
+    fn associated_function_returning_struct_as_argument_passes_type_checker() {
         let source = r#"
             struct Point {
                 x: i32; y: i32;
@@ -826,13 +774,11 @@ mod compound_return_call_in_expression_position {
                 return consume(Point::new(1, 2));
             }
         "#;
-        let Err(error) = try_type_check(source) else {
-            panic!("Associated function returning struct passed as argument should fail");
-        };
-        let error_msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            error_msg.contains("compound-returning function calls can only appear"),
-            "Error should mention compound-returning restriction: {error_msg}"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
     }
 

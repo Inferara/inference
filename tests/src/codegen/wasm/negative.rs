@@ -77,59 +77,69 @@ mod unimplemented_operators {
 }
 
 mod uninitialized_variables {
-    use crate::utils::try_codegen;
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+
+    fn try_type_check(source: &str) -> anyhow::Result<()> {
+        let arena = build_ast(source.to_string());
+        TypeCheckerBuilder::build_typed_context(arena)?;
+        Ok(())
+    }
 
     #[test]
     fn uninitialized_i32() {
-        let result = try_codegen("pub fn test() { let x: i32; }");
-        assert!(result.is_err(), "uninitialized i32 should fail codegen");
-        let err = result.unwrap_err();
+        let result = try_type_check("pub fn test() { let x: i32; }");
+        assert!(result.is_err(), "uninitialized i32 should fail type check");
+        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Uninitialized variable"),
+            err.contains("must be initialized at declaration"),
             "unexpected error message: {err}"
         );
     }
 
     #[test]
     fn uninitialized_i64() {
-        let result = try_codegen("pub fn test() { let x: i64; }");
-        assert!(result.is_err(), "uninitialized i64 should fail codegen");
-        let err = result.unwrap_err();
+        let result = try_type_check("pub fn test() { let x: i64; }");
+        assert!(result.is_err(), "uninitialized i64 should fail type check");
+        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Uninitialized variable"),
+            err.contains("must be initialized at declaration"),
             "unexpected error message: {err}"
         );
     }
 
     #[test]
     fn uninitialized_u32() {
-        let result = try_codegen("pub fn test() { let x: u32; }");
-        assert!(result.is_err(), "uninitialized u32 should fail codegen");
-        let err = result.unwrap_err();
+        let result = try_type_check("pub fn test() { let x: u32; }");
+        assert!(result.is_err(), "uninitialized u32 should fail type check");
+        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Uninitialized variable"),
+            err.contains("must be initialized at declaration"),
             "unexpected error message: {err}"
         );
     }
 
     #[test]
     fn uninitialized_bool() {
-        let result = try_codegen("pub fn test() { let x: bool; }");
-        assert!(result.is_err(), "uninitialized bool should fail codegen");
-        let err = result.unwrap_err();
+        let result = try_type_check("pub fn test() { let x: bool; }");
+        assert!(result.is_err(), "uninitialized bool should fail type check");
+        let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Uninitialized variable"),
+            err.contains("must be initialized at declaration"),
             "unexpected error message: {err}"
         );
     }
 
     #[test]
     fn uninitialized_struct() {
-        let result = try_codegen("struct P { x: i32; }\npub fn test() { let p: P; }");
-        assert!(result.is_err(), "uninitialized struct should fail codegen");
-        let err = result.unwrap_err();
+        let result = try_type_check("struct P { x: i32; }\npub fn test() { let p: P; }");
         assert!(
-            err.contains("Uninitialized variable"),
+            result.is_err(),
+            "uninitialized struct should fail type check"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be initialized at declaration"),
             "unexpected error message: {err}"
         );
     }
@@ -285,28 +295,22 @@ mod type_def_statement {
 }
 
 mod uzumaki_compound_types {
-    use crate::utils::try_codegen;
+    use crate::utils::{try_codegen, try_codegen_no_analysis, wasm_codegen};
 
     #[test]
     fn uzumaki_struct_in_forall() {
-        let result = try_codegen(
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let wasm_bytes = wasm_codegen(
             "struct P { x: i32; }\npub fn test() { forall { let p: P = @; } }",
         );
-        assert!(
-            result.is_err(),
-            "uzumaki with struct type should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Unsupported Uzumaki expression type"),
-            "unexpected error message: {err}"
-        );
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct uzumaki WASM is invalid: {e}"));
     }
 
     #[test]
     fn uzumaki_struct_return() {
         let result =
-            try_codegen("struct P { x: i32; }\npub fn test() -> P { return @; }");
+            try_codegen_no_analysis("struct P { x: i32; }\npub fn test() -> P { return @; }");
         assert!(
             result.is_err(),
             "uzumaki as sret return should fail codegen"
@@ -320,7 +324,7 @@ mod uzumaki_compound_types {
 
     #[test]
     fn uzumaki_array_return() {
-        let result = try_codegen("pub fn test() -> [i32; 3] { return @; }");
+        let result = try_codegen_no_analysis("pub fn test() -> [i32; 3] { return @; }");
         assert!(
             result.is_err(),
             "uzumaki as array sret return should fail codegen"
@@ -349,6 +353,29 @@ mod compound_reassignment {
         assert!(
             err.contains("array literal in unsupported position"),
             "unexpected error message: {err}"
+        );
+    }
+}
+
+mod extern_function_call {
+    use crate::utils::build_ast;
+
+    #[test]
+    fn extern_function_call_rejected_before_codegen() {
+        let source = "external fn print(val: i32) -> ();\npub fn main() { print(42); }";
+        let arena = build_ast(source.to_string());
+        let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type checking should pass for extern function call")
+            .typed_context();
+        let analysis_result = inference_analysis::analyze(&typed_context);
+        assert!(
+            analysis_result.is_err(),
+            "call to extern function should be rejected by analysis"
+        );
+        let err = analysis_result.unwrap_err().to_string();
+        assert!(
+            err.contains("external function") && err.contains("print"),
+            "expected analysis error about external function call, got: {err}"
         );
     }
 }
