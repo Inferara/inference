@@ -1778,6 +1778,9 @@ impl TypeChecker {
                     .push(TypeCheckError::MethodCallChainOnCompoundReturn {
                         location: ctx.arena()[call_expr_id].location,
                     });
+                for arg in call_args {
+                    self.infer_expression(arg.1, ctx);
+                }
                 return None;
             }
 
@@ -1894,10 +1897,9 @@ impl TypeChecker {
         }
 
         // Regular function call
-        let func_name = self.resolve_function_call_name(ctx.arena(), function_expr_id);
-        let func_name = match func_name {
-            Some(name) => name,
-            None => {
+        let func_name = match &ctx.arena()[function_expr_id].kind {
+            Expr::Identifier(ident_id) => ctx.arena()[*ident_id].name.clone(),
+            _ => {
                 for arg in call_args {
                     self.infer_expression(arg.1, ctx);
                 }
@@ -2077,21 +2079,6 @@ impl TypeChecker {
                 .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
                     location: ctx.arena()[arg_expr_id].location,
                 });
-        }
-    }
-
-    /// Resolve the name of a function from its function expression.
-    ///
-    /// For `Identifier(id)` returns the identifier name.
-    /// For more complex expressions, returns None (handled by caller).
-    fn resolve_function_call_name(
-        &self,
-        arena: &AstArena,
-        function_expr_id: ExprId,
-    ) -> Option<String> {
-        match &arena[function_expr_id].kind {
-            Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
-            _ => None,
         }
     }
 

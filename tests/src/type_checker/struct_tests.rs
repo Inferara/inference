@@ -606,6 +606,36 @@ mod method_call_chain {
         }
     }
 
+    /// Verifies that argument errors in a chained method call are still reported
+    /// alongside the `MethodCallChainOnCompoundReturn` error.
+    #[test]
+    fn method_chain_on_compound_return_reports_argument_errors() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    return Point { x: self.x + dx, y: self.y + dy };
+                }
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test() -> i32 {
+                let p: Point = Point { x: 10, y: 20 };
+                return p.translate(5, 3).get_x(unknown_var);
+            }
+        "#;
+        let Err(error) = try_type_check(source) else {
+            panic!("Should fail with both compound-return chain and undefined variable errors");
+        };
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("cannot chain method calls on compound-returning functions"),
+            "Should report compound-returning chain restriction: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("unknown_var"),
+            "Should also report the undefined variable in chained call arguments: {error_msg}"
+        );
+    }
+
     #[test]
     fn method_chain_on_associated_function_return_errors() {
         let source = r#"

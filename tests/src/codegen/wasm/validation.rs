@@ -1241,6 +1241,10 @@ mod codegen_validation_tests {
     }
 
     /// Extracts the WAT text for a specific function by name from a full WAT module.
+    ///
+    /// NOTE: This uses parenthesis-depth counting, which is fragile if WAT
+    /// formatting changes or if a function name is a substring of another.
+    /// Sufficient for test code but not a general-purpose WAT parser.
     fn extract_function_body(wat: &str, func_name: &str) -> String {
         let marker = format!("${func_name}");
         let mut in_func = false;
