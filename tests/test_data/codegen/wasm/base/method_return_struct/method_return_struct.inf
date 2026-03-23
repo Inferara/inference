@@ -1,0 +1,72 @@
+struct Point {
+    x: i32;
+    y: i32;
+
+    fn translate(self, dx: i32, dy: i32) -> Point {
+        return Point { x: self.x + dx, y: self.y + dy };
+    }
+    fn scale(self, f: i32) -> Point {
+        return Point { x: self.x * f, y: self.y * f };
+    }
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+    fn new(x: i32, y: i32) -> Point {
+        return Point { x: x, y: y };
+    }
+}
+
+pub fn test_translate_x() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let p2: Point = p.translate(5, 3);
+    return p2.get_x();
+}
+
+pub fn test_translate_y() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let p2: Point = p.translate(5, 3);
+    return p2.get_y();
+}
+
+pub fn test_scale_x() -> i32 {
+    let p: Point = Point { x: 3, y: 7 };
+    let p2: Point = p.scale(4);
+    return p2.get_x();
+}
+
+pub fn test_scale_y() -> i32 {
+    let p: Point = Point { x: 3, y: 7 };
+    let p2: Point = p.scale(4);
+    return p2.get_y();
+}
+
+pub fn test_original_unchanged_x() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let p2: Point = p.translate(5, 3);
+    return p.get_x();
+}
+
+pub fn test_original_unchanged_y() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let p2: Point = p.translate(5, 3);
+    return p.get_y();
+}
+
+pub fn test_new_returns_struct_x() -> i32 {
+    let p: Point = Point::new(42, 99);
+    return p.get_x();
+}
+
+pub fn test_new_returns_struct_y() -> i32 {
+    let p: Point = Point::new(42, 99);
+    return p.get_y();
+}
+
+pub fn test_return_translated() -> i32 {
+    let p: Point = Point { x: 1, y: 2 };
+    let p2: Point = p.translate(10, 20);
+    return p2.get_x() + p2.get_y();
+}

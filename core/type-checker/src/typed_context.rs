@@ -11,9 +11,28 @@ use crate::{
 use inference_ast::{
     arena::AstArena,
     ids::{DefId, NodeId},
-    nodes::SourceFileData,
+    nodes::{SourceFileData, Visibility},
 };
 use rustc_hash::FxHashMap;
+
+/// Public metadata about a method defined on a type.
+///
+/// This is the public projection of the type-checker's internal
+/// `MethodInfo`. It exposes only the information that downstream phases
+/// (such as WASM code generation, IDE features, and analysis) need:
+/// parameter types, return type, whether the method takes `self`, and
+/// its visibility.
+///
+/// Obtained via [`TypedContext::lookup_method`].
+#[derive(Debug, Clone)]
+pub struct MethodMetadata {
+    pub name: String,
+    /// Parameter types, excluding `self`. See `has_self` for whether the method takes a receiver.
+    pub param_types: Vec<TypeInfo>,
+    pub return_type: TypeInfo,
+    pub has_self: bool,
+    pub visibility: Visibility,
+}
 
 /// Central store produced by type checking.
 ///
@@ -86,6 +105,24 @@ impl TypedContext {
         self.symbol_table.lookup_struct(name)
     }
 
+    /// Looks up a method on the given type by name and returns its metadata.
+    ///
+    /// Returns `None` if no method with the given name exists on the type.
+    /// The returned [`MethodMetadata`] contains parameter types (excluding
+    /// `self`), return type, whether the method takes `self`, and visibility.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<MethodMetadata> {
+        self.symbol_table
+            .lookup_method(type_name, method_name)
+            .map(|info| MethodMetadata {
+                name: info.signature.name.clone(),
+                param_types: info.signature.param_types.clone(),
+                return_type: info.signature.return_type.clone(),
+                has_self: info.has_self,
+                visibility: info.visibility,
+            })
+    }
+
     pub(crate) fn set_node_typeinfo(&mut self, node_id: NodeId, type_info: TypeInfo) {
         self.node_types.insert(node_id, type_info);
     }
@@ -102,4 +139,239 @@ impl TypedContext {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::symbol_table::FuncInfo;
+    use crate::type_info::{NumberType, TypeInfo, TypeInfoKind};
+    use inference_ast::nodes::Visibility;
 
+    fn make_i32_type() -> TypeInfo {
+        TypeInfo {
+            kind: TypeInfoKind::Number(NumberType::I32),
+            type_params: vec![],
+        }
+    }
+
+    fn make_typed_context_with_method(
+        type_name: &str,
+        method_name: &str,
+        param_types: Vec<TypeInfo>,
+        return_type: TypeInfo,
+        visibility: Visibility,
+        has_self: bool,
+    ) -> TypedContext {
+        let arena = AstArena::default();
+        let mut ctx = TypedContext::new(arena);
+        let sig = FuncInfo {
+            name: method_name.to_string(),
+            type_params: vec![],
+            param_types,
+            return_type,
+            visibility: visibility.clone(),
+            definition_scope_id: 0,
+        };
+        ctx.symbol_table
+            .register_method(type_name, sig, visibility, has_self)
+            .expect("register_method should succeed");
+        ctx
+    }
+
+    #[test]
+    fn lookup_method_returns_none_for_missing_method() {
+        let ctx = make_typed_context_with_method(
+            "Point",
+            "get_x",
+            vec![],
+            make_i32_type(),
+            Visibility::Public,
+            true,
+        );
+        assert!(ctx.lookup_method("Point", "nonexistent").is_none());
+    }
+
+    #[test]
+    fn lookup_method_returns_none_for_missing_type() {
+        let ctx = make_typed_context_with_method(
+            "Point",
+            "get_x",
+            vec![],
+            make_i32_type(),
+            Visibility::Public,
+            true,
+        );
+        assert!(ctx.lookup_method("NoSuchType", "get_x").is_none());
+    }
+
+    #[test]
+    fn lookup_method_returns_instance_method_metadata() {
+        let ctx = make_typed_context_with_method(
+            "Point",
+            "get_x",
+            vec![],
+            make_i32_type(),
+            Visibility::Public,
+            true,
+        );
+        let meta = ctx
+            .lookup_method("Point", "get_x")
+            .expect("method should be found");
+        assert_eq!(meta.name, "get_x");
+        assert!(meta.param_types.is_empty());
+        assert!(matches!(
+            meta.return_type.kind,
+            TypeInfoKind::Number(NumberType::I32)
+        ));
+        assert!(meta.has_self);
+        assert!(matches!(meta.visibility, Visibility::Public));
+    }
+
+    #[test]
+    fn lookup_method_returns_associated_function_metadata() {
+        let params = vec![make_i32_type(), make_i32_type()];
+        let ret = TypeInfo {
+            kind: TypeInfoKind::Custom("Point".to_string()),
+            type_params: vec![],
+        };
+        let ctx = make_typed_context_with_method(
+            "Point",
+            "new",
+            params,
+            ret,
+            Visibility::Public,
+            false,
+        );
+        let meta = ctx
+            .lookup_method("Point", "new")
+            .expect("method should be found");
+        assert_eq!(meta.name, "new");
+        assert_eq!(meta.param_types.len(), 2);
+        assert!(!meta.has_self);
+        assert!(matches!(
+            meta.return_type.kind,
+            TypeInfoKind::Custom(ref name) if name == "Point"
+        ));
+    }
+
+    #[test]
+    fn lookup_method_preserves_visibility() {
+        let ctx = make_typed_context_with_method(
+            "Counter",
+            "internal_helper",
+            vec![],
+            TypeInfo::default(),
+            Visibility::Private,
+            true,
+        );
+        let meta = ctx
+            .lookup_method("Counter", "internal_helper")
+            .expect("method should be found");
+        assert!(matches!(meta.visibility, Visibility::Private));
+    }
+
+    #[test]
+    fn lookup_method_multiple_methods_on_same_type() {
+        let arena = AstArena::default();
+        let mut ctx = TypedContext::new(arena);
+
+        let sig_get_x = FuncInfo {
+            name: "get_x".to_string(),
+            type_params: vec![],
+            param_types: vec![],
+            return_type: make_i32_type(),
+            visibility: Visibility::Public,
+            definition_scope_id: 0,
+        };
+        ctx.symbol_table
+            .register_method("Point", sig_get_x, Visibility::Public, true)
+            .expect("register get_x should succeed");
+
+        let sig_get_y = FuncInfo {
+            name: "get_y".to_string(),
+            type_params: vec![],
+            param_types: vec![],
+            return_type: TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            },
+            visibility: Visibility::Public,
+            definition_scope_id: 0,
+        };
+        ctx.symbol_table
+            .register_method("Point", sig_get_y, Visibility::Public, true)
+            .expect("register get_y should succeed");
+
+        let meta_x = ctx
+            .lookup_method("Point", "get_x")
+            .expect("get_x should be found");
+        assert_eq!(meta_x.name, "get_x");
+        assert!(matches!(
+            meta_x.return_type.kind,
+            TypeInfoKind::Number(NumberType::I32)
+        ));
+
+        let meta_y = ctx
+            .lookup_method("Point", "get_y")
+            .expect("get_y should be found");
+        assert_eq!(meta_y.name, "get_y");
+        assert!(matches!(
+            meta_y.return_type.kind,
+            TypeInfoKind::Number(NumberType::I64)
+        ));
+    }
+
+    #[test]
+    fn lookup_method_same_name_on_different_types() {
+        let arena = AstArena::default();
+        let mut ctx = TypedContext::new(arena);
+
+        let sig_point = FuncInfo {
+            name: "get_x".to_string(),
+            type_params: vec![],
+            param_types: vec![],
+            return_type: make_i32_type(),
+            visibility: Visibility::Public,
+            definition_scope_id: 0,
+        };
+        ctx.symbol_table
+            .register_method("Point", sig_point, Visibility::Public, true)
+            .expect("register Point::get_x should succeed");
+
+        let sig_vector = FuncInfo {
+            name: "get_x".to_string(),
+            type_params: vec![],
+            param_types: vec![],
+            return_type: TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            },
+            visibility: Visibility::Private,
+            definition_scope_id: 0,
+        };
+        ctx.symbol_table
+            .register_method("Vector", sig_vector, Visibility::Private, false)
+            .expect("register Vector::get_x should succeed");
+
+        let meta_point = ctx
+            .lookup_method("Point", "get_x")
+            .expect("Point::get_x should be found");
+        assert_eq!(meta_point.name, "get_x");
+        assert!(matches!(
+            meta_point.return_type.kind,
+            TypeInfoKind::Number(NumberType::I32)
+        ));
+        assert!(meta_point.has_self);
+        assert!(matches!(meta_point.visibility, Visibility::Public));
+
+        let meta_vector = ctx
+            .lookup_method("Vector", "get_x")
+            .expect("Vector::get_x should be found");
+        assert_eq!(meta_vector.name, "get_x");
+        assert!(matches!(
+            meta_vector.return_type.kind,
+            TypeInfoKind::Number(NumberType::I64)
+        ));
+        assert!(!meta_vector.has_self);
+        assert!(matches!(meta_vector.visibility, Visibility::Private));
+    }
+}

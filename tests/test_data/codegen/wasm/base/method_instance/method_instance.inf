@@ -1,0 +1,55 @@
+struct Point { x: i32; y: i32;
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+    fn sum(self) -> i32 {
+        return self.x + self.y;
+    }
+    fn sum_with(self, extra: i32) -> i32 {
+        return self.x + self.y + extra;
+    }
+}
+
+pub fn test_get_x() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.get_x();
+}
+
+pub fn test_get_y() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.get_y();
+}
+
+pub fn test_sum() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.sum();
+}
+
+pub fn test_sum_with() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.sum_with(5);
+}
+
+pub fn test_let_binding() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    let x: i32 = p.get_x();
+    return x;
+}
+
+pub fn test_standalone() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    p.get_x();
+    return 42;
+}
+
+pub fn test_binary_op() -> i32 {
+    let p: Point = Point { x: 10, y: 20 };
+    return p.get_x() + p.get_y();
+}
+
+pub fn test_on_param(p: Point) -> i32 {
+    return p.get_x();
+}

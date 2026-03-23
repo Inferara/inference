@@ -19,4 +19,5 @@ mod binops_u32;
 mod expr_deep_nesting;
 mod inference_wrapper;
 mod loops;
+mod negative;
 mod validation;

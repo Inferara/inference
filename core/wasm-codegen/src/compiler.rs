@@ -77,8 +77,8 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
-    align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
+    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot,
+    align_to, align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
     emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
     emit_struct_param_copy,
 };
@@ -94,6 +94,14 @@ const ASSUME_OPCODE: u8 = 0x3c;
 const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
+
+/// Separator used in mangled method names: `"{StructName}.{method_name}"`.
+///
+/// Dot is used because it matches Zig's convention and is standard across
+/// the WASM ecosystem. Since `.` is a syntax token in Inference (member
+/// access), it cannot appear in user-defined identifiers, making collisions
+/// impossible without any additional validation.
+const METHOD_SEPARATOR: &str = ".";
 
 #[derive(Default)]
 struct LoopContext {
@@ -121,6 +129,39 @@ struct StructReturnInfo {
     struct_name: String,
     total_size: u32,
     field_slots: Vec<memory::StructFieldSlot>,
+}
+
+/// Resolved callee of a `FunctionCall` expression.
+///
+/// Produced by [`Compiler::resolve_function_callee`] to consolidate the
+/// three-way callee pattern (`Identifier`, `TypeMemberAccess`, `MemberAccess`)
+/// that appears across multiple codegen methods.
+enum ResolvedCallee {
+    /// Plain function call via `Expr::Identifier`.
+    Function(String),
+    /// Associated function call via `Expr::TypeMemberAccess` (e.g., `Point::new()`).
+    AssociatedFunction {
+        mangled_name: String,
+        type_expr_id: ExprId,
+        method_name_id: IdentId,
+    },
+    /// Instance method call via `Expr::MemberAccess` (e.g., `p.translate()`).
+    InstanceMethod {
+        mangled_name: String,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+    },
+}
+
+impl ResolvedCallee {
+    /// Returns the resolved WASM function name regardless of variant.
+    fn callee_name(&self) -> &str {
+        match self {
+            Self::Function(name) => name,
+            Self::AssociatedFunction { mangled_name, .. }
+            | Self::InstanceMethod { mangled_name, .. } => mangled_name,
+        }
+    }
 }
 
 /// WASM compiler for generating WebAssembly binary from typed AST.
@@ -154,6 +195,8 @@ pub(crate) struct Compiler {
     func_array_returns: FxHashMap<String, ArrayReturnInfo>,
     /// Maps function names to their struct return type metadata.
     func_struct_returns: FxHashMap<String, StructReturnInfo>,
+    /// Maps `(type_name, method_name)` to the mangled WASM function name.
+    method_mangled_names: FxHashMap<(String, String), String>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
     // Per-function state (set in visit_function_definition, used by lowering methods)
@@ -181,6 +224,7 @@ impl Compiler {
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
+            method_mangled_names: FxHashMap::default(),
             current_fn_name: String::new(),
             func: None,
             locals_map: FxHashMap::default(),
@@ -194,6 +238,63 @@ impl Compiler {
         self.func
             .as_mut()
             .expect("func() called outside function compilation")
+    }
+
+    /// Returns the WASM function index that the first method will occupy,
+    /// given the number of top-level functions that precede it.
+    pub(crate) fn func_idx_after_toplevel(&self, toplevel_count: u32) -> u32 {
+        self.func_idx + toplevel_count
+    }
+
+    /// Returns the number of registered function/method name-to-index mappings.
+    ///
+    /// Used by traversal code to verify Stage 1 registration produced the expected
+    /// number of entries before any body compilation begins.
+    #[cfg(debug_assertions)]
+    pub(crate) fn registered_function_count(&self) -> usize {
+        self.func_name_to_idx.len()
+    }
+
+    /// Registers sret metadata for a function that returns a compound type (array or struct).
+    ///
+    /// If the return type is an array, inserts into `func_array_returns`.
+    /// If the return type is a custom (struct), computes the field layout and inserts
+    /// into `func_struct_returns`. Otherwise does nothing.
+    fn register_sret_if_compound(
+        &mut self,
+        name: String,
+        return_ty_id: TypeId,
+        arena: &AstArena,
+        ctx: &TypedContext,
+    ) {
+        let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
+        match &return_type_info.kind {
+            TypeInfoKind::Array(elem_type, length) => {
+                let elem_sz = element_size(&elem_type.kind);
+                self.func_array_returns.insert(
+                    name,
+                    ArrayReturnInfo {
+                        elem_kind: elem_type.kind.clone(),
+                        elem_size: elem_sz,
+                        length: *length,
+                    },
+                );
+            }
+            TypeInfoKind::Custom(custom_name) => {
+                if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
+                    self.func_struct_returns.insert(
+                        name,
+                        StructReturnInfo {
+                            struct_name: custom_name.clone(),
+                            total_size,
+                            field_slots,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
@@ -215,36 +316,48 @@ impl Compiler {
             if let Def::Function { returns, .. } = &arena[def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                let return_type_info = TypeInfo::from_type_id(arena, *return_ty_id);
-                match &return_type_info.kind {
-                    TypeInfoKind::Array(elem_type, length) => {
-                        let elem_sz = element_size(&elem_type.kind);
-                        self.func_array_returns.insert(
-                            fn_name,
-                            ArrayReturnInfo {
-                                elem_kind: elem_type.kind.clone(),
-                                elem_size: elem_sz,
-                                length: *length,
-                            },
-                        );
-                    }
-                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                    TypeInfoKind::Custom(custom_name) => {
-                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                            let (total_size, field_slots) =
-                                compute_struct_field_layout(&struct_info);
-                            self.func_struct_returns.insert(
-                                fn_name,
-                                StructReturnInfo {
-                                    struct_name: custom_name.clone(),
-                                    total_size,
-                                    field_slots,
-                                },
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+                self.register_sret_if_compound(fn_name, *return_ty_id, arena, ctx);
+            }
+        }
+    }
+
+    /// Builds the method name-to-WASM-index map from struct definitions.
+    ///
+    /// For each struct that has methods, this function:
+    /// 1. Computes a mangled name `"{struct_name}.{method_name}"` for each method
+    /// 2. Inserts the mangled name into `func_name_to_idx` with the next available index
+    /// 3. Records the `(struct_name, method_name) -> mangled_name` mapping
+    /// 4. Detects sret return types and populates `func_array_returns`/`func_struct_returns`
+    ///
+    /// Must be called after `build_func_name_to_idx` so that method indices follow
+    /// top-level function indices. Must be called before any body compilation so that
+    /// forward references (methods calling functions and vice versa) resolve correctly.
+    pub(crate) fn build_method_name_to_idx(
+        &mut self,
+        arena: &AstArena,
+        method_defs: &[(String, DefId)],
+        ctx: &TypedContext,
+        base_idx: u32,
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
+            let method_name = arena.def_name(*def_id).to_string();
+            let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
+
+            assert!(
+                !self.func_name_to_idx.contains_key(&mangled_name),
+                "Mangled method name '{mangled_name}' collides with an existing function; \
+                 top-level functions must not use the `TypeName.method_name` naming pattern"
+            );
+            self.func_name_to_idx
+                .insert(mangled_name.clone(), base_idx + i as u32);
+            self.method_mangled_names
+                .insert((struct_name.clone(), method_name), mangled_name.clone());
+
+            if let Def::Function { returns, .. } = &arena[*def_id].kind
+                && let Some(return_ty_id) = returns
+            {
+                self.register_sret_if_compound(mangled_name, *return_ty_id, arena, ctx);
             }
         }
     }
@@ -294,6 +407,7 @@ impl Compiler {
         def_id: DefId,
         arena: &AstArena,
         ctx: &TypedContext,
+        method_struct_name: Option<&str>,
     ) {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
@@ -307,7 +421,14 @@ impl Compiler {
             _ => return,
         };
 
-        let fn_name = arena[fn_name_id].name.clone();
+        let raw_name = arena[fn_name_id].name.clone();
+        // For methods, use the mangled name for sret lookups, debug names, and current_fn_name.
+        // For top-level functions, fn_name == raw_name.
+        let fn_name = if let Some(struct_name) = method_struct_name {
+            format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
+        } else {
+            raw_name
+        };
         self.current_fn_name.clone_from(&fn_name);
 
         let is_array_return = self.func_array_returns.contains_key(&fn_name);
@@ -353,7 +474,19 @@ impl Compiler {
                     local_idx += 1;
                 }
                 ArgKind::SelfRef { .. } => {
-                    todo!("Self-reference parameters are not yet supported in WASM codegen")
+                    cov_mark::hit!(wasm_codegen_emit_self_param);
+                    params.push(ValType::I32);
+                    let prev = self
+                        .locals_map
+                        .insert("self".to_string(), (local_idx, ValType::I32));
+                    assert!(
+                        prev.is_none(),
+                        "parameter `self` collides with an existing entry in locals_map; \
+                         the type-checker should have rejected duplicate parameter names",
+                    );
+                    local_idx += 1;
+                    // self is a struct pointer; method body will use memory loads/stores
+                    self.has_memory = true;
                 }
                 ArgKind::Ignored { .. } => {
                     todo!("Ignore arguments are not yet supported in WASM codegen")
@@ -376,13 +509,17 @@ impl Compiler {
             self.has_memory = true;
         }
 
+        let is_method = method_struct_name.is_some();
         let is_main = fn_name == "main";
-        let should_export = vis == Visibility::Public && !is_main;
+        // Methods are not exported as WASM exports. A future `export` keyword will
+        // control which functions are exported. For now, only top-level `pub` functions
+        // (except `main`, which gets special handling) become WASM exports.
+        let should_export = vis == Visibility::Public && !is_main && !is_method;
         if should_export {
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if is_main && vis == Visibility::Public {
+        if is_main && vis == Visibility::Public && !is_method {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
@@ -390,7 +527,8 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout = Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args);
+        self.frame_layout =
+            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name);
 
         if self.frame_layout.is_some() {
             self.has_memory = true;
@@ -416,45 +554,59 @@ impl Compiler {
         if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_prologue(func, layout);
 
-            // Copy-on-entry: for each compound-typed parameter (array or struct),
+            // Copy-on-entry: for each compound-typed parameter (array, struct, or mut self),
             // copy the caller's data into the callee's frame to enforce value semantics.
             for arg in &args {
-                if let ArgKind::Named { name, .. } = &arg.kind {
-                    let arg_name = arena[*name].name.clone();
-                    let arg_type_info = {
-                        let ty_id = match &arg.kind {
-                            ArgKind::Named { ty, .. } => *ty,
-                            _ => unreachable!(),
+                match &arg.kind {
+                    ArgKind::Named { name, .. } => {
+                        let arg_name = arena[*name].name.clone();
+                        let arg_type_info = {
+                            let ty_id = match &arg.kind {
+                                ArgKind::Named { ty, .. } => *ty,
+                                _ => unreachable!(),
+                            };
+                            TypeInfo::from_type_id(arena, ty_id)
                         };
-                        TypeInfo::from_type_id(arena, ty_id)
-                    };
-                    let param_local = self
-                        .locals_map
-                        .get(&arg_name)
-                        .expect("Compound parameter must be in locals_map")
-                        .0;
-                    match &arg_type_info.kind {
-                        TypeInfoKind::Array(elem_type, _length) => {
-                            let slot = layout
-                                .array_offsets
-                                .get(&arg_name)
-                                .expect("Array parameter must have a frame slot");
-                            emit_array_param_copy(
-                                func,
-                                layout,
-                                slot,
-                                param_local,
-                                &elem_type.kind,
-                            );
-                        }
-                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                        TypeInfoKind::Custom(_) => {
-                            if let Some(slot) = layout.struct_offsets.get(&arg_name) {
-                                emit_struct_param_copy(func, layout, slot, param_local);
+                        let param_local = self
+                            .locals_map
+                            .get(&arg_name)
+                            .expect("Compound parameter must be in locals_map")
+                            .0;
+                        match &arg_type_info.kind {
+                            TypeInfoKind::Array(elem_type, _length) => {
+                                let slot = layout
+                                    .array_offsets
+                                    .get(&arg_name)
+                                    .expect("Array parameter must have a frame slot");
+                                emit_array_param_copy(
+                                    func,
+                                    layout,
+                                    slot,
+                                    param_local,
+                                    &elem_type.kind,
+                                );
                             }
+                            // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                            TypeInfoKind::Custom(_) => {
+                                if let Some(slot) = layout.struct_offsets.get(&arg_name) {
+                                    emit_struct_param_copy(func, layout, slot, param_local);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    ArgKind::SelfRef { is_mut: true } => {
+                        cov_mark::hit!(wasm_codegen_emit_self_copy_on_entry);
+                        if let Some(slot) = layout.struct_offsets.get("self") {
+                            let self_local = self
+                                .locals_map
+                                .get("self")
+                                .expect("`self` must be in locals_map for mut self method")
+                                .0;
+                            emit_struct_param_copy(func, layout, slot, self_local);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -574,66 +726,101 @@ impl Compiler {
     }
 
     /// Computes the stack frame layout for a function.
+    ///
+    /// The `method_struct_name` parameter should be `Some("TypeName")` when compiling
+    /// a method body, so that `ArgKind::SelfRef { is_mut: true }` can look up the
+    /// struct layout and allocate a frame slot for the mutable `self` copy.
+    #[allow(clippy::too_many_lines)]
     fn compute_frame_layout(
         arena: &AstArena,
         block_id: BlockId,
         ctx: &TypedContext,
         frame_ptr_local_idx: u32,
         args: &[inference_ast::nodes::ArgData],
+        method_struct_name: Option<&str>,
     ) -> Option<FrameLayout> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
 
         for arg in args {
-            if let ArgKind::Named { name, ty, .. } = &arg.kind {
-                let type_info = TypeInfo::from_type_id(arena, *ty);
-                match &type_info.kind {
-                    TypeInfoKind::Array(elem_type, length) => {
-                        let elem_sz = element_size(&elem_type.kind);
-                        let byte_count = elem_sz.checked_mul(*length).expect(
-                            "Array byte count overflow: element size * length exceeds u32::MAX",
-                        );
-                        let aligned_offset = align_to(current_offset, elem_sz);
-                        let slot = ArraySlot {
-                            offset: aligned_offset,
-                            elem_size: elem_sz,
-                            length: *length,
-                        };
-                        let arg_name = arena[*name].name.clone();
-                        array_offsets.insert(arg_name, slot);
-                        current_offset = aligned_offset.checked_add(byte_count).expect(
-                            "Frame offset overflow: total array allocation exceeds u32::MAX",
-                        );
-                    }
-                    // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                    TypeInfoKind::Custom(custom_name) => {
-                        if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                            let (total_size, field_slots) =
-                                compute_struct_field_layout(&struct_info);
-                            if total_size > 0 {
-                                let max_field_align = field_slots
-                                    .iter()
-                                    .map(|f| element_size(&f.type_kind))
-                                    .max()
-                                    .unwrap_or(1);
-                                let aligned_offset = align_to(current_offset, max_field_align);
-                                let slot = StructSlot {
-                                    offset: aligned_offset,
-                                    total_size,
-                                    fields: field_slots,
-                                };
-                                let arg_name = arena[*name].name.clone();
-                                struct_offsets.insert(arg_name, slot);
-                                current_offset =
-                                    aligned_offset.checked_add(total_size).expect(
+            match &arg.kind {
+                ArgKind::Named { name, ty, .. } => {
+                    let type_info = TypeInfo::from_type_id(arena, *ty);
+                    match &type_info.kind {
+                        TypeInfoKind::Array(elem_type, length) => {
+                            let elem_sz = element_size(&elem_type.kind);
+                            let byte_count = elem_sz.checked_mul(*length).expect(
+                                "Array byte count overflow: element size * length exceeds u32::MAX",
+                            );
+                            let aligned_offset = align_to(current_offset, elem_sz);
+                            let slot = ArraySlot {
+                                offset: aligned_offset,
+                                elem_size: elem_sz,
+                                length: *length,
+                            };
+                            let arg_name = arena[*name].name.clone();
+                            array_offsets.insert(arg_name, slot);
+                            current_offset = aligned_offset.checked_add(byte_count).expect(
+                                "Frame offset overflow: total array allocation exceeds u32::MAX",
+                            );
+                        }
+                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
+                        TypeInfoKind::Custom(custom_name) => {
+                            if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                                let (total_size, field_slots) =
+                                    compute_struct_field_layout(&struct_info);
+                                if total_size > 0 {
+                                    let max_field_align = field_slots
+                                        .iter()
+                                        .map(|f| element_size(&f.type_kind))
+                                        .max()
+                                        .unwrap_or(1);
+                                    let aligned_offset = align_to(current_offset, max_field_align);
+                                    let slot = StructSlot {
+                                        offset: aligned_offset,
+                                        total_size,
+                                        fields: field_slots,
+                                    };
+                                    let arg_name = arena[*name].name.clone();
+                                    struct_offsets.insert(arg_name, slot);
+                                    current_offset = aligned_offset.checked_add(total_size).expect(
                                         "Frame offset overflow: struct allocation exceeds u32::MAX",
                                     );
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
+                ArgKind::SelfRef { is_mut } if *is_mut => {
+                    let struct_name = method_struct_name.expect(
+                        "ArgKind::SelfRef encountered but no method_struct_name provided; \
+                         this indicates a bug in traverse_t_ast_with_compiler",
+                    );
+                    if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                        let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
+                        if total_size > 0 {
+                            let max_field_align = field_slots
+                                .iter()
+                                .map(|f| element_size(&f.type_kind))
+                                .max()
+                                .unwrap_or(1);
+                            let aligned_offset = align_to(current_offset, max_field_align);
+                            let slot = StructSlot {
+                                offset: aligned_offset,
+                                total_size,
+                                fields: field_slots,
+                            };
+                            struct_offsets.insert("self".to_string(), slot);
+                            current_offset = aligned_offset.checked_add(total_size).expect(
+                                "Frame offset overflow: struct allocation exceeds u32::MAX",
+                            );
+                        }
+                    }
+                }
+                // Immutable self or non-self args: no frame slot needed
+                _ => {}
             }
         }
 
@@ -708,8 +895,7 @@ impl Compiler {
                                         .map(|f| element_size(&f.type_kind))
                                         .max()
                                         .unwrap_or(1);
-                                    let aligned_offset =
-                                        align_to(*current_offset, max_field_align);
+                                    let aligned_offset = align_to(*current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
                                         total_size,
@@ -763,7 +949,12 @@ impl Compiler {
                 }
                 Stmt::Loop { body, .. } => {
                     Self::collect_compound_slots(
-                        arena, *body, ctx, array_offsets, struct_offsets, current_offset,
+                        arena,
+                        *body,
+                        ctx,
+                        array_offsets,
+                        struct_offsets,
+                        current_offset,
                     );
                 }
                 _ => {}
@@ -780,15 +971,17 @@ impl Compiler {
                 self.lower_block(arena, block_id, ctx);
             }
             Stmt::Expr(expr_id) => {
-                // The type checker rejects standalone calls to array-returning
-                // functions, so this path should be unreachable.
+                // The type checker rejects standalone calls to compound-returning
+                // functions/methods, so these paths should be unreachable.
                 if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
-                    && let Expr::Identifier(callee_name_id) = &arena[*function].kind
+                    && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
                 {
-                    let callee_name = &arena[*callee_name_id].name;
+                    let name = resolved.callee_name();
                     assert!(
-                        !self.func_array_returns.contains_key(callee_name),
-                        "standalone call to array-returning function should have been rejected by the type checker",
+                        !self.func_array_returns.contains_key(name)
+                            && !self.func_struct_returns.contains_key(name),
+                        "standalone call to compound-returning function/method '{name}' \
+                         should have been rejected by the type checker",
                     );
                 }
                 self.lower_expression(arena, expr_id, ctx, None);
@@ -860,9 +1053,9 @@ impl Compiler {
                         );
                         let is_compound_type = is_array_type || is_struct_type;
 
-                        // Detect sret call (array-returning or struct-returning function)
+                        // Detect sret call (array-returning or struct-returning function/method)
                         let is_sret_call =
-                            is_compound_type && self.is_sret_function_call(arena, val_expr_id);
+                            is_compound_type && self.is_sret_function_call(arena, val_expr_id, ctx);
 
                         // Detect array-to-array copy
                         let is_array_copy =
@@ -919,13 +1112,13 @@ impl Compiler {
     }
 
     /// Checks whether an expression is a function call to an sret function (array or struct return).
-    fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId) -> bool {
+    fn is_sret_function_call(&self, arena: &AstArena, expr_id: ExprId, ctx: &TypedContext) -> bool {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
-            && let Expr::Identifier(callee_name_id) = &arena[*function].kind
+            && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
         {
-            let callee_name = &arena[*callee_name_id].name;
-            return self.func_array_returns.contains_key(callee_name)
-                || self.func_struct_returns.contains_key(callee_name);
+            let name = resolved.callee_name();
+            return self.func_array_returns.contains_key(name)
+                || self.func_struct_returns.contains_key(name);
         }
         false
     }
@@ -952,7 +1145,9 @@ impl Compiler {
         } else if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
             struct_slot.offset
         } else {
-            panic!("Destination variable '{var_name}' not found in array_offsets or struct_offsets");
+            panic!(
+                "Destination variable '{var_name}' not found in array_offsets or struct_offsets"
+            );
         };
         let frame_ptr_local = layout.frame_ptr_local;
 
@@ -968,19 +1163,35 @@ impl Compiler {
                     .instruction(&Instruction::I32Const(dest_offset as i32));
                 self.func().instruction(&Instruction::I32Add);
             }
+
+            let resolved = self
+                .resolve_function_callee(arena, function, ctx)
+                .expect("sret callee must be an identifier, TypeMemberAccess, or MemberAccess");
+
+            let callee_name = resolved.callee_name().to_owned();
+            let receiver_expr = match &resolved {
+                ResolvedCallee::InstanceMethod {
+                    receiver_expr_id, ..
+                } => Some(*receiver_expr_id),
+                _ => None,
+            };
+
+            if let Some(receiver) = receiver_expr {
+                self.lower_expression(arena, receiver, ctx, None);
+            }
+
             // Push regular arguments
             for (_label, arg_expr_id) in &args {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
-            let callee_name = self
-                .resolve_callee_name(arena, function)
-                .expect("sret callee must be an identifier");
             let func_idx = self
                 .func_name_to_idx
                 .get(&callee_name)
                 .copied()
                 .expect("sret callee must be in func_name_to_idx");
             self.func().instruction(&Instruction::Call(func_idx));
+        } else {
+            unreachable!("lower_sret_var_init called with non-FunctionCall expression");
         }
 
         // Set local to point to destination slot
@@ -1159,24 +1370,61 @@ impl Compiler {
             Expr::MemberAccess { expr, name } => {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
             }
-            Expr::TypeMemberAccess { .. } => todo!(),
+            Expr::TypeMemberAccess { .. } => {
+                todo!(
+                    "TypeMemberAccess expressions (including enum variant access like \
+                     `Enum::Variant`) are not yet supported in wasm codegen"
+                );
+            }
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-                match self.lower_function_call(arena, function, &args, ctx) {
-                    Ok(()) => {}
-                    Err(CodegenError::UnsupportedCalleeKind) => {
+                match self.resolve_function_callee(arena, function, ctx) {
+                    Some(ResolvedCallee::InstanceMethod {
+                        receiver_expr_id,
+                        method_name_id,
+                        ..
+                    }) => {
+                        self.lower_instance_method_call(
+                            arena,
+                            receiver_expr_id,
+                            method_name_id,
+                            &args,
+                            ctx,
+                            None,
+                        );
+                    }
+                    Some(ResolvedCallee::AssociatedFunction {
+                        type_expr_id,
+                        method_name_id,
+                        ..
+                    }) => {
+                        self.lower_associated_function_call(
+                            arena,
+                            type_expr_id,
+                            method_name_id,
+                            &args,
+                            ctx,
+                            None,
+                        );
+                    }
+                    Some(ResolvedCallee::Function(ref name)) => {
+                        match self.lower_function_call(arena, name, &args, ctx) {
+                            Ok(()) => {}
+                            Err(CodegenError::UnknownFunction(name)) => {
+                                panic!(
+                                    "Function '{name}' not found in name-to-index map; \
+                                     the type-checker should have caught undefined functions"
+                                )
+                            }
+                            Err(e) => panic!("function call lowering failed: {e}"),
+                        }
+                    }
+                    None => {
                         todo!(
-                            "Non-identifier function calls (method calls, higher-order) \
+                            "Non-identifier function calls (higher-order) \
                              are not yet implemented"
                         )
                     }
-                    Err(CodegenError::UnknownFunction(name)) => {
-                        panic!(
-                            "Function '{name}' not found in name-to-index map; \
-                             the type-checker should have caught undefined functions"
-                        )
-                    }
-                    Err(e) => panic!("function call lowering failed: {e}"),
                 }
             }
             Expr::StructLiteral { name: _, fields } => {
@@ -1262,43 +1510,261 @@ impl Compiler {
         }
     }
 
-    /// Resolves the callee name from a function expression.
-    #[allow(clippy::unused_self)]
-    fn resolve_callee_name(&self, arena: &AstArena, function_expr_id: ExprId) -> Option<String> {
-        if let Expr::Identifier(ident_id) = &arena[function_expr_id].kind {
-            Some(arena[*ident_id].name.clone())
-        } else {
-            None
+    /// Resolves the callee of a `FunctionCall` expression into a [`ResolvedCallee`].
+    ///
+    /// Given the `function` expression of a `FunctionCall` AST node, determines
+    /// which of the three call patterns it represents and resolves the corresponding
+    /// WASM function name. Returns `None` if the expression does not match any
+    /// known callee pattern (e.g., higher-order calls).
+    fn resolve_function_callee(
+        &self,
+        arena: &AstArena,
+        function_expr_id: ExprId,
+        ctx: &TypedContext,
+    ) -> Option<ResolvedCallee> {
+        match &arena[function_expr_id].kind {
+            Expr::Identifier(ident_id) => {
+                Some(ResolvedCallee::Function(arena[*ident_id].name.clone()))
+            }
+            Expr::TypeMemberAccess {
+                expr: type_expr,
+                name: method_name,
+            } => {
+                let mangled =
+                    self.resolve_associated_mangled_name(arena, *type_expr, *method_name)?;
+                Some(ResolvedCallee::AssociatedFunction {
+                    mangled_name: mangled,
+                    type_expr_id: *type_expr,
+                    method_name_id: *method_name,
+                })
+            }
+            Expr::MemberAccess {
+                expr: receiver,
+                name: method_name,
+            } => {
+                let mangled =
+                    self.resolve_method_mangled_name(arena, *receiver, *method_name, ctx)?;
+                Some(ResolvedCallee::InstanceMethod {
+                    mangled_name: mangled,
+                    receiver_expr_id: *receiver,
+                    method_name_id: *method_name,
+                })
+            }
+            _ => None,
         }
     }
 
-    /// Lowers a plain identifier-based function call to a WASM `call` instruction.
+    /// Lowers a plain function call to a WASM `call` instruction.
     fn lower_function_call(
         &mut self,
         arena: &AstArena,
-        function_expr_id: ExprId,
+        callee_name: &str,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
-        let func_name = self
-            .resolve_callee_name(arena, function_expr_id)
-            .ok_or(CodegenError::UnsupportedCalleeKind)?;
-
         cov_mark::hit!(wasm_codegen_emit_function_call);
 
-        let args_copy: Vec<_> = call_args.iter().map(|(l, e)| (*l, *e)).collect();
-        for (_label, arg_expr_id) in &args_copy {
+        for (_label, arg_expr_id) in call_args {
             self.lower_expression(arena, *arg_expr_id, ctx, None);
         }
 
         let func_idx = self
             .func_name_to_idx
-            .get(&func_name)
+            .get(callee_name)
             .copied()
-            .ok_or(CodegenError::UnknownFunction(func_name))?;
+            .ok_or_else(|| CodegenError::UnknownFunction(callee_name.to_owned()))?;
 
         self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
+    }
+
+    /// Resolves the mangled WASM function name for an instance method call.
+    ///
+    /// Given the receiver expression and method name, determines the receiver's struct type
+    /// from the type context and looks up the corresponding mangled name in `method_mangled_names`.
+    /// Returns `None` if the receiver has no type info or the method is not registered.
+    fn resolve_method_mangled_name(
+        &self,
+        arena: &AstArena,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+        ctx: &TypedContext,
+    ) -> Option<String> {
+        let method_name = &arena[method_name_id].name;
+        let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
+        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+            &receiver_type.kind
+        else {
+            return None;
+        };
+        self.method_mangled_names
+            .get(&(struct_name.clone(), method_name.clone()))
+            .cloned()
+    }
+
+    /// Lowers an instance method call (`receiver.method(args)`) to WASM instructions.
+    ///
+    /// Resolves the receiver's struct type, looks up the mangled method name
+    /// (`TypeName.method_name`), pushes the receiver as the implicit `self`
+    /// argument, then pushes user arguments, and emits `call`.
+    ///
+    /// When the method returns a compound type (struct or array), the sret calling
+    /// convention is used. If `sret_local` is `Some(local_idx)`, the local at that
+    /// index holds the sret destination pointer and is pushed as the first WASM
+    /// argument before the receiver. If `sret_local` is `None` and the method
+    /// returns a compound type, this is a codegen limitation (expression-position
+    /// compound-returning method calls require temporary frame allocation).
+    fn lower_instance_method_call(
+        &mut self,
+        arena: &AstArena,
+        receiver_expr_id: ExprId,
+        method_name_id: IdentId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+        sret_local: Option<u32>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_instance_method_call);
+
+        let mangled_name = self
+            .resolve_method_mangled_name(arena, receiver_expr_id, method_name_id, ctx)
+            .unwrap_or_else(|| {
+                let method_name = &arena[method_name_id].name;
+                panic!(
+                    "Instance method call: could not resolve mangled name for method \
+                     '{method_name}' (receiver has no type info or non-struct type)"
+                )
+            });
+
+        let is_sret = self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name);
+
+        let func_idx = self
+            .func_name_to_idx
+            .get(&mangled_name)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+            });
+
+        if is_sret {
+            cov_mark::hit!(wasm_codegen_emit_instance_method_sret);
+            let sret_idx = sret_local.unwrap_or_else(|| {
+                panic!(
+                    "Instance method call to compound-returning method '{mangled_name}' \
+                     in expression position without sret destination. \
+                     Compound-returning calls are only supported in variable initialization \
+                     and return positions."
+                )
+            });
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+        }
+
+        // Push receiver as the implicit `self` argument
+        self.lower_expression(arena, receiver_expr_id, ctx, None);
+
+        // Push user arguments
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        self.func().instruction(&Instruction::Call(func_idx));
+    }
+
+    /// Extracts the type name from the `expr` part of a `TypeMemberAccess` expression.
+    ///
+    /// Handles `Expr::Type(TypeId)` with `TypeNode::Custom(ident_id)` and
+    /// `Expr::Identifier(ident_id)` patterns, matching the type-checker's resolution logic.
+    fn extract_type_name_from_type_expr(arena: &AstArena, type_expr_id: ExprId) -> Option<String> {
+        match &arena[type_expr_id].kind {
+            Expr::Type(ty_id) => match &arena[*ty_id].kind {
+                TypeNode::Custom(ident_id) => Some(arena[*ident_id].name.clone()),
+                _ => None,
+            },
+            Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Resolves the mangled WASM function name for an associated function call (`Type::method()`).
+    ///
+    /// Extracts the type name from the expression, then looks up the mangled name
+    /// in `method_mangled_names`. Returns `None` if the type name cannot be extracted
+    /// or the method is not registered.
+    fn resolve_associated_mangled_name(
+        &self,
+        arena: &AstArena,
+        type_expr_id: ExprId,
+        method_name_id: IdentId,
+    ) -> Option<String> {
+        let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
+        let method_name = &arena[method_name_id].name;
+        self.method_mangled_names
+            .get(&(type_name, method_name.clone()))
+            .cloned()
+    }
+
+    /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
+    ///
+    /// Associated functions have no `self` parameter. The callee is resolved via
+    /// the type name and method name, looked up in `method_mangled_names`, and
+    /// called with only the user-provided arguments.
+    ///
+    /// When the method returns a compound type (struct or array), the sret calling
+    /// convention is used. If `sret_local` is `Some(local_idx)`, the local at that
+    /// index holds the sret destination pointer and is pushed as the first WASM
+    /// argument. If `sret_local` is `None` and the method returns a compound type,
+    /// this is a codegen limitation (expression-position compound-returning method
+    /// calls require temporary frame allocation).
+    fn lower_associated_function_call(
+        &mut self,
+        arena: &AstArena,
+        type_expr_id: ExprId,
+        method_name_id: IdentId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+        sret_local: Option<u32>,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_associated_function_call);
+
+        let mangled_name = self
+            .resolve_associated_mangled_name(arena, type_expr_id, method_name_id)
+            .unwrap_or_else(|| {
+                let method_name = &arena[method_name_id].name;
+                panic!(
+                    "Associated function call: could not resolve mangled name for \
+                     method '{method_name}' (type expression has no resolvable type name)"
+                )
+            });
+
+        let is_sret = self.func_array_returns.contains_key(&mangled_name)
+            || self.func_struct_returns.contains_key(&mangled_name);
+
+        let func_idx = self
+            .func_name_to_idx
+            .get(&mangled_name)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+            });
+
+        if is_sret {
+            cov_mark::hit!(wasm_codegen_emit_associated_function_sret);
+            let sret_idx = sret_local.unwrap_or_else(|| {
+                panic!(
+                    "Associated function call to compound-returning method '{mangled_name}' \
+                     in expression position without sret destination. \
+                     Compound-returning calls are only supported in variable initialization \
+                     and return positions."
+                )
+            });
+            self.func().instruction(&Instruction::LocalGet(sret_idx));
+        }
+
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        self.func().instruction(&Instruction::Call(func_idx));
     }
 
     /// Lowers an assignment statement.
@@ -1318,8 +1784,7 @@ impl Compiler {
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                let is_struct_literal =
-                    matches!(&arena[right].kind, Expr::StructLiteral { .. });
+                let is_struct_literal = matches!(&arena[right].kind, Expr::StructLiteral { .. });
                 let is_struct_type = self
                     .frame_layout
                     .as_ref()
@@ -1332,8 +1797,7 @@ impl Compiler {
                     let dest_slot = &layout.struct_offsets[name];
                     let byte_size = dest_slot.total_size;
                     // dest = local (already points to frame slot)
-                    self.func()
-                        .instruction(&Instruction::LocalGet(local_idx));
+                    self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (struct pointer)
                     self.lower_expression(arena, right, ctx, None);
                     // byte count
@@ -1490,13 +1954,28 @@ impl Compiler {
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
         let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
-        let callee_name = self
-            .resolve_callee_name(arena, function)
+
+        let resolved = self
+            .resolve_function_callee(arena, function, ctx)
             .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
+
+        let callee_name = resolved.callee_name().to_owned();
+        let receiver_expr = match &resolved {
+            ResolvedCallee::InstanceMethod {
+                receiver_expr_id, ..
+            } => Some(*receiver_expr_id),
+            _ => None,
+        };
+
         if self.func_array_returns.contains_key(&callee_name)
             || self.func_struct_returns.contains_key(&callee_name)
         {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
+
+            if let Some(receiver) = receiver_expr {
+                self.lower_expression(arena, receiver, ctx, None);
+            }
+
             for (_label, arg_expr_id) in &args {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
@@ -2238,9 +2717,7 @@ impl Compiler {
                     .iter()
                     .find(|fs| fs.name == *field_name)
                     .unwrap_or_else(|| {
-                        panic!(
-                            "Field '{field_name}' not found in cached layout for '{var_name}'"
-                        )
+                        panic!("Field '{field_name}' not found in cached layout for '{var_name}'")
                     });
                 return (field_slot.offset, field_slot.type_kind.clone());
             }
@@ -2250,7 +2727,9 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(struct_expr_id))
             .expect("MemberAccess: struct expression must have type info");
 
-        let TypeInfoKind::Struct(struct_name) = &struct_type.kind else {
+        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+            &struct_type.kind
+        else {
             panic!(
                 "MemberAccess: struct expression has non-struct type: {:?}",
                 struct_type.kind

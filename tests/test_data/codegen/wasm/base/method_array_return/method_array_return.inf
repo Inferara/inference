@@ -1,0 +1,24 @@
+struct Pair {
+    x: i32;
+    y: i32;
+
+    fn to_array(self) -> [i32; 2] {
+        let result: [i32; 2] = [self.x, self.y];
+        return result;
+    }
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+}
+
+pub fn test_to_array_first() -> i32 {
+    let p: Pair = Pair { x: 10, y: 20 };
+    let arr: [i32; 2] = p.to_array();
+    return arr[0];
+}
+
+pub fn test_to_array_second() -> i32 {
+    let p: Pair = Pair { x: 10, y: 20 };
+    let arr: [i32; 2] = p.to_array();
+    return arr[1];
+}

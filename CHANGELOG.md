@@ -66,6 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Struct reassignment: `p = q` uses `memory.copy` to destination frame slot (not pointer aliasing)
   - Struct literal reassignment: `p = Point { x: 3, y: 4 }` writes fields directly to existing frame slot
   - Uzumaki for all primitive types: bool, i8-u64 emit `i32.uzumaki` or `i64.uzumaki` as appropriate
+- Add struct method codegen with instance methods, associated functions, and cross-calls ([#162])
+  - Methods compiled as top-level WASM functions with mangled names (`TypeName.method_name`)
+  - Two-phase traversal: register all function + method indices before compiling any bodies (enables forward references)
+  - `self` parameter lowered as `ValType::I32` struct pointer at param index 0
+  - Immutable `self` reads directly from caller pointer (zero-copy optimization); mutable `self` uses copy-on-entry
+  - Instance method calls (`p.get_x()`) resolve receiver type, push struct pointer as implicit first argument
+  - Associated function calls (`Point::new(1, 2)`) resolve mangled name without receiver
+  - Methods returning compound types (structs, arrays) use sret calling convention
+  - `ResolvedCallee` enum consolidates three callee patterns (Function, AssociatedFunction, InstanceMethod) across all call paths
+  - `assert!` on mangled name collision: detects `TypeName.method_name` conflicts with top-level functions in release builds
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -186,12 +196,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix duplicate `BinaryOperandTypeMismatch` error for mixed-type arithmetic ([#149])
 - Remove dead code: `types_equal` function, `is_compatible_with` method, `param_names` field from `FuncInfo`
 - Add `find_enclosing_variable_name()` to `TypedContext` for walking AST parent chain to enclosing variable
+- Rename `ArrayReturnCallInExpressionPosition` to `CompoundReturnCallInExpressionPosition` to reflect struct coverage ([#162])
+- Add `CompoundReturnCallInAssignment` error: rejects compound-returning function calls in assignment RHS ([#162])
+  - `p = make_point()` rejected; use `let p = make_point()` instead
+- Add `MethodCallChainOnCompoundReturn` error: rejects method call chains on compound-returning functions ([#162])
+  - `p.translate(1, 2).get_x()` rejected; assign intermediate result to a variable first
+  - Deliberate design choice: implicit temporaries cannot be named in formal proofs
+- Add `MethodMetadata` public struct and `TypedContext::lookup_method()` for cross-crate method metadata access ([#162])
 
 ### Testing
 
 - Add 43 analysis walker tests covering all 5 rules across free functions, struct methods, and spec functions ([#156])
   - Negative tests for valid code, edge cases for nested loops, deeply nested nondet, overlapping rule triggers
   - All four nondet block types (forall, exists, assume, unique) tested for A002
+- Add 9 method codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#162])
+  - `method_instance`, `method_assoc`, `method_self_mutate`, `method_return_struct`, `method_cross_call`, `method_multi_struct`, `method_i64_fields`, `method_three_fields`, `method_array_return`
+- Add negative codegen tests for unsupported features: `assert`, `**` operator, standalone `TypeMemberAccess`, recursive compound returns ([#162])
+- Add validation tests for method mangling, immutable self zero-copy, and mutable self frame copy ([#162])
+- Add 12 type checker tests for method chain rejection, compound-return in assignments, and member-access error cases ([#162])
 - Update all AST, type-checker, and codegen tests for typed arena API ([#156])
   - Migrate from `arena.filter_nodes(|node| matches!(node, AstNode::...))` to structured traversal via typed IDs
   - Update test utilities with `find_function_by_name()`, `collect_exprs_matching()`, `collect_all_stmts()`
@@ -521,3 +543,4 @@ Initial tagged release.
 [#152]: https://github.com/Inferara/inference/pull/152
 [#149]: https://github.com/Inferara/inference/pull/159
 [#156]: https://github.com/Inferara/inference/pull/156
+[#162]: https://github.com/Inferara/inference/pull/178

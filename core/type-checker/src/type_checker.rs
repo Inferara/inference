@@ -216,8 +216,10 @@ impl TypeChecker {
                                     ArgKind::Named { ty, .. }
                                     | ArgKind::Ignored { ty }
                                     | ArgKind::TypeOnly(ty) => {
-                                        Some(TypeInfo::from_type_id_with_type_params(
-                                            arena, *ty, &tp_names,
+                                        Some(self.symbol_table.resolve_custom_type(
+                                            TypeInfo::from_type_id_with_type_params(
+                                                arena, *ty, &tp_names,
+                                            ),
                                         ))
                                     }
                                 })
@@ -227,6 +229,7 @@ impl TypeChecker {
                                 .map(|r| {
                                     TypeInfo::from_type_id_with_type_params(arena, r, &tp_names)
                                 })
+                                .map(|ti| self.symbol_table.resolve_custom_type(ti))
                                 .unwrap_or_default();
 
                             let definition_scope_id =
@@ -745,25 +748,28 @@ impl TypeChecker {
                         });
                     }
                 } else {
-                    // Check for array return call in assignment position
-                    if let Expr::FunctionCall { function, .. } = &ctx.arena()[right].kind {
-                        let func_name = self.resolve_function_call_name(ctx.arena(), *function);
-                        if let Some(ref fn_name) = func_name
-                            && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                            && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
-                        {
-                            self.errors
-                                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                    location: ctx.arena()[right].location,
-                                });
-                        }
-                    }
                     let lhs_is_identifier =
                         matches!(ctx.arena()[left].kind, Expr::Identifier(_));
                     if lhs_is_identifier {
                         self.compound_literal_allowed = true;
                     }
                     let value_type = self.infer_expression(right, ctx);
+                    // Reject compound-returning calls in assignment RHS.
+                    // Covers regular functions, instance methods, and associated functions.
+                    if let Expr::FunctionCall { .. } = &ctx.arena()[right].kind
+                        && let Some(ref val) = value_type
+                        && matches!(
+                            val.kind,
+                            TypeInfoKind::Array(_, _)
+                                | TypeInfoKind::Struct(_)
+                                | TypeInfoKind::Custom(_)
+                        )
+                    {
+                        self.errors
+                            .push(TypeCheckError::CompoundReturnCallInAssignment {
+                                location: ctx.arena()[right].location,
+                            });
+                    }
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
                     {
@@ -785,19 +791,20 @@ impl TypeChecker {
                 self.symbol_table.pop_scope();
             }
             Stmt::Expr(expr_id) => {
-                self.infer_expression(expr_id, ctx);
-                // Check for array return call in expression position
-                if let Expr::FunctionCall { function, .. } = &ctx.arena()[expr_id].kind {
-                    let func_name = self.resolve_function_call_name(ctx.arena(), *function);
-                    if let Some(ref fn_name) = func_name
-                        && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
-                    {
-                        self.errors
-                            .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                location: ctx.arena()[expr_id].location,
-                            });
-                    }
+                let expr_type = self.infer_expression(expr_id, ctx);
+                if let Expr::FunctionCall { .. } = &ctx.arena()[expr_id].kind
+                    && let Some(ref ty) = expr_type
+                    && matches!(
+                        ty.kind,
+                        TypeInfoKind::Array(_, _)
+                            | TypeInfoKind::Struct(_)
+                            | TypeInfoKind::Custom(_)
+                    )
+                {
+                    self.errors
+                        .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
+                            location: ctx.arena()[expr_id].location,
+                        });
                 }
             }
             Stmt::Return { expr } => {
@@ -1082,20 +1089,21 @@ impl TypeChecker {
         let kind = expr_data.kind.clone();
         match kind {
             Expr::ArrayIndexAccess { array, index } => {
-                // Check for function call returning array in array index position
-                if let Expr::FunctionCall { function, .. } = &ctx.arena()[array].kind {
-                    let func_name = self.resolve_function_call_name(ctx.arena(), *function);
-                    if let Some(ref fn_name) = func_name
-                        && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                        && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
-                    {
-                        self.errors
-                            .push(TypeCheckError::ArrayReturnCallInExpressionPosition { location });
-                    }
-                }
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
                 } else if let Some(array_type) = self.infer_expression(array, ctx) {
+                    // Check for compound-returning function call in array index position
+                    if let Expr::FunctionCall { .. } = &ctx.arena()[array].kind
+                        && matches!(
+                            array_type.kind,
+                            TypeInfoKind::Array(_, _)
+                                | TypeInfoKind::Struct(_)
+                                | TypeInfoKind::Custom(_)
+                        )
+                    {
+                        self.errors
+                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition { location });
+                    }
                     if let Some(index_type) = self.infer_expression(index, ctx) {
                         if !index_type.is_number() {
                             self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
@@ -1133,26 +1141,22 @@ impl TypeChecker {
             Expr::MemberAccess { expr, name } => {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
-                } else {
-                    if let Expr::FunctionCall { function, .. } = &ctx.arena()[expr].kind {
-                        let func_name = self.resolve_function_call_name(ctx.arena(), *function);
-                        if let Some(ref fn_name) = func_name
-                            && let Some(sig) = self.symbol_table.lookup_function(fn_name)
-                            && matches!(
-                                sig.return_type.kind,
-                                TypeInfoKind::Array(_, _)
-                                    | TypeInfoKind::Struct(_)
-                                    | TypeInfoKind::Custom(_)
-                            )
-                        {
-                            self.errors
-                                .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                                    location,
-                                });
-                            return None;
-                        }
+                } else if let Some(object_type) = self.infer_expression(expr, ctx) {
+                    // Check for compound-returning function call in member access position
+                    if let Expr::FunctionCall { .. } = &ctx.arena()[expr].kind
+                        && matches!(
+                            object_type.kind,
+                            TypeInfoKind::Array(_, _)
+                                | TypeInfoKind::Struct(_)
+                                | TypeInfoKind::Custom(_)
+                        )
+                    {
+                        self.errors
+                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
+                                location,
+                            });
+                        return None;
                     }
-                    if let Some(object_type) = self.infer_expression(expr, ctx) {
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -1208,7 +1212,6 @@ impl TypeChecker {
                     }
                 } else {
                     None
-                }
                 }
             }
             Expr::TypeMemberAccess {
@@ -1717,6 +1720,7 @@ impl TypeChecker {
                     for (i, arg) in call_args.iter().enumerate() {
                         self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
                         let arg_type = self.infer_expression(arg.1, ctx);
+                        self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
                         if let Some(arg_type) = arg_type
                             && i < sig_param_types.len()
                             && arg_type != sig_param_types[i]
@@ -1761,6 +1765,24 @@ impl TypeChecker {
             let method_name_id = *method_name_id;
 
             let receiver_type = self.infer_expression(receiver_expr, ctx);
+
+            // Prohibit method call chains on compound-returning calls.
+            if let Expr::FunctionCall { .. } = &ctx.arena()[receiver_expr].kind
+                && let Some(ref recv_type) = receiver_type
+                && matches!(
+                    recv_type.kind,
+                    TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+                )
+            {
+                self.errors
+                    .push(TypeCheckError::MethodCallChainOnCompoundReturn {
+                        location: ctx.arena()[call_expr_id].location,
+                    });
+                for arg in call_args {
+                    self.infer_expression(arg.1, ctx);
+                }
+                return None;
+            }
 
             if let Some(receiver_type) = receiver_type {
                 let type_name = match &receiver_type.kind {
@@ -1818,6 +1840,7 @@ impl TypeChecker {
                         for (i, arg) in call_args.iter().enumerate() {
                             self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
                             let arg_type = self.infer_expression(arg.1, ctx);
+                            self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
                             if let Some(arg_type) = arg_type
                                 && i < sig_param_types.len()
                                 && arg_type != sig_param_types[i]
@@ -1874,10 +1897,9 @@ impl TypeChecker {
         }
 
         // Regular function call
-        let func_name = self.resolve_function_call_name(ctx.arena(), function_expr_id);
-        let func_name = match func_name {
-            Some(name) => name,
-            None => {
+        let func_name = match &ctx.arena()[function_expr_id].kind {
+            Expr::Identifier(ident_id) => ctx.arena()[*ident_id].name.clone(),
+            _ => {
                 for arg in call_args {
                     self.infer_expression(arg.1, ctx);
                 }
@@ -1976,6 +1998,7 @@ impl TypeChecker {
         for (i, arg) in call_args.iter().enumerate() {
             self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
             let arg_type = self.infer_expression(arg.1, ctx);
+            self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
             if let Some(arg_type) = arg_type
                 && i < sig_param_types.len()
             {
@@ -2022,18 +2045,6 @@ impl TypeChecker {
                 location: arena[arg_expr_id].location,
             });
         }
-        if let Expr::FunctionCall { function, .. } = &arena[arg_expr_id].kind {
-            let func_name = self.resolve_function_call_name(arena, *function);
-            if let Some(ref fn_name) = func_name
-                && let Some(inner_sig) = self.symbol_table.lookup_function(fn_name)
-                && matches!(inner_sig.return_type.kind, TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
-            {
-                self.errors
-                    .push(TypeCheckError::ArrayReturnCallInExpressionPosition {
-                        location: arena[arg_expr_id].location,
-                    });
-            }
-        }
         if let Expr::Uzumaki = &arena[arg_expr_id].kind
             && let Some(pt) = param_type
         {
@@ -2046,18 +2057,28 @@ impl TypeChecker {
         }
     }
 
-    /// Resolve the name of a function from its function expression.
+    /// Reject compound-returning function calls used as arguments.
     ///
-    /// For `Identifier(id)` returns the identifier name.
-    /// For more complex expressions, returns None (handled by caller).
-    fn resolve_function_call_name(
-        &self,
-        arena: &AstArena,
-        function_expr_id: ExprId,
-    ) -> Option<String> {
-        match &arena[function_expr_id].kind {
-            Expr::Identifier(ident_id) => Some(arena[*ident_id].name.clone()),
-            _ => None,
+    /// Called after `infer_expression` so the argument's inferred type is available.
+    /// Uses the inferred type rather than resolving the callee, which handles all
+    /// callee forms uniformly: plain functions, instance methods, and associated functions.
+    fn check_compound_return_in_arg(
+        &mut self,
+        arg_expr_id: ExprId,
+        arg_type: &Option<TypeInfo>,
+        ctx: &TypedContext,
+    ) {
+        if let Expr::FunctionCall { .. } = &ctx.arena()[arg_expr_id].kind
+            && let Some(ty) = arg_type
+            && matches!(
+                ty.kind,
+                TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+            )
+        {
+            self.errors
+                .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
+                    location: ctx.arena()[arg_expr_id].location,
+                });
         }
     }
 

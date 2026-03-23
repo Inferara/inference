@@ -139,5 +139,5 @@ cargo test -p inference-tests analysis
 ## Current Limitations
 
 1. All five rules are `Error` severity. No rules currently produce `Warning` or `Info` findings; those severity levels are wired and ready but unused.
-2. `ArrayLiteralAsArgument` and `ArrayReturnCallInExpressionPosition` are restrictions currently enforced in the type checker (`core/type-checker`) rather than here. They would fit naturally as analysis rules A006 and A007.
+2. `ArrayLiteralAsArgument` and `CompoundReturnCallInExpressionPosition` are restrictions currently enforced in the type checker (`core/type-checker`) rather than here. They would fit naturally as analysis rules A006 and A007.
 3. The walker visits all statements but does not expose expression-level traversal. Rules that need to inspect expressions must do their own descent.

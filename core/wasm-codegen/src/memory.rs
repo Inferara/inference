@@ -882,7 +882,6 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[0].offset, 0);
-
     }
 
     #[test]
@@ -902,7 +901,6 @@ mod tests {
 
         assert_eq!(fields[1].name, "y");
         assert_eq!(fields[1].offset, 4);
-
     }
 
     #[test]
@@ -977,7 +975,6 @@ mod tests {
         let (total_size, fields) = compute_struct_field_layout(&layout);
         assert_eq!(total_size, 1);
         assert_eq!(fields[0].offset, 0);
-
     }
 
     #[test]

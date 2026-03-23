@@ -1,0 +1,38 @@
+struct Vec3 {
+    x: i32;
+    y: i32;
+    z: i32;
+
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+    fn get_z(self) -> i32 {
+        return self.z;
+    }
+    fn sum(self) -> i32 {
+        return self.x + self.y + self.z;
+    }
+}
+
+pub fn test_get_x() -> i32 {
+    let v: Vec3 = Vec3 { x: 1, y: 2, z: 3 };
+    return v.get_x();
+}
+
+pub fn test_get_y() -> i32 {
+    let v: Vec3 = Vec3 { x: 1, y: 2, z: 3 };
+    return v.get_y();
+}
+
+pub fn test_get_z() -> i32 {
+    let v: Vec3 = Vec3 { x: 1, y: 2, z: 3 };
+    return v.get_z();
+}
+
+pub fn test_sum() -> i32 {
+    let v: Vec3 = Vec3 { x: 1, y: 2, z: 3 };
+    return v.sum();
+}

@@ -751,3 +751,30 @@ pub(crate) fn assert_function_returns_simple_type(
         panic!("DefId does not point to a function");
     }
 }
+
+/// Attempts the full compilation pipeline, catching panics.
+///
+/// Returns `Ok(CodegenOutput)` on success, `Err(message)` on panic or error.
+/// Useful for negative tests that verify certain inputs fail codegen.
+pub(crate) fn try_codegen(source_code: &str) -> Result<inference_wasm_codegen::CodegenOutput, String> {
+    let arena = build_ast(source_code.to_string());
+    let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        .unwrap()
+        .typed_context();
+    let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
+    let target = inference_wasm_codegen::Target::default();
+    let mode = inference_wasm_codegen::CompilationMode::default();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level())
+    }))
+    .map_err(|panic| {
+        if let Some(s) = panic.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        }
+    })?
+    .map_err(|e| e.to_string())
+}

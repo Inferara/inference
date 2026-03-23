@@ -490,7 +490,7 @@ pub enum TypeCheckError {
     #[error(
         "{location}: compound-returning function calls can only appear in `let` bindings or `return` statements; assign to a variable first"
     )]
-    ArrayReturnCallInExpressionPosition { location: Location },
+    CompoundReturnCallInExpressionPosition { location: Location },
 
     /// Array index expression uses a 64-bit integer type.
     ///
@@ -546,6 +546,27 @@ pub enum TypeCheckError {
         field_name: String,
         location: Location,
     },
+
+    /// Method call chain on a compound-returning function call.
+    ///
+    /// Chaining method calls on struct/array-returning functions creates implicit
+    /// temporaries that cannot be named in formal proofs. Assign the intermediate
+    /// result to a variable first.
+    #[error(
+        "{location}: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
+    )]
+    MethodCallChainOnCompoundReturn { location: Location },
+
+    /// Compound-returning function call used in assignment RHS.
+    ///
+    /// Functions returning arrays or structs use the sret calling convention,
+    /// which requires the caller to provide a destination pointer. Assignment
+    /// targets already have an address, but the codegen cannot wire it as an
+    /// sret destination. Use a fresh `let` binding instead.
+    #[error(
+        "{location}: cannot assign from a compound-returning function call; use a new variable binding instead"
+    )]
+    CompoundReturnCallInAssignment { location: Location },
 }
 
 impl TypeCheckError {
@@ -593,14 +614,16 @@ impl TypeCheckError {
             | TypeCheckError::StructLiteralAsArgument { location, .. }
             | TypeCheckError::CompoundLiteralInUnsupportedPosition { location, .. }
             | TypeCheckError::ArrayUzumakiAsArgument { location, .. }
-            | TypeCheckError::ArrayReturnCallInExpressionPosition { location, .. }
+            | TypeCheckError::CompoundReturnCallInExpressionPosition { location, .. }
             | TypeCheckError::ArrayIndex64Bit { location, .. }
             | TypeCheckError::InvalidArraySize { location, .. }
             | TypeCheckError::MethodNeverAccessesSelf { location, .. }
             | TypeCheckError::EmptyStruct { location, .. }
             | TypeCheckError::MissingStructField { location, .. }
             | TypeCheckError::UnknownStructField { location, .. }
-            | TypeCheckError::DuplicateStructField { location, .. } => location,
+            | TypeCheckError::DuplicateStructField { location, .. }
+            | TypeCheckError::MethodCallChainOnCompoundReturn { location, .. }
+            | TypeCheckError::CompoundReturnCallInAssignment { location, .. } => location,
         }
     }
 }
@@ -1262,7 +1285,7 @@ mod tests {
 
     #[test]
     fn display_array_return_call_in_expression_position() {
-        let err = TypeCheckError::ArrayReturnCallInExpressionPosition {
+        let err = TypeCheckError::CompoundReturnCallInExpressionPosition {
             location: test_location(),
         };
         assert_eq!(
@@ -1383,6 +1406,28 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: duplicate field `x` in struct literal `Point`"
+        );
+    }
+
+    #[test]
+    fn display_compound_return_call_in_assignment() {
+        let err = TypeCheckError::CompoundReturnCallInAssignment {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot assign from a compound-returning function call; use a new variable binding instead"
+        );
+    }
+
+    #[test]
+    fn display_method_call_chain_on_compound_return() {
+        let err = TypeCheckError::MethodCallChainOnCompoundReturn {
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first"
         );
     }
 }

@@ -1,0 +1,36 @@
+struct Vec2 {
+    x: i32;
+    y: i32;
+
+    fn get_x(self) -> i32 {
+        return self.x;
+    }
+    fn get_y(self) -> i32 {
+        return self.y;
+    }
+    fn sum(self) -> i32 {
+        return self.get_x() + self.get_y();
+    }
+    fn new(x: i32, y: i32) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+}
+
+fn double(n: i32) -> i32 {
+    return n * 2;
+}
+
+pub fn test_method_calls_method() -> i32 {
+    let v: Vec2 = Vec2 { x: 3, y: 7 };
+    return v.sum();
+}
+
+pub fn test_method_calls_toplevel_fn() -> i32 {
+    let v: Vec2 = Vec2 { x: 5, y: 0 };
+    return double(v.get_x());
+}
+
+pub fn test_toplevel_fn_calls_method() -> i32 {
+    let v: Vec2 = Vec2::new(4, 6);
+    return double(v.get_y());
+}
