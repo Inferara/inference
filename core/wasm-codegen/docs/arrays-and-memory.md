@@ -743,6 +743,31 @@ i32.add
 local.set $b               ;; b now points to its own copy
 ```
 
+### Struct Uzumaki (`lower_struct_uzumaki`)
+
+A struct variable initialized with uzumaki (`let p: Point = @;`) is filled field-by-field with non-deterministic values. For each field in the struct layout, the compiler emits the appropriate uzumaki opcode followed by a store at the field's memory offset:
+
+```wasm
+local.get $__frame_ptr
+i32.const <struct_offset + field_x_offset>
+i32.add
+i32.uzumaki                ;; 0xfc 0x31 — non-deterministic i32 value
+i32.store                  ;; p.x = @
+
+local.get $__frame_ptr
+i32.const <struct_offset + field_y_offset>
+i32.add
+i32.uzumaki
+i32.store                  ;; p.y = @
+
+local.get $__frame_ptr
+i32.const <struct_offset>
+i32.add
+local.set $p
+```
+
+Fields with `i64` types emit `i64.uzumaki` (0xfc 0x32) followed by `i64.store`. Field types use the same type dispatch as regular struct literal stores.
+
 ## Known Limitations
 
 1. **Nested arrays**: `[[i32; 3]; 2]` not yet supported (type-checker restriction)
@@ -768,6 +793,7 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_struct_copy` | `lower_struct_copy_var_init()` | Struct-to-struct copy via `memory.copy` |
 | `wasm_codegen_emit_member_access_read` | `lower_member_access()` | Struct field read via load |
 | `wasm_codegen_emit_member_access_write` | `lower_member_access_write()` | Struct field write via store |
+| `wasm_codegen_emit_struct_uzumaki` | `lower_struct_uzumaki()` | Non-deterministic struct initialization (field-wise uzumaki stores) |
 
 ## Examples
 

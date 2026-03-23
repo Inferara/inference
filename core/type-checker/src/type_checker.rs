@@ -849,11 +849,6 @@ impl TypeChecker {
                         });
                     }
                 } else {
-                    let lhs_is_identifier =
-                        matches!(ctx.arena()[left].kind, Expr::Identifier(_));
-                    if lhs_is_identifier {
-
-                    }
                     let value_type = self.infer_expression(right, ctx);
                     // Compound-return-in-assignment check moved to analysis rule A017.
                     if let (Some(target), Some(val)) = (target_type, value_type)
@@ -1005,19 +1000,16 @@ impl TypeChecker {
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                    } else {
-
-                        if let Some(init_type) = self.infer_expression(expr_id, ctx)
-                            && self.symbol_table.resolve_custom_type(init_type.clone())
-                                != target_type
-                        {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: target_type.clone(),
-                                found: init_type,
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
+                    } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
+                        && self.symbol_table.resolve_custom_type(init_type.clone())
+                            != target_type
+                    {
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: target_type.clone(),
+                            found: init_type,
+                            context: TypeMismatchContext::VariableDefinition,
+                            location,
+                        });
                     }
                 } else {
                     self.errors.push(TypeCheckError::UninitializedVariable {
@@ -1158,13 +1150,13 @@ impl TypeChecker {
                     Some(type_info)
                 } else if let Some(array_type) = self.infer_expression(array, ctx) {
                     // Compound-return and 64-bit index checks moved to analysis (A016, A019).
-                    if let Some(index_type) = self.infer_expression(index, ctx) {
-                        if !index_type.is_number() {
-                            self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
-                                found: index_type,
-                                location,
-                            });
-                        }
+                    if let Some(index_type) = self.infer_expression(index, ctx)
+                        && !index_type.is_number()
+                    {
+                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                            found: index_type,
+                            location,
+                        });
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -1579,31 +1571,30 @@ impl TypeChecker {
                     return Some(type_info);
                 }
                 // Compound-literal-position check moved to analysis rule A015.
-                if !elements.is_empty() {
-                    if let Some(element_type_info) = self.infer_expression(elements[0], ctx) {
-                        for &element_id in &elements[1..] {
-    
-                            let element_type = self.infer_expression(element_id, ctx);
-                            if let Some(element_type) = element_type
-                                && element_type != element_type_info
-                            {
-                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                    expected: element_type_info.clone(),
-                                    found: element_type,
-                                    location,
-                                });
-                            }
+                if !elements.is_empty()
+                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
+                {
+                    for &element_id in &elements[1..] {
+                        let element_type = self.infer_expression(element_id, ctx);
+                        if let Some(element_type) = element_type
+                            && element_type != element_type_info
+                        {
+                            self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                expected: element_type_info.clone(),
+                                found: element_type,
+                                location,
+                            });
                         }
-                        let array_type = TypeInfo {
-                            kind: TypeInfoKind::Array(
-                                Box::new(element_type_info),
-                                elements.len() as u32,
-                            ),
-                            type_params: vec![],
-                        };
-                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
-                        return Some(array_type);
                     }
+                    let array_type = TypeInfo {
+                        kind: TypeInfoKind::Array(
+                            Box::new(element_type_info),
+                            elements.len() as u32,
+                        ),
+                        type_params: vec![],
+                    };
+                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                    return Some(array_type);
                 }
                 None
             }

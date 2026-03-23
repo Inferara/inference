@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Struct reassignment: `p = q` uses `memory.copy` to destination frame slot (not pointer aliasing)
   - Struct literal reassignment: `p = Point { x: 3, y: 4 }` writes fields directly to existing frame slot
   - Uzumaki for all primitive types: bool, i8-u64 emit `i32.uzumaki` or `i64.uzumaki` as appropriate
+  - Struct uzumaki (`let p: Point = @;`) now supported: `lower_struct_uzumaki` emits per-field uzumaki opcodes followed by stores (`wasm_codegen_emit_struct_uzumaki`)
 - Add struct method codegen with instance methods, associated functions, and cross-calls ([#162])
   - Methods compiled as top-level WASM functions with mangled names (`TypeName.method_name`)
   - Two-phase traversal: register all function + method indices before compiling any bodies (enables forward references)
@@ -122,6 +123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Three-severity model: `Error` (blocks compilation), `Warning`, `Info`
   - Diagnostic format: `<line>:<column>: <severity>[<rule_id>]: <message>`
   - Rules are zero-sized `Send + Sync` structs for future parallel execution
+- Expand analysis pass from 5 to 22 rules; migrate 13 checks from the type checker
+  - Type checker now enforces only type correctness; all other semantic checks live in analysis
+  - New control-flow rules: A006 uzumaki-outside-nondet, A007 missing-return (branch-aware), A008 standalone-uzumaki
+  - New lint warnings: A009 empty-enum, A010 method-never-accesses-self, A011 empty-struct
+  - Migrated codegen restriction rules: A012 array-literal-as-argument, A013 struct-literal-as-argument, A014 array-uzumaki-as-argument, A015 compound-literal-in-unsupported-position, A016 compound-return-call-in-expression-position, A017 compound-return-call-in-assignment, A018 method-call-chain-on-compound-return, A019 array-index-64bit, A022 literal-out-of-range
+  - New rules: A023 uzumaki-in-reassignment, A024 extern-function-call
+  - `AssignToImmutable` and `VariableShadowed` remain in the type checker (require scope state)
 
 ### AST
 
@@ -203,9 +211,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `p.translate(1, 2).get_x()` rejected; assign intermediate result to a variable first
   - Deliberate design choice: implicit temporaries cannot be named in formal proofs
 - Add `MethodMetadata` public struct and `TypedContext::lookup_method()` for cross-crate method metadata access ([#162])
+- Migrate 13 codegen restriction checks from type checker to analysis pass
+  - Removed from `TypeCheckError`: `LiteralOutOfRange`, `ArrayLiteralAsArgument`, `StructLiteralAsArgument`, `ArrayUzumakiAsArgument`, `CompoundLiteralInUnsupportedPosition`, `CompoundReturnCallInExpressionPosition`, `CompoundReturnCallInAssignment`, `MethodCallChainOnCompoundReturn`, `ArrayIndex64Bit`, `EmptyStruct`, `MethodNeverAccessesSelf`; plus `UzumakiInReassignment` and `ExternFunctionCall` which are new
+  - Type checker now produces 46 error variants (down from 50)
+- Add 7 new `TypeCheckError` variants for validation hardening
+  - `DuplicateStructFieldDefinition` — duplicate field names in a struct definition
+  - `RecursiveStructDefinition` — field type creates an infinite-size cycle (direct, array, or alias)
+  - `InvalidAssignmentTarget` — assignment LHS is not a valid lvalue
+  - `UninitializedVariable` — variable declared without an initializer
+  - `ArrayLiteralSizeMismatch` — array literal element count differs from declared size
+  - `DivisionByZero` — literal zero in divisor position of `/` or `%`
+  - `DuplicateEnumVariant` — duplicate variant names in an enum definition
+- Fix undeclared types in variable definitions now validated (previously missed in some positions)
+- Fix case-insensitive type lookup removed — `I32` no longer resolves to `i32`; all type names are case-sensitive
+- Fix `from_builtin_str` uses exact case-sensitive matching
+- Fix external function parameter parsing corrected in AST builder (previously dropped parameters in some cases)
+- Bump `tree-sitter-inference` grammar from 0.0.39 to 0.0.40 — fixes chained member access parsing
 
 ### Testing
 
+- Rewrite all 85 AST builder tests in `tests/src/ast/helpers.rs` with deep structural verification
+  - 50+ test helper functions for constructing and asserting on AST nodes
+  - Tests now verify node positions, field values, and parent-child relationships
+  - Total test count increased from ~1162 to 1917
+- Expand analysis test coverage from 43 to match all 22 rules
+  - Tests for all new control-flow rules: A006 (uzumaki placement), A007 (branch-aware missing return), A008 (standalone uzumaki)
+  - Tests for migrated lint and codegen-restriction rules (A009–A019, A022–A024)
 - Add 43 analysis walker tests covering all 5 rules across free functions, struct methods, and spec functions ([#156])
   - Negative tests for valid code, edge cases for nested loops, deeply nested nondet, overlapping rule triggers
   - All four nondet block types (forall, exists, assume, unique) tested for A002

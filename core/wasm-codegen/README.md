@@ -230,7 +230,7 @@ The `codegen` function:
 - **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar fields are supported: struct literals, member access read/write, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Nested arrays, arrays of structs, arrays of arrays, partial initialization syntax, and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
-- **Return-path analysis** - The compiler does not yet emit a compile-time error for non-void functions missing a return on all paths. An `unreachable` trap is emitted as a runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
+- **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
 
 ## Documentation
 

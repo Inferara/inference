@@ -96,8 +96,10 @@ fn check_expr(
         }
         Expr::FunctionCall { function, args, .. } => {
             check_expr(arena, *function, false, errors);
+            // Function arguments are an allowed position for compound literals in A015;
+            // dedicated rules A012/A013 handle literal-as-argument restrictions.
             for (_, arg_expr) in args {
-                check_expr(arena, *arg_expr, false, errors);
+                check_expr(arena, *arg_expr, true, errors);
             }
         }
         Expr::Binary { left, right, .. } => {

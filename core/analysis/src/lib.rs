@@ -1,19 +1,49 @@
 #![warn(clippy::pedantic)]
-//! Control Flow Analysis Pass for the Inference Compiler
+//! Static Analysis Pass for the Inference Compiler
 //!
-//! This crate provides semantic analysis that validates control flow invariants
-//! beyond what the type checker covers. It operates on the fully-typed AST and
-//! runs after type checking but before code generation.
+//! This crate provides semantic analysis that validates invariants beyond what
+//! the type checker covers. It operates on the fully-typed AST and runs after
+//! type checking but before code generation.
+//!
+//! The type checker focuses on type correctness only — blocking dead-end type
+//! errors that would prevent further analysis. Everything else (control flow,
+//! codegen restrictions, lint warnings) is handled here.
 //!
 //! ## Current Analyses
 //!
-//! ### Loop Control Flow Validation
+//! ### Control Flow (A001–A008)
 //!
-//! - `break` must appear inside a loop body
-//! - `break` must not appear inside a non-deterministic block
-//! - `return` must not appear inside a loop body
-//! - Infinite loops (`loop { ... }`) must contain a `break` statement
-//! - `return` must not appear inside a non-deterministic block
+//! - A001: `break` must appear inside a loop body
+//! - A002: `break` must not appear inside a non-deterministic block
+//! - A003: `return` must not appear inside a loop body
+//! - A004: Infinite loops (`loop { ... }`) must contain a `break` statement
+//! - A005: `return` must not appear inside a non-deterministic block
+//! - A006: Uzumaki (`@`) must not appear outside a non-deterministic block
+//! - A007: Non-void functions must have a return on every execution path
+//! - A008: Standalone uzumaki expression (not assigned to a variable)
+//!
+//! ### Lint Warnings (A009–A011)
+//!
+//! - A009: Enum definition with no variants
+//! - A010: Method declares `self` but never accesses it
+//! - A011: Struct definition with no fields and no methods
+//!
+//! ### Codegen Restrictions (A012–A019, A022–A024)
+//!
+//! These rules describe constructs that are valid in the type system but cannot
+//! be lowered by the current code generator.
+//!
+//! - A012: Array literal passed directly as a function argument
+//! - A013: Struct literal passed directly as a function argument
+//! - A014: Array uzumaki passed directly as a function argument
+//! - A015: Compound literal (array or struct) in an unsupported expression position
+//! - A016: Compound-returning function call in a general expression position
+//! - A017: Compound-returning function call on the RHS of an assignment statement
+//! - A018: Method call chained on the result of a compound-returning function
+//! - A019: 64-bit integer used as an array index
+//! - A022: Numeric literal out of range for its declared type
+//! - A023: Uzumaki used in a variable reassignment (only `let` initializers allowed)
+//! - A024: Call to an external (`extern`) function
 //!
 //! ## Pipeline Position
 //!
@@ -44,17 +74,18 @@ mod walker;
 
 use errors::{AnalysisErrors, AnalysisResult, Severity};
 
-/// Performs control flow analysis on the typed AST.
+/// Performs static analysis on the typed AST.
 ///
-/// Runs all registered analysis rules and collects errors. Currently includes:
-/// - Loop control flow validation (break placement, return inside loop,
-///   infinite loop detection)
+/// Runs all registered analysis rules and collects findings. Rules cover
+/// control flow validation, lint warnings, and codegen restrictions. See the
+/// module-level documentation for the full rule list.
 ///
 /// # Errors
 ///
-/// Returns `AnalysisErrors` if any control flow violations are found.
-/// All errors are collected before returning, allowing the user to see
-/// all issues at once.
+/// Returns `AnalysisErrors` if any `Error`-severity findings are produced.
+/// All findings are collected before returning, allowing the user to see all
+/// issues at once. `Warning`-severity findings are returned via `AnalysisResult`
+/// on both success and error paths.
 pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisErrors> {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
