@@ -21,9 +21,13 @@ Typed AST (TypedContext)
 ### Compilation Phases
 
 1. **AST Traversal** - Walk typed AST and visit function definitions
-2. **Function name pre-scan** - Build `func_name_to_idx` map from function names to WASM
-   function section indices before the main compilation pass. This enables forward references
-   — a caller defined before its callee in source can still emit a valid `call` instruction.
+2. **Function and method name pre-scan** - Build `func_name_to_idx` map from function
+   and method names to WASM function section indices before the main compilation pass. Two
+   sub-steps run: `build_func_name_to_idx` registers top-level functions, then
+   `build_method_name_to_idx` registers struct methods under mangled names
+   (`"{StructName}.{method_name}"`). This enables forward references — a caller defined
+   before its callee in source can still emit a valid `call` instruction. Method indices
+   follow top-level function indices in the WASM function section.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
 3. **Compound Frame Layout** - For functions with array- or struct-typed variables or parameters,
    compute a stack frame layout by walking the entire function body and collecting array and struct
@@ -56,6 +60,16 @@ Typed AST (TypedContext)
    `br_if` exit check for conditional loops and `br 0` unconditional back-edge; `break`
    statements lower to `br <depth>` targeting the enclosing loop's exit block.
    See [docs/loops-lowering.md](docs/loops-lowering.md).
+   Function calls are dispatched through `resolve_function_callee` which classifies the
+   callee as a plain `Function`, an `AssociatedFunction` (called via `Type::method()`
+   syntax), or an `InstanceMethod` (called via `receiver.method()` syntax). All three
+   resolve to a mangled WASM function name that is looked up in `func_name_to_idx` before
+   emitting `call <idx>`. Instance methods receive `self` as an implicit first argument
+   (an `i32` pointer). Methods with a `mut self` receiver copy `self` into the callee's
+   frame on entry (value semantics — mutations do not reach the caller); methods with an
+   immutable `self` read directly through the pointer. Methods are never exported as WASM
+   exports regardless of Inference visibility.
+   See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
    Non-void functions emit an `unreachable` instruction before the function `end` to
    satisfy the WASM validator when all paths exit through explicit `return` instructions.
    See [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -213,7 +227,7 @@ The `codegen` function:
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
 - **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
-- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar fields are supported: struct literals, member access read/write, struct parameters (copy-on-entry), and struct-returning functions via sret. Nested arrays, arrays of structs, arrays of arrays, partial initialization syntax, and mutable array parameters are not yet implemented. Plain identifier-based function calls are supported; method calls (`obj.method()`), associated function calls (`Type::func()`), and higher-order function calls are not yet implemented.
+- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar fields are supported: struct literals, member access read/write, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Nested arrays, arrays of structs, arrays of arrays, partial initialization syntax, and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The compiler does not yet emit a compile-time error for non-void functions missing a return on all paths. An `unreachable` trap is emitted as a runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -245,7 +259,7 @@ Detailed design documents live in `docs/`:
 
 ## Module Organization
 
-- `lib.rs` - Public API and AST traversal
+- `lib.rs` - Public API, AST traversal (`traverse_t_ast_with_compiler`), two-stage index pre-scan (top-level functions then struct methods)
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
 - `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `compute_struct_field_layout`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
 - `errors.rs` - `CodegenError` enum for function call lowering failures
@@ -327,6 +341,26 @@ Test data includes:
   returns; validated and executed via wasmtime
 - `struct_copy.inf` - Struct-to-struct copy (`let b = a;`) preserving value semantics:
   modifications to the copy do not affect the original; validated and executed via wasmtime
+- `method_assoc.inf` - Associated function calls (`Type::func()`) including zero-arg constructors,
+  multi-arg builders, cross-struct calls, and associated functions returning struct types; validated
+  and executed via wasmtime
+- `method_instance.inf` - Instance method calls (`obj.method()`) including `self` reads, multiple
+  fields, chained independent calls, and methods with parameters; validated and executed via wasmtime
+- `method_self_mutate.inf` - Methods with `mut self` receiver: verifies that mutations inside the
+  method body do not affect the caller's copy (value semantics); executed via wasmtime
+- `method_cross_call.inf` - Methods that call top-level functions and vice versa; validates that
+  mangled method names and top-level function names coexist in `func_name_to_idx`
+- `method_three_fields.inf` - Struct with three fields; exercises field offset computation inside
+  method bodies; validated and executed via wasmtime
+- `method_i64_fields.inf` - Methods on structs with `i64` fields; validates that 8-byte loads/stores
+  work correctly inside method bodies; validated and executed via wasmtime
+- `method_multi_struct.inf` - Two separate structs each with methods; validates that mangled names
+  for different struct types do not collide; validated and executed via wasmtime
+- `method_array_return.inf` - Associated functions and methods returning array types via the sret
+  calling convention; validated and executed via wasmtime
+- `method_return_struct.inf` - Methods returning struct types via the sret calling convention;
+  covers associated constructors and instance methods returning structs; validated and executed
+  via wasmtime
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

@@ -77,8 +77,8 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot, align_to,
-    align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
+    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot,
+    align_to, align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
     emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
     emit_struct_param_copy,
 };
@@ -197,9 +197,6 @@ pub(crate) struct Compiler {
     func_struct_returns: FxHashMap<String, StructReturnInfo>,
     /// Maps `(type_name, method_name)` to the mangled WASM function name.
     method_mangled_names: FxHashMap<(String, String), String>,
-    /// When compiling a method body, holds the struct type name (e.g. `"Point"`).
-    /// `None` when compiling a top-level function.
-    current_method_struct: Option<String>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
     // Per-function state (set in visit_function_definition, used by lowering methods)
@@ -228,7 +225,6 @@ impl Compiler {
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
             method_mangled_names: FxHashMap::default(),
-            current_method_struct: None,
             current_fn_name: String::new(),
             func: None,
             locals_map: FxHashMap::default(),
@@ -250,9 +246,13 @@ impl Compiler {
         self.func_idx + toplevel_count
     }
 
-    /// Sets or clears the struct name for the method currently being compiled.
-    pub(crate) fn set_current_method_struct(&mut self, name: Option<String>) {
-        self.current_method_struct = name;
+    /// Returns the number of registered function/method name-to-index mappings.
+    ///
+    /// Used by traversal code to verify Stage 1 registration produced the expected
+    /// number of entries before any body compilation begins.
+    #[cfg(debug_assertions)]
+    pub(crate) fn registered_function_count(&self) -> usize {
+        self.func_name_to_idx.len()
     }
 
     /// Registers sret metadata for a function that returns a compound type (array or struct).
@@ -351,10 +351,8 @@ impl Compiler {
             );
             self.func_name_to_idx
                 .insert(mangled_name.clone(), base_idx + i as u32);
-            self.method_mangled_names.insert(
-                (struct_name.clone(), method_name),
-                mangled_name.clone(),
-            );
+            self.method_mangled_names
+                .insert((struct_name.clone(), method_name), mangled_name.clone());
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
@@ -409,6 +407,7 @@ impl Compiler {
         def_id: DefId,
         arena: &AstArena,
         ctx: &TypedContext,
+        method_struct_name: Option<&str>,
     ) {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
@@ -425,7 +424,7 @@ impl Compiler {
         let raw_name = arena[fn_name_id].name.clone();
         // For methods, use the mangled name for sret lookups, debug names, and current_fn_name.
         // For top-level functions, fn_name == raw_name.
-        let fn_name = if let Some(ref struct_name) = self.current_method_struct {
+        let fn_name = if let Some(struct_name) = method_struct_name {
             format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
         } else {
             raw_name
@@ -477,9 +476,9 @@ impl Compiler {
                 ArgKind::SelfRef { .. } => {
                     cov_mark::hit!(wasm_codegen_emit_self_param);
                     params.push(ValType::I32);
-                    let prev =
-                        self.locals_map
-                            .insert("self".to_string(), (local_idx, ValType::I32));
+                    let prev = self
+                        .locals_map
+                        .insert("self".to_string(), (local_idx, ValType::I32));
                     assert!(
                         prev.is_none(),
                         "parameter `self` collides with an existing entry in locals_map; \
@@ -510,7 +509,7 @@ impl Compiler {
             self.has_memory = true;
         }
 
-        let is_method = self.current_method_struct.is_some();
+        let is_method = method_struct_name.is_some();
         let is_main = fn_name == "main";
         // Methods are not exported as WASM exports. A future `export` keyword will
         // control which functions are exported. For now, only top-level `pub` functions
@@ -528,14 +527,8 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout = Self::compute_frame_layout(
-            arena,
-            body_id,
-            ctx,
-            local_idx,
-            &args,
-            self.current_method_struct.as_deref(),
-        );
+        self.frame_layout =
+            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name);
 
         if self.frame_layout.is_some() {
             self.has_memory = true;
@@ -791,26 +784,22 @@ impl Compiler {
                                     };
                                     let arg_name = arena[*name].name.clone();
                                     struct_offsets.insert(arg_name, slot);
-                                    current_offset =
-                                        aligned_offset.checked_add(total_size).expect(
-                                            "Frame offset overflow: struct allocation exceeds u32::MAX",
-                                        );
+                                    current_offset = aligned_offset.checked_add(total_size).expect(
+                                        "Frame offset overflow: struct allocation exceeds u32::MAX",
+                                    );
                                 }
                             }
                         }
                         _ => {}
                     }
                 }
-                ArgKind::SelfRef { is_mut }
-                    if *is_mut =>
-                {
+                ArgKind::SelfRef { is_mut } if *is_mut => {
                     let struct_name = method_struct_name.expect(
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
                     );
                     if let Some(struct_info) = ctx.lookup_struct(struct_name) {
-                        let (total_size, field_slots) =
-                            compute_struct_field_layout(&struct_info);
+                        let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
                         if total_size > 0 {
                             let max_field_align = field_slots
                                 .iter()
@@ -824,10 +813,9 @@ impl Compiler {
                                 fields: field_slots,
                             };
                             struct_offsets.insert("self".to_string(), slot);
-                            current_offset =
-                                aligned_offset.checked_add(total_size).expect(
-                                    "Frame offset overflow: struct allocation exceeds u32::MAX",
-                                );
+                            current_offset = aligned_offset.checked_add(total_size).expect(
+                                "Frame offset overflow: struct allocation exceeds u32::MAX",
+                            );
                         }
                     }
                 }
@@ -907,8 +895,7 @@ impl Compiler {
                                         .map(|f| element_size(&f.type_kind))
                                         .max()
                                         .unwrap_or(1);
-                                    let aligned_offset =
-                                        align_to(*current_offset, max_field_align);
+                                    let aligned_offset = align_to(*current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
                                         total_size,
@@ -962,7 +949,12 @@ impl Compiler {
                 }
                 Stmt::Loop { body, .. } => {
                     Self::collect_compound_slots(
-                        arena, *body, ctx, array_offsets, struct_offsets, current_offset,
+                        arena,
+                        *body,
+                        ctx,
+                        array_offsets,
+                        struct_offsets,
+                        current_offset,
                     );
                 }
                 _ => {}
@@ -982,8 +974,7 @@ impl Compiler {
                 // The type checker rejects standalone calls to compound-returning
                 // functions/methods, so these paths should be unreachable.
                 if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
-                    && let Some(resolved) =
-                        self.resolve_function_callee(arena, *function, ctx)
+                    && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
                 {
                     let name = resolved.callee_name();
                     assert!(
@@ -1154,7 +1145,9 @@ impl Compiler {
         } else if let Some(struct_slot) = layout.struct_offsets.get(var_name) {
             struct_slot.offset
         } else {
-            panic!("Destination variable '{var_name}' not found in array_offsets or struct_offsets");
+            panic!(
+                "Destination variable '{var_name}' not found in array_offsets or struct_offsets"
+            );
         };
         let frame_ptr_local = layout.frame_ptr_local;
 
@@ -1791,8 +1784,7 @@ impl Compiler {
                     .get(name)
                     .expect("Assignment target variable not found");
                 let local_idx = *local_idx;
-                let is_struct_literal =
-                    matches!(&arena[right].kind, Expr::StructLiteral { .. });
+                let is_struct_literal = matches!(&arena[right].kind, Expr::StructLiteral { .. });
                 let is_struct_type = self
                     .frame_layout
                     .as_ref()
@@ -1805,8 +1797,7 @@ impl Compiler {
                     let dest_slot = &layout.struct_offsets[name];
                     let byte_size = dest_slot.total_size;
                     // dest = local (already points to frame slot)
-                    self.func()
-                        .instruction(&Instruction::LocalGet(local_idx));
+                    self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (struct pointer)
                     self.lower_expression(arena, right, ctx, None);
                     // byte count
@@ -2726,9 +2717,7 @@ impl Compiler {
                     .iter()
                     .find(|fs| fs.name == *field_name)
                     .unwrap_or_else(|| {
-                        panic!(
-                            "Field '{field_name}' not found in cached layout for '{var_name}'"
-                        )
+                        panic!("Field '{field_name}' not found in cached layout for '{var_name}'")
                     });
                 return (field_slot.offset, field_slot.type_kind.clone());
             }

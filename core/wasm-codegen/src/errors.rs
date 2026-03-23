@@ -16,6 +16,8 @@ pub(crate) enum CodegenError {
     UnknownFunction(String),
     /// The return expression in an sret function is not a supported form.
     /// Supported forms: identifier, array literal, or call to another sret function.
-    #[error("unsupported sret return expression in function — expected identifier, array literal, or array-returning function call")]
+    #[error(
+        "unsupported sret return expression in function — expected identifier, array literal, or array-returning function call"
+    )]
     UnsupportedSretReturnExpression,
 }

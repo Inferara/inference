@@ -136,7 +136,7 @@ pub fn codegen(
 ///    functions, then `build_method_name_to_idx` registers struct methods with
 ///    mangled names (`TypeName.method_name`).
 /// 2. **Body compilation** -- top-level functions are compiled first, then
-///    method bodies are compiled with `current_method_struct` set so that
+///    method bodies are compiled with `method_struct_name` passed so that
 ///    `self` parameter handling (Phase 3+) knows which struct type is in scope.
 fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
     let arena = typed_context.arena();
@@ -152,10 +152,7 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
         // Collect method DefIds with their parent struct name
         let mut method_defs: Vec<(String, DefId)> = Vec::new();
         for &def_id in &source_file.defs {
-            if let Def::Struct {
-                name, methods, ..
-            } = &arena[def_id].kind
-            {
+            if let Def::Struct { name, methods, .. } = &arena[def_id].kind {
                 let struct_name = arena[*name].name.clone();
                 for &method_def_id in methods {
                     method_defs.push((struct_name.clone(), method_def_id));
@@ -167,23 +164,32 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
         compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context);
         #[allow(clippy::cast_possible_truncation)]
         let method_base_idx = compiler.func_idx_after_toplevel(func_def_ids.len() as u32);
-        compiler.build_method_name_to_idx(
-            arena,
-            &method_defs,
-            typed_context,
-            method_base_idx,
+        compiler.build_method_name_to_idx(arena, &method_defs, typed_context, method_base_idx);
+
+        // Verify Stage 1 produced the expected number of index entries.
+        // Catches index calculation bugs before they manifest as wrong `call` targets.
+        debug_assert_eq!(
+            compiler.registered_function_count(),
+            func_def_ids.len() + method_defs.len(),
+            "func_name_to_idx entry count after Stage 1 registration does not match \
+             expected count (top-level functions: {}, methods: {})",
+            func_def_ids.len(),
+            method_defs.len(),
         );
 
         // Stage 2: Compile top-level function bodies
         for &def_id in &func_def_ids {
-            compiler.visit_function_definition(def_id, arena, typed_context);
+            compiler.visit_function_definition(def_id, arena, typed_context, None);
         }
 
         // Stage 2b: Compile method bodies
         for (struct_name, method_def_id) in &method_defs {
-            compiler.set_current_method_struct(Some(struct_name.clone()));
-            compiler.visit_function_definition(*method_def_id, arena, typed_context);
-            compiler.set_current_method_struct(None);
+            compiler.visit_function_definition(
+                *method_def_id,
+                arena,
+                typed_context,
+                Some(struct_name),
+            );
         }
     }
 }

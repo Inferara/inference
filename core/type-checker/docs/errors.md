@@ -4,7 +4,7 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 47 distinct error variants, each with specific context and location
+The type checker produces 50 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
 Not all variants are covered in detail below. The authoritative list of variants and their
@@ -829,6 +829,46 @@ fn test() {
     let x = arr[i];  // Error: array index must be a 32-bit integer type, found `i64`
 }
 ```
+
+### `CompoundReturnCallInAssignment`
+
+A call to a compound-returning function (one that returns an array or struct) appears on the
+right-hand side of an assignment statement. The sret convention requires the caller to supply
+a destination pointer, which cannot be an existing variable slot.
+
+**Message format**: `{location}: cannot assign from a compound-returning function call; use a new variable binding instead`
+
+**Example**:
+
+```inference
+fn make_point() -> Point { return Point { x: 1, y: 2 }; }
+
+fn test() {
+    let mut p: Point = Point { x: 0, y: 0 };
+    p = make_point();  // Error: cannot assign from a compound-returning function call
+}
+```
+
+**Solution**: Use a new `let` binding: `let p = make_point();`
+
+### `MethodCallChainOnCompoundReturn`
+
+A method call is chained directly on the result of a compound-returning function call, creating
+an implicit temporary that has no named variable binding.
+
+**Message format**: `{location}: cannot chain method calls on compound-returning functions; assign the intermediate result to a variable first`
+
+**Example**:
+
+```inference
+fn make_point() -> Point { return Point { x: 1, y: 2 }; }
+
+fn test() {
+    let v = make_point().get_x();  // Error: cannot chain method calls on compound-returning functions
+}
+```
+
+**Solution**: Assign the intermediate result first: `let p = make_point(); let v = p.get_x();`
 
 ---
 

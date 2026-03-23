@@ -2,8 +2,8 @@
 
 This document describes how Inference function calls are compiled to WebAssembly `call`
 instructions, covering the forward-reference pre-scan, the interlock between parameter
-indices and body-local indices, the call lowering pipeline, drop emission rules, and known
-limitations.
+indices and body-local indices, the call lowering pipeline (including method and associated
+function calls), drop emission rules, and known limitations.
 
 ## Prerequisites
 
@@ -27,45 +27,48 @@ Inference allows forward references: a caller can appear before its callee in th
 file. A single-pass compiler that emits `call` instructions as it encounters calls would
 not yet know the index of a callee defined later.
 
-The compiler solves this with a dedicated pre-scan in `lib.rs`:
+The compiler solves this with a two-stage pre-scan in `lib.rs`: first top-level functions
+are indexed, then struct methods are indexed with mangled names.
 
-```rust
-fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
-    for source_file in &typed_context.source_files() {
-        let func_defs = source_file.function_definitions();
-        // Pre-scan: build function name-to-index map so that forward references
-        // (callee defined after caller in source) resolve correctly at call sites.
-        compiler.build_func_name_to_idx(&func_defs);
-        for func_def in func_defs {
-            compiler.visit_function_definition(&func_def, typed_context);
-        }
-    }
-}
+Stage 1 registers all top-level functions:
+
+```text
+build_func_name_to_idx(arena, func_def_ids, ctx)
+    func_name_to_idx["foo"] = 0, ["bar"] = 1, ...
 ```
 
-`build_func_name_to_idx` assigns each function its WASM index — the same ordering used
-during `visit_function_definition`. This guarantees that when `lower_function_call` looks
-up a callee name, it finds the correct index regardless of whether the callee was already
-compiled.
+Stage 2 registers methods under mangled names (`"{StructName}.{method_name}"`):
+
+```text
+build_method_name_to_idx(arena, method_defs, ctx, base_idx)
+    func_name_to_idx["Point.new"]       = base_idx + 0
+    func_name_to_idx["Point.translate"] = base_idx + 1
+    method_mangled_names[("Point", "new")]       = "Point.new"
+    method_mangled_names[("Point", "translate")] = "Point.translate"
+```
+
+Both stages run before any body is compiled, so all callee names resolve correctly
+regardless of definition order in the source file.
 
 ### Diagram
 
 ```text
 traverse_t_ast_with_compiler
         |
-        +---> build_func_name_to_idx(func_defs)
-        |         |
-        |         | Enumerate funcs in source order
-        |         | func_name_to_idx["foo"] = 0, ["bar"] = 1, ...
-        |         v
-        |     func_name_to_idx populated for ALL functions
+        +---> build_func_name_to_idx(func_def_ids)
+        |         func_name_to_idx["foo"] = 0, ["bar"] = 1, ...
         |
-        +---> visit_function_definition(func_defs[0])  // "foo"
-        +---> visit_function_definition(func_defs[1])  // "bar"
+        +---> build_method_name_to_idx(method_defs, base_idx=N)
+        |         func_name_to_idx["Point.new"] = N+0, ...
+        |         method_mangled_names[("Point","new")] = "Point.new"
+        |
+        +---> visit_function_definition(func_def_ids[0], None)  // "foo"
+        +---> visit_function_definition(func_def_ids[1], None)  // "bar"
         +---> ...
+        +---> visit_function_definition(method_def_ids[0], Some("Point"))  // "Point.new"
                   |
-                  | lower_function_call("bar") can look up index 1
-                  | even if called from "foo" (index 0, defined first)
+                  | lower_function_call can look up any index
+                  | regardless of definition order
 ```
 
 ## How Parameter Indices Interlock with Local Indices
@@ -129,48 +132,44 @@ return
 
 ## The Call Lowering Pipeline
 
-`lower_function_call` in `compiler.rs` handles the three steps needed to emit a `call`:
+Before emitting arguments or a `call` instruction, the compiler resolves which function to
+call. This resolution is centralised in `resolve_function_callee`, which returns a
+`ResolvedCallee` enum:
 
 ```text
-lower_function_call(fce, ctx, func, locals_map)
+ResolvedCallee
+  ├── Function(name)                        — plain identifier call: foo()
+  ├── AssociatedFunction { mangled_name, .. } — Type::method() syntax
+  └── InstanceMethod { mangled_name, .. }    — receiver.method() syntax
+```
+
+For `AssociatedFunction` and `InstanceMethod`, the mangled name is formed by joining the
+struct name and the method name with a dot (`"Point.new"`, `"Point.translate"`). This
+matches the name inserted by `build_method_name_to_idx`, so the same `func_name_to_idx`
+lookup works for all three callee kinds.
+
+`lower_function_call` in `compiler.rs` handles the steps needed to emit a `call`:
+
+```text
+lower_function_call(fce, ctx)
         |
-        1. Check callee kind: only Expression::Identifier accepted
-        |     Other kinds → Err(CodegenError::UnsupportedCalleeKind)
+        1. resolve_function_callee → ResolvedCallee (name + optional receiver)
         |
-        2. Lower arguments in positional order
+        2. For InstanceMethod: push receiver (self pointer) as first argument
+        |
+        3. Lower remaining arguments in positional order
         |     for (label, expr) in fce.arguments:
-        |         lower_expression(expr, ...)  // pushes arg onto WASM stack
+        |         lower_expression(expr, ...)
         |     labels are ignored (WASM is purely positional)
         |
-        3. Resolve callee index and emit call
-              func_idx = func_name_to_idx[fce.name()]
+        4. Resolve callee index and emit call
+              func_idx = func_name_to_idx[callee_name]
               func.instruction(&Instruction::Call(func_idx))
 ```
 
 Argument labels (if present in source) are discarded at the WASM level because WebAssembly
 has no concept of named arguments. The type-checker validates label correctness and
 argument count before codegen runs.
-
-### Code Path
-
-```rust
-fn lower_function_call(&self, fce, ctx, func, locals_map) -> Result<(), CodegenError> {
-    let Expression::Identifier(_) = &fce.function else {
-        return Err(CodegenError::UnsupportedCalleeKind);
-    };
-    cov_mark::hit!(wasm_codegen_emit_function_call);
-    if let Some(arguments) = &fce.arguments {
-        for (_label, expr_ref) in arguments {
-            self.lower_expression(&expr_ref.borrow(), ctx, func, locals_map);
-        }
-    }
-    let func_name = fce.name();
-    let func_idx = self.func_name_to_idx.get(&func_name).copied()
-        .ok_or(CodegenError::UnknownFunction(func_name))?;
-    func.instruction(&Instruction::Call(func_idx));
-    Ok(())
-}
-```
 
 ## Drop Emission Rules
 
@@ -210,32 +209,57 @@ Statement::Expression(expression) => {
 
 ## Supported vs Unsupported Callee Kinds
 
-Only plain identifier callees are currently supported:
+Three callee forms are now supported:
 
 ```inference
 // Supported: plain identifier
 let x = foo(1, 2);
 return bar();
 
-// Not yet supported: method call
-obj.method();       // → CodegenError::UnsupportedCalleeKind → todo!()
+// Supported: associated function call
+let p = Point::new(1, 2);
 
-// Not yet supported: associated function
-MyType::func();     // → CodegenError::UnsupportedCalleeKind → todo!()
+// Supported: instance method call
+let result = p.translate(5, 10);
 
 // Not yet supported: higher-order / function pointer
 let f = foo;
-f(1);               // → CodegenError::UnsupportedCalleeKind → todo!()
+f(1);               // → todo!()
 ```
 
-The `CodegenError` enum in `errors.rs` encodes these distinctions:
+The `CodegenError` enum in `errors.rs` covers the remaining error cases:
 
 ```rust
 pub(crate) enum CodegenError {
-    UnsupportedCalleeKind,      // → todo!()  (planned future work)
-    UnknownFunction(String),    // → panic!() (type-checker inconsistency)
+    UnknownFunction(String),           // → panic!() (type-checker inconsistency)
+    UnsupportedSretReturnExpression,   // → panic!() (unexpected sret return form)
 }
 ```
+
+## Method Name Mangling
+
+Methods are emitted as ordinary WASM functions. To avoid name collisions between methods
+on different structs and between methods and top-level functions, the compiler mangles
+method names by joining the struct name and method name with a dot:
+
+```text
+struct_name + "." + method_name
+```
+
+Examples:
+- `Point::new` → `"Point.new"`
+- `Counter::increment` → `"Counter.increment"`
+
+The dot separator is chosen because it matches Zig's convention and is a standard WASM
+name-section idiom. Since `.` is a syntax token in Inference (member access operator), it
+cannot appear in any user-defined identifier, making accidental collisions impossible.
+
+The `assert!` in `build_method_name_to_idx` guards against collisions with top-level
+function names. A top-level function named `Point.something` would trigger this assertion
+at startup, before any code is emitted.
+
+Methods are never emitted as WASM exports, regardless of their declared visibility in
+Inference source. Only top-level `pub fn` declarations produce WASM exports.
 
 ## Known Limitations
 
@@ -253,12 +277,6 @@ Passing `@` (uzumaki) as a function argument (e.g., `foo(@)`) triggers a type-ch
 panic because the type-checker does not yet propagate the expected parameter type onto the
 `@` expression. This is a gap in the type-checker, not in codegen.
 
-### Method and Associated Function Calls
-
-`obj.method()` and `Type::assoc()` call forms require member access resolution and
-dispatch logic not yet implemented. They produce `todo!()` via
-`CodegenError::UnsupportedCalleeKind`.
-
 ### Multi-File Calls
 
 `build_func_name_to_idx` is invoked per source file. Cross-file function calls cannot be
@@ -270,6 +288,7 @@ resolved until multi-file compilation is implemented (currently `todo!()` in `co
 |------|-------|---------|
 | `wasm_codegen_emit_function_params` | 7 | 7 parameters across all functions in `fn_params.inf` |
 | `wasm_codegen_emit_function_call` | 5 | 5 call sites in `fn_calls.inf` |
+| `wasm_codegen_emit_self_copy_on_entry` | varies | `mut self` frame copy emitted for each method with mutable receiver |
 
 The `fn_params_test` verifies `wasm_codegen_emit_function_params` fires exactly 7 times
 (matching `fn_params.inf`: 1+1+1+2+2 params). The `fn_calls_test` verifies
@@ -277,10 +296,12 @@ The `fn_params_test` verifies `wasm_codegen_emit_function_params` fires exactly 
 
 ## Related Files
 
-- `core/wasm-codegen/src/compiler.rs` — `build_func_name_to_idx`, `visit_function_definition`, `lower_function_call`
+- `core/wasm-codegen/src/compiler.rs` — `build_func_name_to_idx`, `build_method_name_to_idx`, `resolve_function_callee`, `lower_function_call`
 - `core/wasm-codegen/src/errors.rs` — `CodegenError` enum
 - `core/wasm-codegen/src/lib.rs` — `traverse_t_ast_with_compiler` (where pre-scan is called)
 - `core/wasm-codegen/README.md` — Crate-level overview and compilation phases
 - `core/wasm-codegen/docs/local-variables-lowering.md` — Local variable lowering (prerequisite)
 - `tests/test_data/codegen/wasm/base/fn_params/fn_params.inf` — Parameter test fixture
 - `tests/test_data/codegen/wasm/base/fn_calls/fn_calls.inf` — Function call test fixture
+- `tests/test_data/codegen/wasm/base/method_assoc/method_assoc.inf` — Associated function call fixture
+- `tests/test_data/codegen/wasm/base/method_instance/method_instance.inf` — Instance method call fixture

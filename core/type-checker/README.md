@@ -71,7 +71,7 @@ TypeCheckerBuilder
 
 - [`type_info`] - Type representation system with `TypeInfo` and `TypeInfoKind`
 - [`typed_context`] - Storage for type annotations on AST nodes
-- [`errors`] - Comprehensive error types with 47 distinct variants
+- [`errors`] - Comprehensive error types with 50 distinct variants
 - `symbol_table` (internal) - Hierarchical scope and symbol management
 - `type_checker` (internal) - Core type inference implementation
 
@@ -273,6 +273,7 @@ Test organization:
 - `tests/src/type_checker/type_checker.rs` - Core type inference tests
 - `tests/src/type_checker/array_tests.rs` - Array type checking
 - `tests/src/type_checker/struct_tests.rs` - Struct type checking (literals, field access, mutability, sret restrictions, shadowing, empty struct/unused self errors)
+- `tests/src/type_checker/associated_functions.rs` - Distinguishing instance methods from associated functions; verifies `InstanceMethodCalledAsAssociated` and `AssociatedFunctionCalledAsMethod` errors
 - `tests/src/type_checker/coverage.rs` - Comprehensive coverage tests
 
 ## Recent Changes
@@ -336,6 +337,25 @@ Test organization:
 
 **Variable Shadowing in Struct Contexts**:
 - The shadowing prohibition applies to struct variable bindings: a `let p: Point = ...` in an inner scope shadows an outer `p` and emits `VariableShadowed`
+
+### Method Call Type Checking (Issue #162)
+
+**Instance Method vs Associated Function Dispatch**:
+- Methods with a `self` parameter must be called on a receiver using `instance.method()` syntax;
+  calling them as `Type::method()` emits `InstanceMethodCalledAsAssociated`
+- Methods without `self` are associated functions and must be called as `Type::func()`;
+  calling them on a receiver emits `AssociatedFunctionCalledAsMethod`
+- `TypedContext::lookup_method(type_name, method_name)` returns `MethodMetadata` with
+  `has_self`, `param_types`, `return_type`, and `visibility` fields — the public projection
+  of the type-checker's internal `MethodInfo`
+
+**Compound-Returning Method Restrictions**:
+- A method or function call that returns an array or struct (sret convention) cannot appear
+  in a general expression position; doing so emits `CompoundReturnCallInExpressionPosition`
+- Such a call in the RHS of an assignment statement (`x = foo()`) emits
+  `CompoundReturnCallInAssignment`; use a fresh `let` binding instead
+- Chaining a method call on the result of a compound-returning call (e.g., `make_point().x`)
+  emits `MethodCallChainOnCompoundReturn`; assign the intermediate result first
 
 ### Fixed-Size Array Support (Issue #148)
 
@@ -429,7 +449,7 @@ Detailed documentation is available in the `docs/` directory:
 - [Architecture Guide](./docs/architecture.md) - Internal design, phase walkthrough, and implementation patterns
 - [API Guide](./docs/api-guide.md) - Practical examples and usage patterns for the type checker API
 - [Type System Reference](./docs/type-system.md) - Complete type system rules, operators, and type inference
-- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 47 error variants with examples
+- [Error Reference](./docs/errors.md) - Comprehensive catalog of all 50 error variants with examples
 
 ## Related Documentation
 
