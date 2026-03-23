@@ -1080,8 +1080,8 @@ fn test_parse_member_access() {
 
 #[test]
 fn test_parse_chained_member_access() {
-    // obj.field.subfield: parser creates QualifiedName("obj", "field") for the
-    // first two segments, then MemberAccess(.subfield) on top.
+    // obj.field.subfield parses as nested MemberAccess:
+    // MemberAccess { expr: MemberAccess { expr: Identifier("obj"), name: "field" }, name: "subfield" }
     let (arena, defs) = parse_defs("fn test() -> i32 { return obj.field.subfield; }");
     let (_, _, body) =
         assert_function_def(&arena, defs[0], "test", Visibility::Private, 0, true, 1);
@@ -1089,16 +1089,13 @@ fn test_parse_chained_member_access() {
     let ret_expr = assert_return(&arena, stmts[0]);
 
     // Outer: MemberAccess { expr, name: "subfield" }
-    let base = assert_member_access(&arena, ret_expr, "subfield");
+    let inner = assert_member_access(&arena, ret_expr, "subfield");
 
-    // Inner: Expr::Type(QualifiedName { qualifier: "obj", name: "field" })
-    let qualified_ty = assert_type_expr(&arena, base);
-    let ty = &arena[qualified_ty];
-    let TypeNode::QualifiedName { qualifier, name } = &ty.kind else {
-        panic!("expected TypeNode::QualifiedName, got {:?}", ty.kind);
-    };
-    assert_eq!(arena[*qualifier].name, "obj");
-    assert_eq!(arena[*name].name, "field");
+    // Inner: MemberAccess { expr: Identifier("obj"), name: "field" }
+    let obj = assert_member_access(&arena, inner, "field");
+
+    // Base: Identifier("obj")
+    assert_ident_expr(&arena, obj, "obj");
 }
 
 #[test]
