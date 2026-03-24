@@ -504,7 +504,7 @@ impl WasmParseData<'_> {
         // Generate Theorems
         res.push('\n');
         res.push_str("(* Theorems *)\n");
-        res.push_str(format!"Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
+        res.push_str(format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
         res.push_str("Proof.\n");
         res.push_str("  (* TODO: fill the proof *)\n");
         res.push_str("Qed.\n");
