@@ -35,6 +35,10 @@ pub(crate) struct TypeChecker {
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
     reported_error_keys: FxHashSet<String>,
+    /// Type parameter names for the function/method body currently being inferred.
+    /// Set before walking the body, cleared after. Used by `infer_statement` to
+    /// pass type param context to `validate_type` and `TypeInfo::from_type_id_with_type_params`.
+    current_type_params: Vec<String>,
 }
 
 impl TypeChecker {
@@ -409,10 +413,10 @@ impl TypeChecker {
                         });
                     }
                     let value_kind = ctx.arena()[value_id].kind.clone();
-                    if let Expr::NumberLiteral { .. } = value_kind
-                    {
+                    let mut type_ok = false;
+                    if let Expr::NumberLiteral { .. } = value_kind {
                         if const_type.kind.is_number() {
-                            ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type.clone());
+                            type_ok = true;
                         } else {
                             self.errors.push(TypeCheckError::TypeMismatch {
                                 expected: const_type.clone(),
@@ -435,9 +439,13 @@ impl TypeChecker {
                                 context: TypeMismatchContext::VariableDefinition,
                                 location,
                             });
+                        } else {
+                            type_ok = true;
                         }
                     }
-                    ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type);
+                    if type_ok {
+                        ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type);
+                    }
                 }
                 Def::Function {
                     name,
@@ -715,10 +723,12 @@ impl TypeChecker {
             .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
+        self.current_type_params = tp_names;
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
         for stmt_id in stmts {
             self.infer_statement(stmt_id, &return_type, ctx);
         }
+        self.current_type_params = Vec::new();
         self.symbol_table.pop_scope();
     }
 
@@ -792,10 +802,12 @@ impl TypeChecker {
             .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
+        self.current_type_params = tp_names;
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
         for stmt_id in stmts {
             self.infer_statement(stmt_id, &return_type, ctx);
         }
+        self.current_type_params = Vec::new();
         self.symbol_table.pop_scope();
     }
 
@@ -953,10 +965,11 @@ impl TypeChecker {
             } => {
                 let arena = ctx.arena();
                 let var_name = arena[name].name.clone();
-                self.validate_type(arena, ty, &[]);
+                let tp = self.current_type_params.clone();
+                self.validate_type(arena, ty, &tp);
                 let target_type = self
                     .symbol_table
-                    .resolve_custom_type(TypeInfo::from_type_id(arena, ty));
+                    .resolve_custom_type(TypeInfo::from_type_id_with_type_params(arena, ty, &tp));
                 // Validate array size if applicable
                 if let TypeNode::Array { size, .. } = &arena[ty].kind {
                     self.validate_array_size(ctx.arena(), *size, ctx.arena()[ty].location);
@@ -1012,11 +1025,6 @@ impl TypeChecker {
                             location,
                         });
                     }
-                } else {
-                    self.errors.push(TypeCheckError::UninitializedVariable {
-                        name: var_name.clone(),
-                        location,
-                    });
                 }
                 if self
                     .symbol_table

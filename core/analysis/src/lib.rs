@@ -30,7 +30,11 @@
 //!
 //! ### Dead Code (A020)
 //!
-//! - A020: Unreachable code after `return` or `break`
+//! - A020: Unreachable code after `return`, `break`, or infinite loop
+//!
+//! ### Variable Initialization (A025)
+//!
+//! - A025: Variable declarations must have an initializer
 //!
 //! ### Codegen Restrictions (A012–A019, A022–A024)
 //!
@@ -143,6 +147,7 @@ mod tests {
             AnalysisDiagnostic::LiteralOutOfRange { value: "256".to_string(), type_name: "u8".to_string(), min: 0, max: 255, location: dummy_location() },
             AnalysisDiagnostic::UzumakiInReassignment { location: dummy_location() },
             AnalysisDiagnostic::ExternFunctionCall { name: "print".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::UninitializedVariable { name: "x".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

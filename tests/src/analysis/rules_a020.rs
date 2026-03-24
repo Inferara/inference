@@ -257,4 +257,138 @@ mod dead_code_tests {
             assert_eq!(*terminator, "break");
         }
     }
+
+    #[test]
+    fn a020_dead_code_after_infinite_loop_without_break() {
+        let source = r#"
+            fn foo() {
+                loop {
+                    let x: i32 = 1;
+                }
+                let y: i32 = 0;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let has_a020 = warnings
+            .iter()
+            .any(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(
+            has_a020,
+            "expected DeadCode warning after infinite loop without break, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a020_no_dead_code_after_infinite_loop_with_break() {
+        let source = r#"
+            fn foo() -> i32 {
+                loop {
+                    break;
+                }
+                return 0;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let has_a020 = warnings
+            .iter()
+            .any(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(
+            !has_a020,
+            "should NOT flag code after loop-with-break as dead, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a020_no_dead_code_after_conditional_loop() {
+        let source = r#"
+            fn foo(x: i32) -> i32 {
+                loop x > 0 {
+                    break;
+                }
+                return 0;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let has_a020 = warnings
+            .iter()
+            .any(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(
+            !has_a020,
+            "should NOT flag code after conditional loop as dead, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a020_dead_code_terminator_message_loop() {
+        let source = r#"
+            fn foo() {
+                loop {
+                    let x: i32 = 1;
+                }
+                let y: i32 = 0;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let dead = warnings
+            .iter()
+            .find(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(dead.is_some(), "expected DeadCode warning");
+        if let Some(AnalysisDiagnostic::DeadCode { terminator, .. }) = dead {
+            assert_eq!(*terminator, "loop");
+        }
+    }
+
+    #[test]
+    fn a020_dead_code_if_else_mixed_terminators_reports_conditional() {
+        let source = r#"
+            fn foo(x: i32) -> i32 {
+                let mut result: i32 = 0;
+                loop {
+                    if x > 0 {
+                        return 1;
+                    } else {
+                        break;
+                    }
+                    result = 42;
+                }
+                return result;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let dead = warnings
+            .iter()
+            .find(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(
+            dead.is_some(),
+            "expected DeadCode warning after if-else with mixed terminators"
+        );
+        if let Some(AnalysisDiagnostic::DeadCode { terminator, .. }) = dead {
+            assert_eq!(
+                *terminator, "conditional",
+                "mixed return+break should report 'conditional', not '{terminator}'"
+            );
+        }
+    }
+
+    #[test]
+    fn a020_dead_code_if_else_same_terminator_reports_kind() {
+        let source = r#"
+            fn foo(x: i32) -> i32 {
+                if x > 0 {
+                    return 1;
+                } else {
+                    return 2;
+                }
+                let y: i32 = 0;
+            }
+        "#;
+        let warnings = expect_warnings(source);
+        let dead = warnings
+            .iter()
+            .find(|w| matches!(w, AnalysisDiagnostic::DeadCode { .. }));
+        assert!(dead.is_some(), "expected DeadCode warning");
+        if let Some(AnalysisDiagnostic::DeadCode { terminator, .. }) = dead {
+            assert_eq!(*terminator, "return");
+        }
+    }
 }

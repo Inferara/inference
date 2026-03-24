@@ -78,69 +78,62 @@ mod unimplemented_operators {
 
 mod uninitialized_variables {
     use crate::utils::build_ast;
+    use inference_analysis::errors::AnalysisDiagnostic;
     use inference_type_checker::TypeCheckerBuilder;
 
-    fn try_type_check(source: &str) -> anyhow::Result<()> {
+    fn try_analyze(source: &str) -> Result<(), Vec<AnalysisDiagnostic>> {
         let arena = build_ast(source.to_string());
-        TypeCheckerBuilder::build_typed_context(arena)?;
-        Ok(())
+        let ctx = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type checking should succeed for uninitialized variable tests")
+            .typed_context();
+        match inference_analysis::analyze(&ctx) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.errors().to_vec()),
+        }
     }
 
     #[test]
     fn uninitialized_i32() {
-        let result = try_type_check("pub fn test() { let x: i32; }");
-        assert!(result.is_err(), "uninitialized i32 should fail type check");
-        let err = result.unwrap_err().to_string();
+        let errors = try_analyze("pub fn test() { let x: i32; }").unwrap_err();
         assert!(
-            err.contains("must be initialized at declaration"),
-            "unexpected error message: {err}"
+            errors.iter().any(|e| matches!(e, AnalysisDiagnostic::UninitializedVariable { .. })),
+            "uninitialized i32 should fail analysis: {errors:?}"
         );
     }
 
     #[test]
     fn uninitialized_i64() {
-        let result = try_type_check("pub fn test() { let x: i64; }");
-        assert!(result.is_err(), "uninitialized i64 should fail type check");
-        let err = result.unwrap_err().to_string();
+        let errors = try_analyze("pub fn test() { let x: i64; }").unwrap_err();
         assert!(
-            err.contains("must be initialized at declaration"),
-            "unexpected error message: {err}"
+            errors.iter().any(|e| matches!(e, AnalysisDiagnostic::UninitializedVariable { .. })),
+            "uninitialized i64 should fail analysis: {errors:?}"
         );
     }
 
     #[test]
     fn uninitialized_u32() {
-        let result = try_type_check("pub fn test() { let x: u32; }");
-        assert!(result.is_err(), "uninitialized u32 should fail type check");
-        let err = result.unwrap_err().to_string();
+        let errors = try_analyze("pub fn test() { let x: u32; }").unwrap_err();
         assert!(
-            err.contains("must be initialized at declaration"),
-            "unexpected error message: {err}"
+            errors.iter().any(|e| matches!(e, AnalysisDiagnostic::UninitializedVariable { .. })),
+            "uninitialized u32 should fail analysis: {errors:?}"
         );
     }
 
     #[test]
     fn uninitialized_bool() {
-        let result = try_type_check("pub fn test() { let x: bool; }");
-        assert!(result.is_err(), "uninitialized bool should fail type check");
-        let err = result.unwrap_err().to_string();
+        let errors = try_analyze("pub fn test() { let x: bool; }").unwrap_err();
         assert!(
-            err.contains("must be initialized at declaration"),
-            "unexpected error message: {err}"
+            errors.iter().any(|e| matches!(e, AnalysisDiagnostic::UninitializedVariable { .. })),
+            "uninitialized bool should fail analysis: {errors:?}"
         );
     }
 
     #[test]
     fn uninitialized_struct() {
-        let result = try_type_check("struct P { x: i32; }\npub fn test() { let p: P; }");
+        let errors = try_analyze("struct P { x: i32; }\npub fn test() { let p: P; }").unwrap_err();
         assert!(
-            result.is_err(),
-            "uninitialized struct should fail type check"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("must be initialized at declaration"),
-            "unexpected error message: {err}"
+            errors.iter().any(|e| matches!(e, AnalysisDiagnostic::UninitializedVariable { .. })),
+            "uninitialized struct should fail analysis: {errors:?}"
         );
     }
 }

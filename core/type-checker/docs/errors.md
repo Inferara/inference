@@ -1021,22 +1021,6 @@ fn test() {
 }
 ```
 
-### `UninitializedVariable`
-
-A variable is declared without an initializer. All variables must be initialized at declaration.
-
-**Message format**: `{location}: variable \`{name}\` must be initialized at declaration`
-
-**Example**:
-
-```rust
-fn test() {
-    let x: i32;  // Error: variable `x` must be initialized at declaration
-}
-```
-
-**Solution**: Provide an initializer: `let x: i32 = 0;`
-
 ### `ArrayLiteralSizeMismatch`
 
 An array literal has a different number of elements than the declared array type specifies.

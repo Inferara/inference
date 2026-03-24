@@ -315,6 +315,25 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a007_conditional_loop_returning_does_not_satisfy_return() {
+        let source = r#"
+            fn foo(x: i32) -> i32 {
+                loop x > 0 {
+                    return 1;
+                }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_missing_return = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. }));
+        assert!(
+            has_missing_return,
+            "conditional loop should not satisfy missing return requirement, got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a007_missing_return_in_struct_method() {
         let source = r#"
             fn main() -> i32 { return 0; }
@@ -332,6 +351,89 @@ mod analysis_rules_tests {
         assert!(
             has_missing_return,
             "struct method with return type but no return should trigger MissingReturn, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a007_no_missing_return_for_explicit_unit_return_type() {
+        let source = r#"
+            fn foo() -> unit {
+                let x: i32 = 0;
+            }
+        "#;
+        let result = analyze(source);
+        let has_missing_return = match &result {
+            Ok(_) => false,
+            Err(e) => e
+                .errors()
+                .iter()
+                .any(|err| matches!(err, AnalysisDiagnostic::MissingReturn { .. })),
+        };
+        assert!(
+            !has_missing_return,
+            "function returning unit should not trigger MissingReturn"
+        );
+    }
+
+    #[test]
+    fn a007_missing_return_still_fires_for_non_unit_type() {
+        let source = r#"
+            fn foo() -> i32 {
+                let x: i32 = 42;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_missing_return = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::MissingReturn { .. }));
+        assert!(
+            has_missing_return,
+            "non-unit return type should trigger MissingReturn, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a007_no_missing_return_for_void_function() {
+        let source = r#"
+            fn foo() {
+                let x: i32 = 0;
+            }
+        "#;
+        let result = analyze(source);
+        let has_missing_return = match &result {
+            Ok(_) => false,
+            Err(e) => e
+                .errors()
+                .iter()
+                .any(|err| matches!(err, AnalysisDiagnostic::MissingReturn { .. })),
+        };
+        assert!(
+            !has_missing_return,
+            "void function should not trigger MissingReturn"
+        );
+    }
+
+    #[test]
+    fn a007_no_missing_return_for_method_with_unit_return_type() {
+        let source = r#"
+            struct Foo {
+                x: i32;
+                fn bar(self) -> unit {
+                    let y: i32 = self.x;
+                }
+            }
+        "#;
+        let result = analyze(source);
+        let has_missing_return = match &result {
+            Ok(_) => false,
+            Err(e) => e
+                .errors()
+                .iter()
+                .any(|err| matches!(err, AnalysisDiagnostic::MissingReturn { .. })),
+        };
+        assert!(
+            !has_missing_return,
+            "method returning unit should not trigger MissingReturn"
         );
     }
 

@@ -2870,6 +2870,9 @@ mod duplicate_struct_field_definition_tests {
 #[cfg(test)]
 mod const_type_mismatch_tests {
     use super::*;
+    use inference_ast::ids::NodeId;
+    use inference_ast::nodes::Def;
+    use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 
     #[test]
     fn test_const_bool_assigned_number() {
@@ -2905,6 +2908,63 @@ mod const_type_mismatch_tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_valid_const_has_correct_typeinfo() {
+        let source = r#"const X: i32 = 42;"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Const value literal should have type info"
+        );
+        assert!(
+            matches!(
+                literal_type.unwrap().kind,
+                TypeInfoKind::Number(NumberType::I32)
+            ),
+            "Const i32 literal should have type i32"
+        );
+    }
+
+    #[test]
+    fn test_valid_bool_const_has_correct_typeinfo() {
+        let source = r#"const X: bool = true;"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Bool const value should have type info"
+        );
+        assert!(
+            matches!(literal_type.unwrap().kind, TypeInfoKind::Bool),
+            "Const bool literal should have type bool"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2925,6 +2985,78 @@ mod case_sensitive_type_tests {
             "got: {err}"
         );
     }
+
+    #[test]
+    fn string_capital_s_is_valid_type() {
+        let source = r#"fn test(x: String) -> String { return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "String (capital S) should be a valid type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn string_lowercase_is_valid_type() {
+        let source = r#"fn test(x: string) -> string { return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "string (lowercase) should be a valid type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn custom_type_wrong_case_is_rejected() {
+        let source = r#"
+            struct Foo { x: i32; }
+            fn test() -> foo {
+                let f: foo = Foo { x: 1 };
+                return f;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "custom type with wrong case should be rejected (case-sensitive)"
+        );
+    }
+
+    #[test]
+    fn custom_type_correct_case_is_accepted() {
+        let source = r#"
+            struct Foo { x: i32; }
+            fn test() -> Foo {
+                let f: Foo = Foo { x: 1 };
+                return f;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "custom type with correct case should be accepted, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn builtin_numeric_types_are_lowercase() {
+        for source in [
+            r#"fn test(x: i32) -> i32 { return x; }"#,
+            r#"fn test(x: i64) -> i64 { return x; }"#,
+            r#"fn test(x: u8) -> u8 { return x; }"#,
+            r#"fn test() -> bool { return true; }"#,
+        ] {
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "builtin type should be valid, source: {source}, got: {:?}",
+                result.as_ref().err()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2939,6 +3071,63 @@ mod external_function_tests {
             result.is_ok(),
             "External function with correct arg count should pass, got: {:?}",
             result.err()
+        );
+    }
+}
+
+/// Tests for generic type parameters in variable definitions
+#[cfg(test)]
+mod generic_type_param_in_vardef {
+    use super::*;
+
+    #[test]
+    fn test_generic_type_param_in_vardef_not_rejected() {
+        let source = r#"fn foo T'(x: T) -> T { let y: T = x; return y; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "type param T in vardef should not be rejected as unknown type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_unknown_type_in_vardef_still_rejected() {
+        let source = r#"fn foo() { let y: UnknownType = 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "unknown type in vardef should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_generic_type_param_in_method_vardef() {
+        let source = r#"
+            struct Wrapper {
+                value: i32;
+                fn transform T'(self, x: T) -> T {
+                    let result: T = x;
+                    return result;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "type param T in method vardef should not be rejected, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_multiple_type_params_in_vardef() {
+        let source = r#"fn foo A' B'(a: A, b: B) -> A { let x: A = a; let y: B = b; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "multiple type params in vardef should not be rejected, got: {:?}",
+            result.as_ref().err()
         );
     }
 }

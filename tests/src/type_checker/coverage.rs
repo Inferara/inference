@@ -158,20 +158,14 @@ mod statement_coverage {
     }
 
     #[test]
-    fn test_variable_definition_without_initializer() {
+    fn test_variable_definition_without_initializer_passes_type_check() {
         let source = r#"fn test() -> i32 { let x: i32; return 42; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Variable without initializer should produce an error"
+            result.is_ok(),
+            "Variable without initializer should pass type checking (caught by analysis rule A025 instead), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("must be initialized at declaration"),
-                "Error should mention initialization requirement, got: {err}"
-            );
-        }
     }
 
     #[test]

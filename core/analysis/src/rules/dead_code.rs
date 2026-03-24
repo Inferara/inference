@@ -1,16 +1,17 @@
-//! A020: Unreachable code after `return` or `break`.
+//! A020: Unreachable code after `return`, `break`, or infinite loop.
 //!
-//! Statements that appear after an unconditional `return` or `break` within
-//! the same block are unreachable and indicate a likely mistake.
+//! Statements that appear after an unconditional `return`, `break`, or an
+//! infinite loop without `break` within the same block are unreachable and
+//! indicate a likely mistake.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{Def, Stmt};
+use inference_ast::nodes::{BlockKind, Def, Stmt};
 
 use crate::errors::AnalysisDiagnostic;
 
 crate::rule! {
-    /// Unreachable code after `return` or `break`.
+    /// Unreachable code after `return`, `break`, or infinite loop.
     #[id = "A020"]
     #[name = "Dead code"]
     #[severity = warning]
@@ -93,6 +94,10 @@ fn stmt_terminator_kind(arena: &AstArena, stmt_id: StmtId) -> Option<&'static st
     match &arena[stmt_id].kind {
         Stmt::Return { .. } => Some("return"),
         Stmt::Break => Some("break"),
+        Stmt::Loop {
+            condition: None,
+            body,
+        } if !contains_break_for_this_loop(arena, *body) => Some("loop"),
         Stmt::If {
             then_block,
             else_block: Some(else_id),
@@ -101,7 +106,8 @@ fn stmt_terminator_kind(arena: &AstArena, stmt_id: StmtId) -> Option<&'static st
             let then_term = block_terminates(arena, *then_block);
             let else_term = block_terminates(arena, *else_id);
             match (then_term, else_term) {
-                (Some(k), Some(_)) => Some(k),
+                (Some(k1), Some(k2)) if k1 == k2 => Some(k1),
+                (Some(_), Some(_)) => Some("conditional"),
                 _ => None,
             }
         }
@@ -118,4 +124,43 @@ fn block_terminates(arena: &AstArena, block_id: BlockId) -> Option<&'static str>
         }
     }
     None
+}
+
+/// Checks whether a loop body contains a `break` targeting this loop
+/// (not a nested inner loop).
+fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
+    let block = &arena[block_id];
+    if block.block_kind != BlockKind::Regular {
+        return false;
+    }
+    block.stmts.iter().any(|&sid| contains_break_in_stmt(arena, sid))
+}
+
+fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
+    match &arena[stmt_id].kind {
+        Stmt::Break => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_break_for_this_loop(arena, *then_block)
+                || else_block.is_some_and(|b| contains_break_for_this_loop(arena, b))
+        }
+        Stmt::Block(block_id) => {
+            let block = &arena[*block_id];
+            if block.block_kind != BlockKind::Regular {
+                return false;
+            }
+            block.stmts.iter().any(|&sid| contains_break_in_stmt(arena, sid))
+        }
+        Stmt::Loop { .. }
+        | Stmt::Return { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::VarDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Assert { .. }
+        | Stmt::ConstDef(_) => false,
+    }
 }

@@ -4,6 +4,12 @@
 //! generator does not yet emit WASM imports for them. Calling an external
 //! function would panic during code generation, so the analysis pass rejects
 //! such calls with a clear error message.
+//!
+//! NOTE: This rule only matches direct calls by name (`foo()`). External
+//! functions cannot currently be struct members or passed as values, so
+//! name-based matching is sufficient. If the language later allows extern
+//! functions in structs or as first-class values, this rule will need to
+//! be extended.
 
 use std::collections::HashSet;
 

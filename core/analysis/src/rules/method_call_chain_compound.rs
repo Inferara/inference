@@ -4,9 +4,8 @@
 //! temporaries that cannot be named in formal proofs. Assign the intermediate
 //! result to a variable first.
 
-use inference_ast::ids::{ExprId, NodeId};
+use inference_ast::ids::ExprId;
 use inference_ast::nodes::{Expr, Stmt};
-use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::{errors::AnalysisDiagnostic, walker};
@@ -61,7 +60,7 @@ fn check_expr(
         // The function expression is a MemberAccess { expr: receiver, name: method_name }
         Expr::FunctionCall { function, args, .. } => {
             if let Expr::MemberAccess { expr: receiver_expr, .. } = &arena[*function].kind {
-                if is_compound_returning_call(ctx, *receiver_expr) {
+                if walker::is_compound_returning_call(ctx, *receiver_expr) {
                     errors.push(AnalysisDiagnostic::MethodCallChainOnCompoundReturn {
                         location: arena[expr_id].location,
                     });
@@ -110,19 +109,5 @@ fn check_expr(
         | Expr::UnitLiteral
         | Expr::Uzumaki
         | Expr::Type(_) => {}
-    }
-}
-
-fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) -> bool {
-    if !matches!(ctx.arena()[expr_id].kind, Expr::FunctionCall { .. }) {
-        return false;
-    }
-    if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
-        matches!(
-            ti.kind,
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
-        )
-    } else {
-        false
     }
 }

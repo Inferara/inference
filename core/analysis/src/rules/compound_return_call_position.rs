@@ -4,9 +4,8 @@
 //! which requires the caller to provide a destination pointer. They can only
 //! appear in variable definitions or return statements.
 
-use inference_ast::ids::{ExprId, NodeId};
+use inference_ast::ids::ExprId;
 use inference_ast::nodes::{Expr, Stmt};
-use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::{errors::AnalysisDiagnostic, walker};
@@ -66,20 +65,6 @@ fn check_stmt(
     }
 }
 
-fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) -> bool {
-    if !matches!(ctx.arena()[expr_id].kind, Expr::FunctionCall { .. }) {
-        return false;
-    }
-    if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
-        matches!(
-            ti.kind,
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
-        )
-    } else {
-        false
-    }
-}
-
 /// Checks an expression and reports if it is a compound-returning call in
 /// a disallowed position. Also recurses into child expressions.
 fn check_expr(
@@ -87,7 +72,7 @@ fn check_expr(
     expr_id: ExprId,
     errors: &mut Vec<AnalysisDiagnostic>,
 ) {
-    if is_compound_returning_call(ctx, expr_id) {
+    if walker::is_compound_returning_call(ctx, expr_id) {
         errors.push(AnalysisDiagnostic::CompoundReturnCallInExpressionPosition {
             location: ctx.arena()[expr_id].location,
         });

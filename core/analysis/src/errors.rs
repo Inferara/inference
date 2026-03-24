@@ -141,6 +141,9 @@ pub enum AnalysisDiagnostic {
 
     #[error("call to external function `{name}` is not supported in codegen; external functions cannot be compiled to WebAssembly yet")]
     ExternFunctionCall { name: String, location: Location },
+
+    #[error("variable `{name}` must be initialized at declaration; use `let {name}: <type> = <value>;`")]
+    UninitializedVariable { name: String, location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -169,7 +172,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::ArrayIndex64Bit { location, .. }
             | AnalysisDiagnostic::LiteralOutOfRange { location, .. }
             | AnalysisDiagnostic::UzumakiInReassignment { location }
-            | AnalysisDiagnostic::ExternFunctionCall { location, .. } => location,
+            | AnalysisDiagnostic::ExternFunctionCall { location, .. }
+            | AnalysisDiagnostic::UninitializedVariable { location, .. } => location,
         }
     }
 
@@ -201,6 +205,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::LiteralOutOfRange { .. } => "A022",
             AnalysisDiagnostic::UzumakiInReassignment { .. } => "A023",
             AnalysisDiagnostic::ExternFunctionCall { .. } => "A024",
+            AnalysisDiagnostic::UninitializedVariable { .. } => "A025",
         }
     }
 }

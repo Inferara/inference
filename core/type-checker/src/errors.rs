@@ -502,12 +502,6 @@ pub enum TypeCheckError {
     #[error("{location}: invalid assignment target; expected a variable, array element, or struct field")]
     InvalidAssignmentTarget { location: Location },
 
-    /// Variable declared without an initializer.
-    ///
-    /// All variables must be initialized at their declaration site.
-    #[error("{location}: variable `{name}` must be initialized at declaration")]
-    UninitializedVariable { name: String, location: Location },
-
     /// Array literal size does not match the declared array type size.
     #[error(
         "{location}: array literal has {actual} elements but the declared type expects {expected}"
@@ -580,7 +574,6 @@ impl TypeCheckError {
             | TypeCheckError::DuplicateStructFieldDefinition { location, .. }
             | TypeCheckError::RecursiveStructDefinition { location, .. }
             | TypeCheckError::InvalidAssignmentTarget { location, .. }
-            | TypeCheckError::UninitializedVariable { location, .. }
             | TypeCheckError::ArrayLiteralSizeMismatch { location, .. }
             | TypeCheckError::DivisionByZero { location, .. }
             | TypeCheckError::DuplicateEnumVariant { location, .. } => location,
@@ -1284,18 +1277,6 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: invalid assignment target; expected a variable, array element, or struct field"
-        );
-    }
-
-    #[test]
-    fn display_uninitialized_variable() {
-        let err = TypeCheckError::UninitializedVariable {
-            name: "x".to_string(),
-            location: test_location(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "1:5: variable `x` must be initialized at declaration"
         );
     }
 

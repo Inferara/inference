@@ -5,8 +5,9 @@
 //! to access node data.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{BlockId, DefId, ExprId, StmtId};
+use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
 use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
+use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
 /// Context passed to visitor callbacks during AST walking.
@@ -125,6 +126,23 @@ pub(crate) fn walk_expr(
         | Expr::UnitLiteral
         | Expr::Uzumaki
         | Expr::Type(_) => {}
+    }
+}
+
+/// Returns `true` when `expr_id` is a function call that returns a compound
+/// type (array, struct, or custom). Used by multiple rules to detect sret
+/// calling convention restrictions.
+pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) -> bool {
+    if !matches!(ctx.arena()[expr_id].kind, Expr::FunctionCall { .. }) {
+        return false;
+    }
+    if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
+        matches!(
+            ti.kind,
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        )
+    } else {
+        false
     }
 }
 

@@ -357,7 +357,6 @@ Test organization:
 - `DuplicateStructFieldDefinition` — two fields with the same name in a struct `struct S { x: i32, x: i32 }` is rejected
 - `RecursiveStructDefinition` — field type creates a size cycle, including cycles through arrays (`struct A { items: [A; 3] }`) and type aliases
 - `InvalidAssignmentTarget` — left-hand side of an assignment is not a valid lvalue (identifier, array index, or struct field)
-- `UninitializedVariable` — variable declared without an initializer (`let x: i32;`)
 - `ArrayLiteralSizeMismatch` — array literal element count does not match the declared array size
 - `DivisionByZero` — literal zero in the divisor position of `/` or `%`
 - `DuplicateEnumVariant` — two variants with the same name in an enum definition

@@ -5,8 +5,8 @@
 //! performs whole-body analysis rather than per-statement checks.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Stmt};
+use inference_ast::ids::{BlockId, DefId, StmtId, TypeId};
+use inference_ast::nodes::{BlockKind, Def, SimpleTypeKind, Stmt, TypeNode};
 
 use crate::errors::AnalysisDiagnostic;
 
@@ -26,6 +26,17 @@ crate::rule! {
     }
 }
 
+fn has_non_unit_return_type(arena: &AstArena, returns: Option<TypeId>) -> bool {
+    match returns {
+        None => false,
+        Some(type_id) => match &arena[type_id].kind {
+            TypeNode::Simple(SimpleTypeKind::Unit) => false,
+            TypeNode::Custom(ident_id) => arena[*ident_id].name != "unit",
+            _ => true,
+        },
+    }
+}
+
 fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiagnostic>) {
     for &def_id in def_ids {
         match &arena[def_id].kind {
@@ -35,7 +46,9 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
                 body,
                 ..
             } => {
-                if returns.is_some() && !returns_on_all_paths(arena, *body) {
+                if has_non_unit_return_type(arena, *returns)
+                    && !returns_on_all_paths(arena, *body)
+                {
                     errors.push(AnalysisDiagnostic::MissingReturn {
                         function_name: arena[*name].name.clone(),
                         location: arena[def_id].location,
@@ -50,7 +63,7 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
                         body,
                         ..
                     } = &arena[method_id].kind
-                        && returns.is_some()
+                        && has_non_unit_return_type(arena, *returns)
                         && !returns_on_all_paths(arena, *body)
                     {
                         errors.push(AnalysisDiagnostic::MissingReturn {
@@ -103,6 +116,11 @@ fn stmt_returns_on_all_paths(arena: &AstArena, stmt_id: StmtId) -> bool {
             condition: None,
             body,
         } => returns_on_all_paths(arena, *body) || !contains_break_for_this_loop(arena, *body),
+        // Conditional loops may never execute, so they cannot guarantee a return
+        #[allow(clippy::match_same_arms)]
+        Stmt::Loop {
+            condition: Some(_), ..
+        } => false,
         Stmt::Block(inner) => returns_on_all_paths(arena, *inner),
         _ => false,
     }
