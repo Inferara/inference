@@ -6,7 +6,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId, TypeId};
-use inference_ast::nodes::{BlockKind, Def, SimpleTypeKind, Stmt, TypeNode};
+use inference_ast::nodes::{Def, SimpleTypeKind, Stmt, TypeNode};
 
 use crate::errors::AnalysisDiagnostic;
 
@@ -115,7 +115,10 @@ fn stmt_returns_on_all_paths(arena: &AstArena, stmt_id: StmtId) -> bool {
         Stmt::Loop {
             condition: None,
             body,
-        } => returns_on_all_paths(arena, *body) || !contains_break_for_this_loop(arena, *body),
+        } => {
+            returns_on_all_paths(arena, *body)
+                || !crate::walker::contains_break_for_this_loop(arena, *body)
+        }
         // Conditional loops may never execute, so they cannot guarantee a return
         #[allow(clippy::match_same_arms)]
         Stmt::Loop {
@@ -123,52 +126,5 @@ fn stmt_returns_on_all_paths(arena: &AstArena, stmt_id: StmtId) -> bool {
         } => false,
         Stmt::Block(inner) => returns_on_all_paths(arena, *inner),
         _ => false,
-    }
-}
-
-fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
-    let block = &arena[block_id];
-    if block.block_kind != BlockKind::Regular {
-        return false;
-    }
-    contains_break_in_statements(arena, &block.stmts)
-}
-
-fn contains_break_in_statements(arena: &AstArena, stmt_ids: &[StmtId]) -> bool {
-    for &stmt_id in stmt_ids {
-        if contains_break_in_statement(arena, stmt_id) {
-            return true;
-        }
-    }
-    false
-}
-
-fn contains_break_in_statement(arena: &AstArena, stmt_id: StmtId) -> bool {
-    match &arena[stmt_id].kind {
-        Stmt::Break => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            contains_break_for_this_loop(arena, *then_block)
-                || else_block
-                    .is_some_and(|b| contains_break_for_this_loop(arena, b))
-        }
-        Stmt::Block(block_id) => {
-            let block = &arena[*block_id];
-            if block.block_kind != BlockKind::Regular {
-                return false;
-            }
-            contains_break_in_statements(arena, &block.stmts)
-        }
-        Stmt::Loop { .. }
-        | Stmt::Return { .. }
-        | Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
-        | Stmt::Assert { .. }
-        | Stmt::ConstDef(_) => false,
     }
 }

@@ -146,6 +146,56 @@ pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) ->
     }
 }
 
+/// Checks whether a loop body contains at least one `break` that targets
+/// the current loop (not a nested inner loop).
+///
+/// This function scans the body recursively but:
+/// - Does NOT recurse into nested `Loop` statement bodies (break there targets the nested loop)
+/// - Does NOT recurse into non-det block bodies (break inside non-det is prohibited)
+/// - DOES recurse into `if/else` arms and regular `Block` statements
+pub(crate) fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
+    let block = &arena[block_id];
+    if block.block_kind != BlockKind::Regular {
+        return false;
+    }
+    block
+        .stmts
+        .iter()
+        .any(|&sid| contains_break_in_stmt(arena, sid))
+}
+
+fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
+    match &arena[stmt_id].kind {
+        Stmt::Break => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_break_for_this_loop(arena, *then_block)
+                || else_block.is_some_and(|b| contains_break_for_this_loop(arena, b))
+        }
+        Stmt::Block(block_id) => {
+            let block = &arena[*block_id];
+            if block.block_kind != BlockKind::Regular {
+                return false;
+            }
+            block
+                .stmts
+                .iter()
+                .any(|&sid| contains_break_in_stmt(arena, sid))
+        }
+        Stmt::Loop { .. }
+        | Stmt::Return { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::VarDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Assert { .. }
+        | Stmt::ConstDef(_) => false,
+    }
+}
+
 /// Recursively walks all `Def` variants and calls `callback` for each
 /// function body found. Handles struct methods, spec definitions (recursive),
 /// and module definitions (recursive).

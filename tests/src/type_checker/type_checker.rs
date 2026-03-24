@@ -2871,7 +2871,7 @@ mod duplicate_struct_field_definition_tests {
 mod const_type_mismatch_tests {
     use super::*;
     use inference_ast::ids::NodeId;
-    use inference_ast::nodes::Def;
+    use inference_ast::nodes::{Def, Stmt};
     use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 
     #[test]
@@ -2963,6 +2963,53 @@ mod const_type_mismatch_tests {
         assert!(
             matches!(literal_type.unwrap().kind, TypeInfoKind::Bool),
             "Const bool literal should have type bool"
+        );
+    }
+
+    #[test]
+    fn test_function_body_const_has_correct_typeinfo() {
+        let source = r#"fn main() -> i32 { const X: i64 = 99; return 0; }"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Function { body, .. } = &arena[def_id].kind {
+                    arena[*body].stmts.iter().find_map(|&stmt_id| {
+                        if let Stmt::ConstDef(cdi) = &arena[stmt_id].kind {
+                            if let Def::Constant { value, .. } = &arena[*cdi].kind {
+                                return Some(*value);
+                            }
+                        }
+                        None
+                    })
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition in function body");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Function-body const value literal should have type info"
+        );
+        assert!(
+            matches!(
+                literal_type.unwrap().kind,
+                TypeInfoKind::Number(NumberType::I64)
+            ),
+            "Function-body const i64 literal should have type i64"
+        );
+    }
+
+    #[test]
+    fn test_function_body_const_mismatch_no_typeinfo() {
+        let source = r#"fn main() -> i32 { const X: bool = 42; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Number literal for bool const in function body should fail"
         );
     }
 }

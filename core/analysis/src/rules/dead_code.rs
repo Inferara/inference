@@ -6,7 +6,7 @@
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Stmt};
+use inference_ast::nodes::{Def, Stmt};
 
 use crate::errors::AnalysisDiagnostic;
 
@@ -97,7 +97,7 @@ fn stmt_terminator_kind(arena: &AstArena, stmt_id: StmtId) -> Option<&'static st
         Stmt::Loop {
             condition: None,
             body,
-        } if !contains_break_for_this_loop(arena, *body) => Some("loop"),
+        } if !crate::walker::contains_break_for_this_loop(arena, *body) => Some("loop"),
         Stmt::If {
             then_block,
             else_block: Some(else_id),
@@ -124,43 +124,4 @@ fn block_terminates(arena: &AstArena, block_id: BlockId) -> Option<&'static str>
         }
     }
     None
-}
-
-/// Checks whether a loop body contains a `break` targeting this loop
-/// (not a nested inner loop).
-fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
-    let block = &arena[block_id];
-    if block.block_kind != BlockKind::Regular {
-        return false;
-    }
-    block.stmts.iter().any(|&sid| contains_break_in_stmt(arena, sid))
-}
-
-fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
-    match &arena[stmt_id].kind {
-        Stmt::Break => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            contains_break_for_this_loop(arena, *then_block)
-                || else_block.is_some_and(|b| contains_break_for_this_loop(arena, b))
-        }
-        Stmt::Block(block_id) => {
-            let block = &arena[*block_id];
-            if block.block_kind != BlockKind::Regular {
-                return false;
-            }
-            block.stmts.iter().any(|&sid| contains_break_in_stmt(arena, sid))
-        }
-        Stmt::Loop { .. }
-        | Stmt::Return { .. }
-        | Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::VarDef { .. }
-        | Stmt::TypeDef { .. }
-        | Stmt::Assert { .. }
-        | Stmt::ConstDef(_) => false,
-    }
 }

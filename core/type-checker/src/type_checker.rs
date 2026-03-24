@@ -412,40 +412,7 @@ impl TypeChecker {
                             location,
                         });
                     }
-                    let value_kind = ctx.arena()[value_id].kind.clone();
-                    let mut type_ok = false;
-                    if let Expr::NumberLiteral { .. } = value_kind {
-                        if const_type.kind.is_number() {
-                            type_ok = true;
-                        } else {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: const_type.clone(),
-                                found: TypeInfo {
-                                    kind: TypeInfoKind::Number(NumberType::I32),
-                                    type_params: vec![],
-                                },
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    } else {
-                        let init_type = self.infer_expression(value_id, ctx);
-                        if let Some(init) = init_type
-                            && self.symbol_table.resolve_custom_type(init.clone()) != const_type
-                        {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: const_type.clone(),
-                                found: init,
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        } else {
-                            type_ok = true;
-                        }
-                    }
-                    if type_ok {
-                        ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type);
-                    }
+                    self.check_const_initializer(value_id, &const_type, location, ctx);
                 }
                 Def::Function {
                     name,
@@ -578,6 +545,55 @@ impl TypeChecker {
                 | Def::TypeAlias { .. }
                 | Def::Module { .. } => {}
             }
+        }
+    }
+
+    /// Type-checks a constant initializer expression against the declared type.
+    ///
+    /// If the initializer is a number literal matching a numeric target type,
+    /// sets the expression's type info directly. Otherwise, infers the expression
+    /// type and reports a mismatch if it doesn't match. Only sets node type info
+    /// when types are compatible.
+    fn check_const_initializer(
+        &mut self,
+        value_id: ExprId,
+        const_type: &TypeInfo,
+        location: Location,
+        ctx: &mut TypedContext,
+    ) {
+        let value_kind = ctx.arena()[value_id].kind.clone();
+        let mut type_ok = false;
+        if let Expr::NumberLiteral { .. } = value_kind {
+            if const_type.kind.is_number() {
+                type_ok = true;
+            } else {
+                self.errors.push(TypeCheckError::TypeMismatch {
+                    expected: const_type.clone(),
+                    found: TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    context: TypeMismatchContext::VariableDefinition,
+                    location,
+                });
+            }
+        } else {
+            let init_type = self.infer_expression(value_id, ctx);
+            if let Some(init) = init_type
+                && self.symbol_table.resolve_custom_type(init.clone()) != *const_type
+            {
+                self.errors.push(TypeCheckError::TypeMismatch {
+                    expected: const_type.clone(),
+                    found: init,
+                    context: TypeMismatchContext::VariableDefinition,
+                    location,
+                });
+            } else {
+                type_ok = true;
+            }
+        }
+        if type_ok {
+            ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type.clone());
         }
     }
 
@@ -1110,36 +1126,7 @@ impl TypeChecker {
                             location,
                         });
                     }
-                    let value_kind = ctx.arena()[value_id].kind.clone();
-                    if let Expr::NumberLiteral { .. } = &value_kind {
-                        if constant_type.kind.is_number() {
-                            ctx.set_node_typeinfo(NodeId::Expr(value_id), constant_type.clone());
-                        } else {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: constant_type.clone(),
-                                found: TypeInfo {
-                                    kind: TypeInfoKind::Number(NumberType::I32),
-                                    type_params: vec![],
-                                },
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    } else {
-                        let init_type = self.infer_expression(value_id, ctx);
-                        if let Some(init) = init_type
-                            && self.symbol_table.resolve_custom_type(init.clone())
-                                != constant_type
-                        {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: constant_type.clone(),
-                                found: init,
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    }
-                    ctx.set_node_typeinfo(NodeId::Expr(value_id), constant_type.clone());
+                    self.check_const_initializer(value_id, &constant_type, location, ctx);
                     ctx.set_node_typeinfo(NodeId::Def(cdi), constant_type.clone());
                     ctx.set_node_typeinfo(NodeId::Stmt(stmt_id), constant_type);
                 }
@@ -2177,39 +2164,12 @@ impl TypeChecker {
                                 location: inner_location,
                             });
                         }
-                        let value_kind = ctx.arena()[value_id].kind.clone();
-                        if let Expr::NumberLiteral { .. } = value_kind {
-                            if const_type.kind.is_number() {
-                                ctx.set_node_typeinfo(
-                                    NodeId::Expr(value_id),
-                                    const_type.clone(),
-                                );
-                            } else {
-                                self.errors.push(TypeCheckError::TypeMismatch {
-                                    expected: const_type.clone(),
-                                    found: TypeInfo {
-                                        kind: TypeInfoKind::Number(NumberType::I32),
-                                        type_params: vec![],
-                                    },
-                                    context: TypeMismatchContext::VariableDefinition,
-                                    location: inner_location,
-                                });
-                            }
-                        } else {
-                            let init_type = self.infer_expression(value_id, ctx);
-                            if let Some(init) = init_type
-                                && self.symbol_table.resolve_custom_type(init.clone())
-                                    != const_type
-                            {
-                                self.errors.push(TypeCheckError::TypeMismatch {
-                                    expected: const_type.clone(),
-                                    found: init,
-                                    context: TypeMismatchContext::VariableDefinition,
-                                    location: inner_location,
-                                });
-                            }
-                        }
-                        ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type);
+                        self.check_const_initializer(
+                            value_id,
+                            &const_type,
+                            inner_location,
+                            ctx,
+                        );
                     }
                     Def::ExternFunction {
                         name: ef_name,
