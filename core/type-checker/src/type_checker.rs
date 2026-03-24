@@ -314,33 +314,49 @@ impl TypeChecker {
     ///
     /// A struct that contains itself (or contains another struct that eventually
     /// references it) would have infinite size and cannot be laid out in memory.
+    /// This traverses into nested containers (specs and modules) so that structs
+    /// defined inside them are also checked.
     fn check_recursive_struct_definitions(&mut self, ctx: &TypedContext) {
         let arena = ctx.arena();
         let all_def_ids: Vec<DefId> = arena
             .source_files()
             .flat_map(|sf| sf.defs.iter().copied())
             .collect();
-        for def_id in &all_def_ids {
-            let def_data = &arena[*def_id];
-            if let Def::Struct { name, fields, .. } = &def_data.kind {
-                let struct_name = arena[*name].name.clone();
-                for field in fields {
-                    let field_name = arena[field.name].name.clone();
-                    let field_type = TypeInfo::from_type_id(arena, field.ty);
-                    let resolved = self.symbol_table.resolve_custom_type(field_type);
-                    if self.struct_type_contains(
-                        &resolved.kind,
-                        &struct_name,
-                        &mut FxHashSet::default(),
-                    ) {
-                        self.errors.push(TypeCheckError::RecursiveStructDefinition {
-                            struct_name: struct_name.clone(),
-                            field_name,
-                            field_type: resolved.to_string(),
-                            location: arena[field.name].location,
-                        });
+        self.check_recursive_structs_in_defs(arena, &all_def_ids);
+    }
+
+    fn check_recursive_structs_in_defs(&mut self, arena: &AstArena, def_ids: &[DefId]) {
+        for &def_id in def_ids {
+            match &arena[def_id].kind {
+                Def::Struct { name, fields, .. } => {
+                    let struct_name = arena[*name].name.clone();
+                    for field in fields {
+                        let field_name = arena[field.name].name.clone();
+                        let field_type = TypeInfo::from_type_id(arena, field.ty);
+                        let resolved = self.symbol_table.resolve_custom_type(field_type);
+                        if self.struct_type_contains(
+                            &resolved.kind,
+                            &struct_name,
+                            &mut FxHashSet::default(),
+                        ) {
+                            self.errors.push(TypeCheckError::RecursiveStructDefinition {
+                                struct_name: struct_name.clone(),
+                                field_name,
+                                field_type: resolved.to_string(),
+                                location: arena[field.name].location,
+                            });
+                        }
                     }
                 }
+                Def::Spec { defs, .. } => {
+                    self.check_recursive_structs_in_defs(arena, defs);
+                }
+                Def::Module {
+                    defs: Some(defs), ..
+                } => {
+                    self.check_recursive_structs_in_defs(arena, defs);
+                }
+                _ => {}
             }
         }
     }
@@ -579,17 +595,21 @@ impl TypeChecker {
             }
         } else {
             let init_type = self.infer_expression(value_id, ctx);
-            if let Some(init) = init_type
-                && self.symbol_table.resolve_custom_type(init.clone()) != *const_type
-            {
-                self.errors.push(TypeCheckError::TypeMismatch {
-                    expected: const_type.clone(),
-                    found: init,
-                    context: TypeMismatchContext::VariableDefinition,
-                    location,
-                });
-            } else {
-                type_ok = true;
+            match init_type {
+                Some(init)
+                    if self.symbol_table.resolve_custom_type(init.clone()) != *const_type =>
+                {
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: const_type.clone(),
+                        found: init,
+                        context: TypeMismatchContext::VariableDefinition,
+                        location,
+                    });
+                }
+                Some(_) => {
+                    type_ok = true;
+                }
+                None => {}
             }
         }
         if type_ok {

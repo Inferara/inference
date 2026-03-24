@@ -152,6 +152,23 @@ mod analysis_rules_tests {
         }
     }
 
+    #[test]
+    fn a006_uzumaki_in_const_array_inside_function_detected() {
+        let source = r#"
+            fn main() {
+                const X: [i32; 2] = [1, @];
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a006 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOutsideNonDetBlock { .. }));
+        assert!(
+            has_a006,
+            "uzumaki in const array initializer should trigger A006, got: {errors:?}"
+        );
+    }
+
     // --- A007: Missing return ---
 
     #[test]

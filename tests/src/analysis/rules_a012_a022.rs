@@ -1073,4 +1073,23 @@ mod analysis_rules_tests {
             "expected LiteralOutOfRange in loop condition, got: {errors:?}"
         );
     }
+
+    // --- A022: LiteralOutOfRange in const initializer inside function ---
+
+    #[test]
+    fn a022_literal_out_of_range_in_const_inside_function() {
+        let source = r#"
+            fn main() {
+                const X: u8 = 256;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a022 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::LiteralOutOfRange { .. }));
+        assert!(
+            has_a022,
+            "literal out of range in const inside function should trigger A022, got: {errors:?}"
+        );
+    }
 }

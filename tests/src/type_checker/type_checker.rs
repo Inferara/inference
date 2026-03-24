@@ -2737,6 +2737,143 @@ mod recursive_struct_tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_recursive_struct_inside_spec_is_detected() {
+        let source = r#"
+            spec TestSpec {
+                struct Node {
+                    value: i32;
+                    next: Node;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Recursive struct inside spec should be detected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    // Module definitions are not yet supported in the grammar, so we cannot
+    // write a parser-level test for recursive structs inside modules. The fix
+    // handles Def::Module nonetheless to avoid a latent bug when module parsing
+    // is added.
+
+    #[test]
+    fn test_non_recursive_struct_inside_spec_is_accepted() {
+        let source = r#"
+            spec TestSpec {
+                struct Point {
+                    x: i32;
+                    y: i32;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive struct inside spec should be accepted, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_top_level_still_detected() {
+        let source = r#"
+            struct Node {
+                value: i32;
+                next: Node;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Top-level recursive struct should still be detected"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_three_level_chain() {
+        // A -> B -> C -> A
+        let source = r#"
+            struct A { b: B; }
+            struct B { c: C; }
+            struct C { a: A; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Three-level recursive chain should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_through_array() {
+        // A contains [A; 3] — still recursive
+        let source = r#"
+            struct Node {
+                value: i32;
+                children: [Node; 3];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Recursive struct through array should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_recursive_three_level_chain() {
+        // A -> B -> C, no cycle
+        let source = r#"
+            struct C { value: i32; }
+            struct B { c: C; }
+            struct A { b: B; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive three-level chain should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_direct_inside_spec_with_multiple_structs() {
+        let source = r#"
+            spec TestSpec {
+                struct A { value: i32; self_ref: A; }
+                struct B { value: i32; }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Direct recursive struct inside spec with sibling structs should be detected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3010,6 +3147,45 @@ mod const_type_mismatch_tests {
         assert!(
             result.is_err(),
             "Number literal for bool const in function body should fail"
+        );
+    }
+
+    #[test]
+    fn test_const_empty_array_literal_does_not_get_scalar_type() {
+        // Empty array literal cannot have its type inferred (infer_expression returns None).
+        // Before the fix, the None case fell through to type_ok = true, incorrectly
+        // stamping the declared scalar type onto the expression node.
+        let source = r#"const X: i32 = [];"#;
+        let typed_context = try_type_check(source).expect("Type check should not hard-fail");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_none(),
+            "Empty array literal should NOT get the declared scalar type stamped on it, \
+             but got: {:?}",
+            literal_type
+        );
+    }
+
+    #[test]
+    fn test_const_valid_array_literal() {
+        let source = r#"const X: [i32; 2] = [1, 2];"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Const with matching array literal should pass, got: {:?}",
+            result.as_ref().err()
         );
     }
 }

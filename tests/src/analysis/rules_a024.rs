@@ -166,4 +166,22 @@ mod analysis_rules_tests {
             .count();
         assert_eq!(a024_count, 2, "expected 2 ExternFunctionCall errors for nested calls, got: {errors:?}");
     }
+
+    #[test]
+    fn a024_extern_function_call_in_const_array_inside_function() {
+        let source = r#"
+            external fn ext_func() -> i32;
+            fn main() {
+                const X: [i32; 2] = [1, ext_func()];
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a024 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::ExternFunctionCall { .. }));
+        assert!(
+            has_a024,
+            "extern function call in const array initializer should trigger A024, got: {errors:?}"
+        );
+    }
 }

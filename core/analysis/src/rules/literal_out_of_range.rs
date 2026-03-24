@@ -5,7 +5,7 @@
 //! and validate the literal value fits within its range.
 
 use inference_ast::ids::{ExprId, NodeId};
-use inference_ast::nodes::{Expr, Stmt};
+use inference_ast::nodes::Expr;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 
@@ -21,15 +21,7 @@ crate::rule! {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
-            let stmt = &arena[stmt_id].kind;
-
-            if let Stmt::ConstDef(def_id) = stmt
-                && let inference_ast::nodes::Def::Constant { value, .. } = &arena[*def_id].kind
-            {
-                check_number_literal(ctx, *value, &mut errors);
-            }
-
-            walker::for_each_stmt_expr(stmt, &mut |expr_id| {
+            walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     check_number_literal(ctx, sub_id, &mut errors);
                 });

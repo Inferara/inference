@@ -17,7 +17,7 @@ crate::rule! {
             if walk_ctx.nondet_depth > 0 {
                 return;
             }
-            walker::for_each_stmt_expr(&arena[stmt_id].kind, &mut |expr_id| {
+            walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     if matches!(arena[sub_id].kind, Expr::Uzumaki) {
                         errors.push(AnalysisDiagnostic::UzumakiOutsideNonDetBlock {

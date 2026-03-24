@@ -33,7 +33,7 @@ crate::rule! {
         }
         let mut errors = Vec::new();
         walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
-            walker::for_each_stmt_expr(&arena[stmt_id].kind, &mut |expr_id| {
+            walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     if let Expr::FunctionCall { function, .. } = &arena[sub_id].kind
                         && let Expr::Identifier(ident_id) = &arena[*function].kind

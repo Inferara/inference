@@ -54,10 +54,11 @@ pub(crate) fn walk_function_bodies(
 
 /// Extracts top-level expressions from a statement and calls the callback
 /// for each one. Covers variable definitions, expression statements,
-/// assignments, returns, asserts, if conditions, and loop conditions.
-/// Does not recurse into sub-expressions.
+/// assignments, returns, asserts, if conditions, loop conditions, and
+/// constant definitions. Does not recurse into sub-expressions.
 pub(crate) fn for_each_stmt_expr(
     stmt: &Stmt,
+    arena: &AstArena,
     callback: &mut dyn FnMut(ExprId),
 ) {
     match stmt {
@@ -76,6 +77,11 @@ pub(crate) fn for_each_stmt_expr(
             condition: Some(cond_expr),
             ..
         } => callback(*cond_expr),
+        Stmt::ConstDef(def_id) => {
+            if let Def::Constant { value, .. } = &arena[*def_id].kind {
+                callback(*value);
+            }
+        }
         _ => {}
     }
 }
