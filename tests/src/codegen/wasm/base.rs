@@ -4044,6 +4044,66 @@ mod base_codegen_tests {
         assert_eq!(result, 6, "v.sum() should return 6 (1 + 2 + 3)");
     }
 
+    #[test]
+    fn nested_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "nested_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let create_and_read_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "create_and_read_val")
+            .expect("Failed to get 'create_and_read_val'");
+        let result = create_and_read_val
+            .call(&mut store, ())
+            .expect("create_and_read_val failed");
+        assert_eq!(result, 30, "create_and_read_val should return 30 (o.val)");
+
+        let read_via_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_via_copy")
+            .expect("Failed to get 'read_via_copy'");
+        let result = read_via_copy
+            .call(&mut store, ())
+            .expect("read_via_copy failed");
+        assert_eq!(result, 10, "read_via_copy should return 10 (o.inner.x via copy)");
+
+        let read_inner_y_via_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_inner_y_via_copy")
+            .expect("Failed to get 'read_inner_y_via_copy'");
+        let result = read_inner_y_via_copy
+            .call(&mut store, ())
+            .expect("read_inner_y_via_copy failed");
+        assert_eq!(result, 20, "read_inner_y_via_copy should return 20 (o.inner.y via copy)");
+
+        let sum_all_fields: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_all_fields")
+            .expect("Failed to get 'sum_all_fields'");
+        let result = sum_all_fields
+            .call(&mut store, ())
+            .expect("sum_all_fields failed");
+        assert_eq!(result, 60, "sum_all_fields should return 60 (10 + 20 + 30)");
+
+        let write_inner_field: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_inner_field")
+            .expect("Failed to get 'write_inner_field'");
+        let result = write_inner_field
+            .call(&mut store, ())
+            .expect("write_inner_field failed");
+        assert_eq!(result, 99, "write_inner_field should return 99 (i.x after write)");
+    }
+
 }
 
 /// Test data regeneration helpers.
@@ -4834,6 +4894,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nested_struct_wasm() {
+        let dir = base_test_dir().join("nested_struct");
+        let source_code = std::fs::read_to_string(dir.join("nested_struct.inf"))
+            .expect("Failed to read nested_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nested_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "nested_struct");
     }
 
 }

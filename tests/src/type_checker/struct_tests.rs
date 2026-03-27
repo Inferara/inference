@@ -419,7 +419,7 @@ mod field_validation {
     }
 
     #[test]
-    fn test_nested_struct_field_not_supported() {
+    fn test_nested_struct_field_accepted() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             struct Rect { origin: Point; size: Point; }
@@ -429,13 +429,10 @@ mod field_validation {
             }
         "#;
         let result = try_type_check(source);
-        // Nested structs are not yet supported. The type checker rejects struct-typed fields
-        // because struct literal field type matching does not handle struct types correctly
-        // (reports "expected Point, found Point"). Codegen would also panic in element_size.
-        // This test documents the current limitation at both levels.
         assert!(
-            result.is_err(),
-            "Nested structs are not yet supported; type checker should reject struct-typed fields"
+            result.is_ok(),
+            "Nested struct literals should be accepted, got: {:?}",
+            result.err()
         );
     }
 

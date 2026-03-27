@@ -1363,7 +1363,8 @@ impl TypeChecker {
                             if let Some(field_info) =
                                 struct_info.get_field_info_by_name(&field_name)
                             {
-                                let field_type = field_info.type_info.clone();
+                                let field_type =
+                                    self.symbol_table.resolve_custom_type(field_info.type_info.clone());
                                 let (field_expr_kind, field_expr_loc) = {
                                     let arena = ctx.arena();
                                     (

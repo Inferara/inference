@@ -33,7 +33,7 @@
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use wasm_encoder::{Function, Instruction, MemArg};
 
 /// One WASM memory page in bytes.
@@ -96,11 +96,26 @@ pub(crate) enum CompoundFieldLayout {
         total_size: u32,
     },
     /// A field whose type is an array.
+    ///
+    /// All array-typed fields use pointer semantics during member access,
+    /// regardless of element type. An `Array(i32, 3)` field is `NestedArray`,
+    /// not `Scalar`, because it occupies contiguous memory that must be
+    /// addressed by offset rather than loaded as a single WASM value.
     NestedArray {
         elem_kind: TypeInfoKind,
         elem_size: u32,
         length: u32,
     },
+}
+
+impl CompoundFieldLayout {
+    /// Returns `true` if this field layout represents a compound type (nested struct or array).
+    ///
+    /// Compound fields require pointer semantics during member access rather than
+    /// scalar load/store instructions.
+    pub(crate) fn is_compound(&self) -> bool {
+        !matches!(self, Self::Scalar)
+    }
 }
 
 /// Describes a single struct field's location within a struct instance.
@@ -149,6 +164,15 @@ pub(crate) fn compute_struct_field_layout(
     struct_info: &StructInfo,
     ctx: &TypedContext,
 ) -> (u32, Vec<StructFieldSlot>) {
+    let mut visited = FxHashSet::default();
+    compute_struct_field_layout_with_visited(struct_info, ctx, &mut visited)
+}
+
+fn compute_struct_field_layout_with_visited(
+    struct_info: &StructInfo,
+    ctx: &TypedContext,
+    visited: &mut FxHashSet<String>,
+) -> (u32, Vec<StructFieldSlot>) {
     debug_assert!(
         !struct_info.fields.is_empty(),
         "compute_struct_field_layout called with empty struct"
@@ -158,7 +182,7 @@ pub(crate) fn compute_struct_field_layout(
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
 
     for field in &struct_info.fields {
-        let size = type_byte_size(&field.type_info.kind, ctx);
+        let size = type_byte_size_with_visited(&field.type_info.kind, ctx, visited);
         let align = natural_alignment_for_type(&field.type_info.kind, ctx);
         let aligned_offset = align_to(current_offset, align);
 
@@ -166,7 +190,7 @@ pub(crate) fn compute_struct_field_layout(
             max_align = align;
         }
 
-        let layout = compute_field_layout(&field.type_info.kind, ctx);
+        let layout = compute_field_layout_with_visited(&field.type_info.kind, ctx, visited);
 
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
@@ -185,11 +209,16 @@ pub(crate) fn compute_struct_field_layout(
 }
 
 /// Determines the [`CompoundFieldLayout`] for a given field type.
-fn compute_field_layout(kind: &TypeInfoKind, ctx: &TypedContext) -> CompoundFieldLayout {
+fn compute_field_layout_with_visited(
+    kind: &TypeInfoKind,
+    ctx: &TypedContext,
+    visited: &mut FxHashSet<String>,
+) -> CompoundFieldLayout {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
             if let Some(inner_struct) = ctx.lookup_struct(name) {
-                let (total_size, fields) = compute_struct_field_layout(&inner_struct, ctx);
+                let (total_size, fields) =
+                    compute_struct_field_layout_with_visited(&inner_struct, ctx, visited);
                 CompoundFieldLayout::NestedStruct { fields, total_size }
             } else {
                 CompoundFieldLayout::Scalar
@@ -197,7 +226,7 @@ fn compute_field_layout(kind: &TypeInfoKind, ctx: &TypedContext) -> CompoundFiel
         }
         TypeInfoKind::Array(elem_type, length) => CompoundFieldLayout::NestedArray {
             elem_kind: elem_type.kind.clone(),
-            elem_size: type_byte_size(&elem_type.kind, ctx),
+            elem_size: type_byte_size_with_visited(&elem_type.kind, ctx, visited),
             length: *length,
         },
         _ => CompoundFieldLayout::Scalar,
@@ -245,26 +274,18 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
 /// element type and multiplies by length.
 ///
 /// The recursion depth is bounded to 2 levels by analysis rule A026
-/// (one level of nesting). A debug-only visited set guards against cycles
-/// as defense-in-depth (the type checker catches cycles before codegen runs).
+/// (one level of nesting). A visited set guards against cycles as
+/// defense-in-depth (the type checker catches cycles before codegen runs).
 #[must_use = "returns type size in bytes"]
 pub(crate) fn type_byte_size(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
-    #[cfg(debug_assertions)]
-    {
-        let mut visited = std::collections::HashSet::new();
-        type_byte_size_checked(kind, ctx, &mut visited)
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        type_byte_size_inner(kind, ctx)
-    }
+    let mut visited = FxHashSet::default();
+    type_byte_size_with_visited(kind, ctx, &mut visited)
 }
 
-#[cfg(debug_assertions)]
-fn type_byte_size_checked(
+fn type_byte_size_with_visited(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
-    visited: &mut std::collections::HashSet<String>,
+    visited: &mut FxHashSet<String>,
 ) -> u32 {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
@@ -273,38 +294,18 @@ fn type_byte_size_checked(
                 "cycle detected in type_byte_size for struct `{name}`"
             );
             if let Some(struct_info) = ctx.lookup_struct(name) {
-                let (total_size, _) = compute_struct_field_layout(&struct_info, ctx);
+                let (total_size, _) =
+                    compute_struct_field_layout_with_visited(&struct_info, ctx, visited);
                 total_size
             } else {
-                element_size(kind)
+                panic!("struct `{name}` not found in type context; the type checker should have caught this");
             }
         }
         TypeInfoKind::Array(elem_type, length) => {
-            let elem_sz = type_byte_size_checked(&elem_type.kind, ctx, visited);
-            elem_sz.checked_mul(*length).expect(
-                "Array byte count overflow: element size * length exceeds u32::MAX",
-            )
-        }
-        _ => element_size(kind),
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn type_byte_size_inner(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
-    match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            if let Some(struct_info) = ctx.lookup_struct(name) {
-                let (total_size, _) = compute_struct_field_layout(&struct_info, ctx);
-                total_size
-            } else {
-                element_size(kind)
-            }
-        }
-        TypeInfoKind::Array(elem_type, length) => {
-            let elem_sz = type_byte_size_inner(&elem_type.kind, ctx);
-            elem_sz.checked_mul(*length).expect(
-                "Array byte count overflow: element size * length exceeds u32::MAX",
-            )
+            let elem_sz = type_byte_size_with_visited(&elem_type.kind, ctx, visited);
+            elem_sz
+                .checked_mul(*length)
+                .expect("Array byte count overflow: element size * length exceeds u32::MAX")
         }
         _ => element_size(kind),
     }
@@ -314,23 +315,39 @@ fn type_byte_size_inner(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
 ///
 /// For primitive types, alignment equals size. For structs, alignment is the
 /// maximum alignment of any field. For arrays, alignment is the element alignment.
+///
+/// A visited set guards against cycles as defense-in-depth, matching the
+/// pattern used in [`type_byte_size`] and [`compute_struct_field_layout`].
 #[must_use = "returns alignment in bytes"]
 pub(crate) fn natural_alignment_for_type(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
+    let mut visited = FxHashSet::default();
+    natural_alignment_with_visited(kind, ctx, &mut visited)
+}
+
+fn natural_alignment_with_visited(
+    kind: &TypeInfoKind,
+    ctx: &TypedContext,
+    visited: &mut FxHashSet<String>,
+) -> u32 {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            assert!(
+                visited.insert(name.clone()),
+                "cycle detected in natural_alignment_for_type for struct `{name}`"
+            );
             if let Some(struct_info) = ctx.lookup_struct(name) {
                 struct_info
                     .fields
                     .iter()
-                    .map(|f| natural_alignment_for_type(&f.type_info.kind, ctx))
+                    .map(|f| natural_alignment_with_visited(&f.type_info.kind, ctx, visited))
                     .max()
                     .unwrap_or(1)
             } else {
-                element_size(kind)
+                panic!("struct `{name}` not found in type context; the type checker should have caught this");
             }
         }
         TypeInfoKind::Array(elem_type, _) => {
-            natural_alignment_for_type(&elem_type.kind, ctx)
+            natural_alignment_with_visited(&elem_type.kind, ctx, visited)
         }
         _ => element_size(kind),
     }

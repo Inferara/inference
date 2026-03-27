@@ -136,6 +136,7 @@ pub(crate) fn walk_expr(
 }
 
 /// Returns true if the type is a compound type (struct, custom, or array).
+#[must_use]
 pub(crate) fn is_compound_type(kind: &TypeInfoKind) -> bool {
     matches!(
         kind,
@@ -149,6 +150,7 @@ pub(crate) fn is_compound_type(kind: &TypeInfoKind) -> bool {
 ///   of its fields are themselves compound types.
 /// - **Array**: recurses into the element type.
 /// - **Scalars**: returns false.
+#[must_use]
 pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {

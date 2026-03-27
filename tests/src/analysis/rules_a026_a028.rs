@@ -135,6 +135,25 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a026_depth_2_array_of_nested_struct_in_struct_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            struct Inner { p: Point; }
+            struct Outer { items: [Inner; 3]; }
+            fn main() -> i32 { return 0; }
+        "#;
+        let errors = expect_errors(source);
+        let a026_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisDiagnostic::NestedCompoundDepthExceeded { .. }))
+            .collect();
+        assert!(
+            !a026_errors.is_empty(),
+            "array of nested struct in struct should be rejected (depth-2 via [Inner; 3] where Inner has compound field), got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a026_error_message_includes_struct_and_field_names() {
         let source = r#"
             struct Inner { x: i32; y: i32; }
