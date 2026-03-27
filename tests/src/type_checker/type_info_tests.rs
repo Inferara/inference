@@ -623,15 +623,15 @@ mod number_type_methods {
     }
 
     #[test]
-    fn test_from_str_case_insensitive() {
-        assert_eq!("I8".parse::<NumberType>(), Ok(NumberType::I8));
-        assert_eq!("I16".parse::<NumberType>(), Ok(NumberType::I16));
-        assert_eq!("I32".parse::<NumberType>(), Ok(NumberType::I32));
-        assert_eq!("I64".parse::<NumberType>(), Ok(NumberType::I64));
-        assert_eq!("U8".parse::<NumberType>(), Ok(NumberType::U8));
-        assert_eq!("U16".parse::<NumberType>(), Ok(NumberType::U16));
-        assert_eq!("U32".parse::<NumberType>(), Ok(NumberType::U32));
-        assert_eq!("U64".parse::<NumberType>(), Ok(NumberType::U64));
+    fn test_from_str_case_sensitive() {
+        assert!("I8".parse::<NumberType>().is_err());
+        assert!("I16".parse::<NumberType>().is_err());
+        assert!("I32".parse::<NumberType>().is_err());
+        assert!("I64".parse::<NumberType>().is_err());
+        assert!("U8".parse::<NumberType>().is_err());
+        assert!("U16".parse::<NumberType>().is_err());
+        assert!("U32".parse::<NumberType>().is_err());
+        assert!("U64".parse::<NumberType>().is_err());
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod type_info_kind_builtin_methods {
 
     #[test]
     fn test_non_numeric_builtins_contains_all() {
-        assert_eq!(TypeInfoKind::NON_NUMERIC_BUILTINS.len(), 3);
+        assert_eq!(TypeInfoKind::NON_NUMERIC_BUILTINS.len(), 4);
 
         let names: Vec<&str> = TypeInfoKind::NON_NUMERIC_BUILTINS
             .iter()
@@ -657,6 +657,7 @@ mod type_info_kind_builtin_methods {
         assert!(names.contains(&"unit"));
         assert!(names.contains(&"bool"));
         assert!(names.contains(&"string"));
+        assert!(names.contains(&"String"));
     }
 
     #[test]
@@ -727,26 +728,19 @@ mod type_info_kind_builtin_methods {
     }
 
     #[test]
-    fn test_from_builtin_str_case_insensitive() {
+    fn test_from_builtin_str_case_sensitive() {
+        assert_eq!(TypeInfoKind::from_builtin_str("BOOL"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("Bool"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("STRING"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("Unit"), None);
+        assert_eq!(TypeInfoKind::from_builtin_str("I32"), None);
+    }
+
+    #[test]
+    fn test_from_builtin_str_string_capital_s() {
         assert_eq!(
-            TypeInfoKind::from_builtin_str("BOOL"),
-            Some(TypeInfoKind::Bool)
-        );
-        assert_eq!(
-            TypeInfoKind::from_builtin_str("Bool"),
-            Some(TypeInfoKind::Bool)
-        );
-        assert_eq!(
-            TypeInfoKind::from_builtin_str("STRING"),
+            TypeInfoKind::from_builtin_str("String"),
             Some(TypeInfoKind::String)
-        );
-        assert_eq!(
-            TypeInfoKind::from_builtin_str("Unit"),
-            Some(TypeInfoKind::Unit)
-        );
-        assert_eq!(
-            TypeInfoKind::from_builtin_str("I32"),
-            Some(TypeInfoKind::Number(NumberType::I32))
         );
     }
 

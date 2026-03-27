@@ -10,8 +10,10 @@
 #[cfg(test)]
 mod codegen_validation_tests {
     use crate::utils::{
-        codegen_output, codegen_output_with_mode, codegen_with_full_config,
-        codegen_with_target_mode,
+        codegen_output, codegen_output_no_analysis, codegen_output_with_mode,
+        codegen_output_with_mode_no_analysis, codegen_with_full_config,
+        codegen_with_target_mode, codegen_with_target_mode_no_analysis,
+        wasm_codegen_no_analysis,
     };
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
@@ -78,7 +80,7 @@ mod codegen_validation_tests {
     fn codegen_rejects_soroban_with_nondet() {
         cov_mark::check!(wasm_codegen_soroban_rejects_nondet_function);
         let source = "pub fn with_nondet() -> i32 { return @; }";
-        let result = codegen_with_target_mode(source, Target::Soroban, CompilationMode::Compile);
+        let result = codegen_with_target_mode_no_analysis(source, Target::Soroban, CompilationMode::Compile);
         assert!(
             result.is_err(),
             "Soroban target with non-det should be rejected"
@@ -100,7 +102,7 @@ mod codegen_validation_tests {
             pub fn regular() -> i32 { return 42; }
         "#;
         let output =
-            codegen_with_target_mode(source, Target::Wasm32, CompilationMode::Compile).unwrap();
+            codegen_with_target_mode_no_analysis(source, Target::Wasm32, CompilationMode::Compile).unwrap();
         let wasm = output.wasm();
 
         assert!(
@@ -126,7 +128,7 @@ mod codegen_validation_tests {
             pub fn with_uzumaki() -> i32 { return @; }
             pub fn with_forall() { forall { const a: i32 = 42; } }
         "#;
-        let output = codegen_output_with_mode(source, CompilationMode::Proof);
+        let output = codegen_output_with_mode_no_analysis(source, CompilationMode::Proof);
         let wasm = output.wasm();
 
         assert!(
@@ -221,7 +223,7 @@ mod codegen_validation_tests {
     #[test]
     fn wasm_contains_i64_uzumaki_opcode() {
         let source = "pub fn get_i64_uzumaki() -> i64 { return @; }";
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         assert!(
             wasm_contains_bytes(wasm, &[0xfc, 0x32]),
@@ -274,7 +276,7 @@ mod codegen_validation_tests {
     #[test]
     fn i64_return_produces_valid_wasm() {
         let source = "pub fn get_i64() -> i64 { return @; }";
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("i64 return WASM is invalid: {e}"));
@@ -361,7 +363,7 @@ mod codegen_validation_tests {
     #[test]
     fn i64_uzumaki_in_return_emits_i64_uzumaki_opcode() {
         let source = "pub fn get_i64() -> i64 { return @; }";
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("i64 uzumaki return WASM is invalid: {e}"));
@@ -463,7 +465,7 @@ mod codegen_validation_tests {
     fn variable_definition_uzumaki_i32_emits_uzumaki_opcode() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
         let source = r#"pub fn let_uzumaki_i32_test() -> i32 { let a: i32 = @; return a; }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Variable definition uzumaki i32 WASM is invalid: {e}"));
@@ -477,7 +479,7 @@ mod codegen_validation_tests {
     fn variable_definition_uzumaki_i64_emits_uzumaki_opcode() {
         cov_mark::check!(wasm_codegen_emit_variable_definition);
         let source = r#"pub fn let_uzumaki_i64_test() -> i64 { let b: i64 = @; return b; }"#;
-        let output = codegen_output(source);
+        let output = codegen_output_no_analysis(source);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm)
             .unwrap_or_else(|e| panic!("Variable definition uzumaki i64 WASM is invalid: {e}"));
@@ -810,9 +812,8 @@ mod codegen_validation_tests {
             fn identity(x: i32) -> i32 { return x; }
             pub fn spec() -> i32 { return identity(@); }
         "#;
-        let output = codegen_output(source);
-        let wasm = output.wasm();
-        inf_wasmparser::validate(wasm)
+        let wasm = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("Uzumaki as function argument WASM is invalid: {e}"));
         let has_uzumaki_opcode = wasm.windows(2).any(|w| w == [0xfc, 0x31]);
         assert!(
@@ -827,9 +828,8 @@ mod codegen_validation_tests {
             fn identity_i64(x: i64) -> i64 { return x; }
             pub fn spec() -> i64 { return identity_i64(@); }
         "#;
-        let output = codegen_output(source);
-        let wasm = output.wasm();
-        inf_wasmparser::validate(wasm)
+        let wasm = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("i64 uzumaki as function argument WASM is invalid: {e}"));
         let has_uzumaki_opcode = wasm.windows(2).any(|w| w == [0xfc, 0x32]);
         assert!(

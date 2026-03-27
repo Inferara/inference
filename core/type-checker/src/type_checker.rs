@@ -15,7 +15,7 @@
 use anyhow::bail;
 use inference_ast::arena::AstArena;
 use inference_ast::extern_prelude::ExternPrelude;
-use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
+use inference_ast::ids::{DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgKind, Def, Directive, Expr, Location, OperatorKind, Stmt, TypeNode, UnaryOperatorKind,
     Visibility,
@@ -35,7 +35,10 @@ pub(crate) struct TypeChecker {
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
     reported_error_keys: FxHashSet<String>,
-    compound_literal_allowed: bool,
+    /// Type parameter names for the function/method body currently being inferred.
+    /// Set before walking the body, cleared after. Used by `infer_statement` to
+    /// pass type param context to `validate_type` and `TypeInfo::from_type_id_with_type_params`.
+    current_type_params: Vec<String>,
 }
 
 impl TypeChecker {
@@ -95,25 +98,6 @@ impl TypeChecker {
                     let method_ids: Vec<DefId> = methods.clone();
                     for method_id in method_ids {
                         self.infer_method_variables(method_id, struct_type.clone(), ctx);
-                        let arena = ctx.arena();
-                        let method_data = &arena[method_id];
-                        if let Def::Function {
-                            name: method_name,
-                            args,
-                            body,
-                            ..
-                        } = &method_data.kind
-                        {
-                            let has_self =
-                                args.iter().any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
-                            if has_self && !Self::body_references_self(arena, *body) {
-                                self.errors.push(TypeCheckError::MethodNeverAccessesSelf {
-                                    struct_name: struct_name.clone(),
-                                    method_name: arena[*method_name].name.clone(),
-                                    location: method_data.location,
-                                });
-                            }
-                        }
                     }
                 }
                 _ => {}
@@ -162,12 +146,6 @@ impl TypeChecker {
                     methods,
                 } => {
                     let struct_name = arena[*name].name.clone();
-                    if fields.is_empty() && methods.is_empty() {
-                        self.errors.push(TypeCheckError::EmptyStruct {
-                            name: struct_name.clone(),
-                            location,
-                        });
-                    }
                     let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
                         .iter()
                         .map(|f| {
@@ -178,6 +156,21 @@ impl TypeChecker {
                             )
                         })
                         .collect();
+                    {
+                        let mut seen_fields = FxHashSet::default();
+                        for field in fields {
+                            let field_name = arena[field.name].name.clone();
+                            if !seen_fields.insert(field_name.clone()) {
+                                self.errors.push(
+                                    TypeCheckError::DuplicateStructFieldDefinition {
+                                        struct_name: struct_name.clone(),
+                                        field_name,
+                                        location: arena[field.name].location,
+                                    },
+                                );
+                            }
+                        }
+                    }
                     let method_ids: Vec<DefId> = methods.clone();
                     self.symbol_table
                         .register_struct(&struct_name, &field_infos, vec![], vis.clone())
@@ -270,6 +263,19 @@ impl TypeChecker {
                     let enum_name = arena[*name].name.clone();
                     let variant_names: Vec<&str> =
                         variants.iter().map(|v| arena[*v].name.as_str()).collect();
+                    {
+                        let mut seen_variants = FxHashSet::default();
+                        for variant_id in variants {
+                            let variant_name = arena[*variant_id].name.as_str();
+                            if !seen_variants.insert(variant_name) {
+                                self.errors.push(TypeCheckError::DuplicateEnumVariant {
+                                    enum_name: enum_name.clone(),
+                                    variant_name: variant_name.to_string(),
+                                    location: arena[*variant_id].location,
+                                });
+                            }
+                        }
+                    }
                     self.symbol_table
                         .register_enum(&enum_name, &variant_names, vis.clone())
                         .unwrap_or_else(|_| {
@@ -299,6 +305,91 @@ impl TypeChecker {
                 | Def::ExternFunction { .. }
                 | Def::Module { .. } => {}
             }
+        }
+
+        self.check_recursive_struct_definitions(ctx);
+    }
+
+    /// Detects recursive struct definitions (direct or transitive cycles).
+    ///
+    /// A struct that contains itself (or contains another struct that eventually
+    /// references it) would have infinite size and cannot be laid out in memory.
+    /// This traverses into nested containers (specs and modules) so that structs
+    /// defined inside them are also checked.
+    fn check_recursive_struct_definitions(&mut self, ctx: &TypedContext) {
+        let arena = ctx.arena();
+        let all_def_ids: Vec<DefId> = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter().copied())
+            .collect();
+        self.check_recursive_structs_in_defs(arena, &all_def_ids);
+    }
+
+    fn check_recursive_structs_in_defs(&mut self, arena: &AstArena, def_ids: &[DefId]) {
+        for &def_id in def_ids {
+            match &arena[def_id].kind {
+                Def::Struct { name, fields, .. } => {
+                    let struct_name = arena[*name].name.clone();
+                    for field in fields {
+                        let field_name = arena[field.name].name.clone();
+                        let field_type = TypeInfo::from_type_id(arena, field.ty);
+                        let resolved = self.symbol_table.resolve_custom_type(field_type);
+                        if self.struct_type_contains(
+                            &resolved.kind,
+                            &struct_name,
+                            &mut FxHashSet::default(),
+                        ) {
+                            self.errors.push(TypeCheckError::RecursiveStructDefinition {
+                                struct_name: struct_name.clone(),
+                                field_name,
+                                field_type: resolved.to_string(),
+                                location: arena[field.name].location,
+                            });
+                        }
+                    }
+                }
+                Def::Spec { defs, .. } => {
+                    self.check_recursive_structs_in_defs(arena, defs);
+                }
+                Def::Module {
+                    defs: Some(defs), ..
+                } => {
+                    self.check_recursive_structs_in_defs(arena, defs);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns true if `kind` is or transitively contains struct `target_name`.
+    fn struct_type_contains(
+        &self,
+        kind: &TypeInfoKind,
+        target_name: &str,
+        visited: &mut FxHashSet<String>,
+    ) -> bool {
+        match kind {
+            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                if name == target_name {
+                    return true;
+                }
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                if let Some(info) = self.symbol_table.lookup_struct(name) {
+                    info.fields.iter().any(|f| {
+                        self.struct_type_contains(&f.type_info.kind, target_name, visited)
+                    })
+                } else if let Some(resolved) = self.symbol_table.lookup_type(name) {
+                    self.struct_type_contains(&resolved.kind, target_name, visited)
+                } else {
+                    false
+                }
+            }
+            TypeInfoKind::Array(elem, _) => {
+                self.struct_type_contains(&elem.kind, target_name, visited)
+            }
+            _ => false,
         }
     }
 
@@ -337,7 +428,7 @@ impl TypeChecker {
                             location,
                         });
                     }
-                    ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type);
+                    self.check_const_initializer(value_id, &const_type, location, ctx);
                 }
                 Def::Function {
                     name,
@@ -470,6 +561,59 @@ impl TypeChecker {
                 | Def::TypeAlias { .. }
                 | Def::Module { .. } => {}
             }
+        }
+    }
+
+    /// Type-checks a constant initializer expression against the declared type.
+    ///
+    /// If the initializer is a number literal matching a numeric target type,
+    /// sets the expression's type info directly. Otherwise, infers the expression
+    /// type and reports a mismatch if it doesn't match. Only sets node type info
+    /// when types are compatible.
+    fn check_const_initializer(
+        &mut self,
+        value_id: ExprId,
+        const_type: &TypeInfo,
+        location: Location,
+        ctx: &mut TypedContext,
+    ) {
+        let value_kind = ctx.arena()[value_id].kind.clone();
+        let mut type_ok = false;
+        if let Expr::NumberLiteral { .. } = value_kind {
+            if const_type.kind.is_number() {
+                type_ok = true;
+            } else {
+                self.errors.push(TypeCheckError::TypeMismatch {
+                    expected: const_type.clone(),
+                    found: TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    context: TypeMismatchContext::VariableDefinition,
+                    location,
+                });
+            }
+        } else {
+            let init_type = self.infer_expression(value_id, ctx);
+            match init_type {
+                Some(init)
+                    if self.symbol_table.resolve_custom_type(init.clone()) != *const_type =>
+                {
+                    self.errors.push(TypeCheckError::TypeMismatch {
+                        expected: const_type.clone(),
+                        found: init,
+                        context: TypeMismatchContext::VariableDefinition,
+                        location,
+                    });
+                }
+                Some(_) => {
+                    type_ok = true;
+                }
+                None => {}
+            }
+        }
+        if type_ok {
+            ctx.set_node_typeinfo(NodeId::Expr(value_id), const_type.clone());
         }
     }
 
@@ -615,10 +759,12 @@ impl TypeChecker {
             .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
+        self.current_type_params = tp_names;
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
         for stmt_id in stmts {
             self.infer_statement(stmt_id, &return_type, ctx);
         }
+        self.current_type_params = Vec::new();
         self.symbol_table.pop_scope();
     }
 
@@ -692,10 +838,12 @@ impl TypeChecker {
             .map(|ti| self.symbol_table.resolve_custom_type(ti))
             .unwrap_or_default();
 
+        self.current_type_params = tp_names;
         let stmts: Vec<StmtId> = ctx.arena()[body_id].stmts.clone();
         for stmt_id in stmts {
             self.infer_statement(stmt_id, &return_type, ctx);
         }
+        self.current_type_params = Vec::new();
         self.symbol_table.pop_scope();
     }
 
@@ -708,22 +856,24 @@ impl TypeChecker {
         let kind = stmt_data.kind.clone();
         match kind {
             Stmt::Assign { left, right } => {
-                if let Some(name) = self.extract_root_variable_name(ctx.arena(), left)
-                    && let Some(false) = self.symbol_table.lookup_variable_is_mut(&name)
-                {
+                if let Some(name) = self.extract_root_variable_name(ctx.arena(), left) {
+                    if let Some(false) = self.symbol_table.lookup_variable_is_mut(&name) {
+                        self.errors
+                            .push(TypeCheckError::AssignToImmutable { name, location });
+                    }
+                } else {
                     self.errors
-                        .push(TypeCheckError::AssignToImmutable { name, location });
+                        .push(TypeCheckError::InvalidAssignmentTarget { location });
                 }
                 let target_type = self.infer_expression(left, ctx);
                 {
                     let right_kind = ctx.arena()[right].kind.clone();
-                    let right_loc = ctx.arena()[right].location;
                     if let Some(target) = &target_type
-                        && let Expr::NumberLiteral { value } = &right_kind
+                        && let Expr::NumberLiteral { .. } = &right_kind
                     {
                         if target.kind.is_number() {
                             ctx.set_node_typeinfo(NodeId::Expr(right), target.clone());
-                            self.validate_literal_range(value, &target.kind, right_loc);
+
                         } else {
                             self.errors.push(TypeCheckError::TypeMismatch {
                                 expected: target.clone(),
@@ -748,28 +898,8 @@ impl TypeChecker {
                         });
                     }
                 } else {
-                    let lhs_is_identifier =
-                        matches!(ctx.arena()[left].kind, Expr::Identifier(_));
-                    if lhs_is_identifier {
-                        self.compound_literal_allowed = true;
-                    }
                     let value_type = self.infer_expression(right, ctx);
-                    // Reject compound-returning calls in assignment RHS.
-                    // Covers regular functions, instance methods, and associated functions.
-                    if let Expr::FunctionCall { .. } = &ctx.arena()[right].kind
-                        && let Some(ref val) = value_type
-                        && matches!(
-                            val.kind,
-                            TypeInfoKind::Array(_, _)
-                                | TypeInfoKind::Struct(_)
-                                | TypeInfoKind::Custom(_)
-                        )
-                    {
-                        self.errors
-                            .push(TypeCheckError::CompoundReturnCallInAssignment {
-                                location: ctx.arena()[right].location,
-                            });
-                    }
+                    // Compound-return-in-assignment check moved to analysis rule A017.
                     if let (Some(target), Some(val)) = (target_type, value_type)
                         && target != val
                     {
@@ -791,27 +921,13 @@ impl TypeChecker {
                 self.symbol_table.pop_scope();
             }
             Stmt::Expr(expr_id) => {
-                let expr_type = self.infer_expression(expr_id, ctx);
-                if let Expr::FunctionCall { .. } = &ctx.arena()[expr_id].kind
-                    && let Some(ref ty) = expr_type
-                    && matches!(
-                        ty.kind,
-                        TypeInfoKind::Array(_, _)
-                            | TypeInfoKind::Struct(_)
-                            | TypeInfoKind::Custom(_)
-                    )
-                {
-                    self.errors
-                        .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
-                            location: ctx.arena()[expr_id].location,
-                        });
-                }
+                // Compound-return-in-expression-position check moved to analysis rule A016.
+                self.infer_expression(expr_id, ctx);
             }
             Stmt::Return { expr } => {
                 if let Expr::Uzumaki = &ctx.arena()[expr].kind {
                     ctx.set_node_typeinfo(NodeId::Expr(expr), return_type.clone());
                 } else {
-                    self.compound_literal_allowed = true;
                     let value_type = self.infer_expression(expr, ctx);
                     if *return_type != value_type.clone().unwrap_or_default() {
                         self.errors.push(TypeCheckError::TypeMismatch {
@@ -885,25 +1001,22 @@ impl TypeChecker {
             } => {
                 let arena = ctx.arena();
                 let var_name = arena[name].name.clone();
+                let tp = self.current_type_params.clone();
+                self.validate_type(arena, ty, &tp);
                 let target_type = self
                     .symbol_table
-                    .resolve_custom_type(TypeInfo::from_type_id(arena, ty));
+                    .resolve_custom_type(TypeInfo::from_type_id_with_type_params(arena, ty, &tp));
                 // Validate array size if applicable
                 if let TypeNode::Array { size, .. } = &arena[ty].kind {
                     self.validate_array_size(ctx.arena(), *size, ctx.arena()[ty].location);
                 }
                 if let Some(expr_id) = value {
-                    let (expr_kind, expr_loc) = {
-                        let arena = ctx.arena();
-                        (arena[expr_id].kind.clone(), arena[expr_id].location)
-                    };
-                    if let Expr::NumberLiteral {
-                        value: ref num_value,
-                    } = expr_kind
+                    let expr_kind = ctx.arena()[expr_id].kind.clone();
+                    if let Expr::NumberLiteral { .. } = expr_kind
                     {
                         if target_type.kind.is_number() {
                             ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                            self.validate_literal_range(num_value, &target_type.kind, expr_loc);
+
                         } else {
                             self.errors.push(TypeCheckError::TypeMismatch {
                                 expected: target_type.clone(),
@@ -917,39 +1030,36 @@ impl TypeChecker {
                         }
                     }
                     if let Expr::ArrayLiteral { elements } = &expr_kind
-                        && let TypeInfoKind::Array(ref elem_type, _) = target_type.kind
+                        && let TypeInfoKind::Array(ref elem_type, expected_size) = target_type.kind
                     {
+                        if elements.len() != expected_size as usize {
+                            self.errors.push(TypeCheckError::ArrayLiteralSizeMismatch {
+                                expected: expected_size,
+                                actual: elements.len(),
+                                location,
+                            });
+                        }
                         let elems: Vec<ExprId> = elements.clone();
                         for elem_id in elems {
-                            let (el_kind, el_loc) = {
-                                let arena = ctx.arena();
-                                (arena[elem_id].kind.clone(), arena[elem_id].location)
-                            };
-                            if let Expr::NumberLiteral {
-                                value: ref num_value,
-                            } = el_kind
-                            {
+                            let el_kind = ctx.arena()[elem_id].kind.clone();
+                            if let Expr::NumberLiteral { .. } = el_kind {
                                 ctx.set_node_typeinfo(NodeId::Expr(elem_id), (**elem_type).clone());
-                                self.validate_literal_range(num_value, &elem_type.kind, el_loc);
                             }
                         }
                     }
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
                         ctx.set_node_typeinfo(NodeId::Expr(expr_id), target_type.clone());
-                    } else {
-                        self.compound_literal_allowed = true;
-                        if let Some(init_type) = self.infer_expression(expr_id, ctx)
-                            && self.symbol_table.resolve_custom_type(init_type.clone())
-                                != target_type
-                        {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: target_type.clone(),
-                                found: init_type,
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
+                    } else if let Some(init_type) = self.infer_expression(expr_id, ctx)
+                        && self.symbol_table.resolve_custom_type(init_type.clone())
+                            != target_type
+                    {
+                        self.errors.push(TypeCheckError::TypeMismatch {
+                            expected: target_type.clone(),
+                            found: init_type,
+                            context: TypeMismatchContext::VariableDefinition,
+                            location,
+                        });
                     }
                 }
                 if self
@@ -1036,42 +1146,7 @@ impl TypeChecker {
                             location,
                         });
                     }
-                    let arena = ctx.arena();
-                    let value_kind = arena[value_id].kind.clone();
-                    let value_loc = arena[value_id].location;
-                    if let Expr::NumberLiteral { value: num_value } = &value_kind {
-                        if constant_type.kind.is_number() {
-                            self.validate_literal_range(
-                                num_value,
-                                &constant_type.kind,
-                                value_loc,
-                            );
-                        } else {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: constant_type.clone(),
-                                found: TypeInfo {
-                                    kind: TypeInfoKind::Number(NumberType::I32),
-                                    type_params: vec![],
-                                },
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    } else {
-                        let init_type = self.infer_expression(value_id, ctx);
-                        if let Some(init) = init_type
-                            && self.symbol_table.resolve_custom_type(init.clone())
-                                != constant_type
-                        {
-                            self.errors.push(TypeCheckError::TypeMismatch {
-                                expected: constant_type.clone(),
-                                found: init,
-                                context: TypeMismatchContext::VariableDefinition,
-                                location,
-                            });
-                        }
-                    }
-                    ctx.set_node_typeinfo(NodeId::Expr(value_id), constant_type.clone());
+                    self.check_const_initializer(value_id, &constant_type, location, ctx);
                     ctx.set_node_typeinfo(NodeId::Def(cdi), constant_type.clone());
                     ctx.set_node_typeinfo(NodeId::Stmt(stmt_id), constant_type);
                 }
@@ -1081,8 +1156,6 @@ impl TypeChecker {
 
     #[allow(clippy::too_many_lines)]
     fn infer_expression(&mut self, expr_id: ExprId, ctx: &mut TypedContext) -> Option<TypeInfo> {
-        let compound_literal_allowed =
-            std::mem::replace(&mut self.compound_literal_allowed, false);
         let arena = ctx.arena();
         let expr_data = &arena[expr_id];
         let location = expr_data.location;
@@ -1092,34 +1165,14 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
                 } else if let Some(array_type) = self.infer_expression(array, ctx) {
-                    // Check for compound-returning function call in array index position
-                    if let Expr::FunctionCall { .. } = &ctx.arena()[array].kind
-                        && matches!(
-                            array_type.kind,
-                            TypeInfoKind::Array(_, _)
-                                | TypeInfoKind::Struct(_)
-                                | TypeInfoKind::Custom(_)
-                        )
+                    // Compound-return and 64-bit index checks moved to analysis (A016, A019).
+                    if let Some(index_type) = self.infer_expression(index, ctx)
+                        && !index_type.is_number()
                     {
-                        self.errors
-                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition { location });
-                    }
-                    if let Some(index_type) = self.infer_expression(index, ctx) {
-                        if !index_type.is_number() {
-                            self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
-                                found: index_type,
-                                location,
-                            });
-                        } else if matches!(
-                            index_type.kind,
-                            TypeInfoKind::Number(NumberType::I64)
-                                | TypeInfoKind::Number(NumberType::U64)
-                        ) {
-                            self.errors.push(TypeCheckError::ArrayIndex64Bit {
-                                found: index_type,
-                                location,
-                            });
-                        }
+                        self.errors.push(TypeCheckError::ArrayIndexNotNumeric {
+                            found: index_type,
+                            location,
+                        });
                     }
                     match &array_type.kind {
                         TypeInfoKind::Array(element_type, _) => {
@@ -1142,21 +1195,7 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     Some(type_info)
                 } else if let Some(object_type) = self.infer_expression(expr, ctx) {
-                    // Check for compound-returning function call in member access position
-                    if let Expr::FunctionCall { .. } = &ctx.arena()[expr].kind
-                        && matches!(
-                            object_type.kind,
-                            TypeInfoKind::Array(_, _)
-                                | TypeInfoKind::Struct(_)
-                                | TypeInfoKind::Custom(_)
-                        )
-                    {
-                        self.errors
-                            .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
-                                location,
-                            });
-                        return None;
-                    }
+                    // Compound-return-in-expression-position check moved to analysis rule A016.
                     let struct_name = match &object_type.kind {
                         TypeInfoKind::Struct(name) => Some(name.clone()),
                         TypeInfoKind::Custom(name) => {
@@ -1301,13 +1340,7 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                if !compound_literal_allowed {
-                    self.errors.push(TypeCheckError::CompoundLiteralInUnsupportedPosition {
-                        kind: "struct",
-                        location,
-                    });
-                    return None;
-                }
+                // Compound-literal-position check moved to analysis rule A015.
                 let struct_name = ctx.arena()[name].name.clone();
                 let struct_type = self.symbol_table.lookup_type(&struct_name);
                 if let Some(struct_type) = struct_type {
@@ -1338,19 +1371,12 @@ impl TypeChecker {
                                         arena[*field_value_expr].location,
                                     )
                                 };
-                                if let Expr::NumberLiteral {
-                                    value: ref num_value,
-                                } = field_expr_kind
+                                if let Expr::NumberLiteral { .. } = field_expr_kind
                                 {
                                     if field_type.kind.is_number() {
                                         ctx.set_node_typeinfo(
                                             NodeId::Expr(*field_value_expr),
                                             field_type.clone(),
-                                        );
-                                        self.validate_literal_range(
-                                            num_value,
-                                            &field_type.kind,
-                                            field_expr_loc,
                                         );
                                     } else {
                                         self.errors.push(TypeCheckError::TypeMismatch {
@@ -1364,7 +1390,7 @@ impl TypeChecker {
                                         });
                                     }
                                 } else {
-                                    self.compound_literal_allowed = true;
+            
                                     let init_type =
                                         self.infer_expression(*field_value_expr, ctx);
                                     if let Some(init) = init_type
@@ -1468,6 +1494,18 @@ impl TypeChecker {
                 }
                 let left_type = self.infer_expression(left, ctx);
                 let right_type = self.infer_expression(right, ctx);
+                // NOTE: Only detects division by literal zero (e.g., `x / 0`).
+                // Constant expressions and const-declared zero values are not detected.
+                if matches!(op, OperatorKind::Div | OperatorKind::Mod) {
+                    let right_expr = &ctx.arena()[right].kind;
+                    if let Expr::NumberLiteral { value } = right_expr
+                        && value.parse::<i128>().ok() == Some(0)
+                    {
+                        self.errors.push(TypeCheckError::DivisionByZero {
+                            location: ctx.arena()[right].location,
+                        });
+                    }
+                }
                 if let (Some(left_type), Some(right_type)) = (left_type, right_type) {
                     if left_type != right_type {
                         self.errors.push(TypeCheckError::BinaryOperandTypeMismatch {
@@ -1550,41 +1588,31 @@ impl TypeChecker {
                 if let Some(type_info) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
                     return Some(type_info);
                 }
-                if !compound_literal_allowed {
-                    self.errors.push(
-                        TypeCheckError::CompoundLiteralInUnsupportedPosition {
-                            kind: "array",
-                            location,
-                        },
-                    );
-                    return None;
-                }
-                if !elements.is_empty() {
-                    self.compound_literal_allowed = true;
-                    if let Some(element_type_info) = self.infer_expression(elements[0], ctx) {
-                        for &element_id in &elements[1..] {
-                            self.compound_literal_allowed = true;
-                            let element_type = self.infer_expression(element_id, ctx);
-                            if let Some(element_type) = element_type
-                                && element_type != element_type_info
-                            {
-                                self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
-                                    expected: element_type_info.clone(),
-                                    found: element_type,
-                                    location,
-                                });
-                            }
+                // Compound-literal-position check moved to analysis rule A015.
+                if !elements.is_empty()
+                    && let Some(element_type_info) = self.infer_expression(elements[0], ctx)
+                {
+                    for &element_id in &elements[1..] {
+                        let element_type = self.infer_expression(element_id, ctx);
+                        if let Some(element_type) = element_type
+                            && element_type != element_type_info
+                        {
+                            self.errors.push(TypeCheckError::ArrayElementTypeMismatch {
+                                expected: element_type_info.clone(),
+                                found: element_type,
+                                location,
+                            });
                         }
-                        let array_type = TypeInfo {
-                            kind: TypeInfoKind::Array(
-                                Box::new(element_type_info),
-                                elements.len() as u32,
-                            ),
-                            type_params: vec![],
-                        };
-                        ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
-                        return Some(array_type);
                     }
+                    let array_type = TypeInfo {
+                        kind: TypeInfoKind::Array(
+                            Box::new(element_type_info),
+                            elements.len() as u32,
+                        ),
+                        type_params: vec![],
+                    };
+                    ctx.set_node_typeinfo(NodeId::Expr(expr_id), array_type.clone());
+                    return Some(array_type);
                 }
                 None
             }
@@ -1718,9 +1746,9 @@ impl TypeChecker {
                     let sig_param_types = signature.param_types.clone();
                     let sig_return_type = signature.return_type.clone();
                     for (i, arg) in call_args.iter().enumerate() {
-                        self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
+                        self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
                         let arg_type = self.infer_expression(arg.1, ctx);
-                        self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
+
                         if let Some(arg_type) = arg_type
                             && i < sig_param_types.len()
                             && arg_type != sig_param_types[i]
@@ -1766,23 +1794,7 @@ impl TypeChecker {
 
             let receiver_type = self.infer_expression(receiver_expr, ctx);
 
-            // Prohibit method call chains on compound-returning calls.
-            if let Expr::FunctionCall { .. } = &ctx.arena()[receiver_expr].kind
-                && let Some(ref recv_type) = receiver_type
-                && matches!(
-                    recv_type.kind,
-                    TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
-                )
-            {
-                self.errors
-                    .push(TypeCheckError::MethodCallChainOnCompoundReturn {
-                        location: ctx.arena()[call_expr_id].location,
-                    });
-                for arg in call_args {
-                    self.infer_expression(arg.1, ctx);
-                }
-                return None;
-            }
+            // Method-call-chain-on-compound-return check moved to analysis rule A018.
 
             if let Some(receiver_type) = receiver_type {
                 let type_name = match &receiver_type.kind {
@@ -1838,9 +1850,9 @@ impl TypeChecker {
                         let sig_param_types = signature.param_types.clone();
                         let sig_return_type = signature.return_type.clone();
                         for (i, arg) in call_args.iter().enumerate() {
-                            self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
+                            self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
                             let arg_type = self.infer_expression(arg.1, ctx);
-                            self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
+    
                             if let Some(arg_type) = arg_type
                                 && i < sig_param_types.len()
                                 && arg_type != sig_param_types[i]
@@ -1996,9 +2008,8 @@ impl TypeChecker {
 
         // Infer argument types and validate against parameter types
         for (i, arg) in call_args.iter().enumerate() {
-            self.check_arg_array_restrictions(arg.1, sig_param_types.get(i), ctx);
+            self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
             let arg_type = self.infer_expression(arg.1, ctx);
-            self.check_compound_return_in_arg(arg.1, &arg_type, ctx);
             if let Some(arg_type) = arg_type
                 && i < sig_param_types.len()
             {
@@ -2023,64 +2034,25 @@ impl TypeChecker {
         Some(return_type)
     }
 
-    /// Check array-related restrictions on function arguments.
+    /// Propagate uzumaki type from parameter context.
     ///
-    /// Also handles uzumaki type propagation: if the argument is an uzumaki (`@`),
-    /// sets the parameter type on the uzumaki node so that `infer_expression` can
-    /// return the correct type. Rejects uzumaki when the parameter type is an array.
-    fn check_arg_array_restrictions(
+    /// If the argument is an uzumaki (`@`), sets the parameter type on the
+    /// uzumaki node so that `infer_expression` can return the correct type.
+    /// Codegen restriction checks (A012-A014) are handled by the analysis pass.
+    fn propagate_arg_uzumaki_type(
         &mut self,
         arg_expr_id: ExprId,
         param_type: Option<&TypeInfo>,
         ctx: &mut TypedContext,
     ) {
-        let arena = ctx.arena();
-        if let Expr::ArrayLiteral { .. } = &arena[arg_expr_id].kind {
-            self.errors.push(TypeCheckError::ArrayLiteralAsArgument {
-                location: arena[arg_expr_id].location,
-            });
-        }
-        if let Expr::StructLiteral { .. } = &arena[arg_expr_id].kind {
-            self.errors.push(TypeCheckError::StructLiteralAsArgument {
-                location: arena[arg_expr_id].location,
-            });
-        }
-        if let Expr::Uzumaki = &arena[arg_expr_id].kind
+        if let Expr::Uzumaki = &ctx.arena()[arg_expr_id].kind
             && let Some(pt) = param_type
         {
-            if matches!(pt.kind, TypeInfoKind::Array(_, _)) {
-                self.errors.push(TypeCheckError::ArrayUzumakiAsArgument {
-                    location: arena[arg_expr_id].location,
-                });
-            }
             ctx.set_node_typeinfo(NodeId::Expr(arg_expr_id), pt.clone());
         }
     }
 
-    /// Reject compound-returning function calls used as arguments.
-    ///
-    /// Called after `infer_expression` so the argument's inferred type is available.
-    /// Uses the inferred type rather than resolving the callee, which handles all
-    /// callee forms uniformly: plain functions, instance methods, and associated functions.
-    fn check_compound_return_in_arg(
-        &mut self,
-        arg_expr_id: ExprId,
-        arg_type: &Option<TypeInfo>,
-        ctx: &TypedContext,
-    ) {
-        if let Expr::FunctionCall { .. } = &ctx.arena()[arg_expr_id].kind
-            && let Some(ty) = arg_type
-            && matches!(
-                ty.kind,
-                TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
-            )
-        {
-            self.errors
-                .push(TypeCheckError::CompoundReturnCallInExpressionPosition {
-                    location: ctx.arena()[arg_expr_id].location,
-                });
-        }
-    }
+    // Compound-return-in-arg check moved to analysis rule A016.
 
     /// Process a module definition.
     ///
@@ -2192,16 +2164,19 @@ impl TypeChecker {
                     Def::Constant {
                         name: const_name,
                         ty,
+                        value,
                         ..
                     } => {
                         let c_name = arena[*const_name].name.clone();
                         let const_type = self
                             .symbol_table
                             .resolve_custom_type(TypeInfo::from_type_id(arena, *ty));
-                        if let Err(err) = self
-                            .symbol_table
-                            .push_variable_to_scope(&c_name, const_type, false)
-                        {
+                        let value_id = *value;
+                        if let Err(err) = self.symbol_table.push_variable_to_scope(
+                            &c_name,
+                            const_type.clone(),
+                            false,
+                        ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Variable,
                                 name: c_name,
@@ -2209,6 +2184,12 @@ impl TypeChecker {
                                 location: inner_location,
                             });
                         }
+                        self.check_const_initializer(
+                            value_id,
+                            &const_type,
+                            inner_location,
+                            ctx,
+                        );
                     }
                     Def::ExternFunction {
                         name: ef_name,
@@ -2591,43 +2572,7 @@ impl TypeChecker {
         }
     }
 
-    /// Validates that a numeric literal value fits within the target type's range.
-    ///
-    /// Pushes a `LiteralOutOfRange` error if the value exceeds the bounds of
-    /// the target type. Silently returns if the target type is not a numeric type.
-    fn validate_literal_range(
-        &mut self,
-        value: &str,
-        target_kind: &TypeInfoKind,
-        location: Location,
-    ) {
-        let TypeInfoKind::Number(number_type) = target_kind else {
-            return;
-        };
-        let (type_name, min, max): (&str, i128, i128) = match number_type {
-            NumberType::I8 => ("i8", i128::from(i8::MIN), i128::from(i8::MAX)),
-            NumberType::I16 => ("i16", i128::from(i16::MIN), i128::from(i16::MAX)),
-            NumberType::I32 => ("i32", i128::from(i32::MIN), i128::from(i32::MAX)),
-            NumberType::I64 => ("i64", i128::from(i64::MIN), i128::from(i64::MAX)),
-            NumberType::U8 => ("u8", i128::from(u8::MIN), i128::from(u8::MAX)),
-            NumberType::U16 => ("u16", i128::from(u16::MIN), i128::from(u16::MAX)),
-            NumberType::U32 => ("u32", i128::from(u32::MIN), i128::from(u32::MAX)),
-            NumberType::U64 => ("u64", i128::from(u64::MIN), i128::from(u64::MAX)),
-        };
-        let out_of_range = match value.parse::<i128>() {
-            Ok(parsed) => parsed < min || parsed > max,
-            Err(_) => true,
-        };
-        if out_of_range {
-            self.errors.push(TypeCheckError::LiteralOutOfRange {
-                value: value.to_string(),
-                type_name: type_name.to_string(),
-                min,
-                max,
-                location,
-            });
-        }
-    }
+    // validate_literal_range moved to analysis rule A022 (LiteralOutOfRange).
 
     /// Push an error, deduplicating errors for the same unknown type/function/identifier.
     /// This prevents duplicate errors when registration fails but inference continues.
@@ -2655,85 +2600,4 @@ impl TypeChecker {
         self.errors.push(error);
     }
 
-    /// Returns true if any statement in the block references `self`.
-    fn body_references_self(arena: &AstArena, block_id: BlockId) -> bool {
-        arena[block_id]
-            .stmts
-            .iter()
-            .any(|&stmt_id| Self::stmt_references_self(arena, stmt_id))
-    }
-
-    /// Returns true if the statement references `self` in any sub-expression.
-    fn stmt_references_self(arena: &AstArena, stmt_id: StmtId) -> bool {
-        match &arena[stmt_id].kind {
-            Stmt::Block(block_id) => Self::body_references_self(arena, *block_id),
-            Stmt::Expr(expr_id) => Self::expr_references_self(arena, *expr_id),
-            Stmt::Assign { left, right } => {
-                Self::expr_references_self(arena, *left)
-                    || Self::expr_references_self(arena, *right)
-            }
-            Stmt::Return { expr } => Self::expr_references_self(arena, *expr),
-            Stmt::Loop { condition, body } => {
-                condition
-                    .as_ref()
-                    .is_some_and(|c| Self::expr_references_self(arena, *c))
-                    || Self::body_references_self(arena, *body)
-            }
-            Stmt::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                Self::expr_references_self(arena, *condition)
-                    || Self::body_references_self(arena, *then_block)
-                    || else_block.is_some_and(|b| Self::body_references_self(arena, b))
-            }
-            Stmt::VarDef { value, .. } => {
-                value.is_some_and(|v| Self::expr_references_self(arena, v))
-            }
-            Stmt::Assert { expr } => Self::expr_references_self(arena, *expr),
-            Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
-        }
-    }
-
-    /// Returns true if the expression references `self` (directly or in sub-expressions).
-    fn expr_references_self(arena: &AstArena, expr_id: ExprId) -> bool {
-        match &arena[expr_id].kind {
-            Expr::Identifier(ident_id) => arena[*ident_id].name == "self",
-            Expr::Binary { left, right, .. } => {
-                Self::expr_references_self(arena, *left)
-                    || Self::expr_references_self(arena, *right)
-            }
-            Expr::PrefixUnary { expr, .. } | Expr::Parenthesized { expr } => {
-                Self::expr_references_self(arena, *expr)
-            }
-            Expr::FunctionCall {
-                function, args, ..
-            } => {
-                Self::expr_references_self(arena, *function)
-                    || args
-                        .iter()
-                        .any(|(_, arg_expr)| Self::expr_references_self(arena, *arg_expr))
-            }
-            Expr::ArrayIndexAccess { array, index } => {
-                Self::expr_references_self(arena, *array)
-                    || Self::expr_references_self(arena, *index)
-            }
-            Expr::MemberAccess { expr, .. } | Expr::TypeMemberAccess { expr, .. } => {
-                Self::expr_references_self(arena, *expr)
-            }
-            Expr::StructLiteral { fields, .. } => fields
-                .iter()
-                .any(|(_, field_expr)| Self::expr_references_self(arena, *field_expr)),
-            Expr::ArrayLiteral { elements } => elements
-                .iter()
-                .any(|elem| Self::expr_references_self(arena, *elem)),
-            Expr::NumberLiteral { .. }
-            | Expr::BoolLiteral { .. }
-            | Expr::StringLiteral { .. }
-            | Expr::UnitLiteral
-            | Expr::Uzumaki
-            | Expr::Type(_) => false,
-        }
-    }
 }

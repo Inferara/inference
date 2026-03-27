@@ -1,12 +1,17 @@
-# Type-Checker-Guarded Panics
+# Analysis-Guarded Panics
 
 ## Overview
 
-Several `panic!` sites in `core/wasm-codegen/src/compiler.rs` are unreachable for well-typed
-programs. The type checker (`core/type-checker`) detects and rejects the corresponding programs
+Several `panic!` sites in `core/wasm-codegen/src/compiler.rs` are unreachable for valid
+programs. The analysis pass (`core/analysis`) detects and rejects the corresponding programs
 with structured diagnostics before codegen runs. The panics serve as defense-in-depth backstops:
-if a program somehow bypasses the type checker (e.g., due to a type-checker regression), the
-panic message identifies the compiler bug rather than producing silently malformed WASM.
+if a program somehow bypasses the analysis pass (e.g., due to an analysis regression or by
+constructing an AST directly in tests), the panic message identifies the compiler bug rather
+than producing silently malformed WASM.
+
+> **Note**: These guards were originally in the type checker (`TypeCheckError`) and were
+> migrated to the analysis pass (`AnalysisDiagnostic`) as rules A012–A019. The panic
+> backstops in codegen remain unchanged — only the upstream guard moved.
 
 This document catalogues those guarded sites and explains the convention for adding new ones.
 
@@ -14,17 +19,17 @@ This document catalogues those guarded sites and explains the convention for add
 
 ## Why Two Layers
 
-**Type-checker errors** include source location, user-readable context, and actionable suggestions.
-They are the primary rejection mechanism.
+**Analysis diagnostics** include source location, user-readable context, and actionable
+suggestions. They are the primary rejection mechanism (rule A012–A019, A022–A024).
 
 **Codegen panics** are opaque by comparison. Their purpose is not to communicate with users but
-to catch compiler bugs: if the type-checker ever fails to reject a forbidden pattern, codegen
+to catch compiler bugs: if the analysis pass ever fails to reject a forbidden pattern, codegen
 fails loudly instead of silently emitting invalid bytecode or corrupting the shadow stack.
 
 The combination satisfies two goals simultaneously:
 
-- Separation of concerns: codegen can assume its input is well-typed and focus on emission.
-- Defense-in-depth: regressions in the type checker surface as an obvious panic rather than a
+- Separation of concerns: codegen can assume its input has passed analysis and focus on emission.
+- Defense-in-depth: regressions in the analysis pass surface as an obvious panic rather than a
   subtle runtime failure.
 
 ---
@@ -42,11 +47,11 @@ without sret destination. Compound-returning calls are only supported in variabl
 initialization and return positions.
 ```
 
-**Guard:** `TypeCheckError::CompoundReturnCallInExpressionPosition`
+**Guard:** `AnalysisDiagnostic::CompoundReturnCallInExpressionPosition` (rule A016)
 
 The sret calling convention requires the caller to pass a destination pointer as the first
 argument. When the call appears in expression position (e.g., as an argument to another call),
-there is no named destination to point at. The type checker rejects this before codegen runs.
+there is no named destination to point at. The analysis pass rejects this before codegen runs.
 Codegen panics if `sret_local` is `None` for a compound-returning method.
 
 ---
@@ -62,7 +67,7 @@ without sret destination. Compound-returning calls are only supported in variabl
 initialization and return positions.
 ```
 
-**Guard:** `TypeCheckError::CompoundReturnCallInExpressionPosition`
+**Guard:** `AnalysisDiagnostic::CompoundReturnCallInExpressionPosition` (rule A016)
 
 Same invariant as the instance method case above, applied to `Type::method(args)` call syntax.
 
@@ -74,17 +79,17 @@ Same invariant as the instance method case above, applied to `Type::method(args)
 
 **Panic message (via `unreachable!`):**
 ```
-array literal in unsupported position should have been caught by type checker
+array literal in unsupported position should have been caught by analysis pass
 ```
 
 **Guards:**
-- `TypeCheckError::ArrayLiteralAsArgument` — when the literal appears directly as a function argument
-- `TypeCheckError::CompoundLiteralInUnsupportedPosition` — when the literal appears in any other
+- `AnalysisDiagnostic::ArrayLiteralAsArgument` (rule A012) — when the literal appears directly as a function argument
+- `AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition` (rule A015) — when the literal appears in any other
   unsupported position (e.g., as an operand in a binary expression)
 
 Array literals require a named frame slot for memory allocation. The codegen can only lower them
-when `enclosing_var_name` is set (i.e., in a `let` binding, assignment, or `return`). The type
-checker rejects all other positions before codegen reaches this branch.
+when `enclosing_var_name` is set (i.e., in a `let` binding, assignment, or `return`). The
+analysis pass rejects all other positions before codegen reaches this branch.
 
 ---
 
@@ -94,15 +99,15 @@ checker rejects all other positions before codegen reaches this branch.
 
 **Panic message (via `unreachable!`):**
 ```
-struct literal in unsupported position should have been caught by type checker
+struct literal in unsupported position should have been caught by analysis pass
 ```
 
 **Guards:**
-- `TypeCheckError::StructLiteralAsArgument` — when the literal appears directly as a function argument
-- `TypeCheckError::CompoundLiteralInUnsupportedPosition` — when the literal appears in any other
+- `AnalysisDiagnostic::StructLiteralAsArgument` (rule A013) — when the literal appears directly as a function argument
+- `AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition` (rule A015) — when the literal appears in any other
   unsupported position
 
-Struct literals share the same frame-slot dependency as array literals. The type checker
+Struct literals share the same frame-slot dependency as array literals. The analysis pass
 enforces that struct literals only appear where the codegen can name a destination.
 
 ---
@@ -126,23 +131,23 @@ planned future work or an internal consistency check.
 Follow this sequence when a new pattern is unsupported in codegen and must be rejected at the
 source level:
 
-**Step 1 — Add the type-checker error.**
-Define a new variant in `core/type-checker/src/errors.rs`. Document:
-- Why the pattern cannot be lowered (the codegen constraint).
-- What the user should do instead (the actionable suggestion in the error message).
+**Step 1 — Determine the right layer.**
+If the restriction is a type error (e.g., wrong type for an operand), add it to
+`core/type-checker/src/errors.rs`. If the restriction is a codegen limitation that does not
+involve type correctness, add it as a new analysis rule in `core/analysis/src/rules/`.
 
-**Step 2 — Add detection logic in the type checker.**
-In `core/type-checker/src/type_checker.rs`, detect the forbidden pattern and emit the new error.
-Add a type-checker test that verifies the error fires with the expected message and location.
+**Step 2 — Add detection logic.**
+For analysis rules: create `src/rules/my_rule.rs` using the `rule!` macro, register it in
+`all_rules()`, and add the `AnalysisDiagnostic` variant. Add tests.
 
 **Step 3 — Add a `panic!` backstop in codegen.**
 At the exact site in `compiler.rs` where the unsupported pattern would be lowered, add:
 
 ```rust
-// Guarded by TypeCheckError::YourNewError
+// Guarded by AnalysisDiagnostic::YourNewRule (rule AXXX)
 panic!(
     "Descriptive message explaining what invariant was violated and \
-     that the type checker should have prevented this"
+     that the analysis pass should have prevented this"
 );
 ```
 
@@ -173,8 +178,9 @@ fn your_pattern_panics_in_codegen() {
 ## Related Files
 
 - `core/wasm-codegen/src/compiler.rs` — all guarded panic sites
-- `core/type-checker/src/errors.rs` — guard error variant definitions with doc comments
-- `core/type-checker/src/type_checker.rs` — detection logic that emits the guard errors
+- `core/analysis/src/rules/` — analysis rules that are the primary guard (A012–A019, A022–A024)
+- `core/analysis/src/errors.rs` — `AnalysisDiagnostic` variant definitions
+- `core/type-checker/src/errors.rs` — type-level guard error variant definitions
 - `tests/src/codegen/wasm/negative.rs` — negative codegen tests that verify panic behavior
 - `core/wasm-codegen/docs/arrays-and-memory.md` — sret calling convention details
 - `core/wasm-codegen/docs/function-calls-lowering.md` — call lowering pipeline and `ResolvedCallee`

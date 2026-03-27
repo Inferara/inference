@@ -938,7 +938,7 @@ mod type_inference_tests {
                 let c: i32 = @;
                 let d: i64 = @;
 
-                let mut e: u8;
+                let mut e: u8 = 0;
                 e = @;
                 let f: u16 = @;
                 let g: u32 = @;
@@ -2354,27 +2354,21 @@ mod division_operator_tests {
     }
 }
 
-/// Tests for EmptyStruct validation rule
+/// Tests that empty struct no longer produces a type checker error.
+/// The check has been migrated to analysis rule A011.
 #[cfg(test)]
 mod empty_struct_tests {
     use super::*;
 
     #[test]
-    fn empty_struct_produces_error() {
+    fn empty_struct_passes_type_check() {
         let source = r#"struct Empty {} fn main() -> i32 { return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Empty struct should produce an error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("has no fields and no methods"),
-                "Error should mention empty struct, got: {err}"
-            );
-            assert!(
-                err.contains("Empty"),
-                "Error should mention struct name, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Empty struct check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2411,7 +2405,9 @@ mod empty_struct_tests {
     }
 }
 
-/// Tests for MethodNeverAccessesSelf validation rule
+/// Tests for MethodNeverAccessesSelf validation rule.
+/// The check has been migrated to analysis rule A010.
+/// Type checker should now pass for all these cases.
 #[cfg(test)]
 mod unused_self_tests {
     use super::*;
@@ -2450,24 +2446,14 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn method_declaring_self_but_never_using_it_errors() {
+    fn method_declaring_self_but_never_using_it_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Method declaring self but not using it should produce an error"
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Error should mention unused self, got: {err}"
-            );
-            assert!(
-                err.contains("Foo") && err.contains("noop"),
-                "Error should mention struct and method names, got: {err}"
-            );
-        }
     }
 
     #[test]
@@ -2493,21 +2479,18 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn mut_self_never_used_errors() {
+    fn mut_self_never_used_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(mut self) -> i32 { return 42; } } fn main(f: Foo) -> i32 { return f.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "mut self that's never used should error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should catch unused mut self, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused mut self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn multiple_methods_only_unused_one_errors() {
+    fn multiple_methods_only_unused_one_passes_type_check() {
         let source = r#"
             struct Foo {
                 x: i32;
@@ -2517,18 +2500,11 @@ mod unused_self_tests {
             fn main(f: Foo) -> i32 { return f.get() + f.bad(); }
         "#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("bad") && err.contains("declares `self` but never accesses it"),
-                "Only the unused method should error, got: {err}"
-            );
-            assert!(
-                !err.contains("Foo::get"),
-                "The method that uses self should not error, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2576,17 +2552,14 @@ mod unused_self_tests {
     }
 
     #[test]
-    fn method_with_empty_body_errors() {
+    fn method_with_empty_body_passes_type_check() {
         let source = r#"struct Foo { x: i32; fn noop(self) {} } fn main(f: Foo) { f.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Empty method body with self should error");
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should catch self in empty body, got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "Unused self check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2616,39 +2589,31 @@ mod unused_self_tests {
     }
 }
 
-/// Tests for interaction between EmptyStruct and MethodNeverAccessesSelf
+/// Tests that migrated checks no longer produce type checker errors.
 #[cfg(test)]
 mod rule_interaction_tests {
     use super::*;
 
     #[test]
-    fn struct_with_only_unused_self_method_not_empty_struct_error() {
+    fn struct_with_only_unused_self_method_passes_type_check() {
         let source = r#"struct S { fn noop(self) -> i32 { return 42; } } fn main(s: S) -> i32 { return s.noop(); }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(
-                err.contains("declares `self` but never accesses it"),
-                "Should get MethodNeverAccessesSelf, got: {err}"
-            );
-            assert!(
-                !err.contains("has no fields and no methods"),
-                "Should NOT get EmptyStruct (has a method), got: {err}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "MethodNeverAccessesSelf check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn multiple_empty_structs_produce_separate_errors() {
+    fn multiple_empty_structs_pass_type_check() {
         let source = r#"struct A {} struct B {} fn main() -> i32 { return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err());
-        if let Err(error) = result {
-            let err = error.to_string();
-            assert!(err.contains("A"), "Should mention struct A, got: {err}");
-            assert!(err.contains("B"), "Should mention struct B, got: {err}");
-        }
+        assert!(
+            result.is_ok(),
+            "EmptyStruct check moved to analysis; type checker should pass, got: {:?}",
+            result.err()
+        );
     }
 }
 
@@ -2717,5 +2682,675 @@ mod self_in_struct_literal_tests {
             result.err()
         );
     }
+}
 
+#[cfg(test)]
+mod recursive_struct_tests {
+    use super::*;
+
+    #[test]
+    fn test_recursive_struct_direct() {
+        let source = r#"struct Node { val: i32; next: Node; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Direct recursive struct should be rejected");
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_location_points_to_field() {
+        let source = r#"struct Node { val: i32; next: Node; }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the recursive field, not the struct definition. got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_mutual() {
+        let source = r#"struct A { b: B; } struct B { a: A; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Mutually recursive structs should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_recursive_struct_passes() {
+        let source =
+            r#"struct Point { x: i32; } struct Line { p: Point; } fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive struct composition should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_inside_spec_is_detected() {
+        let source = r#"
+            spec TestSpec {
+                struct Node {
+                    value: i32;
+                    next: Node;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Recursive struct inside spec should be detected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    // Module definitions are not yet supported in the grammar, so we cannot
+    // write a parser-level test for recursive structs inside modules. The fix
+    // handles Def::Module nonetheless to avoid a latent bug when module parsing
+    // is added.
+
+    #[test]
+    fn test_non_recursive_struct_inside_spec_is_accepted() {
+        let source = r#"
+            spec TestSpec {
+                struct Point {
+                    x: i32;
+                    y: i32;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive struct inside spec should be accepted, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_top_level_still_detected() {
+        let source = r#"
+            struct Node {
+                value: i32;
+                next: Node;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Top-level recursive struct should still be detected"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_three_level_chain() {
+        // A -> B -> C -> A
+        let source = r#"
+            struct A { b: B; }
+            struct B { c: C; }
+            struct C { a: A; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Three-level recursive chain should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_through_array() {
+        // A contains [A; 3] — still recursive
+        let source = r#"
+            struct Node {
+                value: i32;
+                children: [Node; 3];
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Recursive struct through array should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_non_recursive_three_level_chain() {
+        // A -> B -> C, no cycle
+        let source = r#"
+            struct C { value: i32; }
+            struct B { c: C; }
+            struct A { b: B; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Non-recursive three-level chain should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_recursive_struct_direct_inside_spec_with_multiple_structs() {
+        let source = r#"
+            spec TestSpec {
+                struct A { value: i32; self_ref: A; }
+                struct B { value: i32; }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Direct recursive struct inside spec with sibling structs should be detected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("recursive struct definition"),
+            "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod division_by_zero_tests {
+    use super::*;
+
+    #[test]
+    fn test_division_by_zero_literal() {
+        let source = r#"fn main() -> i32 { return 42 / 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Division by literal zero should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("division by zero"), "got: {err}");
+    }
+
+    #[test]
+    fn test_modulo_by_zero_literal() {
+        let source = r#"fn main() -> i32 { return 10 % 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Modulo by literal zero should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("division by zero"), "got: {err}");
+    }
+
+    #[test]
+    fn test_division_by_nonzero_passes() {
+        let source = r#"fn main() -> i32 { return 42 / 1; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Division by nonzero literal should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod duplicate_enum_variant_tests {
+    use super::*;
+
+    #[test]
+    fn test_duplicate_enum_variant() {
+        let source = r#"enum Color { Red, Red }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Duplicate enum variant should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("duplicate variant"), "got: {err}");
+    }
+
+    #[test]
+    fn test_duplicate_enum_variant_location_points_to_variant() {
+        let source = r#"enum Color { Red, Red }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the duplicate variant, not the enum definition. got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_unique_enum_variants_passes() {
+        let source =
+            r#"enum Color { Red, Green, Blue } fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Unique enum variants should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod invalid_assignment_target_tests {
+    use super::*;
+
+    #[test]
+    fn test_assignment_to_function_call() {
+        let source = r#"fn get() -> i32 { return 1; } fn main() -> i32 { get() = 10; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assignment to function call should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("invalid assignment target"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_struct_field_definition_tests {
+    use super::*;
+
+    #[test]
+    fn test_duplicate_struct_field_in_definition() {
+        let source = r#"struct S { x: i32; x: bool; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Duplicate struct field in definition should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("duplicate field") && err.contains("struct definition"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_struct_field_location_points_to_field() {
+        let source = r#"struct S { x: i32; x: bool; }"#;
+        let result = try_type_check(source);
+        let err = result.err().unwrap().to_string();
+        assert!(
+            !err.starts_with("1:1:"),
+            "Error location should point to the duplicate field, not the struct definition. got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod const_type_mismatch_tests {
+    use super::*;
+    use inference_ast::ids::NodeId;
+    use inference_ast::nodes::{Def, Stmt};
+    use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+
+    #[test]
+    fn test_const_bool_assigned_number() {
+        let source = r#"const X: bool = 42;"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assigning number to bool const should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("type mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn test_const_number_assigned_bool() {
+        let source = r#"const X: i32 = true;"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assigning bool to i32 const should be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("type mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn test_valid_const_passes() {
+        let source = r#"const X: i32 = 42; fn main() -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Valid const declaration should pass, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_valid_const_has_correct_typeinfo() {
+        let source = r#"const X: i32 = 42;"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Const value literal should have type info"
+        );
+        assert!(
+            matches!(
+                literal_type.unwrap().kind,
+                TypeInfoKind::Number(NumberType::I32)
+            ),
+            "Const i32 literal should have type i32"
+        );
+    }
+
+    #[test]
+    fn test_valid_bool_const_has_correct_typeinfo() {
+        let source = r#"const X: bool = true;"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Bool const value should have type info"
+        );
+        assert!(
+            matches!(literal_type.unwrap().kind, TypeInfoKind::Bool),
+            "Const bool literal should have type bool"
+        );
+    }
+
+    #[test]
+    fn test_function_body_const_has_correct_typeinfo() {
+        let source = r#"fn main() -> i32 { const X: i64 = 99; return 0; }"#;
+        let typed_context = try_type_check(source).expect("Type checking should succeed");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Function { body, .. } = &arena[def_id].kind {
+                    arena[*body].stmts.iter().find_map(|&stmt_id| {
+                        if let Stmt::ConstDef(cdi) = &arena[stmt_id].kind {
+                            if let Def::Constant { value, .. } = &arena[*cdi].kind {
+                                return Some(*value);
+                            }
+                        }
+                        None
+                    })
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition in function body");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_some(),
+            "Function-body const value literal should have type info"
+        );
+        assert!(
+            matches!(
+                literal_type.unwrap().kind,
+                TypeInfoKind::Number(NumberType::I64)
+            ),
+            "Function-body const i64 literal should have type i64"
+        );
+    }
+
+    #[test]
+    fn test_function_body_const_mismatch_no_typeinfo() {
+        let source = r#"fn main() -> i32 { const X: bool = 42; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Number literal for bool const in function body should fail"
+        );
+    }
+
+    #[test]
+    fn test_const_empty_array_literal_does_not_get_scalar_type() {
+        // Empty array literal cannot have its type inferred (infer_expression returns None).
+        // Before the fix, the None case fell through to type_ok = true, incorrectly
+        // stamping the declared scalar type onto the expression node.
+        let source = r#"const X: i32 = [];"#;
+        let typed_context = try_type_check(source).expect("Type check should not hard-fail");
+        let arena = typed_context.arena();
+        let value_id = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter())
+            .find_map(|&def_id| {
+                if let Def::Constant { value, .. } = &arena[def_id].kind {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+            .expect("Expected a constant definition");
+        let literal_type = typed_context.get_node_typeinfo(NodeId::Expr(value_id));
+        assert!(
+            literal_type.is_none(),
+            "Empty array literal should NOT get the declared scalar type stamped on it, \
+             but got: {:?}",
+            literal_type
+        );
+    }
+
+    #[test]
+    fn test_const_valid_array_literal() {
+        let source = r#"const X: [i32; 2] = [1, 2];"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Const with matching array literal should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod case_sensitive_type_tests {
+    use super::*;
+
+    #[test]
+    fn test_capitalized_type_rejected() {
+        let source = r#"fn foo(x: I32) -> i32 { return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Capitalized builtin type I32 should be rejected as unknown type"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("unknown type") && err.contains("I32"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn string_capital_s_is_valid_type() {
+        let source = r#"fn test(x: String) -> String { return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "String (capital S) should be a valid type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn string_lowercase_is_valid_type() {
+        let source = r#"fn test(x: string) -> string { return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "string (lowercase) should be a valid type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn custom_type_wrong_case_is_rejected() {
+        let source = r#"
+            struct Foo { x: i32; }
+            fn test() -> foo {
+                let f: foo = Foo { x: 1 };
+                return f;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "custom type with wrong case should be rejected (case-sensitive)"
+        );
+    }
+
+    #[test]
+    fn custom_type_correct_case_is_accepted() {
+        let source = r#"
+            struct Foo { x: i32; }
+            fn test() -> Foo {
+                let f: Foo = Foo { x: 1 };
+                return f;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "custom type with correct case should be accepted, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn builtin_numeric_types_are_lowercase() {
+        for source in [
+            r#"fn test(x: i32) -> i32 { return x; }"#,
+            r#"fn test(x: i64) -> i64 { return x; }"#,
+            r#"fn test(x: u8) -> u8 { return x; }"#,
+            r#"fn test() -> bool { return true; }"#,
+        ] {
+            let result = try_type_check(source);
+            assert!(
+                result.is_ok(),
+                "builtin type should be valid, source: {source}, got: {:?}",
+                result.as_ref().err()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod external_function_tests {
+    use super::*;
+
+    #[test]
+    fn test_external_fn_params_counted() {
+        let source = r#"external fn add(a: i32, b: i32) -> i32; fn main() -> i32 { return add(1, 2); }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "External function with correct arg count should pass, got: {:?}",
+            result.err()
+        );
+    }
+}
+
+/// Tests for generic type parameters in variable definitions
+#[cfg(test)]
+mod generic_type_param_in_vardef {
+    use super::*;
+
+    #[test]
+    fn test_generic_type_param_in_vardef_not_rejected() {
+        let source = r#"fn foo T'(x: T) -> T { let y: T = x; return y; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "type param T in vardef should not be rejected as unknown type, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_unknown_type_in_vardef_still_rejected() {
+        let source = r#"fn foo() { let y: UnknownType = 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "unknown type in vardef should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_generic_type_param_in_method_vardef() {
+        let source = r#"
+            struct Wrapper {
+                value: i32;
+                fn transform T'(self, x: T) -> T {
+                    let result: T = x;
+                    return result;
+                }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "type param T in method vardef should not be rejected, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    #[test]
+    fn test_multiple_type_params_in_vardef() {
+        let source = r#"fn foo A' B'(a: A, b: B) -> A { let x: A = a; let y: B = b; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "multiple type params in vardef should not be rejected, got: {:?}",
+            result.as_ref().err()
+        );
+    }
 }

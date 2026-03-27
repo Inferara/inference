@@ -87,7 +87,7 @@ impl std::str::FromStr for NumberType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::ALL
             .iter()
-            .find(|nt| nt.as_str().eq_ignore_ascii_case(s))
+            .find(|nt| nt.as_str() == s)
             .copied()
             .ok_or(())
     }
@@ -136,6 +136,7 @@ impl TypeInfoKind {
         ("unit", TypeInfoKind::Unit),
         ("bool", TypeInfoKind::Bool),
         ("string", TypeInfoKind::String),
+        ("String", TypeInfoKind::String),
     ];
 
     #[must_use = "this is a pure check with no side effects"]
@@ -161,7 +162,7 @@ impl TypeInfoKind {
         }
         Self::NON_NUMERIC_BUILTINS
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(s))
+            .find(|(name, _)| *name == s)
             .map(|(_, kind)| kind.clone())
     }
 }

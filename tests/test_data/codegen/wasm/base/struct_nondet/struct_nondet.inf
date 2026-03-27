@@ -1,0 +1,23 @@
+struct Point { x: i32; y: i32; }
+
+pub fn struct_uzumaki_i32() {
+    forall {
+        let p: Point = @;
+    }
+}
+
+struct Wide { a: i64; b: i64; }
+
+pub fn struct_uzumaki_i64() {
+    forall {
+        let w: Wide = @;
+    }
+}
+
+struct Mixed { flag: bool; count: i32; big: i64; }
+
+pub fn struct_uzumaki_mixed() {
+    forall {
+        let m: Mixed = @;
+    }
+}

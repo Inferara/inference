@@ -71,7 +71,7 @@ TypeCheckerBuilder
 
 - [`type_info`] - Type representation system with `TypeInfo` and `TypeInfoKind`
 - [`typed_context`] - Storage for type annotations on AST nodes
-- [`errors`] - Comprehensive error types with 50 distinct variants
+- [`errors`] - Comprehensive error types with 46 distinct variants
 - `symbol_table` (internal) - Hierarchical scope and symbol management
 - `type_checker` (internal) - Core type inference implementation
 
@@ -320,8 +320,7 @@ Test organization:
 **Struct Literal Validation**:
 - Struct literals (`Point { x: 10, y: 20 }`) are validated against the struct definition: each field name must exist (`UnknownStructField`), no field may appear twice (`DuplicateStructField`), and no required field may be omitted (`MissingStructField`)
 - Field value types are checked against declared field types; type mismatches produce `TypeMismatch` errors with `VariableDefinition` or `ArrayElement` context
-- Struct literals can only appear in variable initializer positions, assignment RHS, return statements, or as struct field values — use in other expression positions emits `CompoundLiteralInUnsupportedPosition`
-- Struct literals cannot be passed directly as function arguments; `StructLiteralAsArgument` is emitted instead
+- Struct literal field values are type-checked against the struct field types
 
 **Struct Field Access and Mutation**:
 - Member access (`p.x`) validates that the receiver is a struct type (`ExpectedStructType`) and that the named field exists (`FieldNotFound`)
@@ -329,11 +328,11 @@ Test organization:
 
 **Struct Parameters and Return Types**:
 - Struct-typed function parameters are registered with `TypeInfoKind::Struct(name)` after `resolve_custom_type()` resolves the AST `Custom` node
-- Functions returning a struct emit `CompoundReturnCallInExpressionPosition` when the call appears in an unsupported expression position
+- Functions returning a struct are registered and their return type is tracked for downstream use by the analysis pass (which enforces codegen restrictions on compound-returning calls)
 
 **Struct Definition Validation**:
-- Empty structs (no fields, no methods) emit `EmptyStruct`
-- Methods that declare `self` but never reference it in the body emit `MethodNeverAccessesSelf`
+- `DuplicateStructFieldDefinition`: struct field names must be unique within the definition
+- `RecursiveStructDefinition`: struct fields must not create a size cycle (direct or through arrays/aliases)
 
 **Variable Shadowing in Struct Contexts**:
 - The shadowing prohibition applies to struct variable bindings: a `let p: Point = ...` in an inner scope shadows an outer `p` and emits `VariableShadowed`
@@ -350,12 +349,23 @@ Test organization:
   of the type-checker's internal `MethodInfo`
 
 **Compound-Returning Method Restrictions**:
-- A method or function call that returns an array or struct (sret convention) cannot appear
-  in a general expression position; doing so emits `CompoundReturnCallInExpressionPosition`
-- Such a call in the RHS of an assignment statement (`x = foo()`) emits
-  `CompoundReturnCallInAssignment`; use a fresh `let` binding instead
-- Chaining a method call on the result of a compound-returning call (e.g., `make_point().x`)
-  emits `MethodCallChainOnCompoundReturn`; assign the intermediate result first
+- These restrictions are now enforced by the analysis pass (A016–A018). The type checker tracks compound return types and exposes them through `TypedContext` for the analysis pass to query.
+
+### Bug Fixes and Validation Hardening
+
+**New `TypeCheckError` variants**:
+- `DuplicateStructFieldDefinition` — two fields with the same name in a struct `struct S { x: i32, x: i32 }` is rejected
+- `RecursiveStructDefinition` — field type creates a size cycle, including cycles through arrays (`struct A { items: [A; 3] }`) and type aliases
+- `InvalidAssignmentTarget` — left-hand side of an assignment is not a valid lvalue (identifier, array index, or struct field)
+- `ArrayLiteralSizeMismatch` — array literal element count does not match the declared array size
+- `DivisionByZero` — literal zero in the divisor position of `/` or `%`
+- `DuplicateEnumVariant` — two variants with the same name in an enum definition
+
+**Validation fixes**:
+- Undeclared types referenced in variable definitions are now validated (previously missed in some positions)
+- Top-level `const` initializers are type-checked (previously unchecked)
+- Type lookup is now case-sensitive; `I32` no longer resolves to `i32`
+- External function parameter types are now correctly parsed by the AST builder
 
 ### Fixed-Size Array Support (Issue #148)
 

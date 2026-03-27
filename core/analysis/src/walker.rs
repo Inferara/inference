@@ -5,8 +5,9 @@
 //! to access node data.
 
 use inference_ast::arena::AstArena;
-use inference_ast::ids::{BlockId, DefId, StmtId};
-use inference_ast::nodes::{BlockKind, Def, Stmt};
+use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
+use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
+use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
 /// Context passed to visitor callbacks during AST walking.
@@ -48,6 +49,156 @@ pub(crate) fn walk_function_bodies(
             assert!(walk_ctx.nondet_block_kind.is_none(), "nondet_block_kind leaked");
             walk_block(arena, body_id, &mut walk_ctx, visitor);
         });
+    }
+}
+
+/// Extracts top-level expressions from a statement and calls the callback
+/// for each one. Covers variable definitions, expression statements,
+/// assignments, returns, asserts, if conditions, loop conditions, and
+/// constant definitions. Does not recurse into sub-expressions.
+pub(crate) fn for_each_stmt_expr(
+    stmt: &Stmt,
+    arena: &AstArena,
+    callback: &mut dyn FnMut(ExprId),
+) {
+    match stmt {
+        Stmt::VarDef {
+            value: Some(expr_id),
+            ..
+        }
+        | Stmt::Expr(expr_id) => callback(*expr_id),
+        Stmt::Assign { left, right } => {
+            callback(*left);
+            callback(*right);
+        }
+        Stmt::Return { expr } | Stmt::Assert { expr } => callback(*expr),
+        Stmt::If { condition, .. } => callback(*condition),
+        Stmt::Loop {
+            condition: Some(cond_expr),
+            ..
+        } => callback(*cond_expr),
+        Stmt::ConstDef(def_id) => {
+            if let Def::Constant { value, .. } = &arena[*def_id].kind {
+                callback(*value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Recursively visits all sub-expressions in pre-order, calling `visitor`
+/// for every node including the root.
+pub(crate) fn walk_expr(
+    arena: &AstArena,
+    expr_id: ExprId,
+    visitor: &mut dyn FnMut(ExprId),
+) {
+    visitor(expr_id);
+    match &arena[expr_id].kind {
+        Expr::FunctionCall {
+            function, args, ..
+        } => {
+            walk_expr(arena, *function, visitor);
+            for (_, arg_expr) in args {
+                walk_expr(arena, *arg_expr, visitor);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            walk_expr(arena, *left, visitor);
+            walk_expr(arena, *right, visitor);
+        }
+        Expr::PrefixUnary { expr, .. }
+        | Expr::Parenthesized { expr }
+        | Expr::MemberAccess { expr, .. }
+        | Expr::TypeMemberAccess { expr, .. } => walk_expr(arena, *expr, visitor),
+        Expr::ArrayIndexAccess { array, index } => {
+            walk_expr(arena, *array, visitor);
+            walk_expr(arena, *index, visitor);
+        }
+        Expr::StructLiteral { fields, .. } => {
+            for (_, field_expr) in fields {
+                walk_expr(arena, *field_expr, visitor);
+            }
+        }
+        Expr::ArrayLiteral { elements } => {
+            for elem in elements {
+                walk_expr(arena, *elem, visitor);
+            }
+        }
+        Expr::Identifier(_)
+        | Expr::NumberLiteral { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::StringLiteral { .. }
+        | Expr::UnitLiteral
+        | Expr::Uzumaki
+        | Expr::Type(_) => {}
+    }
+}
+
+/// Returns `true` when `expr_id` is a function call that returns a compound
+/// type (array, struct, or custom). Used by multiple rules to detect sret
+/// calling convention restrictions.
+pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) -> bool {
+    if !matches!(ctx.arena()[expr_id].kind, Expr::FunctionCall { .. }) {
+        return false;
+    }
+    if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
+        matches!(
+            ti.kind,
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        )
+    } else {
+        false
+    }
+}
+
+/// Checks whether a loop body contains at least one `break` that targets
+/// the current loop (not a nested inner loop).
+///
+/// This function scans the body recursively but:
+/// - Does NOT recurse into nested `Loop` statement bodies (break there targets the nested loop)
+/// - Does NOT recurse into non-det block bodies (break inside non-det is prohibited)
+/// - DOES recurse into `if/else` arms and regular `Block` statements
+pub(crate) fn contains_break_for_this_loop(arena: &AstArena, block_id: BlockId) -> bool {
+    let block = &arena[block_id];
+    if block.block_kind != BlockKind::Regular {
+        return false;
+    }
+    block
+        .stmts
+        .iter()
+        .any(|&sid| contains_break_in_stmt(arena, sid))
+}
+
+fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
+    match &arena[stmt_id].kind {
+        Stmt::Break => true,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            contains_break_for_this_loop(arena, *then_block)
+                || else_block.is_some_and(|b| contains_break_for_this_loop(arena, b))
+        }
+        Stmt::Block(block_id) => {
+            let block = &arena[*block_id];
+            if block.block_kind != BlockKind::Regular {
+                return false;
+            }
+            block
+                .stmts
+                .iter()
+                .any(|&sid| contains_break_in_stmt(arena, sid))
+        }
+        Stmt::Loop { .. }
+        | Stmt::Return { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::VarDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Assert { .. }
+        | Stmt::ConstDef(_) => false,
     }
 }
 

@@ -44,7 +44,7 @@ mod import_tests {
         // Test documents expected behavior for when modules are fully implemented
         #[test]
         fn test_visibility_public_accessible() {
-            let source = r#"struct PublicItem { x: i32; } fn test() { let item: PublicItem; }"#;
+            let source = r#"struct PublicItem { x: i32; } fn test() { let item: PublicItem = PublicItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -57,7 +57,7 @@ mod import_tests {
         #[test]
         fn test_visibility_private_same_scope() {
             let source =
-                r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem; }"#;
+                r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -69,7 +69,7 @@ mod import_tests {
         // When implemented, this should test that private symbols are accessible in child scopes
         #[test]
         fn test_visibility_private_child_scope_accessible() {
-            let source = r#"struct PrivateItem { x: i32; } fn use_parent_private() { let item: PrivateItem; }"#;
+            let source = r#"struct PrivateItem { x: i32; } fn use_parent_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(result.is_ok(), "Root-level symbols should be accessible");
         }
@@ -79,7 +79,7 @@ mod import_tests {
         #[test]
         fn test_visibility_private_sibling_scope_not_accessible() {
             let source =
-                r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem; }"#;
+                r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -349,7 +349,7 @@ mod import_tests {
         // Test documents expected behavior for when qualified names across modules work
         #[test]
         fn test_qualified_name_resolution_simple() {
-            let source = r#"struct MyType { x: i32; } fn test() { let val: MyType; }"#;
+            let source = r#"struct MyType { x: i32; } fn test() { let val: MyType = MyType { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -361,7 +361,7 @@ mod import_tests {
         // Test documents expected behavior for when nested qualified names work
         #[test]
         fn test_qualified_name_resolution_nested() {
-            let source = r#"struct DeepType { x: i32; } fn test() { let val: DeepType; }"#;
+            let source = r#"struct DeepType { x: i32; } fn test() { let val: DeepType = DeepType { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(result.is_ok(), "Type resolution should work at root level");
         }

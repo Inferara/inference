@@ -158,12 +158,12 @@ mod statement_coverage {
     }
 
     #[test]
-    fn test_variable_definition_without_initializer() {
+    fn test_variable_definition_without_initializer_passes_type_check() {
         let source = r#"fn test() -> i32 { let x: i32; return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
-            "Variable without initializer should work, got: {:?}",
+            "Variable without initializer should pass type checking (caught by analysis rule A025 instead), got: {:?}",
             result.err()
         );
     }
@@ -247,7 +247,7 @@ mod statement_coverage {
 
     #[test]
     fn test_assign_uzumaki_to_variable() {
-        let source = r#"fn test() -> i32 { let mut x: i32; x = @; return x; }"#;
+        let source = r#"fn test() -> i32 { let mut x: i32 = 0; x = @; return x; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -1206,15 +1206,18 @@ mod import_resolution_coverage {
 mod symbol_table_coverage {
     use super::*;
 
-    // FIXME: Test disabled due to parser or type checker limitation
-    // #[test]
-    fn test_lowercase_type_lookup() {
+    #[test]
+    fn test_capitalized_builtin_type_rejected() {
         let source = r#"fn test(x: I32) -> i32 { return x; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_ok(),
-            "Case-insensitive builtin type lookup should work, got: {:?}",
-            result.err()
+            result.is_err(),
+            "Capitalized builtin type I32 should be rejected (types are case-sensitive)"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("unknown type") && err.contains("I32"),
+            "got: {err}"
         );
     }
 

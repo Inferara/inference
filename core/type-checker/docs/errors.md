@@ -4,7 +4,7 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 50 distinct error variants, each with specific context and location
+The type checker produces 46 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
 Not all variants are covered in detail below. The authoritative list of variants and their
@@ -26,8 +26,11 @@ message. The `TypeCheckError::location()` method returns the associated `Locatio
 9. [Generic Type Errors](#generic-type-errors)
 10. [Non-Deterministic Errors](#non-deterministic-errors)
 11. [Mutability and Shadowing Errors](#mutability-and-shadowing-errors)
-12. [Codegen Restriction Errors](#codegen-restriction-errors)
+12. [Codegen Restriction Errors](#codegen-restriction-errors) _(migrated to analysis)_
 13. [Struct Errors](#struct-errors)
+14. [Struct Definition Errors](#struct-definition-errors)
+15. [Assignment and Initialization Errors](#assignment-and-initialization-errors)
+16. [Enum Definition Errors](#enum-definition-errors)
 
 ---
 
@@ -719,7 +722,7 @@ fn test() {
 
 ## Codegen Restriction Errors
 
-These errors describe constructs that are valid in the type system but cannot yet be lowered by the code generator. They are emitted by the type checker so that a user-visible error is produced before codegen is attempted.
+> **Note**: These checks have been migrated to the analysis pass (`core/analysis`) as rules A012–A019, A022–A024. The type checker no longer emits these variants. This section is retained for historical reference; see `core/analysis/README.md` for the current authoritative documentation.
 
 ### `ArrayLiteralAsArgument`
 
@@ -962,6 +965,107 @@ fn test() {
 ```
 
 **Solution**: Provide each field exactly once.
+
+---
+
+## Struct Definition Errors
+
+### `DuplicateStructFieldDefinition`
+
+A struct definition uses the same field name more than once.
+
+**Message format**: `{location}: duplicate field \`{field_name}\` in struct definition \`{struct_name}\``
+
+**Example**:
+
+```rust
+struct Bad { x: i32, x: bool }  // Error: duplicate field `x` in struct definition `Bad`
+```
+
+**Solution**: Rename one of the duplicate fields.
+
+### `RecursiveStructDefinition`
+
+A struct field's type creates a size cycle, making the struct infinitely large.
+
+**Message format**: `{location}: recursive struct definition: field \`{field_name}\` of struct \`{struct_name}\` has type \`{field_type}\` which creates a cycle`
+
+Cycles through arrays (e.g., `struct A { items: [A; 3] }`) and through type aliases are both detected.
+
+**Example**:
+
+```rust
+struct Node { value: i32, next: Node }  // Error: recursive struct definition
+```
+
+**Solution**: Use an index or identifier to break the cycle, or redesign the data structure.
+
+---
+
+## Assignment and Initialization Errors
+
+### `InvalidAssignmentTarget`
+
+The left-hand side of an assignment statement is not a valid lvalue.
+
+**Message format**: `{location}: invalid assignment target; expected a variable, array element, or struct field`
+
+Valid assignment targets are identifiers, array index expressions, and struct member access expressions.
+
+**Example**:
+
+```rust
+fn test() {
+    let mut x = 5;
+    (x + 1) = 10;  // Error: invalid assignment target
+}
+```
+
+### `ArrayLiteralSizeMismatch`
+
+An array literal has a different number of elements than the declared array type specifies.
+
+**Message format**: `{location}: array literal has {actual} elements but the declared type expects {expected}`
+
+**Example**:
+
+```rust
+fn test() {
+    let arr: [i32; 3] = [1, 2];  // Error: array literal has 2 elements but the declared type expects 3
+}
+```
+
+### `DivisionByZero`
+
+A literal zero appears in the divisor position of a `/` or `%` expression.
+
+**Message format**: `{location}: division by zero`
+
+**Example**:
+
+```rust
+fn test() -> i32 {
+    return 10 / 0;  // Error: division by zero
+}
+```
+
+---
+
+## Enum Definition Errors
+
+### `DuplicateEnumVariant`
+
+An enum definition uses the same variant name more than once.
+
+**Message format**: `{location}: duplicate variant \`{variant_name}\` in enum definition \`{enum_name}\``
+
+**Example**:
+
+```rust
+enum Status { Active, Inactive, Active }  // Error: duplicate variant `Active`
+```
+
+**Solution**: Rename or remove the duplicate variant.
 
 ---
 

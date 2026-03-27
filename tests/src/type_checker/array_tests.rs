@@ -32,7 +32,7 @@ mod edge_cases {
 
     #[test]
     fn test_large_array_annotation() {
-        let source = r#"fn test() -> i32 { let arr: [i32; 1000]; return 42; }"#;
+        let source = r#"fn test(arr: [i32; 1000]) -> i32 { return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -43,7 +43,7 @@ mod edge_cases {
 
     #[test]
     fn test_very_large_array_annotation() {
-        let source = r#"fn test() -> i32 { let arr: [i32; 65535]; return 42; }"#;
+        let source = r#"fn test(arr: [i32; 65535]) -> i32 { return arr[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -54,7 +54,8 @@ mod edge_cases {
 
     #[test]
     fn test_nested_array_annotation() {
-        let source = r#"fn test() -> i32 { let arr: [[i32; 2]; 3]; return 42; }"#;
+        let source =
+            r#"fn test() -> i32 { let arr: [[i32; 2]; 3] = [[1, 2], [3, 4], [5, 6]]; return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -65,7 +66,7 @@ mod edge_cases {
 
     #[test]
     fn test_deeply_nested_array_annotation() {
-        let source = r#"fn test() -> i32 { let arr: [[[i32; 2]; 3]; 4]; return 42; }"#;
+        let source = r#"fn test(arr: [[[i32; 2]; 3]; 4]) -> i32 { return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -89,14 +90,14 @@ mod edge_cases {
     fn test_array_of_different_number_types() {
         let source = r#"
             fn test() -> i32 {
-                let arr_i8: [i8; 2];
-                let arr_i16: [i16; 2];
-                let arr_i32: [i32; 2];
-                let arr_i64: [i64; 2];
-                let arr_u8: [u8; 2];
-                let arr_u16: [u16; 2];
-                let arr_u32: [u32; 2];
-                let arr_u64: [u64; 2];
+                let arr_i8: [i8; 2] = [1, 2];
+                let arr_i16: [i16; 2] = [1, 2];
+                let arr_i32: [i32; 2] = [1, 2];
+                let arr_i64: [i64; 2] = [1, 2];
+                let arr_u8: [u8; 2] = [1, 2];
+                let arr_u16: [u16; 2] = [1, 2];
+                let arr_u32: [u32; 2] = [1, 2];
+                let arr_u64: [u64; 2] = [1, 2];
                 return 42;
             }
         "#;
@@ -206,7 +207,7 @@ mod function_parameters {
 
     #[test]
     fn test_function_nested_array_param() {
-        let source = r#"fn process(matrix: [[i32; 2]; 3]) -> i32 { return matrix[0][0]; } fn test() -> i32 { let matrix: [[i32; 2]; 3]; return 42; }"#;
+        let source = r#"fn process(matrix: [[i32; 2]; 3]) -> i32 { return matrix[0][0]; } fn test() -> i32 { return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -478,7 +479,7 @@ mod array_indexing {
 
     #[test]
     fn test_nested_array_index_returns_inner_array_type() {
-        let source = r#"fn test() -> i32 { let arr: [[i32; 2]; 3]; let inner: [i32; 2] = arr[0]; return inner[0]; }"#;
+        let source = r#"fn test() -> i32 { let arr: [[i32; 2]; 3] = [[1, 2], [3, 4], [5, 6]]; let inner: [i32; 2] = arr[0]; return inner[0]; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -500,7 +501,7 @@ mod array_indexing {
 
     #[test]
     fn test_array_index_with_different_numeric_indices() {
-        let source = r#"fn test() -> i32 { let arr: [i32; 10]; let idx: i32 = 0; let elem: i32 = arr[idx]; return elem; }"#;
+        let source = r#"fn test(arr: [i32; 10]) -> i32 { let idx: i32 = 0; let elem: i32 = arr[idx]; return elem; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -578,7 +579,7 @@ mod comprehensive_scenarios {
                 coords: [i32; 3];
             }
             fn test() -> i32 {
-                let p: Point;
+                let p: Point = Point { coords: [1, 2, 3] };
                 return 42;
             }
         "#;
@@ -595,7 +596,7 @@ mod comprehensive_scenarios {
         let source = r#"
             fn test() -> i32 {
                 let arr1: [i32; 5] = [1, 2, 3, 4, 5];
-                let mut arr2: [i32; 5];
+                let mut arr2: [i32; 5] = [0, 0, 0, 0, 0];
                 arr2 = arr1;
                 return arr2[0];
             }
@@ -816,41 +817,31 @@ mod mutability {
 }
 
 mod literal_range_validation {
+    //! Literal range validation has been migrated to analysis rule A022.
+    //! These tests verify the type checker accepts these programs, deferring
+    //! range checks to the analysis pass.
     use super::*;
 
     #[test]
-    fn test_out_of_range_i8_200() {
+    fn test_out_of_range_i8_200_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: i8 = 200; return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "i8 = 200 should be out of range");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-            assert!(
-                error_msg.contains("i8"),
-                "Error should mention i8: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn test_out_of_range_u8_256() {
+    fn test_out_of_range_u8_256_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: u8 = 256; return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "u8 = 256 should be out of range");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -887,25 +878,25 @@ mod literal_range_validation {
     }
 
     #[test]
-    fn test_out_of_range_i16() {
+    fn test_out_of_range_i16_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: i16 = 40000; return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "i16 = 40000 should be out of range");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn test_out_of_range_u16() {
+    fn test_out_of_range_u16_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: u16 = 70000; return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "u16 = 70000 should be out of range");
+        assert!(
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -920,28 +911,25 @@ mod literal_range_validation {
     }
 
     #[test]
-    fn test_i32_overflow() {
+    fn test_i32_overflow_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: i32 = 2147483648; return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "i32 = 2147483648 should be out of range");
+        assert!(
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn test_array_element_out_of_range() {
+    fn test_array_element_out_of_range_passes_type_checker() {
         let source = r#"fn test() -> i32 { let arr: [u8; 3] = [255, 256, 0]; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Array element 256 for u8 should be out of range"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
@@ -956,21 +944,14 @@ mod literal_range_validation {
     }
 
     #[test]
-    fn test_assign_literal_out_of_range() {
+    fn test_assign_literal_out_of_range_passes_type_checker() {
         let source = r#"fn test() -> i32 { let mut x: u8 = 0; x = 256; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Assigning 256 to u8 should be out of range"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
@@ -985,21 +966,14 @@ mod literal_range_validation {
     }
 
     #[test]
-    fn test_constant_out_of_range() {
+    fn test_constant_out_of_range_passes_type_checker() {
         let source = r#"fn test() -> i32 { const x: u8 = 300; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Constant u8 = 300 should be out of range"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
@@ -1014,128 +988,72 @@ mod literal_range_validation {
     }
 
     #[test]
-    fn test_i128_overflow_i32() {
+    fn test_i128_overflow_i32_passes_type_checker() {
         let source =
             r#"fn test() -> i32 { let x: i32 = 99999999999999999999999999999999; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Literal exceeding i128 range should be rejected for i32"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-            assert!(
-                error_msg.contains("i32"),
-                "Error should mention target type i32: {error_msg}"
-            );
-        }
     }
 
     #[test]
-    fn test_i128_overflow_u64() {
+    fn test_i128_overflow_u64_passes_type_checker() {
         let source = r#"fn test() -> i32 { let x: u64 = 999999999999999999999999999999999999999999; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Literal exceeding i128 range should be rejected for u64"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-            assert!(
-                error_msg.contains("u64"),
-                "Error should mention target type u64: {error_msg}"
-            );
-        }
     }
 
     #[test]
-    fn test_i128_overflow_i8() {
+    fn test_i128_overflow_i8_passes_type_checker() {
         let source =
             r#"fn test() -> i32 { let x: i8 = 99999999999999999999999999999999; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Literal exceeding i128 range should be rejected for i8"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-            assert!(
-                error_msg.contains("i8"),
-                "Error should mention target type i8: {error_msg}"
-            );
-        }
     }
 
     #[test]
-    fn test_i128_overflow_array_element() {
+    fn test_i128_overflow_array_element_passes_type_checker() {
         let source = r#"fn test() -> i32 { let arr: [u8; 2] = [1, 99999999999999999999999999999999]; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Array element exceeding i128 range should be rejected"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-            assert!(
-                error_msg.contains("u8"),
-                "Error should mention target type u8: {error_msg}"
-            );
-        }
     }
 
     #[test]
-    fn test_i128_overflow_constant() {
+    fn test_i128_overflow_constant_passes_type_checker() {
         let source =
             r#"fn test() -> i32 { const X: i32 = 99999999999999999999999999999999; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Constant exceeding i128 range should be rejected"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-            assert!(
-                error_msg.contains("i32"),
-                "Error should mention target type i32: {error_msg}"
-            );
-        }
     }
 
     #[test]
-    fn test_i128_overflow_assignment() {
+    fn test_i128_overflow_assignment_passes_type_checker() {
         let source = r#"fn test() -> i32 { let mut x: i32 = 0; x = 99999999999999999999999999999999; return 0; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Assignment exceeding i128 range should be rejected"
+            result.is_ok(),
+            "range validation migrated to analysis (A022), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("out of range"),
-                "Error should mention out of range: {error_msg}"
-            );
-        }
     }
 }
 
@@ -1192,21 +1110,14 @@ mod array_literal_as_argument {
     use super::*;
 
     #[test]
-    fn test_array_literal_as_arg_rejected() {
+    fn test_array_literal_as_arg_passes_type_checker() {
         let source = r#"fn sum(arr: [i32; 3]) -> i32 { return arr[0]; } fn test() -> i32 { return sum([1, 2, 3]); }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Array literal as argument should be rejected"
+            result.is_ok(),
+            "array literal as argument check migrated to analysis (A012), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("array literals cannot be passed directly"),
-                "Error should mention array literals: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
@@ -1225,21 +1136,14 @@ mod array_uzumaki_as_argument {
     use super::*;
 
     #[test]
-    fn test_array_uzumaki_as_arg_rejected() {
+    fn test_array_uzumaki_as_arg_passes_type_checker() {
         let source = r#"fn process(arr: [i32; 5]) -> i32 { return arr[0]; } pub fn spec() -> i32 { return process(@); }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "Array uzumaki as argument should be rejected"
+            result.is_ok(),
+            "array uzumaki as argument check migrated to analysis (A014), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("array uzumaki (@) cannot be used as a function argument"),
-                "Error should mention array uzumaki: {}",
-                error_msg
-            );
-        }
     }
 
     #[test]
@@ -1258,33 +1162,25 @@ mod array_index_64bit {
     use super::*;
 
     #[test]
-    fn test_i64_index_rejected() {
+    fn test_i64_index_passes_type_checker() {
         let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; let idx: i64 = 0; return arr[idx]; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "i64 array index should be rejected");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("32-bit integer type"),
-                "Error should mention 32-bit requirement: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "64-bit index check migrated to analysis (A019), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn test_u64_index_rejected() {
+    fn test_u64_index_passes_type_checker() {
         let source = r#"fn test() -> i32 { let arr: [i32; 3] = [1, 2, 3]; let idx: u64 = 0; return arr[idx]; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "u64 array index should be rejected");
-        if let Err(error) = result {
-            let error_msg = error.to_string();
-            assert!(
-                error_msg.contains("32-bit integer type"),
-                "Error should mention 32-bit requirement: {}",
-                error_msg
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "64-bit index check migrated to analysis (A019), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1368,7 +1264,7 @@ mod invalid_array_size {
 
     #[test]
     fn test_u32_max_in_array_size_accepted() {
-        let source = r#"fn test() -> i32 { let arr: [i32; 4294967295]; return 42; }"#;
+        let source = r#"fn test(arr: [i32; 4294967295]) -> i32 { return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -1430,7 +1326,7 @@ mod invalid_array_size {
 
     #[test]
     fn test_valid_array_sizes_still_work() {
-        let source = r#"fn test() -> i32 { let a: [i32; 1] = [1]; let b: [i32; 3] = [1, 2, 3]; let c: [i32; 100]; return 42; }"#;
+        let source = r#"fn test(c: [i32; 100]) -> i32 { let a: [i32; 1] = [1]; let b: [i32; 3] = [1, 2, 3]; return 42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -1466,63 +1362,46 @@ mod array_return_call_position {
     }
 
     #[test]
-    fn standalone_call_rejected() {
+    fn standalone_call_passes_type_checker() {
         let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; } fn test() -> i32 { make(); return 0; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "standalone sret call should be rejected");
-        if let Err(error) = result {
-            let msg = error.to_string();
-            assert!(
-                msg.contains("let") && msg.contains("return"),
-                "Error should mention let/return: {msg}"
-            );
-        }
+        assert!(
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
-    fn as_argument_rejected() {
+    fn as_argument_passes_type_checker() {
         let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; } fn sum(a: [i32; 3]) -> i32 { return a[0]; } fn test() -> i32 { return sum(make()); }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "array-returning call as argument should be rejected"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let msg = error.to_string();
-            assert!(
-                msg.contains("let") && msg.contains("return"),
-                "Error should mention let/return: {msg}"
-            );
-        }
     }
 
     #[test]
-    fn index_access_rejected() {
+    fn index_access_passes_type_checker() {
         let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; } fn test() -> i32 { return make()[0]; }"#;
         let result = try_type_check(source);
         assert!(
-            result.is_err(),
-            "indexing sret call result should be rejected"
+            result.is_ok(),
+            "compound return call position check migrated to analysis (A016), got: {:?}",
+            result.err()
         );
-        if let Err(error) = result {
-            let msg = error.to_string();
-            assert!(
-                msg.contains("let") && msg.contains("return"),
-                "Error should mention let/return: {msg}"
-            );
-        }
     }
 
     #[test]
-    fn assignment_rejected() {
+    fn assignment_passes_type_checker() {
         let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; } fn test() -> i32 { let mut a: [i32; 3] = [0, 0, 0]; a = make(); return a[0]; }"#;
-        let Err(error) = try_type_check(source) else {
-            panic!("array-returning call in assignment should be rejected");
-        };
-        let msg = error.to_string();
+        let result = try_type_check(source);
         assert!(
-            msg.contains("cannot assign from a compound-returning function call"),
-            "Error should mention compound-returning assignment restriction: {msg}"
+            result.is_ok(),
+            "compound return call assignment check migrated to analysis (A017), got: {:?}",
+            result.err()
         );
     }
 

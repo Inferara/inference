@@ -1,6 +1,8 @@
 # inference-analysis
 
-Static analysis pass for the Inference compiler. Runs after type checking, before code generation, and validates semantic invariants that the type system cannot express.
+Static analysis pass for the Inference compiler. Runs after type checking, before code generation, and validates semantic invariants beyond what the type system expresses.
+
+The type checker is responsible only for type correctness — blocking errors that would prevent further analysis. Everything else (control flow validation, lint warnings, codegen restrictions) lives here.
 
 ## Pipeline Position
 
@@ -42,6 +44,8 @@ Errors, warnings, and informational findings are partitioned by severity. The `a
 
 ## Rules
 
+### Control Flow (errors)
+
 | ID | Struct | Severity | What it checks |
 |----|--------|----------|----------------|
 | A001 | `BreakOutsideLoop` | error | `break` must be inside a loop body |
@@ -49,8 +53,37 @@ Errors, warnings, and informational findings are partitioned by severity. The `a
 | A003 | `ReturnInsideLoop` | error | `return` must not appear inside a loop body |
 | A004 | `InfiniteLoopWithoutBreak` | error | `loop { }` without a condition must contain a reachable `break` |
 | A005 | `ReturnInsideNonDetBlock` | error | `return` must not appear inside a non-deterministic block |
+| A006 | `UzumakiOutsideNonDetBlock` | error | uzumaki (`@`) must not appear outside a `forall`/`exists`/`assume`/`unique` block |
+| A007 | `MissingReturn` | error | non-void function must have a `return` statement on every branch (branch-aware) |
+| A008 | `StandaloneUzumaki` | error | uzumaki expression that is not assigned to a variable serves no purpose |
 
-The rationale behind A003 and A005 is that a single exit point per function simplifies formal verification. The rationale behind A002 is that `break` inside a non-deterministic block would prematurely terminate path exploration.
+A003 and A005 require a single exit point per function to simplify formal verification. A002 prevents `break` from prematurely terminating path exploration in non-det blocks.
+
+### Lint Warnings
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A009 | `EmptyEnumDefinition` | warning | enum with no variants is likely an oversight |
+| A010 | `MethodNeverAccessesSelf` | warning | method declares `self` but never reads or writes a field through it |
+| A011 | `EmptyStructDefinition` | warning | struct with no fields and no methods |
+
+### Codegen Restrictions (errors)
+
+These rules cover constructs that are valid in the type system but cannot yet be lowered by the code generator. They live here rather than in the type checker because they are implementation limits, not type errors.
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A012 | `ArrayLiteralAsArgument` | error | array literal passed directly as a function argument |
+| A013 | `StructLiteralAsArgument` | error | struct literal passed directly as a function argument |
+| A014 | `ArrayUzumakiAsArgument` | error | array uzumaki (`@`) passed directly as a function argument |
+| A015 | `CompoundLiteralPosition` | error | compound literal (array or struct) in an unsupported expression position |
+| A016 | `CompoundReturnCallPosition` | error | compound-returning function call in a general expression position |
+| A017 | `CompoundReturnCallAssignment` | error | compound-returning function call on the RHS of an assignment statement |
+| A018 | `MethodCallChainCompound` | error | method call chained on the result of a compound-returning function |
+| A019 | `ArrayIndex64Bit` | error | 64-bit integer used as an array index |
+| A022 | `LiteralOutOfRange` | error | numeric literal is outside the valid range for its declared type |
+| A023 | `UzumakiInReassignment` | error | uzumaki (`@`) used in a variable reassignment (only `let` initializers are supported) |
+| A024 | `ExternFunctionCall` | error | call to an external (`extern`) function (not yet implemented in codegen) |
 
 ## Diagnostic Output Format
 
@@ -138,6 +171,6 @@ cargo test -p inference-tests analysis
 
 ## Current Limitations
 
-1. All five rules are `Error` severity. No rules currently produce `Warning` or `Info` findings; those severity levels are wired and ready but unused.
-2. `ArrayLiteralAsArgument` and `CompoundReturnCallInExpressionPosition` are restrictions currently enforced in the type checker (`core/type-checker`) rather than here. They would fit naturally as analysis rules A006 and A007.
-3. The walker visits all statements but does not expose expression-level traversal. Rules that need to inspect expressions must do their own descent.
+1. The walker visits all statements but does not expose expression-level traversal. Rules that need to inspect expressions must do their own descent.
+2. Rules are executed sequentially on a single thread. The infrastructure is designed for parallel execution (rules are `Send + Sync`) but parallelism is not yet enabled.
+3. `AssignToImmutable` and `VariableShadowed` remain in the type checker because they depend on scope state that the type checker tracks but the analysis pass does not replicate.
