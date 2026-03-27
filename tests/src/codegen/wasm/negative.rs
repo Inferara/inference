@@ -222,7 +222,7 @@ mod unsupported_compound_types {
         assert!(result.is_err(), "array of arrays should fail codegen");
         let err = result.unwrap_err();
         assert!(
-            err.contains("Unsupported array element type"),
+            err.contains("unsupported position"),
             "unexpected error message: {err}"
         );
     }
@@ -235,7 +235,7 @@ mod unsupported_compound_types {
         assert!(result.is_err(), "array of structs should fail codegen");
         let err = result.unwrap_err();
         assert!(
-            err.contains("Unsupported array element type"),
+            err.contains("unsupported position"),
             "unexpected error message: {err}"
         );
     }

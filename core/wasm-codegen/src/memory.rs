@@ -32,6 +32,7 @@
 
 use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
+use inference_type_checker::typed_context::TypedContext;
 use rustc_hash::FxHashMap;
 use wasm_encoder::{Function, Instruction, MemArg};
 
@@ -77,6 +78,31 @@ pub(crate) struct ArraySlot {
     pub length: u32,
 }
 
+/// Describes the memory layout of a struct field that may itself be a compound type.
+///
+/// For primitive (scalar) fields, no sub-layout is needed -- load/store instructions
+/// operate directly. For compound fields (nested struct or array), the sub-layout
+/// caches the inner structure so that chained member access can resolve offsets
+/// without recomputation.
+///
+/// The nesting depth is bounded to one level by analysis rule A026.
+#[derive(Debug, Clone)]
+pub(crate) enum CompoundFieldLayout {
+    /// A primitive/scalar field -- load/store directly.
+    Scalar,
+    /// A field whose type is another struct.
+    NestedStruct {
+        fields: Vec<StructFieldSlot>,
+        total_size: u32,
+    },
+    /// A field whose type is an array.
+    NestedArray {
+        elem_kind: TypeInfoKind,
+        elem_size: u32,
+        length: u32,
+    },
+}
+
 /// Describes a single struct field's location within a struct instance.
 #[derive(Debug, Clone)]
 pub(crate) struct StructFieldSlot {
@@ -86,6 +112,8 @@ pub(crate) struct StructFieldSlot {
     pub offset: u32,
     /// The type kind of this field, used for load/store instruction selection.
     pub type_kind: TypeInfoKind,
+    /// The compound layout of this field, caching nested struct/array structure.
+    pub layout: CompoundFieldLayout,
 }
 
 /// Describes a struct instance's location within a stack frame.
@@ -109,11 +137,18 @@ pub(crate) struct StructSlot {
 /// matches C struct layout rules (`repr(C)`) and ensures arrays of structs
 /// would be correctly aligned.
 ///
+/// For compound fields (nested structs or arrays), the field's
+/// [`CompoundFieldLayout`] caches the inner layout so that chained member
+/// access can resolve offsets without recomputation.
+///
 /// # Panics
 ///
 /// Panics if a field has an unsupported type for `element_size()`.
 #[must_use = "returns the computed struct layout"]
-pub(crate) fn compute_struct_field_layout(struct_info: &StructInfo) -> (u32, Vec<StructFieldSlot>) {
+pub(crate) fn compute_struct_field_layout(
+    struct_info: &StructInfo,
+    ctx: &TypedContext,
+) -> (u32, Vec<StructFieldSlot>) {
     debug_assert!(
         !struct_info.fields.is_empty(),
         "compute_struct_field_layout called with empty struct"
@@ -123,18 +158,21 @@ pub(crate) fn compute_struct_field_layout(struct_info: &StructInfo) -> (u32, Vec
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
 
     for field in &struct_info.fields {
-        let size = element_size(&field.type_info.kind);
-        let align = size;
+        let size = type_byte_size(&field.type_info.kind, ctx);
+        let align = natural_alignment_for_type(&field.type_info.kind, ctx);
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
             max_align = align;
         }
 
+        let layout = compute_field_layout(&field.type_info.kind, ctx);
+
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
             offset: aligned_offset,
             type_kind: field.type_info.kind.clone(),
+            layout,
         });
 
         current_offset = aligned_offset
@@ -144,6 +182,26 @@ pub(crate) fn compute_struct_field_layout(struct_info: &StructInfo) -> (u32, Vec
 
     let total_size = align_to(current_offset, max_align);
     (total_size, field_slots)
+}
+
+/// Determines the [`CompoundFieldLayout`] for a given field type.
+fn compute_field_layout(kind: &TypeInfoKind, ctx: &TypedContext) -> CompoundFieldLayout {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            if let Some(inner_struct) = ctx.lookup_struct(name) {
+                let (total_size, fields) = compute_struct_field_layout(&inner_struct, ctx);
+                CompoundFieldLayout::NestedStruct { fields, total_size }
+            } else {
+                CompoundFieldLayout::Scalar
+            }
+        }
+        TypeInfoKind::Array(elem_type, length) => CompoundFieldLayout::NestedArray {
+            elem_kind: elem_type.kind.clone(),
+            elem_size: type_byte_size(&elem_type.kind, ctx),
+            length: *length,
+        },
+        _ => CompoundFieldLayout::Scalar,
+    }
 }
 
 /// Per-function stack frame layout for compound type allocations (arrays and structs).
@@ -176,6 +234,105 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
         // i32, u32, i64, u64. This arm is unreachable for valid programs. When
         // struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type: {kind:?}"),
+    }
+}
+
+/// Computes the byte size for any type, including compound types.
+///
+/// For primitive types (Bool, Number), delegates to [`element_size()`].
+/// For `Struct(name)` and `Custom(name)`, looks up the struct via `ctx` and
+/// computes layout recursively. For `Array(elem, len)`, recurses into the
+/// element type and multiplies by length.
+///
+/// The recursion depth is bounded to 2 levels by analysis rule A026
+/// (one level of nesting). A debug-only visited set guards against cycles
+/// as defense-in-depth (the type checker catches cycles before codegen runs).
+#[must_use = "returns type size in bytes"]
+pub(crate) fn type_byte_size(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
+    #[cfg(debug_assertions)]
+    {
+        let mut visited = std::collections::HashSet::new();
+        type_byte_size_checked(kind, ctx, &mut visited)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        type_byte_size_inner(kind, ctx)
+    }
+}
+
+#[cfg(debug_assertions)]
+fn type_byte_size_checked(
+    kind: &TypeInfoKind,
+    ctx: &TypedContext,
+    visited: &mut std::collections::HashSet<String>,
+) -> u32 {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            assert!(
+                visited.insert(name.clone()),
+                "cycle detected in type_byte_size for struct `{name}`"
+            );
+            if let Some(struct_info) = ctx.lookup_struct(name) {
+                let (total_size, _) = compute_struct_field_layout(&struct_info, ctx);
+                total_size
+            } else {
+                element_size(kind)
+            }
+        }
+        TypeInfoKind::Array(elem_type, length) => {
+            let elem_sz = type_byte_size_checked(&elem_type.kind, ctx, visited);
+            elem_sz.checked_mul(*length).expect(
+                "Array byte count overflow: element size * length exceeds u32::MAX",
+            )
+        }
+        _ => element_size(kind),
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn type_byte_size_inner(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            if let Some(struct_info) = ctx.lookup_struct(name) {
+                let (total_size, _) = compute_struct_field_layout(&struct_info, ctx);
+                total_size
+            } else {
+                element_size(kind)
+            }
+        }
+        TypeInfoKind::Array(elem_type, length) => {
+            let elem_sz = type_byte_size_inner(&elem_type.kind, ctx);
+            elem_sz.checked_mul(*length).expect(
+                "Array byte count overflow: element size * length exceeds u32::MAX",
+            )
+        }
+        _ => element_size(kind),
+    }
+}
+
+/// Returns the natural alignment in bytes for any type, including compound types.
+///
+/// For primitive types, alignment equals size. For structs, alignment is the
+/// maximum alignment of any field. For arrays, alignment is the element alignment.
+#[must_use = "returns alignment in bytes"]
+pub(crate) fn natural_alignment_for_type(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            if let Some(struct_info) = ctx.lookup_struct(name) {
+                struct_info
+                    .fields
+                    .iter()
+                    .map(|f| natural_alignment_for_type(&f.type_info.kind, ctx))
+                    .max()
+                    .unwrap_or(1)
+            } else {
+                element_size(kind)
+            }
+        }
+        TypeInfoKind::Array(elem_type, _) => {
+            natural_alignment_for_type(&elem_type.kind, ctx)
+        }
+        _ => element_size(kind),
     }
 }
 
@@ -638,6 +795,7 @@ mod tests {
     use inference_ast::nodes::Visibility;
     use inference_type_checker::type_info::TypeInfo;
     use inference_type_checker::{StructFieldInfo, StructInfo};
+    use inference_type_checker::typed_context::TypedContext;
 
     #[test]
     fn align_to_frame_zero() {
@@ -877,7 +1035,7 @@ mod tests {
             "Single",
             vec![make_field("x", TypeInfoKind::Number(NumberType::I32))],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(total_size, 4);
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "x");
@@ -893,7 +1051,7 @@ mod tests {
                 make_field("y", TypeInfoKind::Number(NumberType::I32)),
             ],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(total_size, 8);
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");
@@ -912,7 +1070,7 @@ mod tests {
                 make_field("val", TypeInfoKind::Number(NumberType::I64)),
             ],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(fields[0].name, "flag");
         assert_eq!(fields[0].offset, 0);
 
@@ -938,7 +1096,7 @@ mod tests {
                 make_field("i", TypeInfoKind::Number(NumberType::U64)),
             ],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(fields.len(), 9);
         assert_eq!(fields[0].offset, 0); // bool: 1 byte
         assert_eq!(fields[1].offset, 1); // i8: 1 byte, align 1
@@ -961,7 +1119,7 @@ mod tests {
                 make_field("small", TypeInfoKind::Bool),
             ],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(fields[0].offset, 0);
 
         assert_eq!(fields[1].offset, 8);
@@ -972,7 +1130,7 @@ mod tests {
     #[test]
     fn struct_layout_single_bool() {
         let layout = make_struct_info("Flag", vec![make_field("b", TypeInfoKind::Bool)]);
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(total_size, 1);
         assert_eq!(fields[0].offset, 0);
     }
@@ -986,7 +1144,7 @@ mod tests {
                 make_field("b", TypeInfoKind::Number(NumberType::I32)),
             ],
         );
-        let (total_size, fields) = compute_struct_field_layout(&layout);
+        let (total_size, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(fields[0].offset, 0);
 
         assert_eq!(fields[1].offset, 4);
@@ -1003,8 +1161,189 @@ mod tests {
                 make_field("y", TypeInfoKind::Number(NumberType::I64)),
             ],
         );
-        let (_, fields) = compute_struct_field_layout(&layout);
+        let (_, fields) = compute_struct_field_layout(&layout, &TypedContext::default());
         assert_eq!(fields[0].type_kind, TypeInfoKind::Number(NumberType::I32));
         assert_eq!(fields[1].type_kind, TypeInfoKind::Number(NumberType::I64));
+    }
+
+    #[test]
+    fn type_byte_size_primitive_bool() {
+        let ctx = TypedContext::default();
+        assert_eq!(type_byte_size(&TypeInfoKind::Bool, &ctx), 1);
+    }
+
+    #[test]
+    fn type_byte_size_primitive_i32() {
+        let ctx = TypedContext::default();
+        assert_eq!(
+            type_byte_size(&TypeInfoKind::Number(NumberType::I32), &ctx),
+            4
+        );
+    }
+
+    #[test]
+    fn type_byte_size_primitive_i64() {
+        let ctx = TypedContext::default();
+        assert_eq!(
+            type_byte_size(&TypeInfoKind::Number(NumberType::I64), &ctx),
+            8
+        );
+    }
+
+    #[test]
+    fn type_byte_size_array_of_i32() {
+        let ctx = TypedContext::default();
+        let kind = TypeInfoKind::Array(
+            Box::new(TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            }),
+            3,
+        );
+        assert_eq!(type_byte_size(&kind, &ctx), 12);
+    }
+
+    #[test]
+    fn type_byte_size_array_of_i64() {
+        let ctx = TypedContext::default();
+        let kind = TypeInfoKind::Array(
+            Box::new(TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            }),
+            3,
+        );
+        assert_eq!(type_byte_size(&kind, &ctx), 24);
+    }
+
+    #[test]
+    fn type_byte_size_nested_array() {
+        let ctx = TypedContext::default();
+        let inner_array = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                3,
+            ),
+            type_params: vec![],
+        };
+        let kind = TypeInfoKind::Array(Box::new(inner_array), 2);
+        assert_eq!(
+            type_byte_size(&kind, &ctx),
+            24,
+            "[[i32; 3]; 2] = 4*3*2 = 24"
+        );
+    }
+
+    #[test]
+    fn natural_alignment_for_type_i32() {
+        let ctx = TypedContext::default();
+        assert_eq!(
+            natural_alignment_for_type(&TypeInfoKind::Number(NumberType::I32), &ctx),
+            4
+        );
+    }
+
+    #[test]
+    fn natural_alignment_for_type_i64() {
+        let ctx = TypedContext::default();
+        assert_eq!(
+            natural_alignment_for_type(&TypeInfoKind::Number(NumberType::I64), &ctx),
+            8
+        );
+    }
+
+    #[test]
+    fn natural_alignment_for_type_array_of_i64() {
+        let ctx = TypedContext::default();
+        let kind = TypeInfoKind::Array(
+            Box::new(TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            }),
+            3,
+        );
+        assert_eq!(
+            natural_alignment_for_type(&kind, &ctx),
+            8,
+            "array of i64 alignment = element alignment = 8"
+        );
+    }
+
+    #[test]
+    fn natural_alignment_for_type_nested_array_i32() {
+        let ctx = TypedContext::default();
+        let inner_array = TypeInfo {
+            kind: TypeInfoKind::Array(
+                Box::new(TypeInfo {
+                    kind: TypeInfoKind::Number(NumberType::I32),
+                    type_params: vec![],
+                }),
+                3,
+            ),
+            type_params: vec![],
+        };
+        let kind = TypeInfoKind::Array(Box::new(inner_array), 2);
+        assert_eq!(
+            natural_alignment_for_type(&kind, &ctx),
+            4,
+            "[[i32; 3]; 2] alignment = i32 alignment = 4"
+        );
+    }
+
+    #[test]
+    fn struct_layout_field_has_scalar_layout() {
+        let ctx = TypedContext::default();
+        let info = make_struct_info(
+            "Point",
+            vec![
+                make_field("x", TypeInfoKind::Number(NumberType::I32)),
+                make_field("y", TypeInfoKind::Number(NumberType::I32)),
+            ],
+        );
+        let (_, fields) = compute_struct_field_layout(&info, &ctx);
+        assert!(matches!(fields[0].layout, CompoundFieldLayout::Scalar));
+        assert!(matches!(fields[1].layout, CompoundFieldLayout::Scalar));
+    }
+
+    #[test]
+    fn struct_layout_array_field_has_nested_array_layout() {
+        let ctx = TypedContext::default();
+        let info = make_struct_info(
+            "HasArray",
+            vec![
+                make_field(
+                    "arr",
+                    TypeInfoKind::Array(
+                        Box::new(TypeInfo {
+                            kind: TypeInfoKind::Number(NumberType::I32),
+                            type_params: vec![],
+                        }),
+                        3,
+                    ),
+                ),
+                make_field("val", TypeInfoKind::Number(NumberType::I32)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&info, &ctx);
+        assert_eq!(fields[0].name, "arr");
+        assert_eq!(fields[0].offset, 0);
+        assert!(
+            matches!(
+                fields[0].layout,
+                CompoundFieldLayout::NestedArray {
+                    elem_size: 4,
+                    length: 3,
+                    ..
+                }
+            ),
+            "array field should have NestedArray layout"
+        );
+        assert_eq!(fields[1].name, "val");
+        assert_eq!(fields[1].offset, 12);
+        assert!(matches!(fields[1].layout, CompoundFieldLayout::Scalar));
+        assert_eq!(total_size, 16, "12 bytes array + 4 bytes i32 = 16");
     }
 }

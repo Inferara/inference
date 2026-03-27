@@ -78,9 +78,9 @@ use wasm_encoder::{
 
 use crate::memory::{
     self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot,
-    align_to, align_to_frame, compute_struct_field_layout, element_size, emit_array_param_copy,
+    align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy,
     emit_sret_copy, emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue,
-    emit_struct_param_copy,
+    emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -270,7 +270,7 @@ impl Compiler {
         let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
         match &return_type_info.kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = element_size(&elem_type.kind);
+                let elem_sz = type_byte_size(&elem_type.kind, ctx);
                 self.func_array_returns.insert(
                     name,
                     ArrayReturnInfo {
@@ -282,7 +282,7 @@ impl Compiler {
             }
             TypeInfoKind::Custom(custom_name) => {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx);
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
@@ -749,11 +749,12 @@ impl Compiler {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = element_size(&elem_type.kind);
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx);
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let aligned_offset = align_to(current_offset, elem_sz);
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx);
+                            let aligned_offset = align_to(current_offset, align);
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -769,11 +770,11 @@ impl Compiler {
                         TypeInfoKind::Custom(custom_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info);
+                                    compute_struct_field_layout(&struct_info, ctx);
                                 if total_size > 0 {
                                     let max_field_align = field_slots
                                         .iter()
-                                        .map(|f| element_size(&f.type_kind))
+                                        .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
                                         .max()
                                         .unwrap_or(1);
                                     let aligned_offset = align_to(current_offset, max_field_align);
@@ -799,11 +800,12 @@ impl Compiler {
                          this indicates a bug in traverse_t_ast_with_compiler",
                     );
                     if let Some(struct_info) = ctx.lookup_struct(struct_name) {
-                        let (total_size, field_slots) = compute_struct_field_layout(&struct_info);
+                        let (total_size, field_slots) =
+                            compute_struct_field_layout(&struct_info, ctx);
                         if total_size > 0 {
                             let max_field_align = field_slots
                                 .iter()
-                                .map(|f| element_size(&f.type_kind))
+                                .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
                                 .max()
                                 .unwrap_or(1);
                             let aligned_offset = align_to(current_offset, max_field_align);
@@ -869,11 +871,12 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = element_size(&elem_type.kind);
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx);
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let aligned_offset = align_to(*current_offset, elem_sz);
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx);
+                            let aligned_offset = align_to(*current_offset, align);
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -888,11 +891,11 @@ impl Compiler {
                         TypeInfoKind::Struct(struct_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info);
+                                    compute_struct_field_layout(&struct_info, ctx);
                                 if total_size > 0 {
                                     let max_field_align = field_slots
                                         .iter()
-                                        .map(|f| element_size(&f.type_kind))
+                                        .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
                                         .max()
                                         .unwrap_or(1);
                                     let aligned_offset = align_to(*current_offset, max_field_align);
@@ -2253,7 +2256,7 @@ impl Compiler {
                 .lookup_struct(struct_name)
                 .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
             if !struct_info.fields.is_empty() {
-                let (_, computed_fields) = compute_struct_field_layout(&struct_info);
+                let (_, computed_fields) = compute_struct_field_layout(&struct_info, ctx);
                 for field in &computed_fields {
                     self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
                 }
@@ -2830,7 +2833,7 @@ impl Compiler {
             .lookup_struct(struct_name)
             .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
-        let (_, field_slots) = compute_struct_field_layout(&struct_info);
+        let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx);
         let field_slot = field_slots
             .iter()
             .find(|fs| fs.name == *field_name)
