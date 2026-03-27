@@ -4,4 +4,5 @@ mod rules_a020;
 mod rules_a023;
 mod rules_a024;
 mod rules_a025;
+mod rules_a026_a028;
 mod walker_tests;

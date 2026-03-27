@@ -144,6 +144,20 @@ pub enum AnalysisDiagnostic {
 
     #[error("variable `{name}` must be initialized at declaration; use `let {name}: <type> = <value>;`")]
     UninitializedVariable { name: String, location: Location },
+
+    #[error("struct `{outer}` field `{field}` has type `{ty}` which contains nested compound types; only one level of nesting is supported")]
+    NestedCompoundDepthExceeded {
+        outer: String,
+        field: String,
+        ty: String,
+        location: Location,
+    },
+
+    #[error("uzumaki (@) cannot be assigned to struct `{name}` because it contains compound fields; uzumaki is only supported for flat structs (all scalar fields) and scalar types")]
+    UzumakiOnNestedStruct { name: String, location: Location },
+
+    #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
+    UzumakiOnStructInArray { location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -173,7 +187,10 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::LiteralOutOfRange { location, .. }
             | AnalysisDiagnostic::UzumakiInReassignment { location }
             | AnalysisDiagnostic::ExternFunctionCall { location, .. }
-            | AnalysisDiagnostic::UninitializedVariable { location, .. } => location,
+            | AnalysisDiagnostic::UninitializedVariable { location, .. }
+            | AnalysisDiagnostic::NestedCompoundDepthExceeded { location, .. }
+            | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
+            | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. } => location,
         }
     }
 
@@ -206,6 +223,9 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UzumakiInReassignment { .. } => "A023",
             AnalysisDiagnostic::ExternFunctionCall { .. } => "A024",
             AnalysisDiagnostic::UninitializedVariable { .. } => "A025",
+            AnalysisDiagnostic::NestedCompoundDepthExceeded { .. } => "A026",
+            AnalysisDiagnostic::UzumakiOnNestedStruct { .. } => "A027",
+            AnalysisDiagnostic::UzumakiOnStructInArray { .. } => "A028",
         }
     }
 }

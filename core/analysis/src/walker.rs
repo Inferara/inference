@@ -135,6 +135,34 @@ pub(crate) fn walk_expr(
     }
 }
 
+/// Returns true if the type is a compound type (struct, custom, or array).
+pub(crate) fn is_compound_type(kind: &TypeInfoKind) -> bool {
+    matches!(
+        kind,
+        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+    )
+}
+
+/// Returns true if a compound type contains compound fields inside it.
+///
+/// - **Struct/Custom**: looks up the struct definition and checks whether any
+///   of its fields are themselves compound types.
+/// - **Array**: recurses into the element type.
+/// - **Scalars**: returns false.
+pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            ctx.lookup_struct(name).is_some_and(|s| {
+                s.fields
+                    .iter()
+                    .any(|f| is_compound_type(&f.type_info.kind))
+            })
+        }
+        TypeInfoKind::Array(elem, _) => has_compound_fields(ctx, &elem.kind),
+        _ => false,
+    }
+}
+
 /// Returns `true` when `expr_id` is a function call that returns a compound
 /// type (array, struct, or custom). Used by multiple rules to detect sret
 /// calling convention restrictions.

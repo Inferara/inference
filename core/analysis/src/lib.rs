@@ -36,7 +36,7 @@
 //!
 //! - A025: Variable declarations must have an initializer
 //!
-//! ### Codegen Restrictions (A012–A019, A022–A024)
+//! ### Codegen Restrictions (A012–A019, A022–A028)
 //!
 //! These rules describe constructs that are valid in the type system but cannot
 //! be lowered by the current code generator.
@@ -51,6 +51,9 @@
 //! - A022: Numeric literal out of range for its declared type
 //! - A023: Uzumaki used in a variable reassignment (only `let` initializers allowed)
 //! - A024: Call to an external (`extern`) function
+//! - A026: Nested compound type depth exceeds one level
+//! - A027: Uzumaki on struct with compound fields (nested struct)
+//! - A028: Uzumaki on array of structs
 //!
 //! ## Pipeline Position
 //!
@@ -148,6 +151,9 @@ mod tests {
             AnalysisDiagnostic::UzumakiInReassignment { location: dummy_location() },
             AnalysisDiagnostic::ExternFunctionCall { name: "print".to_string(), location: dummy_location() },
             AnalysisDiagnostic::UninitializedVariable { name: "x".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::NestedCompoundDepthExceeded { outer: "Outer".to_string(), field: "inner".to_string(), ty: "Inner".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::UzumakiOnNestedStruct { name: "Outer".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::UzumakiOnStructInArray { location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
