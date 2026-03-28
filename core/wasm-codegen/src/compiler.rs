@@ -78,9 +78,9 @@ use wasm_encoder::{
 
 use crate::memory::{
     self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot,
-    align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy, emit_sret_copy,
-    emit_sret_element_addr, emit_stack_epilogue, emit_stack_prologue, emit_struct_param_copy,
-    natural_alignment_for_type, type_byte_size,
+    align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy,
+    emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue, emit_stack_prologue,
+    emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -126,7 +126,6 @@ struct ArrayReturnInfo {
 /// know the sret calling convention parameters at code generation time.
 #[derive(Debug, Clone)]
 struct StructReturnInfo {
-    struct_name: String,
     total_size: u32,
     field_slots: Vec<memory::StructFieldSlot>,
 }
@@ -286,7 +285,6 @@ impl Compiler {
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
-                            struct_name: custom_name.clone(),
                             total_size,
                             field_slots,
                         },
@@ -854,6 +852,7 @@ impl Compiler {
     }
 
     /// Recursively walks a block collecting array and struct variable declarations.
+    #[allow(clippy::too_many_lines)]
     fn collect_compound_slots(
         arena: &AstArena,
         block_id: BlockId,
@@ -1896,7 +1895,7 @@ impl Compiler {
                 for (i, element_id) in elements.iter().enumerate() {
                     #[allow(clippy::cast_possible_truncation)]
                     let byte_offset = (i as u32) * elem_size;
-                    emit_sret_element_addr(self.func(), sret_idx, byte_offset);
+                    emit_ptr_offset_addr(self.func(), sret_idx, byte_offset);
                     self.lower_expression(arena, *element_id, ctx, None);
                     self.func().instruction(&store_instr);
                 }
@@ -1934,14 +1933,7 @@ impl Compiler {
             Expr::StructLiteral { fields, .. } => {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
                 let field_slots = return_info.field_slots.clone();
-                self.lower_sret_struct_literal_fields(
-                    arena,
-                    &fields,
-                    &field_slots,
-                    sret_idx,
-                    0,
-                    ctx,
-                );
+                self.lower_struct_literal_fields(arena, &fields, &field_slots, sret_idx, 0, ctx);
             }
             Expr::FunctionCall { function, args, .. } => {
                 self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
@@ -1952,80 +1944,6 @@ impl Compiler {
         }
 
         Ok(())
-    }
-
-    /// Emits stores for struct literal fields to an sret destination pointer.
-    ///
-    /// For scalar fields, emits `sret_ptr + base_offset + field.offset` then a store.
-    /// For nested struct literal fields, recurses with `base_offset + field.offset`.
-    /// For compound fields with non-literal values, emits `memory.copy`.
-    fn lower_sret_struct_literal_fields(
-        &mut self,
-        arena: &AstArena,
-        fields: &[(IdentId, ExprId)],
-        field_slots: &[memory::StructFieldSlot],
-        sret_idx: u32,
-        base_offset: u32,
-        ctx: &TypedContext,
-    ) {
-        for &(field_name_id, field_value_expr_id) in fields {
-            let field_name = &arena[field_name_id].name;
-            let field_slot = field_slots
-                .iter()
-                .find(|fs| fs.name == *field_name)
-                .unwrap_or_else(|| {
-                    panic!("Struct field '{field_name}' not found in sret return layout")
-                });
-
-            let offset = base_offset + field_slot.offset;
-
-            match &field_slot.layout {
-                memory::CompoundFieldLayout::NestedStruct {
-                    fields: nested_slots,
-                    total_size,
-                } => {
-                    if let Expr::StructLiteral {
-                        fields: inner_fields,
-                        ..
-                    } = &arena[field_value_expr_id].kind
-                    {
-                        let inner_fields: Vec<_> =
-                            inner_fields.iter().map(|(id, expr)| (*id, *expr)).collect();
-                        let nested_slots = nested_slots.clone();
-                        self.lower_sret_struct_literal_fields(
-                            arena,
-                            &inner_fields,
-                            &nested_slots,
-                            sret_idx,
-                            offset,
-                            ctx,
-                        );
-                    } else {
-                        emit_sret_element_addr(self.func(), sret_idx, offset);
-                        self.lower_expression(arena, field_value_expr_id, ctx, None);
-                        #[allow(clippy::cast_possible_wrap)]
-                        self.func()
-                            .instruction(&Instruction::I32Const(*total_size as i32));
-                        self.func().instruction(&Instruction::MemoryCopy {
-                            src_mem: MEMORY_INDEX,
-                            dst_mem: MEMORY_INDEX,
-                        });
-                    }
-                }
-                memory::CompoundFieldLayout::NestedArray { .. } => {
-                    todo!(
-                        "Array-in-struct sret codegen not yet implemented (Phase 4): \
-                         field '{field_name}' is an array inside a struct literal"
-                    );
-                }
-                memory::CompoundFieldLayout::Scalar => {
-                    let store_instr = memory::store_instruction(&field_slot.type_kind);
-                    emit_sret_element_addr(self.func(), sret_idx, offset);
-                    self.lower_expression(arena, field_value_expr_id, ctx, None);
-                    self.func().instruction(&store_instr);
-                }
-            }
-        }
     }
 
     /// Forwards the sret pointer to a callee that also uses sret convention.
@@ -2741,12 +2659,12 @@ impl Compiler {
         let frame_ptr_local = layout.frame_ptr_local;
         let field_slots = slot.fields.clone();
 
-        self.lower_struct_literal_fields_at_offset(
+        self.lower_struct_literal_fields(
             arena,
             fields,
             &field_slots,
-            slot_offset,
             frame_ptr_local,
+            slot_offset,
             ctx,
         );
 
@@ -2760,19 +2678,24 @@ impl Compiler {
         }
     }
 
-    /// Emits stores for struct literal fields at a given base offset from the frame pointer.
+    /// Emits stores for struct literal fields at a given base offset from a base pointer.
     ///
-    /// For scalar fields, emits `frame_ptr + base_offset + field.offset` then a store.
+    /// Handles both sret return destinations and frame-pointer-based local variable
+    /// initialization. The `base_ptr_local` is the WASM local holding the destination
+    /// pointer (either sret param or frame pointer), and `base_offset` is the byte
+    /// offset within that region.
+    ///
+    /// For scalar fields, emits `base_ptr + base_offset + field.offset` then a store.
     /// For nested struct literal fields, recurses with `base_offset + field.offset`.
     /// For compound fields with non-literal values (identifiers, function calls), emits
-    /// `memory.copy` from the source pointer to `frame_ptr + base_offset + field.offset`.
-    fn lower_struct_literal_fields_at_offset(
+    /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
+    fn lower_struct_literal_fields(
         &mut self,
         arena: &AstArena,
         fields: &[(IdentId, ExprId)],
         field_slots: &[memory::StructFieldSlot],
+        base_ptr_local: u32,
         base_offset: u32,
-        frame_ptr_local: u32,
         ctx: &TypedContext,
     ) {
         for &(field_name_id, field_value_expr_id) in fields {
@@ -2782,8 +2705,7 @@ impl Compiler {
                 .find(|fs| fs.name == *field_name)
                 .unwrap_or_else(|| panic!("Struct field '{field_name}' not found in layout"));
 
-            #[allow(clippy::cast_possible_wrap)]
-            let byte_offset = (base_offset + field_slot.offset) as i32;
+            let offset = base_offset + field_slot.offset;
 
             match &field_slot.layout {
                 memory::CompoundFieldLayout::NestedStruct {
@@ -2798,21 +2720,16 @@ impl Compiler {
                         let inner_fields: Vec<_> =
                             inner_fields.iter().map(|(id, expr)| (*id, *expr)).collect();
                         let nested_slots = nested_slots.clone();
-                        self.lower_struct_literal_fields_at_offset(
+                        self.lower_struct_literal_fields(
                             arena,
                             &inner_fields,
                             &nested_slots,
-                            base_offset + field_slot.offset,
-                            frame_ptr_local,
+                            base_ptr_local,
+                            offset,
                             ctx,
                         );
                     } else {
-                        // dest: frame_ptr + base_offset + field.offset
-                        self.func()
-                            .instruction(&Instruction::LocalGet(frame_ptr_local));
-                        self.func().instruction(&Instruction::I32Const(byte_offset));
-                        self.func().instruction(&Instruction::I32Add);
-                        // src: RHS expression (pointer to compound)
+                        emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
                         #[allow(clippy::cast_possible_wrap)]
                         self.func()
@@ -2823,18 +2740,42 @@ impl Compiler {
                         });
                     }
                 }
-                memory::CompoundFieldLayout::NestedArray { .. } => {
-                    todo!(
-                        "Array-in-struct codegen not yet implemented (Phase 4): \
-                         field '{field_name}' is an array inside a struct literal"
-                    );
+                memory::CompoundFieldLayout::NestedArray {
+                    elem_kind,
+                    elem_size,
+                    length,
+                } => {
+                    if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
+                        debug_assert!(
+                            !matches!(elem_kind, TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)),
+                            "Array literal element-wise store requires scalar element type, \
+                             got {elem_kind:?}"
+                        );
+                        let store_instr = memory::store_instruction(elem_kind);
+                        let elements: Vec<_> = elements.clone();
+                        for (i, &element_id) in elements.iter().enumerate() {
+                            #[allow(clippy::cast_possible_truncation)]
+                            let elem_byte_offset = offset + (i as u32) * elem_size;
+                            emit_ptr_offset_addr(self.func(), base_ptr_local, elem_byte_offset);
+                            self.lower_expression(arena, element_id, ctx, None);
+                            self.func().instruction(&store_instr);
+                        }
+                    } else {
+                        let array_byte_size = elem_size * length;
+                        emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
+                        self.lower_expression(arena, field_value_expr_id, ctx, None);
+                        #[allow(clippy::cast_possible_wrap)]
+                        self.func()
+                            .instruction(&Instruction::I32Const(array_byte_size as i32));
+                        self.func().instruction(&Instruction::MemoryCopy {
+                            src_mem: MEMORY_INDEX,
+                            dst_mem: MEMORY_INDEX,
+                        });
+                    }
                 }
                 memory::CompoundFieldLayout::Scalar => {
                     let store_instr = memory::store_instruction(&field_slot.type_kind);
-                    self.func()
-                        .instruction(&Instruction::LocalGet(frame_ptr_local));
-                    self.func().instruction(&Instruction::I32Const(byte_offset));
-                    self.func().instruction(&Instruction::I32Add);
+                    emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                     self.lower_expression(arena, field_value_expr_id, ctx, None);
                     self.func().instruction(&store_instr);
                 }
@@ -2887,21 +2828,19 @@ impl Compiler {
         }
     }
 
-    /// Lowers a member access write (e.g., `p.x = 42`) to a store at struct pointer + field offset.
+    /// Lowers a member access write (e.g., `p.x = 42`) to WASM instructions.
     ///
-    /// The generated WASM code:
-    /// 1. Evaluates the struct expression (pushes the struct base pointer)
-    /// 2. Adds the field's byte offset
-    /// 3. Evaluates the RHS value expression
-    /// 4. Emits the appropriate store instruction for the field type
-    ///
+    /// For scalar fields, emits a store at struct pointer + field offset:
     /// ```text
-    /// <lower expr>           ;; struct pointer
+    /// <lower struct expr>      ;; struct base pointer
     /// i32.const <field_offset>
     /// i32.add
-    /// <lower RHS>            ;; value to store
-    /// <store instruction>    ;; store field value
+    /// <lower RHS>              ;; value to store
+    /// <store instruction>
     /// ```
+    ///
+    /// For compound fields (nested structs or arrays), emits a `memory.copy`
+    /// from the RHS pointer to the destination field address.
     fn lower_member_access_write(
         &mut self,
         arena: &AstArena,

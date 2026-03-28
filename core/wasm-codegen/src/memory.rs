@@ -164,14 +164,14 @@ pub(crate) fn compute_struct_field_layout(
     struct_info: &StructInfo,
     ctx: &TypedContext,
 ) -> (u32, Vec<StructFieldSlot>) {
-    let mut visited = FxHashSet::default();
-    compute_struct_field_layout_with_visited(struct_info, ctx, &mut visited)
+    let visited = FxHashSet::default();
+    compute_struct_field_layout_with_visited(struct_info, ctx, &visited)
 }
 
 fn compute_struct_field_layout_with_visited(
     struct_info: &StructInfo,
     ctx: &TypedContext,
-    visited: &mut FxHashSet<String>,
+    visited: &FxHashSet<String>,
 ) -> (u32, Vec<StructFieldSlot>) {
     debug_assert!(
         !struct_info.fields.is_empty(),
@@ -181,16 +181,22 @@ fn compute_struct_field_layout_with_visited(
     let mut max_align: u32 = 1;
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
 
+    // Each field gets a fresh clone of the ancestor visited set so that
+    // sibling fields of the same struct type (e.g. `a: Point; b: Point`)
+    // don't falsely trigger cycle detection against each other.
     for field in &struct_info.fields {
-        let size = type_byte_size_with_visited(&field.type_info.kind, ctx, visited);
-        let align = natural_alignment_for_type(&field.type_info.kind, ctx);
+        let size =
+            type_byte_size_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
+        let align =
+            natural_alignment_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
             max_align = align;
         }
 
-        let layout = compute_field_layout_with_visited(&field.type_info.kind, ctx, visited);
+        let layout =
+            compute_field_layout_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
 
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
@@ -262,7 +268,7 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
         // The type checker restricts array element types to: bool, i8, u8, i16, u16,
         // i32, u32, i64, u64. This arm is unreachable for valid programs. When
         // struct/string array elements are supported, this will need to be extended.
-        _ => todo!("Unsupported array element type: {kind:?}"),
+        _ => todo!("Unsupported type for byte-size computation: {kind:?}"),
     }
 }
 
@@ -769,18 +775,18 @@ pub(crate) fn emit_sret_copy(
     });
 }
 
-/// Emits the address computation `sret + byte_offset` onto the WASM stack.
+/// Emits the address computation `base_ptr + byte_offset` onto the WASM stack.
 ///
-/// Used when writing individual elements to the sret destination (e.g., for
-/// `return [1, 2, 3]` in an sret function).
+/// Used when writing individual elements to a destination pointer, such as
+/// sret return buffers or frame-pointer-based struct/array slots.
 ///
 /// ```text
-/// local.get $sret
+/// local.get $base_ptr
 /// i32.const <byte_offset>   ;; omitted when offset is 0
 /// i32.add                   ;; omitted when offset is 0
 /// ```
-pub(crate) fn emit_sret_element_addr(func: &mut Function, sret_local: u32, byte_offset: u32) {
-    func.instruction(&Instruction::LocalGet(sret_local));
+pub(crate) fn emit_ptr_offset_addr(func: &mut Function, base_ptr_local: u32, byte_offset: u32) {
+    func.instruction(&Instruction::LocalGet(base_ptr_local));
     if byte_offset > 0 {
         #[allow(clippy::cast_possible_wrap)]
         func.instruction(&Instruction::I32Const(byte_offset as i32));

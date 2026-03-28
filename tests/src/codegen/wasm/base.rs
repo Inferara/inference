@@ -255,7 +255,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -445,7 +449,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "identity_i32")
             .unwrap_or_else(|e| panic!("Failed to get 'identity_i32': {e}"));
         assert_eq!(
-            identity_i32.call(&mut store, 42).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            identity_i32
+                .call(&mut store, 42)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             42
         );
 
@@ -463,7 +469,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "identity_bool")
             .unwrap_or_else(|e| panic!("Failed to get 'identity_bool': {e}"));
         assert_eq!(
-            identity_bool.call(&mut store, 1).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            identity_bool
+                .call(&mut store, 1)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             1
         );
 
@@ -527,7 +535,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "call_zero")
             .unwrap_or_else(|e| panic!("Failed to get 'call_zero': {e}"));
         assert_eq!(
-            call_zero.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            call_zero
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             0
         );
 
@@ -555,7 +565,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "let_from_call")
             .unwrap_or_else(|e| panic!("Failed to get 'let_from_call': {e}"));
         assert_eq!(
-            let_from_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            let_from_call
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             0
         );
 
@@ -563,7 +575,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "forward_call")
             .unwrap_or_else(|e| panic!("Failed to get 'forward_call': {e}"));
         assert_eq!(
-            forward_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            forward_call
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             99
         );
     }
@@ -615,7 +629,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -694,7 +712,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -777,7 +799,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -890,7 +916,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -1009,9 +1039,7 @@ mod base_codegen_tests {
         let i32_array_fn: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i32_array")
             .expect("Failed to get 'i32_array'");
-        let result = i32_array_fn
-            .call(&mut store, ())
-            .expect("i32_array failed");
+        let result = i32_array_fn.call(&mut store, ()).expect("i32_array failed");
         assert_eq!(result, 0, "i32_array should return 0");
         // After call, stack pointer should be restored
         let sp_after = stack_pointer.get(&mut store).i32().unwrap();
@@ -1247,7 +1275,9 @@ mod base_codegen_tests {
         let read_middle: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "read_middle")
             .expect("Failed to get 'read_middle'");
-        let result = read_middle.call(&mut store, ()).expect("read_middle failed");
+        let result = read_middle
+            .call(&mut store, ())
+            .expect("read_middle failed");
         assert_eq!(result, 20, "arr[1] of [10, 20, 30] should be 20");
 
         // read_with_variable: arr[i] of [100, 200, 300]
@@ -1391,10 +1421,7 @@ mod base_codegen_tests {
         let result = write_multiple
             .call(&mut store, ())
             .expect("write_multiple failed");
-        assert_eq!(
-            result, 60,
-            "arr[0]+arr[1]+arr[2] after writes should be 60"
-        );
+        assert_eq!(result, 60, "arr[0]+arr[1]+arr[2] after writes should be 60");
 
         // swap_elements: arr=[1,2], swap -> arr=[2,1], return arr[0]*10+arr[1] -> 21
         let swap_elements: wasmtime::TypedFunc<(), i32> = instance
@@ -1421,13 +1448,8 @@ mod base_codegen_tests {
         let write_bool: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "write_bool")
             .expect("Failed to get 'write_bool'");
-        let result = write_bool
-            .call(&mut store, ())
-            .expect("write_bool failed");
-        assert_eq!(
-            result, 1,
-            "flags[0]=true, flags[2]=true, both checked -> 1"
-        );
+        let result = write_bool.call(&mut store, ()).expect("write_bool failed");
+        assert_eq!(result, 1, "flags[0]=true, flags[2]=true, both checked -> 1");
 
         // Verify stack pointer is fully restored after all calls
         let final_sp = stack_pointer.get(&mut store).i32().unwrap();
@@ -1569,7 +1591,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "caller")
             .expect("Failed to get 'caller'");
         let result = caller.call(&mut store, ()).expect("caller failed");
-        assert_eq!(result, 15, "read_elem([5, 15, 25]) should return arr[1] = 15");
+        assert_eq!(
+            result, 15,
+            "read_elem([5, 15, 25]) should return arr[1] = 15"
+        );
     }
 
     #[test]
@@ -1651,8 +1676,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i8_array_sum")
             .expect("get func");
@@ -1675,13 +1699,15 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u8_array_max")
             .expect("get func");
         let result = func.call(&mut store, ()).expect("call");
-        assert_eq!(result, 255, "u8 array: arr[2] should be 255 (zero-extended)");
+        assert_eq!(
+            result, 255,
+            "u8 array: arr[2] should be 255 (zero-extended)"
+        );
     }
 
     #[test]
@@ -1699,8 +1725,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i16_array_negative")
             .expect("get func");
@@ -1726,8 +1751,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u16_array_large")
             .expect("get func");
@@ -1754,8 +1778,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "i64_write_read")
             .expect("get func");
@@ -1784,8 +1807,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "call_sum_i64")
             .expect("get func");
@@ -1811,8 +1833,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u32_array_large")
             .expect("get func");
@@ -1838,8 +1859,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "call_sum_large")
             .expect("get func");
@@ -1870,8 +1890,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "mixed_arrays")
             .expect("get func");
@@ -1901,8 +1920,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "call_double")
             .expect("get func");
@@ -1938,8 +1956,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "bool_then_i32")
             .expect("get func");
@@ -1969,15 +1986,13 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "bool_then_i64")
             .expect("get func");
         let result = func.call(&mut store, ()).expect("call");
         assert_eq!(
-            result,
-            9_999_999_999i64,
+            result, 9_999_999_999i64,
             "bool_then_i64: flag is true, return big[0] = 9999999999"
         );
     }
@@ -2000,8 +2015,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "caller")
             .expect("get func");
@@ -2024,13 +2038,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "add_i8_overflow")
             .expect("get func");
@@ -2049,13 +2061,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "add_u8_overflow")
             .expect("get func");
@@ -2074,13 +2084,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "neg_i8")
             .expect("get func");
@@ -2099,13 +2107,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "bitnot_u8")
             .expect("get func");
@@ -2124,13 +2130,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "mul_u16")
             .expect("get func");
@@ -2159,13 +2163,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "consistency")
             .expect("get func");
@@ -2186,13 +2188,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "div_i8_overflow")
             .expect("get func");
@@ -2217,13 +2217,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_independence")
             .expect("get func");
@@ -2246,13 +2244,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_values")
             .expect("get func");
@@ -2389,7 +2385,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "test")
             .expect("Failed to get 'test'");
         let result = func.call(&mut store, ()).expect("test failed");
-        assert_eq!(result, 10, "second make() should return fresh [10,20,30], not modified");
+        assert_eq!(
+            result, 10,
+            "second make() should return fresh [10,20,30], not modified"
+        );
     }
 
     #[test]
@@ -2489,7 +2488,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "test")
             .expect("Failed to get 'test'");
         let result = func.call(&mut store, ()).expect("test failed");
-        assert_eq!(result, 60, "scale([1,2,3], 10) should give [10,20,30], sum=60");
+        assert_eq!(
+            result, 60,
+            "scale([1,2,3], 10) should give [10,20,30], sum=60"
+        );
     }
 
     #[test]
@@ -2537,7 +2539,9 @@ mod base_codegen_tests {
         let make_single: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "make_single")
             .expect("Failed to get 'make_single'");
-        let result = make_single.call(&mut store, ()).expect("make_single failed");
+        let result = make_single
+            .call(&mut store, ())
+            .expect("make_single failed");
         assert_eq!(result, 0, "make_single should return 0");
 
         let make_mixed: TypedFunc<(), i32> = instance
@@ -2736,13 +2740,20 @@ mod base_codegen_tests {
         let set_and_get: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "set_and_get")
             .expect("Failed to get 'set_and_get'");
-        let result = set_and_get.call(&mut store, ()).expect("set_and_get failed");
-        assert_eq!(result, 42, "set_and_get should return 42 (p.x after p.x = 42)");
+        let result = set_and_get
+            .call(&mut store, ())
+            .expect("set_and_get failed");
+        assert_eq!(
+            result, 42,
+            "set_and_get should return 42 (p.x after p.x = 42)"
+        );
 
         let swap_fields: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "swap_fields")
             .expect("Failed to get 'swap_fields'");
-        let result = swap_fields.call(&mut store, ()).expect("swap_fields failed");
+        let result = swap_fields
+            .call(&mut store, ())
+            .expect("swap_fields failed");
         assert_eq!(
             result, 30,
             "swap_fields should return 30 (p.x + p.y after swapping 10 and 20)"
@@ -2751,7 +2762,9 @@ mod base_codegen_tests {
         let modify_bool: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "modify_bool")
             .expect("Failed to get 'modify_bool'");
-        let result = modify_bool.call(&mut store, ()).expect("modify_bool failed");
+        let result = modify_bool
+            .call(&mut store, ())
+            .expect("modify_bool failed");
         assert_eq!(
             result, 100,
             "modify_bool should return 100 (f.val when f.flag is set to true)"
@@ -2848,7 +2861,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "call_sum")
             .expect("Failed to get 'call_sum'");
         let result = call_sum.call(&mut store, ()).expect("call_sum failed");
-        assert_eq!(result, 30, "sum_point(Point {{ x: 10, y: 20 }}) should be 30");
+        assert_eq!(
+            result, 30,
+            "sum_point(Point {{ x: 10, y: 20 }}) should be 30"
+        );
 
         // verify_copy_semantics: pass Point { x: 1, y: 2 } to modify_no_effect
         // which sets p.x = 99, but the original p.x should still be 1
@@ -3118,9 +3134,7 @@ mod base_codegen_tests {
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_values_match")
             .expect("Failed to get 'copy_values_match'");
-        let result = func
-            .call(&mut store, ())
-            .expect("copy_values_match failed");
+        let result = func.call(&mut store, ()).expect("copy_values_match failed");
         assert_eq!(result, 10, "q.x + q.y should be 3 + 7 = 10");
 
         // independent_copies: p.x + p.y should still be 1 + 2 = 3
@@ -3176,13 +3190,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test")
             .expect("get func");
@@ -3225,7 +3237,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i32 WASM is invalid: {e}"));
     }
@@ -3241,7 +3253,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i64 WASM is invalid: {e}"));
     }
@@ -3257,7 +3269,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki mixed fields WASM is invalid: {e}"));
     }
@@ -3323,10 +3335,7 @@ mod base_codegen_tests {
         let result = test_sum_with
             .call(&mut store, ())
             .expect("test_sum_with failed");
-        assert_eq!(
-            result, 35,
-            "p.sum_with(5) should return 35 (p.x + p.y + 5)"
-        );
+        assert_eq!(result, 35, "p.sum_with(5) should return 35 (p.x + p.y + 5)");
 
         let test_let_binding: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_let_binding")
@@ -3426,9 +3435,7 @@ mod base_codegen_tests {
         let test_new_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_new_y")
             .expect("Failed to get 'test_new_y'");
-        let result = test_new_y
-            .call(&mut store, ())
-            .expect("test_new_y failed");
+        let result = test_new_y.call(&mut store, ()).expect("test_new_y failed");
         assert_eq!(result, 7, "Point::new(3, 7).get_y() should return 7");
 
         let test_origin: TypedFunc<(), i32> = instance
@@ -3453,9 +3460,7 @@ mod base_codegen_tests {
         let test_mixed: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_mixed")
             .expect("Failed to get 'test_mixed'");
-        let result = test_mixed
-            .call(&mut store, ())
-            .expect("test_mixed failed");
+        let result = test_mixed.call(&mut store, ()).expect("test_mixed failed");
         assert_eq!(
             result, 8,
             "Point::new(5, 15).get_x() + Point::sum_of(1, 2) should return 8"
@@ -3582,10 +3587,7 @@ mod base_codegen_tests {
         let result = test_scale_x
             .call(&mut store, ())
             .expect("test_scale_x failed");
-        assert_eq!(
-            result, 12,
-            "Point(3,7).scale(4).get_x() should return 12"
-        );
+        assert_eq!(result, 12, "Point(3,7).scale(4).get_x() should return 12");
 
         let test_scale_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_scale_y")
@@ -3593,10 +3595,7 @@ mod base_codegen_tests {
         let result = test_scale_y
             .call(&mut store, ())
             .expect("test_scale_y failed");
-        assert_eq!(
-            result, 28,
-            "Point(3,7).scale(4).get_y() should return 28"
-        );
+        assert_eq!(result, 28, "Point(3,7).scale(4).get_y() should return 28");
 
         let test_original_unchanged_x: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_original_unchanged_x")
@@ -3626,10 +3625,7 @@ mod base_codegen_tests {
         let result = test_new_returns_struct_x
             .call(&mut store, ())
             .expect("test_new_returns_struct_x failed");
-        assert_eq!(
-            result, 42,
-            "Point::new(42, 99).get_x() should return 42"
-        );
+        assert_eq!(result, 42, "Point::new(42, 99).get_x() should return 42");
 
         let test_new_returns_struct_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_new_returns_struct_y")
@@ -3637,10 +3633,7 @@ mod base_codegen_tests {
         let result = test_new_returns_struct_y
             .call(&mut store, ())
             .expect("test_new_returns_struct_y failed");
-        assert_eq!(
-            result, 99,
-            "Point::new(42, 99).get_y() should return 99"
-        );
+        assert_eq!(result, 99, "Point::new(42, 99).get_y() should return 99");
 
         let test_return_translated: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_return_translated")
@@ -4077,7 +4070,10 @@ mod base_codegen_tests {
         let result = read_via_copy
             .call(&mut store, ())
             .expect("read_via_copy failed");
-        assert_eq!(result, 10, "read_via_copy should return 10 (o.inner.x via copy)");
+        assert_eq!(
+            result, 10,
+            "read_via_copy should return 10 (o.inner.x via copy)"
+        );
 
         let read_inner_y_via_copy: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "read_inner_y_via_copy")
@@ -4085,7 +4081,10 @@ mod base_codegen_tests {
         let result = read_inner_y_via_copy
             .call(&mut store, ())
             .expect("read_inner_y_via_copy failed");
-        assert_eq!(result, 20, "read_inner_y_via_copy should return 20 (o.inner.y via copy)");
+        assert_eq!(
+            result, 20,
+            "read_inner_y_via_copy should return 20 (o.inner.y via copy)"
+        );
 
         let sum_all_fields: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "sum_all_fields")
@@ -4101,9 +4100,135 @@ mod base_codegen_tests {
         let result = write_inner_field
             .call(&mut store, ())
             .expect("write_inner_field failed");
-        assert_eq!(result, 99, "write_inner_field should return 99 (i.x after write)");
+        assert_eq!(
+            result, 99,
+            "write_inner_field should return 99 (i.x after write)"
+        );
     }
 
+    #[test]
+    fn struct_with_array_golden_test() {
+        let test_name = "struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_with_array_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let create_and_read_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "create_and_read_val")
+            .expect("Failed to get 'create_and_read_val'");
+        let result = create_and_read_val
+            .call(&mut store, ())
+            .expect("create_and_read_val failed");
+        assert_eq!(result, 42, "create_and_read_val should return 42 (s.val)");
+
+        let read_arr_first: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_arr_first")
+            .expect("Failed to get 'read_arr_first'");
+        let result = read_arr_first
+            .call(&mut store, ())
+            .expect("read_arr_first failed");
+        assert_eq!(result, 10, "read_arr_first should return 10 (s.arr[0])");
+
+        let read_arr_last: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_arr_last")
+            .expect("Failed to get 'read_arr_last'");
+        let result = read_arr_last
+            .call(&mut store, ())
+            .expect("read_arr_last failed");
+        assert_eq!(result, 30, "read_arr_last should return 30 (s.arr[2])");
+
+        let write_arr_element: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_arr_element")
+            .expect("Failed to get 'write_arr_element'");
+        let result = write_arr_element
+            .call(&mut store, ())
+            .expect("write_arr_element failed");
+        assert_eq!(
+            result, 99,
+            "write_arr_element should return 99 (s.arr[1] after write)"
+        );
+
+        let sum_arr_and_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_arr_and_val")
+            .expect("Failed to get 'sum_arr_and_val'");
+        let result = sum_arr_and_val
+            .call(&mut store, ())
+            .expect("sum_arr_and_val failed");
+        assert_eq!(
+            result, 102,
+            "sum_arr_and_val should return 102 (10+20+30+42)"
+        );
+
+        let struct_with_array_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "struct_with_array_param")
+            .expect("Failed to get 'struct_with_array_param'");
+        // Pass a pointer to a HasArray in memory -- allocate at the beginning of memory.
+        // HasArray: arr:[i32;3] at offset 0 (12 bytes), val:i32 at offset 12 (4 bytes) = 16 bytes total.
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let data = memory.data_mut(&mut store);
+        let base: usize = 0;
+        data[base..base + 4].copy_from_slice(&100_i32.to_le_bytes()); // arr[0] = 100
+        data[base + 4..base + 8].copy_from_slice(&200_i32.to_le_bytes()); // arr[1] = 200
+        data[base + 8..base + 12].copy_from_slice(&300_i32.to_le_bytes()); // arr[2] = 300
+        data[base + 12..base + 16].copy_from_slice(&50_i32.to_le_bytes()); // val = 50
+        let result = struct_with_array_param
+            .call(&mut store, base as i32)
+            .expect("struct_with_array_param failed");
+        assert_eq!(
+            result, 150,
+            "struct_with_array_param should return 150 (100+50)"
+        );
+
+        let test_method_get_arr_elem: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_get_arr_elem")
+            .expect("Failed to get 'test_method_get_arr_elem'");
+        let result = test_method_get_arr_elem
+            .call(&mut store, ())
+            .expect("test_method_get_arr_elem failed");
+        assert_eq!(
+            result, 20,
+            "test_method_get_arr_elem should return 20 (s.arr[1] via method)"
+        );
+
+        let test_method_sum_arr: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_sum_arr")
+            .expect("Failed to get 'test_method_sum_arr'");
+        let result = test_method_sum_arr
+            .call(&mut store, ())
+            .expect("test_method_sum_arr failed");
+        assert_eq!(
+            result, 60,
+            "test_method_sum_arr should return 60 (10+20+30 via method)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.
@@ -4320,8 +4445,8 @@ mod regenerate {
     #[ignore]
     fn regenerate_fn_params_wasm() {
         let dir = base_test_dir().join("fn_params");
-        let source_code =
-            std::fs::read_to_string(dir.join("fn_params.inf")).expect("Failed to read fn_params.inf");
+        let source_code = std::fs::read_to_string(dir.join("fn_params.inf"))
+            .expect("Failed to read fn_params.inf");
         let actual = wasm_codegen(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
@@ -4916,4 +5041,23 @@ mod regenerate {
         regenerate_wat(&actual, &dir, "nested_struct");
     }
 
+    #[test]
+    #[ignore]
+    fn regenerate_struct_with_array_wasm() {
+        let dir = base_test_dir().join("struct_with_array");
+        let source_code = std::fs::read_to_string(dir.join("struct_with_array.inf"))
+            .expect("Failed to read struct_with_array.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_with_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_with_array");
+    }
 }

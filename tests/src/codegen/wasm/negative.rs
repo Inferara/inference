@@ -241,18 +241,14 @@ mod unsupported_compound_types {
     }
 
     #[test]
-    fn struct_with_array_field() {
+    fn struct_with_array_field_succeeds() {
         let result = try_codegen(
             "struct S { arr: [i32; 2]; }\npub fn test() -> i32 { let s: S = S { arr: [1, 2] }; return 1; }",
         );
         assert!(
-            result.is_err(),
-            "struct with array field should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("not yet implemented"),
-            "unexpected error message: {err}"
+            result.is_ok(),
+            "struct with array field should succeed codegen: {:?}",
+            result.err()
         );
     }
 }

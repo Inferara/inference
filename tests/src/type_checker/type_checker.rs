@@ -2692,12 +2692,12 @@ mod recursive_struct_tests {
     fn test_recursive_struct_direct() {
         let source = r#"struct Node { val: i32; next: Node; }"#;
         let result = try_type_check(source);
-        assert!(result.is_err(), "Direct recursive struct should be rejected");
-        let err = result.err().unwrap().to_string();
         assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
+            result.is_err(),
+            "Direct recursive struct should be rejected"
         );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
     #[test]
@@ -2720,10 +2720,7 @@ mod recursive_struct_tests {
             "Mutually recursive structs should be rejected"
         );
         let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
-        );
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
     #[test]
@@ -2754,10 +2751,7 @@ mod recursive_struct_tests {
             "Recursive struct inside spec should be detected"
         );
         let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
-        );
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
     // Module definitions are not yet supported in the grammar, so we cannot
@@ -2812,10 +2806,7 @@ mod recursive_struct_tests {
             "Three-level recursive chain should be rejected"
         );
         let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
-        );
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
     #[test]
@@ -2833,10 +2824,7 @@ mod recursive_struct_tests {
             "Recursive struct through array should be rejected"
         );
         let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
-        );
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
     #[test]
@@ -2869,10 +2857,7 @@ mod recursive_struct_tests {
             "Direct recursive struct inside spec with sibling structs should be detected"
         );
         let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("recursive struct definition"),
-            "got: {err}"
-        );
+        assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 }
 
@@ -2896,10 +2881,7 @@ mod division_by_zero_tests {
     fn test_modulo_by_zero_literal() {
         let source = r#"fn main() -> i32 { return 10 % 0; }"#;
         let result = try_type_check(source);
-        assert!(
-            result.is_err(),
-            "Modulo by literal zero should be rejected"
-        );
+        assert!(result.is_err(), "Modulo by literal zero should be rejected");
         let err = result.err().unwrap().to_string();
         assert!(err.contains("division by zero"), "got: {err}");
     }
@@ -2924,10 +2906,7 @@ mod duplicate_enum_variant_tests {
     fn test_duplicate_enum_variant() {
         let source = r#"enum Color { Red, Red }"#;
         let result = try_type_check(source);
-        assert!(
-            result.is_err(),
-            "Duplicate enum variant should be rejected"
-        );
+        assert!(result.is_err(), "Duplicate enum variant should be rejected");
         let err = result.err().unwrap().to_string();
         assert!(err.contains("duplicate variant"), "got: {err}");
     }
@@ -2945,8 +2924,7 @@ mod duplicate_enum_variant_tests {
 
     #[test]
     fn test_unique_enum_variants_passes() {
-        let source =
-            r#"enum Color { Red, Green, Blue } fn main() -> i32 { return 0; }"#;
+        let source = r#"enum Color { Red, Green, Blue } fn main() -> i32 { return 0; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -3114,10 +3092,10 @@ mod const_type_mismatch_tests {
             .find_map(|&def_id| {
                 if let Def::Function { body, .. } = &arena[def_id].kind {
                     arena[*body].stmts.iter().find_map(|&stmt_id| {
-                        if let Stmt::ConstDef(cdi) = &arena[stmt_id].kind {
-                            if let Def::Constant { value, .. } = &arena[*cdi].kind {
-                                return Some(*value);
-                            }
+                        if let Stmt::ConstDef(cdi) = &arena[stmt_id].kind
+                            && let Def::Constant { value, .. } = &arena[*cdi].kind
+                        {
+                            return Some(*value);
                         }
                         None
                     })
@@ -3288,7 +3266,8 @@ mod external_function_tests {
 
     #[test]
     fn test_external_fn_params_counted() {
-        let source = r#"external fn add(a: i32, b: i32) -> i32; fn main() -> i32 { return add(1, 2); }"#;
+        let source =
+            r#"external fn add(a: i32, b: i32) -> i32; fn main() -> i32 { return add(1, 2); }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
@@ -3318,10 +3297,7 @@ mod generic_type_param_in_vardef {
     fn test_unknown_type_in_vardef_still_rejected() {
         let source = r#"fn foo() { let y: UnknownType = 0; }"#;
         let result = try_type_check(source);
-        assert!(
-            result.is_err(),
-            "unknown type in vardef should be rejected"
-        );
+        assert!(result.is_err(), "unknown type in vardef should be rejected");
     }
 
     #[test]
