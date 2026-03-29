@@ -203,10 +203,11 @@ fn compute_struct_field_layout_with_visited(
     // sibling fields of the same struct type (e.g. `a: Point; b: Point`)
     // don't falsely trigger cycle detection against each other.
     for field in &struct_info.fields {
+        let mut field_visited = visited.clone();
         let size =
-            type_byte_size_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
+            type_byte_size_with_visited(&field.type_info.kind, ctx, &mut field_visited.clone());
         let align =
-            natural_alignment_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
+            natural_alignment_with_visited(&field.type_info.kind, ctx, &mut field_visited.clone());
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
@@ -214,7 +215,7 @@ fn compute_struct_field_layout_with_visited(
         }
 
         let layout =
-            compute_field_layout_with_visited(&field.type_info.kind, ctx, &mut visited.clone());
+            compute_field_layout_with_visited(&field.type_info.kind, ctx, &mut field_visited);
 
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
@@ -241,6 +242,10 @@ fn compute_field_layout_with_visited(
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
             if let Some(inner_struct) = ctx.lookup_struct(name) {
+                assert!(
+                    visited.insert(name.clone()),
+                    "Cycle detected in struct layout: '{name}' is nested within itself"
+                );
                 let (total_size, fields) =
                     compute_struct_field_layout_with_visited(&inner_struct, ctx, visited);
                 CompoundFieldLayout::NestedStruct { fields, total_size }

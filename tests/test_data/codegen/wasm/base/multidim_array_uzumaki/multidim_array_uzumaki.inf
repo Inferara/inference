@@ -1,0 +1,13 @@
+pub fn multidim_i32_uzumaki() {
+    forall {
+        let grid: [[i32; 3]; 2] = @;
+        let val: i32 = grid[0][1];
+    }
+}
+
+pub fn multidim_i64_uzumaki() {
+    forall {
+        let matrix: [[i64; 2]; 2] = @;
+        let val: i64 = matrix[1][0];
+    }
+}

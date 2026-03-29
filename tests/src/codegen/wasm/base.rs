@@ -4118,6 +4118,27 @@ mod base_codegen_tests {
             result, 99,
             "write_inner_field should return 99 (i.x after write)"
         );
+
+        // Test sret return: nested_struct_return() -> Outer
+        // Outer layout: Inner { x: i32, y: i32 } at offset 0 (8 bytes), val: i32 at offset 8.
+        let nested_struct_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "nested_struct_return")
+            .expect("Failed to get 'nested_struct_return'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let sret_base: i32 = 0;
+        nested_struct_return
+            .call(&mut store, sret_base)
+            .expect("nested_struct_return failed");
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let inner_x = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let inner_y = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let val = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        assert_eq!(inner_x, 42, "nested_struct_return: inner.x should be 42");
+        assert_eq!(inner_y, 84, "nested_struct_return: inner.y should be 84");
+        assert_eq!(val, 126, "nested_struct_return: val should be 126");
     }
 
     #[test]
@@ -4242,6 +4263,29 @@ mod base_codegen_tests {
             result, 60,
             "test_method_sum_arr should return 60 (10+20+30 via method)"
         );
+
+        // Test sret return: struct_with_array_return() -> HasArray
+        // HasArray layout: arr: [i32; 3] at offset 0 (12 bytes), val: i32 at offset 12.
+        let struct_with_array_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "struct_with_array_return")
+            .expect("Failed to get 'struct_with_array_return'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let sret_base: i32 = 0;
+        struct_with_array_return
+            .call(&mut store, sret_base)
+            .expect("struct_with_array_return failed");
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let arr0 = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let arr1 = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let arr2 = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        let val = i32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap());
+        assert_eq!(arr0, 1, "struct_with_array_return: arr[0] should be 1");
+        assert_eq!(arr1, 2, "struct_with_array_return: arr[1] should be 2");
+        assert_eq!(arr2, 3, "struct_with_array_return: arr[2] should be 3");
+        assert_eq!(val, 4, "struct_with_array_return: val should be 4");
     }
 
     // --- array_of_structs tests ---
@@ -4375,6 +4419,56 @@ mod base_codegen_tests {
             result, 30,
             "test_method_on_element should return 30 (10+20 via p.sum())"
         );
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 2);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 2);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 2);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 2);
+        let test_name = "multidim_array_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_i32_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let grid: [[i32; 3]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array uzumaki i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_i64_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let matrix: [[i64; 2]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array uzumaki i64 WASM is invalid: {e}"));
     }
 }
 
@@ -5224,5 +5318,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_of_structs");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_multidim_array_uzumaki_wasm() {
+        let dir = base_test_dir().join("multidim_array_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("multidim_array_uzumaki.inf"))
+            .expect("Failed to read multidim_array_uzumaki.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("multidim_array_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "multidim_array_uzumaki");
     }
 }
