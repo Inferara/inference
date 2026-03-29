@@ -2922,7 +2922,7 @@ impl Compiler {
                     length,
                 } => {
                     if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
-                        debug_assert!(
+                        assert!(
                             !matches!(elem_kind, TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)),
                             "Array literal element-wise store requires scalar element type, \
                              got {elem_kind:?}"

@@ -4139,6 +4139,30 @@ mod base_codegen_tests {
         assert_eq!(inner_x, 42, "nested_struct_return: inner.x should be 42");
         assert_eq!(inner_y, 84, "nested_struct_return: inner.y should be 84");
         assert_eq!(val, 126, "nested_struct_return: val should be 126");
+
+        // Test method accessing self.inner.x
+        let test_method_get_inner_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_get_inner_x")
+            .expect("Failed to get 'test_method_get_inner_x'");
+        let result = test_method_get_inner_x
+            .call(&mut store, ())
+            .expect("test_method_get_inner_x failed");
+        assert_eq!(
+            result, 55,
+            "test_method_get_inner_x should return 55 (self.inner.x via method)"
+        );
+
+        // Test method accessing self.inner.x + self.inner.y
+        let test_method_sum_inner: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_sum_inner")
+            .expect("Failed to get 'test_method_sum_inner'");
+        let result = test_method_sum_inner
+            .call(&mut store, ())
+            .expect("test_method_sum_inner failed");
+        assert_eq!(
+            result, 30,
+            "test_method_sum_inner should return 30 (self.inner.x + self.inner.y via method)"
+        );
     }
 
     #[test]
@@ -4469,6 +4493,83 @@ mod base_codegen_tests {
         let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Multidim array uzumaki i64 WASM is invalid: {e}"));
+    }
+
+    // --- nested_struct_with_array tests ---
+
+    #[test]
+    fn nested_struct_with_array_golden_test() {
+        let test_name = "nested_struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn nested_struct_with_array_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "nested_struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_deep_inner_arr_access: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_arr_access")
+            .expect("Failed to get 'test_deep_inner_arr_access'");
+        let result = test_deep_inner_arr_access
+            .call(&mut store, ())
+            .expect("test_deep_inner_arr_access failed");
+        assert_eq!(
+            result, 20,
+            "test_deep_inner_arr_access should return 20 (d.inner.arr[1])"
+        );
+
+        let test_deep_inner_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_val")
+            .expect("Failed to get 'test_deep_inner_val'");
+        let result = test_deep_inner_val
+            .call(&mut store, ())
+            .expect("test_deep_inner_val failed");
+        assert_eq!(
+            result, 99,
+            "test_deep_inner_val should return 99 (d.inner.val)"
+        );
+
+        let test_deep_tag: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_tag")
+            .expect("Failed to get 'test_deep_tag'");
+        let result = test_deep_tag
+            .call(&mut store, ())
+            .expect("test_deep_tag failed");
+        assert_eq!(result, 42, "test_deep_tag should return 42 (d.tag)");
+
+        let test_deep_inner_arr_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_arr_sum")
+            .expect("Failed to get 'test_deep_inner_arr_sum'");
+        let result = test_deep_inner_arr_sum
+            .call(&mut store, ())
+            .expect("test_deep_inner_arr_sum failed");
+        assert_eq!(
+            result, 60,
+            "test_deep_inner_arr_sum should return 60 (10+20+30)"
+        );
     }
 }
 
@@ -5338,5 +5439,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "multidim_array_uzumaki");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nested_struct_with_array_wasm() {
+        let dir = base_test_dir().join("nested_struct_with_array");
+        let source_code =
+            std::fs::read_to_string(dir.join("nested_struct_with_array.inf"))
+                .expect("Failed to read nested_struct_with_array.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nested_struct_with_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "nested_struct_with_array");
     }
 }

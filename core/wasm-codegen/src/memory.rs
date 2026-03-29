@@ -250,7 +250,7 @@ fn compute_field_layout_with_visited(
                     compute_struct_field_layout_with_visited(&inner_struct, ctx, visited);
                 CompoundFieldLayout::NestedStruct { fields, total_size }
             } else {
-                CompoundFieldLayout::Scalar
+                panic!("struct `{name}` not found in type context; the type checker should have caught this");
             }
         }
         TypeInfoKind::Array(elem_type, length) => CompoundFieldLayout::NestedArray {

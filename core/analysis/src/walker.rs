@@ -135,10 +135,24 @@ pub(crate) fn walk_expr(
     }
 }
 
+/// Returns true if a type is compound: a struct/custom type, or an array
+/// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
+/// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
+#[must_use]
+fn is_compound_type(kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+        TypeInfoKind::Array(elem, _) => is_compound_type(&elem.kind),
+        _ => false,
+    }
+}
+
 /// Returns true if a compound type contains compound fields inside it.
 ///
 /// - **Struct/Custom**: looks up the struct definition and checks whether any
-///   of its fields are themselves compound types.
+///   of its fields are themselves compound types (structs, custom types, or
+///   arrays of structs). Fields that are scalar arrays (e.g. `[i32; 3]`) are
+///   not considered compound.
 /// - **Array**: recurses into the element type.
 /// - **Scalars**: returns false.
 #[must_use]
@@ -146,11 +160,10 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
             ctx.lookup_struct(name).is_some_and(|s| {
-                s.fields.iter().any(|f| {
-                    matches!(
-                        f.type_info.kind,
-                        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
-                    )
+                s.fields.iter().any(|f| match &f.type_info.kind {
+                    TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+                    TypeInfoKind::Array(_, _) => is_compound_type(&f.type_info.kind),
+                    _ => false,
                 })
             })
         }

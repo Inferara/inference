@@ -324,7 +324,7 @@ mod analysis_rules_tests {
     }
 
     #[test]
-    fn a027_uzumaki_on_struct_with_array_field_rejected() {
+    fn a027_uzumaki_on_struct_with_scalar_array_field_accepted() {
         let source = r#"
             struct HasArray { arr: [i32; 3]; val: i32; }
             fn main() -> i32 {
@@ -334,11 +334,27 @@ mod analysis_rules_tests {
                 return 0;
             }
         "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "struct with scalar array field should pass analysis, got: {result:?}");
+    }
+
+    #[test]
+    fn a027_uzumaki_on_struct_with_struct_array_field_rejected() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct HasStructArray { items: [Inner; 3]; val: i32; }
+            fn main() -> i32 {
+                forall {
+                    let h: HasStructArray = @;
+                }
+                return 0;
+            }
+        "#;
         let errors = expect_errors(source);
         let has_a027 = errors
             .iter()
             .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnNestedStruct { .. }));
-        assert!(has_a027, "uzumaki on struct with array field should be rejected, got: {errors:?}");
+        assert!(has_a027, "uzumaki on struct with struct-array field should be rejected, got: {errors:?}");
     }
 
     #[test]

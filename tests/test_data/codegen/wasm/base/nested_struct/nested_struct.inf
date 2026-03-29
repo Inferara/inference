@@ -1,5 +1,14 @@
 struct Inner { x: i32; y: i32; }
-struct Outer { inner: Inner; val: i32; }
+struct Outer { inner: Inner; val: i32;
+    fn get_inner_x(self) -> i32 {
+        let i: Inner = self.inner;
+        return i.x;
+    }
+    fn sum_inner(self) -> i32 {
+        let i: Inner = self.inner;
+        return i.x + i.y;
+    }
+}
 
 pub fn create_and_read_val() -> i32 {
     let o: Outer = Outer { inner: Inner { x: 10, y: 20 }, val: 30 };
@@ -40,4 +49,14 @@ pub fn nested_struct_param(o: Outer) -> i32 {
 pub fn nested_struct_return() -> Outer {
     let o: Outer = Outer { inner: Inner { x: 42, y: 84 }, val: 126 };
     return o;
+}
+
+pub fn test_method_get_inner_x() -> i32 {
+    let o: Outer = Outer { inner: Inner { x: 55, y: 66 }, val: 77 };
+    return o.get_inner_x();
+}
+
+pub fn test_method_sum_inner() -> i32 {
+    let o: Outer = Outer { inner: Inner { x: 10, y: 20 }, val: 30 };
+    return o.sum_inner();
 }
