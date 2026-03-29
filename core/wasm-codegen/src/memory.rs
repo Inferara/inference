@@ -130,7 +130,9 @@ impl CompoundFieldLayout {
     pub(crate) fn byte_size(&self) -> u32 {
         match self {
             Self::NestedStruct { total_size, .. } => *total_size,
-            Self::NestedArray { elem_size, length, .. } => elem_size * length,
+            Self::NestedArray { elem_size, length, .. } => elem_size
+                .checked_mul(*length)
+                .expect("NestedArray byte size overflow: elem_size * length exceeds u32::MAX"),
             Self::Scalar => panic!("byte_size() called on Scalar — use element_size() instead"),
         }
     }
@@ -191,10 +193,9 @@ fn compute_struct_field_layout_with_visited(
     ctx: &TypedContext,
     visited: &FxHashSet<String>,
 ) -> (u32, Vec<StructFieldSlot>) {
-    debug_assert!(
-        !struct_info.fields.is_empty(),
-        "compute_struct_field_layout called with empty struct"
-    );
+    if struct_info.fields.is_empty() {
+        return (0, vec![]);
+    }
     let mut current_offset: u32 = 0;
     let mut max_align: u32 = 1;
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
@@ -1359,6 +1360,127 @@ mod tests {
         let (_, fields) = compute_struct_field_layout(&info, &ctx);
         assert!(matches!(fields[0].layout, CompoundFieldLayout::Scalar));
         assert!(matches!(fields[1].layout, CompoundFieldLayout::Scalar));
+    }
+
+    #[test]
+    fn struct_layout_nested_struct_field() {
+        let mut ctx = TypedContext::default();
+        ctx.register_test_struct(
+            "Inner",
+            &[
+                (
+                    "x".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+                (
+                    "y".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+            ],
+        )
+        .unwrap();
+
+        let info = make_struct_info(
+            "Outer",
+            vec![
+                make_field("inner", TypeInfoKind::Struct("Inner".to_string())),
+                make_field("val", TypeInfoKind::Number(NumberType::I32)),
+            ],
+        );
+        let (total_size, fields) = compute_struct_field_layout(&info, &ctx);
+        assert_eq!(total_size, 12, "Inner(8) + val(4) = 12");
+        assert_eq!(fields.len(), 2);
+
+        assert_eq!(fields[0].name, "inner");
+        assert_eq!(fields[0].offset, 0);
+        assert!(
+            matches!(
+                &fields[0].layout,
+                CompoundFieldLayout::NestedStruct {
+                    total_size: 8,
+                    fields
+                } if fields.len() == 2
+            ),
+            "inner field should be NestedStruct with 2 fields and total_size 8"
+        );
+
+        assert_eq!(fields[1].name, "val");
+        assert_eq!(fields[1].offset, 8);
+        assert!(matches!(fields[1].layout, CompoundFieldLayout::Scalar));
+    }
+
+    #[test]
+    fn type_byte_size_struct() {
+        let mut ctx = TypedContext::default();
+        ctx.register_test_struct(
+            "Point",
+            &[
+                (
+                    "x".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+                (
+                    "y".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I32),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            type_byte_size(&TypeInfoKind::Struct("Point".to_string()), &ctx),
+            8,
+            "Point {{ x: i32, y: i32 }} = 8 bytes"
+        );
+    }
+
+    #[test]
+    fn natural_alignment_for_type_struct_mixed() {
+        let mut ctx = TypedContext::default();
+        ctx.register_test_struct(
+            "Mixed",
+            &[
+                (
+                    "a".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Bool,
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+                (
+                    "b".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I64),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            natural_alignment_for_type(&TypeInfoKind::Struct("Mixed".to_string()), &ctx),
+            8,
+            "Mixed {{ a: bool, b: i64 }} alignment = max(1, 8) = 8"
+        );
     }
 
     #[test]

@@ -4163,6 +4163,28 @@ mod base_codegen_tests {
             result, 30,
             "test_method_sum_inner should return 30 (self.inner.x + self.inner.y via method)"
         );
+
+        // Test nested_struct_param: pass Outer via pointer
+        // Outer layout: Inner { x: i32 @ 0, y: i32 @ 4 }, val: i32 @ 8. Total: 12 bytes.
+        let param_base: i32 = 0;
+        let base = param_base as usize;
+        memory.data_mut(&mut store)[base..base + 4]
+            .copy_from_slice(&10_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 4..base + 8]
+            .copy_from_slice(&20_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 8..base + 12]
+            .copy_from_slice(&30_i32.to_le_bytes());
+
+        let nested_struct_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "nested_struct_param")
+            .expect("Failed to get 'nested_struct_param'");
+        let result = nested_struct_param
+            .call(&mut store, param_base)
+            .expect("nested_struct_param failed");
+        assert_eq!(
+            result, 10,
+            "nested_struct_param should return 10 (o.inner.x via copy)"
+        );
     }
 
     #[test]
@@ -4882,6 +4904,136 @@ mod base_codegen_tests {
             result, 20,
             "get_arr_elem should return 20 (h.arr[1] via sret member access array return)"
         );
+    }
+
+    #[test]
+    fn nested_struct_chained_read_inline_execution() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Outer { inner: Inner; val: i32; }
+            pub fn read_chained() -> i32 {
+                let o: Outer = Outer { inner: Inner { x: 7, y: 8 }, val: 9 };
+                return o.inner.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_chained")
+            .expect("Failed to get 'read_chained'");
+        let result = func.call(&mut store, ()).expect("read_chained failed");
+        assert_eq!(result, 7, "o.inner.x via direct chained access should be 7");
+    }
+
+    #[test]
+    fn nested_struct_chained_write_inline_execution() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Outer { inner: Inner; val: i32; }
+            pub fn write_chained() -> i32 {
+                let mut o: Outer = Outer { inner: Inner { x: 1, y: 2 }, val: 3 };
+                o.inner.x = 42;
+                return o.inner.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_chained")
+            .expect("Failed to get 'write_chained'");
+        let result = func.call(&mut store, ()).expect("write_chained failed");
+        assert_eq!(result, 42, "o.inner.x after chained write should be 42");
+    }
+
+    #[test]
+    fn array_of_structs_sret_return_inline_execution() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make_points() -> [Point; 2] {
+                let arr: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+                return arr;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+
+        let sret_base: i32 = 0;
+        let func: wasmtime::TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "make_points")
+            .expect("Failed to get 'make_points'");
+        func.call(&mut store, sret_base).expect("make_points failed");
+
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let p0_x = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let p0_y = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let p1_x = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        let p1_y = i32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap());
+        assert_eq!(p0_x, 1, "points[0].x");
+        assert_eq!(p0_y, 2, "points[0].y");
+        assert_eq!(p1_x, 3, "points[1].x");
+        assert_eq!(p1_y, 4, "points[1].y");
+    }
+
+    #[test]
+    fn nested_struct_with_array_write_inline_execution() {
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            struct Deep { inner: HasArray; tag: i32; }
+            pub fn write_and_read() -> i32 {
+                let ha: HasArray = HasArray { arr: [10, 20, 30], val: 99 };
+                let d: Deep = Deep { inner: ha, tag: 42 };
+                let mut ha2: HasArray = d.inner;
+                ha2.arr[1] = 77;
+                return ha2.arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_and_read")
+            .expect("Failed to get 'write_and_read'");
+        let result = func.call(&mut store, ()).expect("write_and_read failed");
+        assert_eq!(result, 77, "ha.arr[1] after write should be 77");
     }
 }
 

@@ -1254,7 +1254,8 @@ impl Compiler {
             .array_offsets
             .get(var_name)
             .expect("Destination array not in frame layout");
-        let byte_size = dest_slot.elem_size * dest_slot.length;
+        let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+            .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
         let dest_offset = dest_slot.offset;
         let frame_ptr_local = layout.frame_ptr_local;
 
@@ -1860,7 +1861,8 @@ impl Compiler {
                 } else if is_array_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.array_offsets[name];
-                    let byte_size = dest_slot.elem_size * dest_slot.length;
+                    let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+                        .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
                     // dest = local (already points to frame slot)
                     self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (array pointer)
@@ -2996,7 +2998,8 @@ impl Compiler {
                             self.func().instruction(&store_instr);
                         }
                     } else {
-                        let array_byte_size = elem_size * length;
+                        let array_byte_size = elem_size.checked_mul(*length)
+                            .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
                         #[allow(clippy::cast_possible_wrap)]
