@@ -25,6 +25,7 @@ pub mod uzumaki_in_reassignment;
 pub mod uzumaki_on_deep_array;
 pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
+pub mod unsupported_compound_return_expr;
 pub mod uzumaki_outside_nondet_block;
 
 use array_index_64bit::ArrayIndex64Bit;
@@ -54,6 +55,7 @@ use uzumaki_in_reassignment::UzumakiInReassignment;
 use uzumaki_on_deep_array::UzumakiOnDeepArray;
 use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
+use unsupported_compound_return_expr::UnsupportedCompoundReturnExpr;
 use uzumaki_outside_nondet_block::UzumakiOutsideNonDetBlock;
 
 /// Returns all registered analysis rules.
@@ -93,5 +95,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnStructInArray,
         &CompoundLiteralMemberAssign,
         &UzumakiOnDeepArray,
+        &UnsupportedCompoundReturnExpr,
     ]
 }

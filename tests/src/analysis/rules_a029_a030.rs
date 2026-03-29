@@ -1,7 +1,8 @@
-/// Integration tests for analysis rules A029, A030.
+/// Integration tests for analysis rules A029, A030, A031.
 ///
-/// - A029: CompoundLiteralInMemberAssign -- compound literals cannot be assigned directly to struct fields
+/// - A029: CompoundLiteralInCompoundAssign -- compound literals cannot be assigned directly to compound elements
 /// - A030: UzumakiOnDeepArray -- uzumaki on arrays with more than 2 dimensions is rejected
+/// - A031: UnsupportedCompoundReturnExpression -- compound-returning functions must use simple return forms
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::build_ast;
@@ -45,7 +46,7 @@ mod analysis_rules_tests {
             let has_a029 = e
                 .errors()
                 .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. }));
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
             assert!(!has_a029, "variable RHS should be accepted, got: {e}");
         }
     }
@@ -86,7 +87,7 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let has_a029 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. }));
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
         assert!(has_a029, "array literal RHS should be rejected, got: {errors:?}");
     }
 
@@ -103,8 +104,8 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let diag = errors
             .iter()
-            .find(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. }))
-            .expect("expected CompoundLiteralInMemberAssign");
+            .find(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }))
+            .expect("expected CompoundLiteralInCompoundAssign");
         assert_eq!(diag.rule_id(), "A029");
     }
 
@@ -123,7 +124,7 @@ mod analysis_rules_tests {
             let has_a029 = e
                 .errors()
                 .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. }));
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
             assert!(!has_a029, "scalar field assign should be accepted, got: {e}");
         }
     }
@@ -141,8 +142,8 @@ mod analysis_rules_tests {
         let errors = expect_errors(source);
         let diag = errors
             .iter()
-            .find(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. }))
-            .expect("expected CompoundLiteralInMemberAssign");
+            .find(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }))
+            .expect("expected CompoundLiteralInCompoundAssign");
         let msg = diag.to_string();
         assert!(
             msg.contains("compound literal"),
@@ -304,5 +305,244 @@ mod analysis_rules_tests {
             .iter()
             .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
         assert!(has_a030, "3D array uzumaki in exists block should be rejected, got: {errors:?}");
+    }
+
+    // --- A029: Compound literal in array index assignment ---
+
+    #[test]
+    fn a029_array_index_struct_literal_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn main() -> i32 {
+                let mut pts: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+                pts[0] = Point { x: 10, y: 20 };
+                return pts[0].x;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a029 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
+        assert!(has_a029, "struct literal in array index assignment should be rejected, got: {errors:?}");
+    }
+
+    #[test]
+    fn a029_array_index_array_literal_rejected() {
+        let source = r#"
+            fn main() -> i32 {
+                let mut arr: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+                arr[0] = [10, 20];
+                return arr[0][0];
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a029 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
+        assert!(has_a029, "array literal in array index assignment should be rejected, got: {errors:?}");
+    }
+
+    #[test]
+    fn a029_array_index_scalar_accepted() {
+        let source = r#"
+            fn main() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                arr[0] = 42;
+                return arr[0];
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(ref e) = result {
+            let has_a029 = e
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. }));
+            assert!(!has_a029, "scalar array index assignment should pass analysis, got: {e}");
+        }
+    }
+
+    // --- A031: Unsupported compound return expression ---
+
+    #[test]
+    fn a031_identifier_return_accepted() {
+        let source = r#"
+            fn make_arr() -> [i32; 3] {
+                let arr: [i32; 3] = [1, 2, 3];
+                return arr;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "identifier return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_array_literal_return_accepted() {
+        let source = r#"
+            fn make_arr() -> [i32; 3] {
+                return [1, 2, 3];
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "literal return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_struct_literal_return_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make() -> Point {
+                return Point { x: 1, y: 2 };
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "struct literal return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_function_call_return_accepted() {
+        let source = r#"
+            fn inner() -> [i32; 3] {
+                return [1, 2, 3];
+            }
+            fn outer() -> [i32; 3] {
+                return inner();
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "function call return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_member_access_return_accepted() {
+        let source = r#"
+            struct HasArr { arr: [i32; 3]; val: i32; }
+            fn get_arr(s: HasArr) -> [i32; 3] {
+                return s.arr;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "member access return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_array_index_return_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn get_first(pts: [Point; 3]) -> Point {
+                return pts[0];
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "array index return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_struct_identifier_return_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make() -> Point {
+                let a: Point = Point { x: 1, y: 2 };
+                return a;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "identifier struct return should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_scalar_return_not_checked() {
+        let source = r#"
+            fn add(a: i32, b: i32) -> i32 {
+                return a + b;
+            }
+            fn main() -> i32 { return add(1, 2); }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "scalar return should not be checked by A031: {result:?}");
+    }
+
+    #[test]
+    fn a031_rule_id_is_a031() {
+        let diag = AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
+            location: inference_ast::nodes::Location {
+                offset_start: 0,
+                offset_end: 0,
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+            },
+        };
+        assert_eq!(diag.rule_id(), "A031");
+    }
+
+    #[test]
+    fn a031_error_message() {
+        let diag = AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
+            location: inference_ast::nodes::Location {
+                offset_start: 0,
+                offset_end: 0,
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+            },
+        };
+        let msg = diag.to_string();
+        assert!(msg.contains("compound-returning function"), "message should mention compound-returning: {msg}");
+        assert!(msg.contains("temporary variable"), "message should suggest temporary: {msg}");
+    }
+
+    #[test]
+    fn a031_return_in_if_else_checked() {
+        let source = r#"
+            fn pick(flag: bool) -> [i32; 3] {
+                let a: [i32; 3] = [1, 2, 3];
+                let b: [i32; 3] = [4, 5, 6];
+                if flag {
+                    return a;
+                } else {
+                    return b;
+                }
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "identifier returns in if/else should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn a031_void_function_not_checked() {
+        let source = r#"
+            fn noop() {
+                return;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "void function should not be checked by A031: {result:?}");
+    }
+
+    #[test]
+    fn a031_method_compound_return_checked() {
+        let source = r#"
+            struct Point {
+                x: i32;
+                y: i32;
+                fn origin() -> Point {
+                    return Point { x: 0, y: 0 };
+                }
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "method with compound return literal should be accepted: {result:?}");
     }
 }

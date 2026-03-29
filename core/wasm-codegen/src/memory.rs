@@ -207,8 +207,7 @@ fn compute_struct_field_layout_with_visited(
         let mut field_visited = visited.clone();
         let size =
             type_byte_size_with_visited(&field.type_info.kind, ctx, &mut field_visited.clone());
-        let align =
-            natural_alignment_with_visited(&field.type_info.kind, ctx, &mut field_visited.clone());
+        let align = natural_alignment_for_type(&field.type_info.kind, ctx);
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
@@ -351,6 +350,21 @@ fn type_byte_size_with_visited(
 pub(crate) fn natural_alignment_for_type(kind: &TypeInfoKind, ctx: &TypedContext) -> u32 {
     let mut visited = FxHashSet::default();
     natural_alignment_with_visited(kind, ctx, &mut visited)
+}
+
+/// Returns the maximum natural alignment across all fields of a struct.
+///
+/// Used when computing padding/alignment for struct frame slots so the
+/// struct base address is suitably aligned for every field.
+pub(crate) fn max_struct_alignment(
+    field_slots: &[StructFieldSlot],
+    ctx: &TypedContext,
+) -> u32 {
+    field_slots
+        .iter()
+        .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
+        .max()
+        .unwrap_or(1)
 }
 
 fn natural_alignment_with_visited(
@@ -652,7 +666,10 @@ pub(crate) fn emit_array_param_copy(
 ) {
     cov_mark::hit!(wasm_codegen_emit_array_param_copy);
 
-    let byte_size = slot.elem_size * slot.length;
+    let byte_size = slot
+        .elem_size
+        .checked_mul(slot.length)
+        .expect("array param copy: byte size overflow");
 
     let is_compound_element = matches!(
         elem_type,
@@ -670,12 +687,7 @@ pub(crate) fn emit_array_param_copy(
             func.instruction(&Instruction::I32Add);
         }
         func.instruction(&Instruction::LocalGet(param_local));
-        #[allow(clippy::cast_possible_wrap)]
-        func.instruction(&Instruction::I32Const(byte_size as i32));
-        func.instruction(&Instruction::MemoryCopy {
-            src_mem: MEMORY_INDEX,
-            dst_mem: MEMORY_INDEX,
-        });
+        emit_memory_copy_raw(func, byte_size);
     } else {
         // Unrolled element-by-element copy
         let load_instr = load_instruction(elem_type);
@@ -759,14 +771,7 @@ pub(crate) fn emit_struct_param_copy(
     // source: param pointer
     func.instruction(&Instruction::LocalGet(param_local));
 
-    // byte count
-    #[allow(clippy::cast_possible_wrap)]
-    func.instruction(&Instruction::I32Const(slot.total_size as i32));
-
-    func.instruction(&Instruction::MemoryCopy {
-        src_mem: MEMORY_INDEX,
-        dst_mem: MEMORY_INDEX,
-    });
+    emit_memory_copy_raw(func, slot.total_size);
 
     // Update the parameter local to point to the callee's copy
     func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
@@ -776,6 +781,19 @@ pub(crate) fn emit_struct_param_copy(
         func.instruction(&Instruction::I32Add);
     }
     func.instruction(&Instruction::LocalSet(param_local));
+}
+
+/// Emits the `i32.const <size>` + `memory.copy` instruction pair.
+///
+/// The caller must have already pushed the destination and source addresses
+/// onto the WASM operand stack before calling this helper.
+fn emit_memory_copy_raw(func: &mut Function, byte_size: u32) {
+    #[allow(clippy::cast_possible_wrap)]
+    func.instruction(&Instruction::I32Const(byte_size as i32));
+    func.instruction(&Instruction::MemoryCopy {
+        src_mem: MEMORY_INDEX,
+        dst_mem: MEMORY_INDEX,
+    });
 }
 
 /// Emits a `memory.copy` from a source pointer to the sret destination.
@@ -797,12 +815,7 @@ pub(crate) fn emit_sret_copy(
 ) {
     func.instruction(&Instruction::LocalGet(sret_local));
     func.instruction(&Instruction::LocalGet(source_local));
-    #[allow(clippy::cast_possible_wrap)]
-    func.instruction(&Instruction::I32Const(byte_size as i32));
-    func.instruction(&Instruction::MemoryCopy {
-        src_mem: MEMORY_INDEX,
-        dst_mem: MEMORY_INDEX,
-    });
+    emit_memory_copy_raw(func, byte_size);
 }
 
 /// Emits the address computation `base_ptr + byte_offset` onto the WASM stack.

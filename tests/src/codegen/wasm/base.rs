@@ -4185,6 +4185,15 @@ mod base_codegen_tests {
             result, 10,
             "nested_struct_param should return 10 (o.inner.x via copy)"
         );
+
+        let sp_global = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export __stack_pointer");
+        let sp_val = sp_global.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_val, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
     }
 
     #[test]
@@ -4465,6 +4474,15 @@ mod base_codegen_tests {
             result, 30,
             "test_method_on_element should return 30 (10+20 via p.sum())"
         );
+
+        let sp_global = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export __stack_pointer");
+        let sp_val = sp_global.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_val, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
     }
 
     #[test]
@@ -4677,6 +4695,123 @@ mod base_codegen_tests {
         let wasm_bytes = wasm_codegen_no_analysis(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Multidim array compound index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_param_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn read_2d(grid: [[i32; 3]; 2]) -> i32 {
+                return grid[0][1] + grid[1][2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let data = memory.data_mut(&mut store);
+        let base: usize = 0;
+        // [[i32; 3]; 2] = 6 i32 values = 24 bytes
+        // grid[0][0]=10, grid[0][1]=20, grid[0][2]=30
+        data[base..base + 4].copy_from_slice(&10_i32.to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&20_i32.to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&30_i32.to_le_bytes());
+        // grid[1][0]=40, grid[1][1]=50, grid[1][2]=60
+        data[base + 12..base + 16].copy_from_slice(&40_i32.to_le_bytes());
+        data[base + 16..base + 20].copy_from_slice(&50_i32.to_le_bytes());
+        data[base + 20..base + 24].copy_from_slice(&60_i32.to_le_bytes());
+
+        let read_2d: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "read_2d")
+            .expect("Failed to get 'read_2d'");
+        let result = read_2d
+            .call(&mut store, base as i32)
+            .expect("read_2d failed");
+        assert_eq!(
+            result, 80,
+            "read_2d should return 80 (grid[0][1]=20 + grid[1][2]=60)"
+        );
+    }
+
+    #[test]
+    fn nested_struct_i64_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Inner64 { a: i64; b: i64; }
+            struct Outer64 { inner: Inner64; tag: i32; }
+            pub fn test_i64_nested() -> i64 {
+                let o: Outer64 = Outer64 { inner: Inner64 { a: 100, b: 200 }, tag: 42 };
+                return o.inner.a + o.inner.b;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_i64_nested")
+            .expect("Failed to get 'test_i64_nested'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_i64_nested failed");
+        assert_eq!(
+            result, 300i64,
+            "test_i64_nested should return 300 (o.inner.a + o.inner.b)"
+        );
+    }
+
+    #[test]
+    fn struct_with_i64_array_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct HasI64Arr { vals: [i64; 2]; tag: i32; }
+            pub fn test_i64_arr_field() -> i64 {
+                let v: [i64; 2] = [1000, 2000];
+                let h: HasI64Arr = HasI64Arr { vals: v, tag: 99 };
+                return h.vals[0] + h.vals[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_i64_arr_field")
+            .expect("Failed to get 'test_i64_arr_field'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_i64_arr_field failed");
+        assert_eq!(
+            result, 3000i64,
+            "test_i64_arr_field should return 3000 (h.vals[0] + h.vals[1])"
+        );
     }
 
     #[test]

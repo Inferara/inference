@@ -109,6 +109,7 @@ impl TypedContext {
     ///
     /// Intended for unit tests in downstream crates (e.g. `wasm-codegen`) that
     /// need a populated `TypedContext` without running the full type-checker.
+    #[cfg(feature = "test-utils")]
     #[doc(hidden)]
     pub fn register_test_struct(
         &mut self,

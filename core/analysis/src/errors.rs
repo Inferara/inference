@@ -159,11 +159,14 @@ pub enum AnalysisDiagnostic {
     #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
     UzumakiOnStructInArray { location: Location },
 
-    #[error("compound literal cannot be assigned directly to a struct field; assign to a temporary variable first")]
-    CompoundLiteralInMemberAssign { location: Location },
+    #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
+    CompoundLiteralInCompoundAssign { location: Location },
 
     #[error("uzumaki (@) on arrays with more than 2 dimensions is not supported")]
     UzumakiOnDeepArray { location: Location },
+
+    #[error("return expression in compound-returning function must be a variable, literal, function call, or field/element access; assign the expression to a temporary variable first")]
+    UnsupportedCompoundReturnExpression { location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -197,8 +200,9 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::NestedCompoundDepthExceeded { location, .. }
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
-            | AnalysisDiagnostic::CompoundLiteralInMemberAssign { location }
-            | AnalysisDiagnostic::UzumakiOnDeepArray { location } => location,
+            | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
+            | AnalysisDiagnostic::UzumakiOnDeepArray { location }
+            | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location } => location,
         }
     }
 
@@ -234,8 +238,9 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::NestedCompoundDepthExceeded { .. } => "A026",
             AnalysisDiagnostic::UzumakiOnNestedStruct { .. } => "A027",
             AnalysisDiagnostic::UzumakiOnStructInArray { .. } => "A028",
-            AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. } => "A029",
+            AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. } => "A029",
             AnalysisDiagnostic::UzumakiOnDeepArray { .. } => "A030",
+            AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
         }
     }
 }

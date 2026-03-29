@@ -783,11 +783,8 @@ impl Compiler {
                                 let (total_size, field_slots) =
                                     compute_struct_field_layout(&struct_info, ctx);
                                 if total_size > 0 {
-                                    let max_field_align = field_slots
-                                        .iter()
-                                        .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
-                                        .max()
-                                        .unwrap_or(1);
+                                    let max_field_align =
+                                        memory::max_struct_alignment(&field_slots, ctx);
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -814,11 +811,8 @@ impl Compiler {
                         let (total_size, field_slots) =
                             compute_struct_field_layout(&struct_info, ctx);
                         if total_size > 0 {
-                            let max_field_align = field_slots
-                                .iter()
-                                .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
-                                .max()
-                                .unwrap_or(1);
+                            let max_field_align =
+                                memory::max_struct_alignment(&field_slots, ctx);
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -908,11 +902,8 @@ impl Compiler {
                                 let (total_size, field_slots) =
                                     compute_struct_field_layout(&struct_info, ctx);
                                 if total_size > 0 {
-                                    let max_field_align = field_slots
-                                        .iter()
-                                        .map(|f| natural_alignment_for_type(&f.type_kind, ctx))
-                                        .max()
-                                        .unwrap_or(1);
+                                    let max_field_align =
+                                        memory::max_struct_alignment(&field_slots, ctx);
                                     let aligned_offset = align_to(*current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -1270,14 +1261,7 @@ impl Compiler {
         }
         // src = lower_expression(identifier) -> source pointer
         self.lower_expression(arena, val_expr_id, ctx, None);
-        // byte count
-        #[allow(clippy::cast_possible_wrap)]
-        self.func()
-            .instruction(&Instruction::I32Const(byte_size as i32));
-        self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: MEMORY_INDEX,
-            dst_mem: MEMORY_INDEX,
-        });
+        self.emit_memory_copy(byte_size);
 
         // Set local to point to destination slot
         self.func()
@@ -1327,14 +1311,7 @@ impl Compiler {
         }
         // src = lower_expression(identifier) -> source pointer
         self.lower_expression(arena, val_expr_id, ctx, None);
-        // byte count
-        #[allow(clippy::cast_possible_wrap)]
-        self.func()
-            .instruction(&Instruction::I32Const(byte_size as i32));
-        self.func().instruction(&Instruction::MemoryCopy {
-            src_mem: MEMORY_INDEX,
-            dst_mem: MEMORY_INDEX,
-        });
+        self.emit_memory_copy(byte_size);
 
         // Set local to point to destination slot
         self.func()
@@ -1847,14 +1824,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (struct pointer)
                     self.lower_expression(arena, right, ctx, None);
-                    // byte count
-                    #[allow(clippy::cast_possible_wrap)]
-                    self.func()
-                        .instruction(&Instruction::I32Const(byte_size as i32));
-                    self.func().instruction(&Instruction::MemoryCopy {
-                        src_mem: MEMORY_INDEX,
-                        dst_mem: MEMORY_INDEX,
-                    });
+                    self.emit_memory_copy(byte_size);
                 } else if is_array_literal {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
@@ -1867,14 +1837,7 @@ impl Compiler {
                     self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (array pointer)
                     self.lower_expression(arena, right, ctx, None);
-                    // byte count
-                    #[allow(clippy::cast_possible_wrap)]
-                    self.func()
-                        .instruction(&Instruction::I32Const(byte_size as i32));
-                    self.func().instruction(&Instruction::MemoryCopy {
-                        src_mem: MEMORY_INDEX,
-                        dst_mem: MEMORY_INDEX,
-                    });
+                    self.emit_memory_copy(byte_size);
                 } else {
                     self.lower_expression(arena, right, ctx, None);
                     self.func().instruction(&Instruction::LocalSet(local_idx));
@@ -1930,7 +1893,10 @@ impl Compiler {
         return_info: &ArrayReturnInfo,
     ) -> Result<(), CodegenError> {
         let elem_size = return_info.elem_size;
-        let byte_size = return_info.elem_size * return_info.length;
+        let byte_size = return_info
+            .elem_size
+            .checked_mul(return_info.length)
+            .expect("sret return: array byte size overflow");
         let is_struct_element = matches!(
             &return_info.elem_kind,
             TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
@@ -1977,13 +1943,7 @@ impl Compiler {
             Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. } => {
                 self.func().instruction(&Instruction::LocalGet(sret_idx));
                 self.lower_expression(arena, return_expr_id, ctx, None);
-                #[allow(clippy::cast_possible_wrap)]
-                self.func()
-                    .instruction(&Instruction::I32Const(byte_size as i32));
-                self.func().instruction(&Instruction::MemoryCopy {
-                    src_mem: MEMORY_INDEX,
-                    dst_mem: MEMORY_INDEX,
-                });
+                self.emit_memory_copy(byte_size);
             }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
@@ -2023,13 +1983,7 @@ impl Compiler {
             Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. } => {
                 self.func().instruction(&Instruction::LocalGet(sret_idx));
                 self.lower_expression(arena, return_expr_id, ctx, None);
-                #[allow(clippy::cast_possible_wrap)]
-                self.func()
-                    .instruction(&Instruction::I32Const(return_info.total_size as i32));
-                self.func().instruction(&Instruction::MemoryCopy {
-                    src_mem: MEMORY_INDEX,
-                    dst_mem: MEMORY_INDEX,
-                });
+                self.emit_memory_copy(return_info.total_size);
             }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
@@ -2119,13 +2073,7 @@ impl Compiler {
             self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
             // src: RHS expression (struct pointer)
             self.lower_expression(arena, right_expr_id, ctx, None);
-            #[allow(clippy::cast_possible_wrap)]
-            self.func()
-                .instruction(&Instruction::I32Const(elem_sz as i32));
-            self.func().instruction(&Instruction::MemoryCopy {
-                src_mem: MEMORY_INDEX,
-                dst_mem: MEMORY_INDEX,
-            });
+            self.emit_memory_copy(elem_sz);
         } else {
             let elem_sz = memory::element_size(&elem_type_info.kind);
             let store_instr = memory::store_instruction(&elem_type_info.kind);
@@ -2326,7 +2274,9 @@ impl Compiler {
         if let TypeInfoKind::Array(inner_elem, inner_len) = &elem_type.kind {
             let inner_len = *inner_len;
             let leaf_elem_size = memory::element_size(&inner_elem.kind);
-            let inner_array_size = leaf_elem_size * inner_len;
+            let inner_array_size = leaf_elem_size
+                .checked_mul(inner_len)
+                .expect("multidim uzumaki: inner array size overflow");
             let uzumaki_opcode = if Self::is_i64_type(&inner_elem.kind) {
                 UZUMAKI_I64_OPCODE
             } else {
@@ -2826,13 +2776,13 @@ impl Compiler {
         elem_size: u32,
         ctx: &TypedContext,
     ) {
+        let field_slots_clone = field_slots.to_vec();
         for (i, &element_id) in elements.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let base_offset = slot_offset + (i as u32) * elem_size;
 
             if let Expr::StructLiteral { fields, .. } = &arena[element_id].kind {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
-                let field_slots_clone = field_slots.to_vec();
                 self.lower_struct_literal_fields(
                     arena,
                     &fields,
@@ -2844,13 +2794,7 @@ impl Compiler {
             } else {
                 memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, base_offset);
                 self.lower_expression(arena, element_id, ctx, None);
-                #[allow(clippy::cast_possible_wrap)]
-                self.func()
-                    .instruction(&Instruction::I32Const(elem_size as i32));
-                self.func().instruction(&Instruction::MemoryCopy {
-                    src_mem: MEMORY_INDEX,
-                    dst_mem: MEMORY_INDEX,
-                });
+                self.emit_memory_copy(elem_size);
             }
         }
     }
@@ -2968,13 +2912,7 @@ impl Compiler {
                     } else {
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
-                        #[allow(clippy::cast_possible_wrap)]
-                        self.func()
-                            .instruction(&Instruction::I32Const(*total_size as i32));
-                        self.func().instruction(&Instruction::MemoryCopy {
-                            src_mem: MEMORY_INDEX,
-                            dst_mem: MEMORY_INDEX,
-                        });
+                        self.emit_memory_copy(*total_size);
                     }
                 }
                 memory::CompoundFieldLayout::NestedArray {
@@ -3002,13 +2940,7 @@ impl Compiler {
                             .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
-                        #[allow(clippy::cast_possible_wrap)]
-                        self.func()
-                            .instruction(&Instruction::I32Const(array_byte_size as i32));
-                        self.func().instruction(&Instruction::MemoryCopy {
-                            src_mem: MEMORY_INDEX,
-                            dst_mem: MEMORY_INDEX,
-                        });
+                        self.emit_memory_copy(array_byte_size);
                     }
                 }
                 memory::CompoundFieldLayout::Scalar => {
@@ -3103,13 +3035,7 @@ impl Compiler {
             }
             // src: RHS expression (pointer to compound)
             self.lower_expression(arena, right_expr_id, ctx, None);
-            #[allow(clippy::cast_possible_wrap)]
-            self.func()
-                .instruction(&Instruction::I32Const(compound_size as i32));
-            self.func().instruction(&Instruction::MemoryCopy {
-                src_mem: MEMORY_INDEX,
-                dst_mem: MEMORY_INDEX,
-            });
+            self.emit_memory_copy(compound_size);
         } else {
             let store_instr = memory::store_instruction(&field.type_kind);
 
@@ -3207,6 +3133,16 @@ impl Compiler {
 
     fn emit_uzumaki(&mut self, opcode: u8) {
         self.func().raw([OPCODE_PREFIX, opcode]);
+    }
+
+    fn emit_memory_copy(&mut self, byte_size: u32) {
+        #[allow(clippy::cast_possible_wrap)]
+        self.func()
+            .instruction(&Instruction::I32Const(byte_size as i32));
+        self.func().instruction(&Instruction::MemoryCopy {
+            src_mem: MEMORY_INDEX,
+            dst_mem: MEMORY_INDEX,
+        });
     }
 
     pub(crate) fn has_main(&self) -> bool {
@@ -3338,7 +3274,7 @@ fn try_const_index_byte_offset(
     if let Expr::NumberLiteral { ref value } = arena[index_expr_id].kind {
         let index_val = value.parse::<i32>().ok()?;
         #[allow(clippy::cast_possible_wrap)]
-        let byte_offset = index_val.wrapping_mul(elem_sz as i32);
+        let byte_offset = index_val.checked_mul(elem_sz as i32)?;
         Some(byte_offset)
     } else {
         None

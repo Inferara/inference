@@ -37,18 +37,20 @@ fn check_defs(
 ) {
     for &def_id in defs {
         match &arena[def_id].kind {
-            Def::Struct {
-                name, fields, ..
-            } => {
+            Def::Struct { name, fields, .. } => {
                 let struct_name = arena[*name].name.clone();
                 if let Some(struct_info) = ctx.lookup_struct(&struct_name) {
-                    for (ast_field, tc_field) in fields.iter().zip(struct_info.fields.iter()) {
+                    for tc_field in &struct_info.fields {
                         if walker::has_compound_fields(ctx, &tc_field.type_info.kind) {
+                            let location = fields
+                                .iter()
+                                .find(|f| arena[f.name].name == tc_field.name)
+                                .map_or_else(|| arena[*name].location, |f| arena[f.ty].location);
                             errors.push(AnalysisDiagnostic::NestedCompoundDepthExceeded {
                                 outer: struct_name.clone(),
                                 field: tc_field.name.clone(),
                                 ty: tc_field.type_info.kind.to_string(),
-                                location: arena[ast_field.ty].location,
+                                location,
                             });
                         }
                     }
@@ -62,4 +64,3 @@ fn check_defs(
         }
     }
 }
-
