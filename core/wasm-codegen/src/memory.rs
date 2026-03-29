@@ -76,6 +76,12 @@ pub(crate) struct ArraySlot {
     pub elem_size: u32,
     /// Number of elements in the array.
     pub length: u32,
+    /// Cached field layout for struct-element arrays.
+    ///
+    /// Populated during frame layout computation when the array element type
+    /// is a struct. For non-struct element arrays, this is `None`.
+    /// Avoids per-access recomputation of the inner struct's field offsets.
+    pub element_layout: Option<Vec<StructFieldSlot>>,
 }
 
 /// Describes the memory layout of a struct field that may itself be a compound type.
@@ -115,6 +121,18 @@ impl CompoundFieldLayout {
     /// scalar load/store instructions.
     pub(crate) fn is_compound(&self) -> bool {
         !matches!(self, Self::Scalar)
+    }
+
+    /// Returns the total byte size of this compound field layout.
+    ///
+    /// # Panics
+    /// Panics if called on a `Scalar` variant — scalars should use `element_size()`.
+    pub(crate) fn byte_size(&self) -> u32 {
+        match self {
+            Self::NestedStruct { total_size, .. } => *total_size,
+            Self::NestedArray { elem_size, length, .. } => elem_size * length,
+            Self::Scalar => panic!("byte_size() called on Scalar — use element_size() instead"),
+        }
     }
 }
 
@@ -308,8 +326,7 @@ fn type_byte_size_with_visited(
             }
         }
         TypeInfoKind::Array(elem_type, length) => {
-            let elem_sz = type_byte_size_with_visited(&elem_type.kind, ctx, visited);
-            elem_sz
+            type_byte_size_with_visited(&elem_type.kind, ctx, visited)
                 .checked_mul(*length)
                 .expect("Array byte count overflow: element size * length exceeds u32::MAX")
         }
@@ -345,7 +362,7 @@ fn natural_alignment_with_visited(
                 struct_info
                     .fields
                     .iter()
-                    .map(|f| natural_alignment_with_visited(&f.type_info.kind, ctx, visited))
+                    .map(|f| natural_alignment_with_visited(&f.type_info.kind, ctx, &mut visited.clone()))
                     .max()
                     .unwrap_or(1)
             } else {
@@ -631,8 +648,15 @@ pub(crate) fn emit_array_param_copy(
 
     let byte_size = slot.elem_size * slot.length;
 
-    if slot.length > UNROLL_THRESHOLD {
-        // Bulk copy via memory.copy
+    let is_struct_element = matches!(
+        elem_type,
+        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+    );
+
+    if slot.length > UNROLL_THRESHOLD || is_struct_element {
+        // Bulk copy via memory.copy.
+        // Always used for struct-element arrays because load/store instructions
+        // do not support compound types.
         func.instruction(&Instruction::LocalGet(layout.frame_ptr_local));
         if slot.offset > 0 {
             #[allow(clippy::cast_possible_wrap)]
@@ -869,6 +893,7 @@ mod tests {
             offset: 0,
             elem_size: 4,
             length: 3,
+            element_layout: None,
         };
         assert_eq!(slot.offset, 0);
         assert_eq!(slot.elem_size, 4);

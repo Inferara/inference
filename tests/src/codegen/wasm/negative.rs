@@ -228,15 +228,14 @@ mod unsupported_compound_types {
     }
 
     #[test]
-    fn array_of_structs() {
+    fn array_of_structs_succeeds() {
         let result = try_codegen(
             "struct P { x: i32; }\npub fn test() -> i32 { let a: [P; 2] = [P{x:1}, P{x:2}]; return 1; }",
         );
-        assert!(result.is_err(), "array of structs should fail codegen");
-        let err = result.unwrap_err();
         assert!(
-            err.contains("unsupported position"),
-            "unexpected error message: {err}"
+            result.is_ok(),
+            "array of structs should succeed codegen: {:?}",
+            result.err()
         );
     }
 

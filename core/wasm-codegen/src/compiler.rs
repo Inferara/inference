@@ -753,10 +753,13 @@ impl Compiler {
                             );
                             let align = natural_alignment_for_type(&elem_type.kind, ctx);
                             let aligned_offset = align_to(current_offset, align);
+                            let element_layout =
+                                compute_element_layout_if_struct(&elem_type.kind, ctx);
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
                                 length: *length,
+                                element_layout,
                             };
                             let arg_name = arena[*name].name.clone();
                             array_offsets.insert(arg_name, slot);
@@ -876,10 +879,13 @@ impl Compiler {
                             );
                             let align = natural_alignment_for_type(&elem_type.kind, ctx);
                             let aligned_offset = align_to(*current_offset, align);
+                            let element_layout =
+                                compute_element_layout_if_struct(&elem_type.kind, ctx);
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
                                 length: *length,
+                                element_layout,
                             };
                             let var_name = arena[*name].name.clone();
                             array_offsets.insert(var_name, slot);
@@ -1868,6 +1874,10 @@ impl Compiler {
     }
 
     /// Lowers a return expression in an array-returning sret function.
+    ///
+    /// For scalar-element arrays, emits per-element stores to the sret pointer.
+    /// For struct-element arrays, emits per-element `lower_struct_literal_fields`
+    /// or `memory.copy` depending on the expression form.
     fn lower_array_sret_return(
         &mut self,
         arena: &AstArena,
@@ -1878,7 +1888,10 @@ impl Compiler {
     ) -> Result<(), CodegenError> {
         let elem_size = return_info.elem_size;
         let byte_size = return_info.elem_size * return_info.length;
-        let store_instr = memory::store_instruction(&return_info.elem_kind);
+        let is_struct_element = matches!(
+            &return_info.elem_kind,
+            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        );
 
         match &arena[return_expr_id].kind {
             Expr::Identifier(ident_id) => {
@@ -1892,12 +1905,28 @@ impl Compiler {
             }
             Expr::ArrayLiteral { elements } => {
                 let elements = elements.clone();
-                for (i, element_id) in elements.iter().enumerate() {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let byte_offset = (i as u32) * elem_size;
-                    emit_ptr_offset_addr(self.func(), sret_idx, byte_offset);
-                    self.lower_expression(arena, *element_id, ctx, None);
-                    self.func().instruction(&store_instr);
+                if is_struct_element {
+                    let field_slots =
+                        compute_element_layout_if_struct(&return_info.elem_kind, ctx)
+                            .expect("Struct element must have field layout");
+                    self.lower_array_literal_struct_elements(
+                        arena,
+                        &elements,
+                        &field_slots,
+                        sret_idx,
+                        0,
+                        elem_size,
+                        ctx,
+                    );
+                } else {
+                    let store_instr = memory::store_instruction(&return_info.elem_kind);
+                    for (i, element_id) in elements.iter().enumerate() {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let byte_offset = (i as u32) * elem_size;
+                        emit_ptr_offset_addr(self.func(), sret_idx, byte_offset);
+                        self.lower_expression(arena, *element_id, ctx, None);
+                        self.func().instruction(&store_instr);
+                    }
                 }
             }
             Expr::FunctionCall { function, args, .. } => {
@@ -1994,6 +2023,10 @@ impl Compiler {
     }
 
     /// Lowers an array index write (`arr[i] = value`).
+    ///
+    /// For scalar elements, emits a store at `base + index * elem_size`.
+    /// For struct elements, emits `memory.copy` from the source struct pointer
+    /// to `base + index * struct_size`.
     fn lower_array_index_write(
         &mut self,
         arena: &AstArena,
@@ -2008,14 +2041,37 @@ impl Compiler {
         let elem_type_info = ctx
             .get_node_typeinfo(NodeId::Expr(aiae_expr_id))
             .expect("ArrayIndexAccess must have type info (element type)");
-        let elem_sz = memory::element_size(&elem_type_info.kind);
-        let store_instr = memory::store_instruction(&elem_type_info.kind);
 
-        self.lower_expression(arena, array_expr_id, ctx, None);
-        self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
-        self.lower_expression(arena, right_expr_id, ctx, None);
+        let is_struct_element = matches!(
+            &elem_type_info.kind,
+            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        );
 
-        self.func().instruction(&store_instr);
+        if is_struct_element {
+            let elem_sz = type_byte_size(&elem_type_info.kind, ctx);
+
+            // dest: array_base + index * struct_size
+            self.lower_expression(arena, array_expr_id, ctx, None);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            // src: RHS expression (struct pointer)
+            self.lower_expression(arena, right_expr_id, ctx, None);
+            #[allow(clippy::cast_possible_wrap)]
+            self.func()
+                .instruction(&Instruction::I32Const(elem_sz as i32));
+            self.func().instruction(&Instruction::MemoryCopy {
+                src_mem: MEMORY_INDEX,
+                dst_mem: MEMORY_INDEX,
+            });
+        } else {
+            let elem_sz = memory::element_size(&elem_type_info.kind);
+            let store_instr = memory::store_instruction(&elem_type_info.kind);
+
+            self.lower_expression(arena, array_expr_id, ctx, None);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            self.lower_expression(arena, right_expr_id, ctx, None);
+
+            self.func().instruction(&store_instr);
+        }
     }
 
     /// Lowers an `if`/`else` statement to WASM structured control flow.
@@ -2111,7 +2167,11 @@ impl Compiler {
         )
     }
 
-    /// Lowers an array index access expression (`arr[i]`) to WASM load instructions.
+    /// Lowers an array index access expression (`arr[i]`) to WASM instructions.
+    ///
+    /// For scalar elements, emits a load from `base + index * elem_size`.
+    /// For struct elements, pushes a pointer (`base + index * struct_size`) without
+    /// loading, enabling chained member access like `arr[0].x`.
     fn lower_array_index_access(
         &mut self,
         arena: &AstArena,
@@ -2125,13 +2185,25 @@ impl Compiler {
         let elem_type_info = ctx
             .get_node_typeinfo(NodeId::Expr(aiae_expr_id))
             .expect("ArrayIndexAccess must have type info (element type)");
-        let elem_sz = memory::element_size(&elem_type_info.kind);
-        let load_instr = memory::load_instruction(&elem_type_info.kind);
+
+        let is_struct_element = matches!(
+            &elem_type_info.kind,
+            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        );
+
+        let elem_sz = if is_struct_element {
+            type_byte_size(&elem_type_info.kind, ctx)
+        } else {
+            memory::element_size(&elem_type_info.kind)
+        };
 
         self.lower_expression(arena, array_expr_id, ctx, None);
         self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
 
-        self.func().instruction(&load_instr);
+        if !is_struct_element {
+            let load_instr = memory::load_instruction(&elem_type_info.kind);
+            self.func().instruction(&load_instr);
+        }
     }
 
     /// Emits the byte-offset computation for an array index expression.
@@ -2556,6 +2628,11 @@ impl Compiler {
     }
 
     /// Lowers an array literal expression.
+    ///
+    /// For scalar-element arrays, emits per-element stores. For struct-element
+    /// arrays, uses `lower_struct_literal_fields` at each element's base offset
+    /// to recursively emit field stores. Non-literal struct elements (identifiers,
+    /// function calls) are handled via `memory.copy`.
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
@@ -2580,7 +2657,7 @@ impl Compiler {
         let slot_length = slot.length;
         let slot_offset = slot.offset;
         let slot_elem_size = slot.elem_size;
-        let store_instr = memory::store_instruction_from_slot(slot);
+        let element_layout = slot.element_layout.clone();
         let frame_ptr_local = layout.frame_ptr_local;
 
         if slot_length == 0 {
@@ -2595,17 +2672,30 @@ impl Compiler {
             return;
         }
 
-        for (i, &element_id) in elements.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let byte_offset = slot_offset + (i as u32) * slot_elem_size;
-            self.func()
-                .instruction(&Instruction::LocalGet(frame_ptr_local));
-            #[allow(clippy::cast_possible_wrap)]
-            self.func()
-                .instruction(&Instruction::I32Const(byte_offset as i32));
-            self.func().instruction(&Instruction::I32Add);
-            self.lower_expression(arena, element_id, ctx, None);
-            self.func().instruction(&store_instr);
+        if let Some(ref field_slots) = element_layout {
+            self.lower_array_literal_struct_elements(
+                arena,
+                elements,
+                field_slots,
+                frame_ptr_local,
+                slot_offset,
+                slot_elem_size,
+                ctx,
+            );
+        } else {
+            let store_instr = memory::store_instruction_from_slot(slot);
+            for (i, &element_id) in elements.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation)]
+                let byte_offset = slot_offset + (i as u32) * slot_elem_size;
+                self.func()
+                    .instruction(&Instruction::LocalGet(frame_ptr_local));
+                #[allow(clippy::cast_possible_wrap)]
+                self.func()
+                    .instruction(&Instruction::I32Const(byte_offset as i32));
+                self.func().instruction(&Instruction::I32Add);
+                self.lower_expression(arena, element_id, ctx, None);
+                self.func().instruction(&store_instr);
+            }
         }
 
         self.func()
@@ -2615,6 +2705,51 @@ impl Compiler {
             self.func()
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Lowers struct-element array literal elements using recursive field stores.
+    ///
+    /// For each element at index `i`, computes base offset `slot_offset + i * elem_size`.
+    /// If the element is a `StructLiteral`, uses `lower_struct_literal_fields` to emit
+    /// per-field stores. Otherwise (identifier, function call), evaluates the expression
+    /// to get a source pointer and emits `memory.copy` for the full struct size.
+    fn lower_array_literal_struct_elements(
+        &mut self,
+        arena: &AstArena,
+        elements: &[ExprId],
+        field_slots: &[memory::StructFieldSlot],
+        frame_ptr_local: u32,
+        slot_offset: u32,
+        elem_size: u32,
+        ctx: &TypedContext,
+    ) {
+        for (i, &element_id) in elements.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let base_offset = slot_offset + (i as u32) * elem_size;
+
+            if let Expr::StructLiteral { fields, .. } = &arena[element_id].kind {
+                let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                let field_slots_clone = field_slots.to_vec();
+                self.lower_struct_literal_fields(
+                    arena,
+                    &fields,
+                    &field_slots_clone,
+                    frame_ptr_local,
+                    base_offset,
+                    ctx,
+                );
+            } else {
+                memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, base_offset);
+                self.lower_expression(arena, element_id, ctx, None);
+                #[allow(clippy::cast_possible_wrap)]
+                self.func()
+                    .instruction(&Instruction::I32Const(elem_size as i32));
+                self.func().instruction(&Instruction::MemoryCopy {
+                    src_mem: MEMORY_INDEX,
+                    dst_mem: MEMORY_INDEX,
+                });
+            }
         }
     }
 
@@ -2855,13 +2990,7 @@ impl Compiler {
             self.resolve_struct_field_offset(arena, struct_expr_id, field_name_id, ctx);
 
         if field_layout.is_compound() {
-            let compound_size = match &field_layout {
-                memory::CompoundFieldLayout::NestedStruct { total_size, .. } => *total_size,
-                memory::CompoundFieldLayout::NestedArray {
-                    elem_size, length, ..
-                } => elem_size * length,
-                memory::CompoundFieldLayout::Scalar => unreachable!(),
-            };
+            let compound_size = field_layout.byte_size();
 
             // dest: struct_ptr + field_offset
             self.lower_expression(arena, struct_expr_id, ctx, None);
@@ -3077,6 +3206,25 @@ impl Compiler {
         module.section(&name_section);
 
         module.finish()
+    }
+}
+
+/// Computes and returns the struct field layout if the given type is a struct.
+///
+/// Returns `Some(field_slots)` when `kind` is `Struct(name)` or `Custom(name)` and
+/// the struct is found in the type context. Returns `None` for non-struct types.
+/// Used when building `ArraySlot` to cache the element layout for struct-element arrays.
+fn compute_element_layout_if_struct(
+    kind: &TypeInfoKind,
+    ctx: &TypedContext,
+) -> Option<Vec<memory::StructFieldSlot>> {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            let struct_info = ctx.lookup_struct(name)?;
+            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx);
+            Some(field_slots)
+        }
+        _ => None,
     }
 }
 
