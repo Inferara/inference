@@ -1079,14 +1079,21 @@ impl Compiler {
                             is_compound_type && self.is_sret_function_call(arena, val_expr_id, ctx);
 
                         // Detect array-to-array copy
-                        let is_array_copy =
-                            is_array_type && matches!(arena[val_expr_id].kind, Expr::Identifier(_));
+                        let is_array_copy = is_array_type
+                            && matches!(
+                                arena[val_expr_id].kind,
+                                Expr::Identifier(_)
+                                    | Expr::ArrayIndexAccess { .. }
+                                    | Expr::MemberAccess { .. }
+                            );
 
-                        // Detect struct-to-struct copy (from identifier or member access)
+                        // Detect struct-to-struct copy (from identifier, member access, or array index)
                         let is_struct_copy = is_struct_type
                             && matches!(
                                 arena[val_expr_id].kind,
-                                Expr::Identifier(_) | Expr::MemberAccess { .. }
+                                Expr::Identifier(_)
+                                    | Expr::MemberAccess { .. }
+                                    | Expr::ArrayIndexAccess { .. }
                             );
 
                         if is_sret_call {
@@ -1823,6 +1830,11 @@ impl Compiler {
                     .frame_layout
                     .as_ref()
                     .is_some_and(|layout| layout.struct_offsets.contains_key(name));
+                let is_array_literal = matches!(&arena[right].kind, Expr::ArrayLiteral { .. });
+                let is_array_type = self
+                    .frame_layout
+                    .as_ref()
+                    .is_some_and(|layout| layout.array_offsets.contains_key(name));
                 if is_struct_literal {
                     self.lower_expression(arena, right, ctx, Some(name));
                     self.func().instruction(&Instruction::Drop);
@@ -1833,6 +1845,25 @@ impl Compiler {
                     // dest = local (already points to frame slot)
                     self.func().instruction(&Instruction::LocalGet(local_idx));
                     // src = RHS expression (struct pointer)
+                    self.lower_expression(arena, right, ctx, None);
+                    // byte count
+                    #[allow(clippy::cast_possible_wrap)]
+                    self.func()
+                        .instruction(&Instruction::I32Const(byte_size as i32));
+                    self.func().instruction(&Instruction::MemoryCopy {
+                        src_mem: MEMORY_INDEX,
+                        dst_mem: MEMORY_INDEX,
+                    });
+                } else if is_array_literal {
+                    self.lower_expression(arena, right, ctx, Some(name));
+                    self.func().instruction(&Instruction::Drop);
+                } else if is_array_type {
+                    let layout = self.frame_layout.as_ref().unwrap();
+                    let dest_slot = &layout.array_offsets[name];
+                    let byte_size = dest_slot.elem_size * dest_slot.length;
+                    // dest = local (already points to frame slot)
+                    self.func().instruction(&Instruction::LocalGet(local_idx));
+                    // src = RHS expression (array pointer)
                     self.lower_expression(arena, right, ctx, None);
                     // byte count
                     #[allow(clippy::cast_possible_wrap)]
@@ -1941,6 +1972,17 @@ impl Compiler {
             Expr::FunctionCall { function, args, .. } => {
                 self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
             }
+            Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. } => {
+                self.func().instruction(&Instruction::LocalGet(sret_idx));
+                self.lower_expression(arena, return_expr_id, ctx, None);
+                #[allow(clippy::cast_possible_wrap)]
+                self.func()
+                    .instruction(&Instruction::I32Const(byte_size as i32));
+                self.func().instruction(&Instruction::MemoryCopy {
+                    src_mem: MEMORY_INDEX,
+                    dst_mem: MEMORY_INDEX,
+                });
+            }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
             }
@@ -1975,6 +2017,17 @@ impl Compiler {
             }
             Expr::FunctionCall { function, args, .. } => {
                 self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
+            }
+            Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. } => {
+                self.func().instruction(&Instruction::LocalGet(sret_idx));
+                self.lower_expression(arena, return_expr_id, ctx, None);
+                #[allow(clippy::cast_possible_wrap)]
+                self.func()
+                    .instruction(&Instruction::I32Const(return_info.total_size as i32));
+                self.func().instruction(&Instruction::MemoryCopy {
+                    src_mem: MEMORY_INDEX,
+                    dst_mem: MEMORY_INDEX,
+                });
             }
             _ => {
                 return Err(CodegenError::UnsupportedSretReturnExpression);
@@ -2051,12 +2104,12 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(aiae_expr_id))
             .expect("ArrayIndexAccess must have type info (element type)");
 
-        let is_struct_element = matches!(
+        let is_compound_element = matches!(
             &elem_type_info.kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
-        if is_struct_element {
+        if is_compound_element {
             let elem_sz = type_byte_size(&elem_type_info.kind, ctx);
 
             // dest: array_base + index * struct_size
@@ -2385,6 +2438,12 @@ impl Compiler {
         struct_base_offset: u32,
         field: &memory::StructFieldSlot,
     ) {
+        assert!(
+            !field.layout.is_compound(),
+            "emit_struct_field_uzumaki called for compound field '{}'; \
+             analysis rule A027 should have rejected uzumaki on structs with compound fields",
+            field.name
+        );
         let uzumaki_opcode = if Self::is_i64_type(&field.type_kind) {
             UZUMAKI_I64_OPCODE
         } else {

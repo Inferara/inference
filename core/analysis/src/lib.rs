@@ -54,6 +54,8 @@
 //! - A026: Nested compound type depth exceeds one level
 //! - A027: Uzumaki on struct with compound fields (nested struct)
 //! - A028: Uzumaki on array of structs
+//! - A029: Compound literal in member access assignment
+//! - A030: Uzumaki on deep array (3D+)
 //!
 //! ## Pipeline Position
 //!
@@ -154,6 +156,8 @@ mod tests {
             AnalysisDiagnostic::NestedCompoundDepthExceeded { outer: "Outer".to_string(), field: "inner".to_string(), ty: "Inner".to_string(), location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnNestedStruct { name: "Outer".to_string(), location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnStructInArray { location: dummy_location() },
+            AnalysisDiagnostic::CompoundLiteralInMemberAssign { location: dummy_location() },
+            AnalysisDiagnostic::UzumakiOnDeepArray { location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

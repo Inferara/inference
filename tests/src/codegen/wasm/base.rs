@@ -4571,6 +4571,318 @@ mod base_codegen_tests {
             "test_deep_inner_arr_sum should return 60 (10+20+30)"
         );
     }
+
+    #[test]
+    fn multidim_array_param_inline_validation() {
+        let source = r#"
+            pub fn read_grid(grid: [[i32; 3]; 2]) -> i32 {
+                return grid[0][1];
+            }
+            pub fn caller() {
+                forall {
+                    let g: [[i32; 3]; 2] = @;
+                    let _v: i32 = read_grid(g);
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_param_i64_inline_validation() {
+        let source = r#"
+            pub fn read_matrix(m: [[i64; 2]; 3]) -> i64 {
+                return m[1][0];
+            }
+            pub fn caller() {
+                forall {
+                    let m: [[i64; 2]; 3] = @;
+                    let _v: i64 = read_matrix(m);
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim i64 array param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_scalar_index_write_inline_validation() {
+        let source = r#"
+            pub fn write_and_read() {
+                forall {
+                    let mut grid: [[i32; 3]; 2] = @;
+                    grid[1][0] = 99;
+                    let _v: i32 = grid[1][0];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array scalar index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_scalar_index_write_i64_inline_validation() {
+        let source = r#"
+            pub fn write_matrix() {
+                forall {
+                    let mut m: [[i64; 2]; 2] = @;
+                    m[0][1] = 42;
+                    let _v: i64 = m[0][1];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim i64 array scalar index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_compound_index_write_inline_validation() {
+        let source = r#"
+            pub fn write_row() {
+                forall {
+                    let mut grid: [[i32; 3]; 2] = @;
+                    let row: [i32; 3] = @;
+                    grid[0] = row;
+                    let _v: i32 = grid[0][1];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array compound index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn copy_struct_from_array_index_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test_copy_from_index() -> i32 {
+                let mut points: [Point; 3] = [
+                    Point { x: 10, y: 20 },
+                    Point { x: 30, y: 40 },
+                    Point { x: 50, y: 60 }
+                ];
+                let p: Point = points[1];
+                points[1].x = 99;
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_copy_from_index")
+            .expect("Failed to get 'test_copy_from_index'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_copy_from_index failed");
+        assert_eq!(
+            result, 30,
+            "p.x should still be 30 after modifying points[1].x (value semantics via copy)"
+        );
+    }
+
+    #[test]
+    fn array_literal_reassignment_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn test_array_literal_reassign() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                arr = [4, 5, 6];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_array_literal_reassign")
+            .expect("Failed to get 'test_array_literal_reassign'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_array_literal_reassign failed");
+        assert_eq!(
+            result, 5,
+            "arr[1] should be 5 after reassigning arr = [4, 5, 6]"
+        );
+    }
+
+    #[test]
+    fn array_variable_reassignment_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn test_array_var_reassign() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                let other: [i32; 3] = [7, 8, 9];
+                arr = other;
+                return arr[2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_array_var_reassign")
+            .expect("Failed to get 'test_array_var_reassign'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_array_var_reassign failed");
+        assert_eq!(
+            result, 9,
+            "arr[2] should be 9 after reassigning arr = other"
+        );
+    }
+
+    #[test]
+    fn sret_return_array_index_struct_second_elem_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Vec2 { x: i32; y: i32; }
+            pub fn get_second_y() -> i32 {
+                let vecs: [Vec2; 3] = [
+                    Vec2 { x: 1, y: 2 },
+                    Vec2 { x: 3, y: 4 },
+                    Vec2 { x: 5, y: 6 }
+                ];
+                let v: Vec2 = get_at(vecs, 2);
+                return v.y;
+            }
+            fn get_at(arr: [Vec2; 3], idx: i32) -> Vec2 {
+                return arr[idx];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_second_y")
+            .expect("Failed to get 'get_second_y'");
+        let result = func
+            .call(&mut store, ())
+            .expect("get_second_y failed");
+        assert_eq!(
+            result, 6,
+            "get_second_y should return 6 (arr[2].y via sret array index return)"
+        );
+    }
+
+    #[test]
+    fn sret_return_array_index_struct_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn first_point_x() -> i32 {
+                let pts: [Point; 2] = [Point { x: 10, y: 20 }, Point { x: 30, y: 40 }];
+                let p: Point = get_first(pts);
+                return p.x;
+            }
+            fn get_first(pts: [Point; 2]) -> Point {
+                return pts[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "first_point_x")
+            .expect("Failed to get 'first_point_x'");
+        let result = func
+            .call(&mut store, ())
+            .expect("first_point_x failed");
+        assert_eq!(
+            result, 10,
+            "first_point_x should return 10 (pts[0].x via sret array index return)"
+        );
+    }
+
+    #[test]
+    fn sret_return_member_access_array_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            pub fn get_arr_elem() -> i32 {
+                let h: HasArray = HasArray { arr: [10, 20, 30], val: 99 };
+                let a: [i32; 3] = get_arr(h);
+                return a[1];
+            }
+            fn get_arr(h: HasArray) -> [i32; 3] {
+                return h.arr;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_arr_elem")
+            .expect("Failed to get 'get_arr_elem'");
+        let result = func
+            .call(&mut store, ())
+            .expect("get_arr_elem failed");
+        assert_eq!(
+            result, 20,
+            "get_arr_elem should return 20 (h.arr[1] via sret member access array return)"
+        );
+    }
 }
 
 /// Test data regeneration helpers.

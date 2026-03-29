@@ -334,13 +334,8 @@ mod compound_reassignment {
             "pub fn test() -> i32 { let mut a: [i32; 2] = [1, 2]; a = [3, 4]; return a[0]; }",
         );
         assert!(
-            result.is_err(),
-            "array literal reassignment should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("array literal in unsupported position"),
-            "unexpected error message: {err}"
+            result.is_ok(),
+            "array literal reassignment should succeed codegen"
         );
     }
 }

@@ -653,12 +653,12 @@ pub(crate) fn emit_array_param_copy(
 
     let byte_size = slot.elem_size * slot.length;
 
-    let is_struct_element = matches!(
+    let is_compound_element = matches!(
         elem_type,
-        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
     );
 
-    if slot.length > UNROLL_THRESHOLD || is_struct_element {
+    if slot.length > UNROLL_THRESHOLD || is_compound_element {
         // Bulk copy via memory.copy.
         // Always used for struct-element arrays because load/store instructions
         // do not support compound types.

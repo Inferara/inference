@@ -278,8 +278,16 @@
     i32.store
     local.get $__frame_ptr
     local.set $pts
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
     local.get $pts
     i32.const 8
+    i32.add
+    i32.const 8
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
     i32.add
     local.set $p
     local.get $p
@@ -435,7 +443,15 @@
     i32.store
     local.get $__frame_ptr
     local.set $pts
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
     local.get $pts
+    i32.const 8
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
     local.set $p
     local.get $p
     call $Point.sum

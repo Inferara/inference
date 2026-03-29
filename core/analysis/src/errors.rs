@@ -158,6 +158,12 @@ pub enum AnalysisDiagnostic {
 
     #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
     UzumakiOnStructInArray { location: Location },
+
+    #[error("compound literal cannot be assigned directly to a struct field; assign to a temporary variable first")]
+    CompoundLiteralInMemberAssign { location: Location },
+
+    #[error("uzumaki (@) on arrays with more than 2 dimensions is not supported")]
+    UzumakiOnDeepArray { location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -190,7 +196,9 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UninitializedVariable { location, .. }
             | AnalysisDiagnostic::NestedCompoundDepthExceeded { location, .. }
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
-            | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. } => location,
+            | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
+            | AnalysisDiagnostic::CompoundLiteralInMemberAssign { location }
+            | AnalysisDiagnostic::UzumakiOnDeepArray { location } => location,
         }
     }
 
@@ -226,6 +234,8 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::NestedCompoundDepthExceeded { .. } => "A026",
             AnalysisDiagnostic::UzumakiOnNestedStruct { .. } => "A027",
             AnalysisDiagnostic::UzumakiOnStructInArray { .. } => "A028",
+            AnalysisDiagnostic::CompoundLiteralInMemberAssign { .. } => "A029",
+            AnalysisDiagnostic::UzumakiOnDeepArray { .. } => "A030",
         }
     }
 }

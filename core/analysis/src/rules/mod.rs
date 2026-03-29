@@ -3,6 +3,7 @@ pub mod array_uzumaki_as_argument;
 pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
 pub mod break_outside_loop;
+pub mod compound_literal_member_assign;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
 pub mod compound_return_call_position;
@@ -21,6 +22,7 @@ pub mod return_inside_nondet_block;
 pub mod standalone_uzumaki;
 pub mod uninitialized_variable;
 pub mod uzumaki_in_reassignment;
+pub mod uzumaki_on_deep_array;
 pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
 pub mod uzumaki_outside_nondet_block;
@@ -30,6 +32,7 @@ use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
 use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
 use break_outside_loop::BreakOutsideLoop;
+use compound_literal_member_assign::CompoundLiteralMemberAssign;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
 use compound_return_call_position::CompoundReturnCallPosition;
@@ -48,6 +51,7 @@ use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use standalone_uzumaki::StandaloneUzumaki;
 use uninitialized_variable::UninitializedVariable;
 use uzumaki_in_reassignment::UzumakiInReassignment;
+use uzumaki_on_deep_array::UzumakiOnDeepArray;
 use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
 use uzumaki_outside_nondet_block::UzumakiOutsideNonDetBlock;
@@ -87,5 +91,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &NestedCompoundDepth,
         &UzumakiOnNestedStruct,
         &UzumakiOnStructInArray,
+        &CompoundLiteralMemberAssign,
+        &UzumakiOnDeepArray,
     ]
 }
