@@ -6,7 +6,6 @@
 
 use inference_ast::ids::NodeId;
 use inference_ast::nodes::{Expr, Stmt};
-use inference_type_checker::type_info::TypeInfoKind;
 
 use crate::{errors::AnalysisDiagnostic, walker};
 
@@ -27,7 +26,7 @@ crate::rule! {
                 && matches!(arena[*expr_id].kind, Expr::Uzumaki)
                 && walk_ctx.nondet_depth > 0
                 && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id))
-                && array_nesting_depth(&type_info.kind) > 2
+                && walker::array_nesting_depth(&type_info.kind) > 2
             {
                 errors.push(AnalysisDiagnostic::UzumakiOnDeepArray {
                     location: arena[*expr_id].location,
@@ -35,12 +34,5 @@ crate::rule! {
             }
         });
         errors
-    }
-}
-
-fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
-    match kind {
-        TypeInfoKind::Array(elem, _) => 1 + array_nesting_depth(&elem.kind),
-        _ => 0,
     }
 }

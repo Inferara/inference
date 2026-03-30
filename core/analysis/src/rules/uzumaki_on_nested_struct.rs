@@ -1,8 +1,8 @@
 //! A027: Uzumaki on nested struct type.
 //!
 //! Uzumaki (@) cannot be assigned to a struct variable if that struct has any
-//! compound field (struct or array). Uzumaki is only supported for flat structs
-//! (all scalar fields) and scalar types.
+//! compound field (struct or array). Uzumaki is only supported for structs whose
+//! fields are all scalars or scalar arrays.
 
 use inference_ast::ids::NodeId;
 use inference_ast::nodes::{Expr, Stmt};

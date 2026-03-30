@@ -36,7 +36,7 @@
 //!
 //! - A025: Variable declarations must have an initializer
 //!
-//! ### Codegen Restrictions (A012–A019, A022–A030)
+//! ### Codegen Restrictions (A012–A019, A022–A031)
 //!
 //! These rules describe constructs that are valid in the type system but cannot
 //! be lowered by the current code generator.

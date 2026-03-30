@@ -1276,7 +1276,7 @@ mod type_inference_tests {
                     if field_name == "inner" {
                         assert_eq!(
                             field_type.unwrap().kind,
-                            TypeInfoKind::Custom("Inner".to_string()),
+                            TypeInfoKind::Struct("Inner".to_string()),
                             "Field inner should have type Inner"
                         );
                     } else if field_name == "value" {
@@ -1465,7 +1465,7 @@ mod type_inference_tests {
                         "level2" => {
                             assert_eq!(
                                 field_type.unwrap().kind,
-                                TypeInfoKind::Custom("Level2".to_string()),
+                                TypeInfoKind::Struct("Level2".to_string()),
                                 "Field level2 should have type Level2"
                             );
                             found_level2 = true;
@@ -1473,7 +1473,7 @@ mod type_inference_tests {
                         "level3" => {
                             assert_eq!(
                                 field_type.unwrap().kind,
-                                TypeInfoKind::Custom("Level3".to_string()),
+                                TypeInfoKind::Struct("Level3".to_string()),
                                 "Field level3 should have type Level3"
                             );
                             found_level3 = true;

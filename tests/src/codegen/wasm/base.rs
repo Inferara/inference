@@ -4610,6 +4610,52 @@ mod base_codegen_tests {
             result, 60,
             "test_deep_inner_arr_sum should return 60 (10+20+30)"
         );
+
+        // Deep struct as parameter
+        let deep_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "deep_param")
+            .expect("Failed to get 'deep_param'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        // Deep layout: inner(HasArray) at 0..16 (arr[0..12] + val@12), tag@16
+        // HasArray: arr[0]=10@0, arr[1]=20@4, arr[2]=30@8, val=99@12
+        // Deep: tag=42@16; total 20 bytes
+        let param_base: i32 = 0;
+        let base = param_base as usize;
+        memory.data_mut(&mut store)[base..base + 4].copy_from_slice(&10_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 4..base + 8].copy_from_slice(&20_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 8..base + 12].copy_from_slice(&30_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 12..base + 16].copy_from_slice(&99_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 16..base + 20].copy_from_slice(&42_i32.to_le_bytes());
+        let result = deep_param
+            .call(&mut store, param_base)
+            .expect("deep_param failed");
+        assert_eq!(
+            result, 52,
+            "deep_param should return 52 (d.inner.arr[0]=10 + d.tag=42)"
+        );
+
+        // Deep struct as sret return
+        let deep_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "deep_return")
+            .expect("Failed to get 'deep_return'");
+        let sret_base: i32 = 0;
+        deep_return
+            .call(&mut store, sret_base)
+            .expect("deep_return failed");
+        let data = memory.data(&store);
+        let sbase = sret_base as usize;
+        let arr0 = i32::from_le_bytes(data[sbase..sbase + 4].try_into().unwrap());
+        let arr1 = i32::from_le_bytes(data[sbase + 4..sbase + 8].try_into().unwrap());
+        let arr2 = i32::from_le_bytes(data[sbase + 8..sbase + 12].try_into().unwrap());
+        let val = i32::from_le_bytes(data[sbase + 12..sbase + 16].try_into().unwrap());
+        let tag = i32::from_le_bytes(data[sbase + 16..sbase + 20].try_into().unwrap());
+        assert_eq!(arr0, 10, "deep_return: inner.arr[0] should be 10");
+        assert_eq!(arr1, 20, "deep_return: inner.arr[1] should be 20");
+        assert_eq!(arr2, 30, "deep_return: inner.arr[2] should be 30");
+        assert_eq!(val, 99, "deep_return: inner.val should be 99");
+        assert_eq!(tag, 42, "deep_return: tag should be 42");
     }
 
     #[test]

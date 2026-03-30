@@ -135,6 +135,17 @@ pub(crate) fn walk_expr(
     }
 }
 
+/// Returns how many array layers deep a type is.
+///
+/// `[i32; 3]` => 1, `[[i32; 3]; 2]` => 2, `[[[i32; 2]; 3]; 4]` => 3,
+/// `i32` / `Point` => 0.
+pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
+    match kind {
+        TypeInfoKind::Array(elem, _) => 1 + array_nesting_depth(&elem.kind),
+        _ => 0,
+    }
+}
+
 /// Returns true if a type is compound: a struct/custom type, or an array
 /// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
 /// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.

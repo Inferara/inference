@@ -27,6 +27,7 @@ crate::rule! {
                 && matches!(arena[*expr_id].kind, Expr::Uzumaki)
                 && walk_ctx.nondet_depth > 0
                 && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id))
+                && walker::array_nesting_depth(&type_info.kind) <= 2
                 && array_contains_struct(&type_info.kind)
             {
                 errors.push(AnalysisDiagnostic::UzumakiOnStructInArray {

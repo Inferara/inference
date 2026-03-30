@@ -1223,7 +1223,7 @@ impl TypeChecker {
                                         field_name: field_name.clone(),
                                     },
                                 );
-                                let field_type = field_info.type_info.clone();
+                                let field_type = self.symbol_table.resolve_custom_type(field_info.type_info.clone());
                                 ctx.set_node_typeinfo(NodeId::Expr(expr_id), field_type.clone());
                                 Some(field_type)
                             } else {

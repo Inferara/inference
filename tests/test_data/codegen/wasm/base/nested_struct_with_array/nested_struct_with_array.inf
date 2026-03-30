@@ -31,3 +31,13 @@ pub fn test_deep_inner_arr_sum() -> i32 {
     let d: Deep = Deep { inner: ha, tag: 42 };
     return d.inner.arr[0] + d.inner.arr[1] + d.inner.arr[2];
 }
+
+pub fn deep_param(d: Deep) -> i32 {
+    return d.inner.arr[0] + d.tag;
+}
+
+pub fn deep_return() -> Deep {
+    let ha: HasArray = HasArray{arr:[10,20,30],val:99};
+    let d: Deep = Deep{inner:ha,tag:42};
+    return d;
+}

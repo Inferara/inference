@@ -95,6 +95,13 @@ const UNIQUE_OPCODE: u8 = 0x3d;
 const BLOCK_TYPE_VOID: u8 = 0x40;
 const END_OPCODE: u8 = 0x0b;
 
+/// Maximum number of scalar elements that uzumaki unrolling will emit
+/// instructions for. Each element produces ~5 WASM instructions (load
+/// frame pointer, compute offset, add, uzumaki, store), so 65 536
+/// elements = 327 680 instructions -- a reasonable upper bound before
+/// instruction explosion becomes a concern.
+const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
+
 /// Separator used in mangled method names: `"{StructName}.{method_name}"`.
 ///
 /// Dot is used because it matches Zig's convention and is standard across
@@ -279,7 +286,8 @@ impl Compiler {
         let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
         match &return_type_info.kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx);
+                let elem_sz = type_byte_size(&elem_type.kind, ctx)
+                    .expect("sret registration: type_byte_size failed for array element");
                 self.func_array_returns.insert(
                     name,
                     ArrayReturnInfo {
@@ -291,7 +299,8 @@ impl Compiler {
             }
             TypeInfoKind::Custom(custom_name) => {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx);
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)
+                        .expect("sret registration: struct layout computation failed");
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
@@ -757,11 +766,13 @@ impl Compiler {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx);
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx)
+                                .expect("frame layout: type_byte_size failed for array element");
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx);
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx)
+                                .expect("frame layout: natural_alignment failed for array element");
                             let aligned_offset = align_to(current_offset, align);
                             let element_layout =
                                 compute_element_layout_if_struct(&elem_type.kind, ctx);
@@ -781,10 +792,12 @@ impl Compiler {
                         TypeInfoKind::Custom(custom_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx);
+                                    compute_struct_field_layout(&struct_info, ctx)
+                                        .expect("frame layout: struct layout computation failed");
                                 if total_size > 0 {
                                     let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx);
+                                        memory::max_struct_alignment(&field_slots, ctx)
+                                            .expect("frame layout: max_struct_alignment failed");
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -809,10 +822,12 @@ impl Compiler {
                     );
                     if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                         let (total_size, field_slots) =
-                            compute_struct_field_layout(&struct_info, ctx);
+                            compute_struct_field_layout(&struct_info, ctx)
+                                .expect("frame layout: struct layout computation failed for self");
                         if total_size > 0 {
                             let max_field_align =
-                                memory::max_struct_alignment(&field_slots, ctx);
+                                memory::max_struct_alignment(&field_slots, ctx)
+                                    .expect("frame layout: max_struct_alignment failed for self");
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -877,11 +892,13 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx);
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx)
+                                .expect("collect slots: type_byte_size failed for array element");
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx);
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx)
+                                .expect("collect slots: natural_alignment failed for array element");
                             let aligned_offset = align_to(*current_offset, align);
                             let element_layout =
                                 compute_element_layout_if_struct(&elem_type.kind, ctx);
@@ -900,10 +917,12 @@ impl Compiler {
                         TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx);
+                                    compute_struct_field_layout(&struct_info, ctx)
+                                        .expect("collect slots: struct layout computation failed");
                                 if total_size > 0 {
                                     let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx);
+                                        memory::max_struct_alignment(&field_slots, ctx)
+                                            .expect("collect slots: max_struct_alignment failed");
                                     let aligned_offset = align_to(*current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -937,6 +956,7 @@ impl Compiler {
                     else_block,
                     ..
                 } => {
+                    let saved_offset = *current_offset;
                     Self::collect_compound_slots(
                         arena,
                         *then_block,
@@ -945,7 +965,9 @@ impl Compiler {
                         struct_offsets,
                         current_offset,
                     );
+                    let then_end = *current_offset;
                     if let Some(else_id) = else_block {
+                        *current_offset = saved_offset;
                         Self::collect_compound_slots(
                             arena,
                             *else_id,
@@ -954,6 +976,7 @@ impl Compiler {
                             struct_offsets,
                             current_offset,
                         );
+                        *current_offset = (*current_offset).max(then_end);
                     }
                 }
                 Stmt::Loop { body, .. } => {
@@ -1511,7 +1534,11 @@ impl Compiler {
                                 "Array uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        self.lower_array_uzumaki(arena, &elem_type, length, var_name);
+                        if let Err(e) =
+                            self.lower_array_uzumaki(arena, &elem_type, length, var_name)
+                        {
+                            panic!("array uzumaki lowering failed: {e}");
+                        }
                     }
                     TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
                         cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
@@ -1521,7 +1548,9 @@ impl Compiler {
                                 "Struct uzumaki (expr_id={expr_id:?}) has no enclosing variable name"
                             )
                         });
-                        self.lower_struct_uzumaki(ctx, &name, var_name);
+                        if let Err(e) = self.lower_struct_uzumaki(ctx, &name, var_name) {
+                            panic!("struct uzumaki lowering failed: {e}");
+                        }
                     }
                     _ => panic!("Unsupported Uzumaki expression type: {type_info:?}"),
                 }
@@ -2066,7 +2095,8 @@ impl Compiler {
         );
 
         if is_compound_element {
-            let elem_sz = type_byte_size(&elem_type_info.kind, ctx);
+            let elem_sz = type_byte_size(&elem_type_info.kind, ctx)
+                .expect("array index write: type_byte_size failed for compound element");
 
             // dest: array_base + index * struct_size
             self.lower_expression(arena, array_expr_id, ctx, None);
@@ -2205,6 +2235,7 @@ impl Compiler {
 
         let elem_sz = if is_compound_element {
             type_byte_size(&elem_type_info.kind, ctx)
+                .expect("array index access: type_byte_size failed for compound element")
         } else {
             memory::element_size(&elem_type_info.kind)
         };
@@ -2253,7 +2284,14 @@ impl Compiler {
         elem_type: &TypeInfo,
         length: u32,
         enclosing_var_name: &str,
-    ) {
+    ) -> Result<(), CodegenError> {
+        if length > MAX_UZUMAKI_UNROLL_ELEMENTS {
+            return Err(CodegenError::ArrayTooLargeForUzumaki {
+                total_elements: length,
+                max: MAX_UZUMAKI_UNROLL_ELEMENTS,
+            });
+        }
+
         let parent_var_name = enclosing_var_name;
 
         let layout = self
@@ -2287,8 +2325,11 @@ impl Compiler {
             for i in 0..length {
                 for j in 0..inner_len {
                     #[allow(clippy::cast_possible_wrap)]
-                    let byte_offset =
-                        (slot_offset + i * inner_array_size + j * leaf_elem_size) as i32;
+                    let byte_offset = slot_offset
+                        .checked_add(i * inner_array_size)
+                        .and_then(|v| v.checked_add(j * leaf_elem_size))
+                        .expect("byte offset overflow in 2D array uzumaki")
+                        as i32;
                     self.func()
                         .instruction(&Instruction::LocalGet(frame_ptr_local));
                     self.func().instruction(&Instruction::I32Const(byte_offset));
@@ -2326,6 +2367,7 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
+        Ok(())
     }
 
     /// Lowers a struct-typed uzumaki expression to field-wise non-deterministic stores.
@@ -2338,7 +2380,7 @@ impl Compiler {
         ctx: &TypedContext,
         struct_name: &str,
         enclosing_var_name: &str,
-    ) {
+    ) -> Result<(), CodegenError> {
         let layout = self
             .frame_layout
             .as_ref()
@@ -2362,14 +2404,14 @@ impl Compiler {
                 .lookup_struct(struct_name)
                 .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
             if !struct_info.fields.is_empty() {
-                let (_, computed_fields) = compute_struct_field_layout(&struct_info, ctx);
+                let (_, computed_fields) = compute_struct_field_layout(&struct_info, ctx)?;
                 for field in &computed_fields {
-                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+                    self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
                 }
             }
         } else {
             for field in &field_slots {
-                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field);
+                self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
             }
         }
 
@@ -2381,15 +2423,29 @@ impl Compiler {
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
         }
+        Ok(())
     }
 
     /// Emits a uzumaki opcode + store for a single struct field at its memory offset.
+    ///
+    /// For array-typed fields, emits one uzumaki + store per element; the element
+    /// count is checked against [`MAX_UZUMAKI_UNROLL_ELEMENTS`] to prevent
+    /// instruction explosion.
     fn emit_struct_field_uzumaki(
         &mut self,
         frame_ptr_local: u32,
         struct_base_offset: u32,
         field: &memory::StructFieldSlot,
-    ) {
+    ) -> Result<(), CodegenError> {
+        if let TypeInfoKind::Array(ref _elem, length) = field.type_kind
+            && length > MAX_UZUMAKI_UNROLL_ELEMENTS
+        {
+            return Err(CodegenError::ArrayTooLargeForUzumaki {
+                total_elements: length,
+                max: MAX_UZUMAKI_UNROLL_ELEMENTS,
+            });
+        }
+
         assert!(
             !field.layout.is_compound(),
             "emit_struct_field_uzumaki called for compound field '{}'; \
@@ -2412,6 +2468,7 @@ impl Compiler {
         self.func().instruction(&Instruction::I32Add);
         self.emit_uzumaki(uzumaki_opcode);
         self.func().instruction(&store_instr);
+        Ok(())
     }
 
     /// Lowers a binary expression to WASM stack instructions.
@@ -2779,7 +2836,9 @@ impl Compiler {
         let field_slots_clone = field_slots.to_vec();
         for (i, &element_id) in elements.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
-            let base_offset = slot_offset + (i as u32) * elem_size;
+            let base_offset = slot_offset
+                .checked_add((i as u32) * elem_size)
+                .expect("byte offset overflow in array literal struct elements");
 
             if let Expr::StructLiteral { fields, .. } = &arena[element_id].kind {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
@@ -3108,7 +3167,8 @@ impl Compiler {
             .lookup_struct(struct_name)
             .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
-        let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx);
+        let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)
+            .expect("resolve field offset: struct layout computation failed");
         let field_slot = field_slots
             .iter()
             .find(|fs| fs.name == *field_name)
@@ -3258,7 +3318,8 @@ fn compute_element_layout_if_struct(
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
             let struct_info = ctx.lookup_struct(name)?;
-            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx);
+            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)
+                .expect("element layout: struct layout computation failed");
             Some(field_slots)
         }
         _ => None,

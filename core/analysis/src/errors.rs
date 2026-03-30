@@ -153,7 +153,7 @@ pub enum AnalysisDiagnostic {
         location: Location,
     },
 
-    #[error("uzumaki (@) cannot be assigned to struct `{name}` because it contains compound fields; uzumaki is only supported for flat structs (all scalar fields) and scalar types")]
+    #[error("uzumaki (@) cannot be assigned to struct `{name}` because it contains compound fields; uzumaki is only supported for structs whose fields are all scalars or scalar arrays")]
     UzumakiOnNestedStruct { name: String, location: Location },
 
     #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
