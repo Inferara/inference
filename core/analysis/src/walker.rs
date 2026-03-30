@@ -158,12 +158,13 @@ fn is_compound_type(kind: &TypeInfoKind) -> bool {
     }
 }
 
-/// Returns true if a compound type contains compound fields inside it.
+/// Returns true if a compound type contains fields that are unsupported
+/// for struct uzumaki lowering.
 ///
 /// - **Struct/Custom**: looks up the struct definition and checks whether any
-///   of its fields are themselves compound types (structs, custom types, or
-///   arrays of structs). Fields that are scalar arrays (e.g. `[i32; 3]`) are
-///   not considered compound.
+///   of its fields are nested structs, arrays of structs, or multidimensional
+///   arrays (nesting depth > 1). Fields that are 1D scalar arrays (e.g.
+///   `[i32; 3]`) are not considered compound.
 /// - **Array**: recurses into the element type.
 /// - **Scalars**: returns false.
 #[must_use]
@@ -173,13 +174,14 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
             ctx.lookup_struct(name).is_some_and(|s| {
                 s.fields.iter().any(|f| match &f.type_info.kind {
                     TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
-                    TypeInfoKind::Array(_, _) => is_compound_type(&f.type_info.kind),
+                    TypeInfoKind::Array(_, _) => {
+                        is_compound_type(&f.type_info.kind)
+                            || array_nesting_depth(&f.type_info.kind) > 1
+                    }
                     _ => false,
                 })
             })
         }
-        // Recurse into array element type: `[[i32; 3]; 2]` is accepted because
-        // the innermost element type is scalar. Only arrays of structs are compound.
         TypeInfoKind::Array(elem, _) => has_compound_fields(ctx, &elem.kind),
         _ => false,
     }

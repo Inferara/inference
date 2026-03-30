@@ -358,6 +358,24 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a027_uzumaki_on_struct_with_2d_array_field_rejected() {
+        let source = r#"
+            struct Has2D { grid: [[i32; 3]; 2]; val: i32; }
+            fn main() -> i32 {
+                forall {
+                    let h: Has2D = @;
+                }
+                return 0;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a027 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnNestedStruct { .. }));
+        assert!(has_a027, "uzumaki on struct with 2D array field should be rejected, got: {errors:?}");
+    }
+
+    #[test]
     fn a027_error_message_includes_struct_name() {
         let source = r#"
             struct Inner { x: i32; y: i32; }

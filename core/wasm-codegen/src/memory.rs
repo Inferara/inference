@@ -177,9 +177,13 @@ pub(crate) struct StructSlot {
 /// [`CompoundFieldLayout`] caches the inner layout so that chained member
 /// access can resolve offsets without recomputation.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if a field has an unsupported type for `element_size()`.
+/// Returns [`CodegenError::CycleInStructLayout`] if a struct transitively
+/// contains itself (defense-in-depth; the type checker normally prevents this).
+///
+/// Returns [`CodegenError::StructNotFoundInTypeContext`] if a nested struct
+/// name cannot be found in the type context.
 pub(crate) fn compute_struct_field_layout(
     struct_info: &StructInfo,
     ctx: &TypedContext,
