@@ -205,17 +205,25 @@ fn compute_struct_field_layout_with_visited(
     // don't falsely trigger cycle detection against each other.
     for field in &struct_info.fields {
         let mut field_visited = visited.clone();
-        let size =
-            type_byte_size_with_visited(&field.type_info.kind, ctx, &mut field_visited.clone());
+        let layout =
+            compute_field_layout_with_visited(&field.type_info.kind, ctx, &mut field_visited);
+
+        let size = match &layout {
+            CompoundFieldLayout::NestedStruct { total_size, .. } => *total_size,
+            CompoundFieldLayout::NestedArray {
+                elem_size, length, ..
+            } => elem_size
+                .checked_mul(*length)
+                .expect("Array byte count overflow: element size * length exceeds u32::MAX"),
+            CompoundFieldLayout::Scalar => element_size(&field.type_info.kind),
+        };
+
         let align = natural_alignment_for_type(&field.type_info.kind, ctx);
         let aligned_offset = align_to(current_offset, align);
 
         if align > max_align {
             max_align = align;
         }
-
-        let layout =
-            compute_field_layout_with_visited(&field.type_info.kind, ctx, &mut field_visited);
 
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),

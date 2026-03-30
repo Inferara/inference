@@ -65,10 +65,8 @@ fn check_defs(
         match &arena[def_id].kind {
             Def::Function {
                 returns, body, ..
-            } => {
-                if has_compound_return_type(ctx, arena, *returns) {
-                    check_block_for_returns(arena, *body, errors);
-                }
+            } if has_compound_return_type(ctx, arena, *returns) => {
+                check_block_for_returns(arena, *body, errors);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
@@ -107,12 +105,10 @@ fn check_stmt_for_returns(
     errors: &mut Vec<AnalysisDiagnostic>,
 ) {
     match &arena[stmt_id].kind {
-        Stmt::Return { expr } => {
-            if !is_supported_sret_expr(arena, *expr) {
-                errors.push(AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
-                    location: arena[*expr].location,
-                });
-            }
+        Stmt::Return { expr } if !is_supported_sret_expr(arena, *expr) => {
+            errors.push(AnalysisDiagnostic::UnsupportedCompoundReturnExpression {
+                location: arena[*expr].location,
+            });
         }
         Stmt::If {
             then_block,
