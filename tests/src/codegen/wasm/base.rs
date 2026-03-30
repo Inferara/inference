@@ -3227,6 +3227,23 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn struct_array_field_nondet_golden_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 3);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 3);
+        let test_name = "struct_array_field_nondet";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
     fn struct_uzumaki_i32_inline_validation() {
         cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
         let source = r#"
@@ -3272,6 +3289,86 @@ mod base_codegen_tests {
         let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki mixed fields WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            pub fn test() {
+                forall {
+                    let h: HasArray = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with array field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_i64_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct HasI64Arr { arr: [i64; 2]; val: i32; }
+            pub fn test() {
+                forall {
+                    let h: HasI64Arr = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with i64 array field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_multiple_array_fields_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Multi { a: [i32; 2]; b: [i64; 2]; c: i32; }
+            pub fn test() {
+                forall {
+                    let m: Multi = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with multiple array fields uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_only_array_fields_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct ArrayOnly { a: [i32; 3]; b: [i32; 2]; }
+            pub fn test() {
+                forall {
+                    let x: ArrayOnly = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with only array fields uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_bool_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Flags { bits: [bool; 4]; tag: i32; }
+            pub fn test() {
+                forall {
+                    let f: Flags = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with bool array field uzumaki WASM is invalid: {e}"));
     }
 
     // --- Method codegen: self parameter handling and instance method call tests ---
@@ -6006,6 +6103,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "struct_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_array_field_nondet_wasm() {
+        let dir = base_test_dir().join("struct_array_field_nondet");
+        let source_code = std::fs::read_to_string(dir.join("struct_array_field_nondet.inf"))
+            .expect("Failed to read struct_array_field_nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_array_field_nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_array_field_nondet");
     }
 
     #[test]

@@ -77,10 +77,10 @@ use wasm_encoder::{
 };
 
 use crate::memory::{
-    self, ArraySlot, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT, STACK_SIZE, StructSlot,
-    align_to, align_to_frame, compute_struct_field_layout, emit_array_param_copy,
-    emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue, emit_stack_prologue,
-    emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
+    self, ArraySlot, CompoundFieldLayout, FrameLayout, MEMORY_INDEX, STACK_POINTER_INIT,
+    STACK_SIZE, StructSlot, align_to, align_to_frame, compute_struct_field_layout,
+    emit_array_param_copy, emit_ptr_offset_addr, emit_sret_copy, emit_stack_epilogue,
+    emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
 // Custom opcode constants for non-deterministic operations.
@@ -2426,11 +2426,12 @@ impl Compiler {
         Ok(())
     }
 
-    /// Emits a uzumaki opcode + store for a single struct field at its memory offset.
+    /// Emits uzumaki opcode(s) + store(s) for a single struct field at its memory offset.
     ///
-    /// For array-typed fields, emits one uzumaki + store per element; the element
-    /// count is checked against [`MAX_UZUMAKI_UNROLL_ELEMENTS`] to prevent
-    /// instruction explosion.
+    /// Handles both scalar fields (single uzumaki + store) and array-typed fields
+    /// (one uzumaki + store per element). The element count for arrays is checked
+    /// against [`MAX_UZUMAKI_UNROLL_ELEMENTS`] to prevent instruction explosion.
+    /// Nested struct fields remain rejected (analysis rule A027).
     fn emit_struct_field_uzumaki(
         &mut self,
         frame_ptr_local: u32,
@@ -2446,28 +2447,62 @@ impl Compiler {
             });
         }
 
-        assert!(
-            !field.layout.is_compound(),
-            "emit_struct_field_uzumaki called for compound field '{}'; \
-             analysis rule A027 should have rejected uzumaki on structs with compound fields",
-            field.name
-        );
-        let uzumaki_opcode = if Self::is_i64_type(&field.type_kind) {
-            UZUMAKI_I64_OPCODE
-        } else {
-            UZUMAKI_I32_OPCODE
-        };
-        let store_instr = memory::store_instruction(&field.type_kind);
+        match field.layout {
+            CompoundFieldLayout::Scalar => {
+                let uzumaki_opcode = if Self::is_i64_type(&field.type_kind) {
+                    UZUMAKI_I64_OPCODE
+                } else {
+                    UZUMAKI_I32_OPCODE
+                };
+                let store_instr = memory::store_instruction(&field.type_kind);
 
-        #[allow(clippy::cast_possible_wrap)]
-        let byte_offset = (struct_base_offset + field.offset) as i32;
+                #[allow(clippy::cast_possible_wrap)]
+                let byte_offset = struct_base_offset
+                    .checked_add(field.offset)
+                    .expect("byte offset overflow in struct field uzumaki")
+                    as i32;
 
-        self.func()
-            .instruction(&Instruction::LocalGet(frame_ptr_local));
-        self.func().instruction(&Instruction::I32Const(byte_offset));
-        self.func().instruction(&Instruction::I32Add);
-        self.emit_uzumaki(uzumaki_opcode);
-        self.func().instruction(&store_instr);
+                self.func()
+                    .instruction(&Instruction::LocalGet(frame_ptr_local));
+                self.func().instruction(&Instruction::I32Const(byte_offset));
+                self.func().instruction(&Instruction::I32Add);
+                self.emit_uzumaki(uzumaki_opcode);
+                self.func().instruction(&store_instr);
+            }
+            CompoundFieldLayout::NestedArray {
+                ref elem_kind,
+                elem_size,
+                length,
+            } => {
+                let uzumaki_opcode = if Self::is_i64_type(elem_kind) {
+                    UZUMAKI_I64_OPCODE
+                } else {
+                    UZUMAKI_I32_OPCODE
+                };
+                let store_instr = memory::store_instruction(elem_kind);
+                for i in 0..length {
+                    #[allow(clippy::cast_possible_wrap)]
+                    let byte_offset = struct_base_offset
+                        .checked_add(field.offset)
+                        .and_then(|v| i.checked_mul(elem_size).and_then(|ie| v.checked_add(ie)))
+                        .expect("byte offset overflow in struct field array uzumaki")
+                        as i32;
+                    self.func()
+                        .instruction(&Instruction::LocalGet(frame_ptr_local));
+                    self.func().instruction(&Instruction::I32Const(byte_offset));
+                    self.func().instruction(&Instruction::I32Add);
+                    self.emit_uzumaki(uzumaki_opcode);
+                    self.func().instruction(&store_instr);
+                }
+            }
+            CompoundFieldLayout::NestedStruct { .. } => {
+                panic!(
+                    "emit_struct_field_uzumaki called for nested struct field '{}'; \
+                     analysis rule A027 should have rejected uzumaki on structs with nested struct fields",
+                    field.name
+                );
+            }
+        }
         Ok(())
     }
 

@@ -1,0 +1,23 @@
+struct HasArray { arr: [i32; 3]; val: i32; }
+
+pub fn has_array_uzumaki() {
+    forall {
+        let h: HasArray = @;
+    }
+}
+
+struct HasI64Arr { arr: [i64; 2]; val: i32; }
+
+pub fn has_i64_arr_uzumaki() {
+    forall {
+        let h: HasI64Arr = @;
+    }
+}
+
+struct ArrayOnly { a: [i32; 3]; b: [i32; 2]; }
+
+pub fn array_only_uzumaki() {
+    forall {
+        let x: ArrayOnly = @;
+    }
+}
