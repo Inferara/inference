@@ -77,6 +77,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Methods returning compound types (structs, arrays) use sret calling convention
   - `ResolvedCallee` enum consolidates three callee patterns (Function, AssociatedFunction, InstanceMethod) across all call paths
   - `assert!` on mangled name collision: detects `TypeName.method_name` conflicts with top-level functions in release builds
+- Add nested compound type codegen: struct-in-struct, array-in-struct, struct-in-array ([#161])
+  - Recursive `type_byte_size()` computes byte sizes for nested compound types via `TypedContext` struct lookup
+  - `CompoundFieldLayout` enum (`Scalar`, `NestedStruct`, `NestedArray`) caches sub-layout on `StructFieldSlot` for efficient chained access
+  - Pointer semantics for compound member/index access: compound fields push i32 pointer, load only at terminal scalar field
+  - Struct-in-struct: nested struct literals, chained field access (`outer.inner.x`), field writes, parameter passing, sret return, copy
+  - Array-in-struct: array field literals, index access through struct (`s.arr[i]`), field writes, parameter passing
+  - Struct-in-array: struct element literals, field access through index (`arr[i].field`), element writes, sret return
+  - Method support for nested types: `self.inner.x` and `self.arr[i]` via pointer chaining
+  - Multidimensional array uzumaki: `[[i32; 3]; 2] = @` emits per-element uzumaki stores in non-det blocks
+  - Struct uzumaki with array fields: `let s: HasArray = @;` emits per-element uzumaki for array-typed fields
+  - `element_layout: Option<Vec<StructFieldSlot>>` on `ArraySlot` for cached struct-element array layouts
+  - One level of compound nesting permitted (enforced by analysis rule A026)
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -130,6 +142,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migrated codegen restriction rules: A012 array-literal-as-argument, A013 struct-literal-as-argument, A014 array-uzumaki-as-argument, A015 compound-literal-in-unsupported-position, A016 compound-return-call-in-expression-position, A017 compound-return-call-in-assignment, A018 method-call-chain-on-compound-return, A019 array-index-64bit, A022 literal-out-of-range
   - New rules: A023 uzumaki-in-reassignment, A024 extern-function-call
   - `AssignToImmutable` and `VariableShadowed` remain in the type checker (require scope state)
+- Add 5 analysis rules for nested compound type constraints ([#161])
+  - A026 `NestedCompoundDepth`: reject struct field nesting deeper than one level (definition-site check)
+  - A027 `UzumakiOnNestedStruct`: reject uzumaki on structs with compound fields
+  - A028 `UzumakiOnStructInArray`: reject uzumaki on arrays of structs at any dimension depth
+  - A029 `CompoundLiteralMemberAssign`: reject compound literal assignment directly to compound elements
+  - A031 `UnsupportedCompoundReturnExpr`: reject complex return expressions in compound-returning functions
+  - Walker helpers: `has_compound_fields()`, `array_nesting_depth()`, `is_compound_return_call()`
 
 ### AST
 
@@ -227,6 +246,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `from_builtin_str` uses exact case-sensitive matching
 - Fix external function parameter parsing corrected in AST builder (previously dropped parameters in some cases)
 - Bump `tree-sitter-inference` grammar from 0.0.39 to 0.0.40 — fixes chained member access parsing
+- Add `compound_literal_allowed` propagation into nested struct literal fields and array literal elements ([#161])
+  - `Outer { inner: Inner { x: 1 } }` correctly accepted in variable declarations
+  - Array literals inside struct fields accepted: `HasArray { arr: [1, 2, 3] }`
+- Add `find_enclosing_variable_name()` to `TypedContext` for analysis rule uzumaki struct name lookup ([#161])
 
 ### Testing
 
@@ -240,6 +263,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 43 analysis walker tests covering all 5 rules across free functions, struct methods, and spec functions ([#156])
   - Negative tests for valid code, edge cases for nested loops, deeply nested nondet, overlapping rule triggers
   - All four nondet block types (forall, exists, assume, unique) tested for A002
+- Add 5 nested compound codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#161])
+  - `nested_struct`: struct-in-struct literal, chained access, write, param, return, copy, method
+  - `struct_with_array`: array-in-struct literal, index access through struct, write, param, method
+  - `array_of_structs`: struct-in-array literal, field access through index, element write, method
+  - `nested_struct_with_array`: combined struct nesting with array fields
+  - `multidim_array_uzumaki`: multidimensional array uzumaki in non-det block
+- Add `struct_array_field_nondet` test fixture for struct uzumaki with array fields ([#161])
+- Add 3 analysis test modules for nested compound rules ([#161])
+  - `rules_a026_a028.rs`: nested depth, uzumaki on nested struct, uzumaki on struct-in-array (703 lines)
+  - `rules_a029_a030.rs`: compound literal in compound assign, uzumaki on deep array (364 lines)
+  - `rules_a031.rs`: unsupported compound return expression (234 lines)
+- Add type checker tests for nested compound literal propagation (`compound_literal_allowed`) ([#161])
 - Add 9 method codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#162])
   - `method_instance`, `method_assoc`, `method_self_mutate`, `method_return_struct`, `method_cross_call`, `method_multi_struct`, `method_i64_fields`, `method_three_fields`, `method_array_return`
 - Add negative codegen tests for unsupported features: `assert`, `**` operator, standalone `TypeMemberAccess`, recursive compound returns ([#162])
@@ -574,4 +609,5 @@ Initial tagged release.
 [#152]: https://github.com/Inferara/inference/pull/152
 [#149]: https://github.com/Inferara/inference/pull/159
 [#156]: https://github.com/Inferara/inference/pull/156
+[#161]: https://github.com/Inferara/inference/pull/185
 [#162]: https://github.com/Inferara/inference/pull/178

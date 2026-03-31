@@ -419,7 +419,7 @@ mod field_validation {
     }
 
     #[test]
-    fn test_nested_struct_field_not_supported() {
+    fn test_nested_struct_field_accepted() {
         let source = r#"
             struct Point { x: i32; y: i32; }
             struct Rect { origin: Point; size: Point; }
@@ -429,13 +429,44 @@ mod field_validation {
             }
         "#;
         let result = try_type_check(source);
-        // Nested structs are not yet supported. The type checker rejects struct-typed fields
-        // because struct literal field type matching does not handle struct types correctly
-        // (reports "expected Point, found Point"). Codegen would also panic in element_size.
-        // This test documents the current limitation at both levels.
         assert!(
-            result.is_err(),
-            "Nested structs are not yet supported; type checker should reject struct-typed fields"
+            result.is_ok(),
+            "Nested struct literals should be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_array_of_struct_literals_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() -> i32 {
+                let pts: [Point; 3] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }, Point { x: 5, y: 6 }];
+                return 0;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Array of struct literals should be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_struct_with_array_field_literal_accepted() {
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            fn test() -> i32 {
+                let s: HasArray = HasArray { arr: [1, 2, 3], val: 42 };
+                return 0;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Struct literal with array field should be accepted, got: {:?}",
+            result.err()
         );
     }
 

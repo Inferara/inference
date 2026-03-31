@@ -1,0 +1,50 @@
+struct Point { x: i32; y: i32;
+    fn sum(self) -> i32 {
+        return self.x + self.y;
+    }
+}
+
+pub fn create_and_read_field() -> i32 {
+    let pts: [Point; 3] = [Point{x:1,y:2}, Point{x:3,y:4}, Point{x:5,y:6}];
+    return pts[1].x;
+}
+
+pub fn read_second_field() -> i32 {
+    let pts: [Point; 3] = [Point{x:1,y:2}, Point{x:3,y:4}, Point{x:5,y:6}];
+    return pts[2].y;
+}
+
+pub fn sum_all_x() -> i32 {
+    let pts: [Point; 3] = [Point{x:10,y:20}, Point{x:30,y:40}, Point{x:50,y:60}];
+    let sum: i32 = pts[0].x + pts[1].x + pts[2].x;
+    return sum;
+}
+
+pub fn write_element_field() -> i32 {
+    let mut pts: [Point; 2] = [Point{x:1,y:2}, Point{x:3,y:4}];
+    pts[0].x = 99;
+    return pts[0].x;
+}
+
+pub fn copy_element_to_var() -> i32 {
+    let pts: [Point; 2] = [Point{x:10,y:20}, Point{x:30,y:40}];
+    let p: Point = pts[1];
+    return p.x + p.y;
+}
+
+pub fn write_whole_element() -> i32 {
+    let mut pts: [Point; 2] = [Point{x:1,y:2}, Point{x:3,y:4}];
+    let replacement: Point = Point{x:77,y:88};
+    pts[0] = replacement;
+    return pts[0].x + pts[0].y;
+}
+
+pub fn array_of_structs_param(pts: [Point; 2]) -> i32 {
+    return pts[0].x + pts[1].y;
+}
+
+pub fn test_method_on_element() -> i32 {
+    let pts: [Point; 2] = [Point{x:10,y:20}, Point{x:30,y:40}];
+    let p: Point = pts[0];
+    return p.sum();
+}

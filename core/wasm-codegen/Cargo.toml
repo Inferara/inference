@@ -17,5 +17,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 inf-wasmparser.workspace = true
+inference-type-checker = { workspace = true, features = ["test-utils"] }
 wasmprinter = "0.245.1"
 cov-mark = { workspace = true, features = ["enable"] }

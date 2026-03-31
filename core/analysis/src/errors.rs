@@ -144,6 +144,26 @@ pub enum AnalysisDiagnostic {
 
     #[error("variable `{name}` must be initialized at declaration; use `let {name}: <type> = <value>;`")]
     UninitializedVariable { name: String, location: Location },
+
+    #[error("struct `{outer}` field `{field}` has type `{ty}` which contains nested compound types; only one level of nesting is supported")]
+    NestedCompoundDepthExceeded {
+        outer: String,
+        field: String,
+        ty: String,
+        location: Location,
+    },
+
+    #[error("uzumaki (@) cannot be assigned to struct `{name}` because it contains compound fields; uzumaki is only supported for structs whose fields are all scalars or scalar arrays")]
+    UzumakiOnNestedStruct { name: String, location: Location },
+
+    #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
+    UzumakiOnStructInArray { location: Location },
+
+    #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
+    CompoundLiteralInCompoundAssign { location: Location },
+
+    #[error("return expression in compound-returning function must be a variable, literal, function call, or field/element access; assign the expression to a temporary variable first")]
+    UnsupportedCompoundReturnExpression { location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -173,7 +193,12 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::LiteralOutOfRange { location, .. }
             | AnalysisDiagnostic::UzumakiInReassignment { location }
             | AnalysisDiagnostic::ExternFunctionCall { location, .. }
-            | AnalysisDiagnostic::UninitializedVariable { location, .. } => location,
+            | AnalysisDiagnostic::UninitializedVariable { location, .. }
+            | AnalysisDiagnostic::NestedCompoundDepthExceeded { location, .. }
+            | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
+            | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
+            | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
+            | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location } => location,
         }
     }
 
@@ -206,6 +231,12 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UzumakiInReassignment { .. } => "A023",
             AnalysisDiagnostic::ExternFunctionCall { .. } => "A024",
             AnalysisDiagnostic::UninitializedVariable { .. } => "A025",
+            AnalysisDiagnostic::NestedCompoundDepthExceeded { .. } => "A026",
+            AnalysisDiagnostic::UzumakiOnNestedStruct { .. } => "A027",
+            AnalysisDiagnostic::UzumakiOnStructInArray { .. } => "A028",
+            AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. } => "A029",
+            // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
+            AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
         }
     }
 }

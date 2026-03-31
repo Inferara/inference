@@ -255,7 +255,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -445,7 +449,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "identity_i32")
             .unwrap_or_else(|e| panic!("Failed to get 'identity_i32': {e}"));
         assert_eq!(
-            identity_i32.call(&mut store, 42).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            identity_i32
+                .call(&mut store, 42)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             42
         );
 
@@ -463,7 +469,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "identity_bool")
             .unwrap_or_else(|e| panic!("Failed to get 'identity_bool': {e}"));
         assert_eq!(
-            identity_bool.call(&mut store, 1).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            identity_bool
+                .call(&mut store, 1)
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             1
         );
 
@@ -527,7 +535,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "call_zero")
             .unwrap_or_else(|e| panic!("Failed to get 'call_zero': {e}"));
         assert_eq!(
-            call_zero.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            call_zero
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             0
         );
 
@@ -555,7 +565,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "let_from_call")
             .unwrap_or_else(|e| panic!("Failed to get 'let_from_call': {e}"));
         assert_eq!(
-            let_from_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            let_from_call
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             0
         );
 
@@ -563,7 +575,9 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "forward_call")
             .unwrap_or_else(|e| panic!("Failed to get 'forward_call': {e}"));
         assert_eq!(
-            forward_call.call(&mut store, ()).unwrap_or_else(|e| panic!("Call failed: {e}")),
+            forward_call
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("Call failed: {e}")),
             99
         );
     }
@@ -615,7 +629,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -694,7 +712,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -777,7 +799,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -890,7 +916,11 @@ mod base_codegen_tests {
                 let result = f
                     .call(&mut store, $args)
                     .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
-                assert_eq!(result, $expected, "{}({:?}) expected {:?}", $name, $args, $expected);
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
             }};
         }
 
@@ -1009,9 +1039,7 @@ mod base_codegen_tests {
         let i32_array_fn: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i32_array")
             .expect("Failed to get 'i32_array'");
-        let result = i32_array_fn
-            .call(&mut store, ())
-            .expect("i32_array failed");
+        let result = i32_array_fn.call(&mut store, ()).expect("i32_array failed");
         assert_eq!(result, 0, "i32_array should return 0");
         // After call, stack pointer should be restored
         let sp_after = stack_pointer.get(&mut store).i32().unwrap();
@@ -1247,7 +1275,9 @@ mod base_codegen_tests {
         let read_middle: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "read_middle")
             .expect("Failed to get 'read_middle'");
-        let result = read_middle.call(&mut store, ()).expect("read_middle failed");
+        let result = read_middle
+            .call(&mut store, ())
+            .expect("read_middle failed");
         assert_eq!(result, 20, "arr[1] of [10, 20, 30] should be 20");
 
         // read_with_variable: arr[i] of [100, 200, 300]
@@ -1391,10 +1421,7 @@ mod base_codegen_tests {
         let result = write_multiple
             .call(&mut store, ())
             .expect("write_multiple failed");
-        assert_eq!(
-            result, 60,
-            "arr[0]+arr[1]+arr[2] after writes should be 60"
-        );
+        assert_eq!(result, 60, "arr[0]+arr[1]+arr[2] after writes should be 60");
 
         // swap_elements: arr=[1,2], swap -> arr=[2,1], return arr[0]*10+arr[1] -> 21
         let swap_elements: wasmtime::TypedFunc<(), i32> = instance
@@ -1421,13 +1448,8 @@ mod base_codegen_tests {
         let write_bool: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "write_bool")
             .expect("Failed to get 'write_bool'");
-        let result = write_bool
-            .call(&mut store, ())
-            .expect("write_bool failed");
-        assert_eq!(
-            result, 1,
-            "flags[0]=true, flags[2]=true, both checked -> 1"
-        );
+        let result = write_bool.call(&mut store, ()).expect("write_bool failed");
+        assert_eq!(result, 1, "flags[0]=true, flags[2]=true, both checked -> 1");
 
         // Verify stack pointer is fully restored after all calls
         let final_sp = stack_pointer.get(&mut store).i32().unwrap();
@@ -1569,7 +1591,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "caller")
             .expect("Failed to get 'caller'");
         let result = caller.call(&mut store, ()).expect("caller failed");
-        assert_eq!(result, 15, "read_elem([5, 15, 25]) should return arr[1] = 15");
+        assert_eq!(
+            result, 15,
+            "read_elem([5, 15, 25]) should return arr[1] = 15"
+        );
     }
 
     #[test]
@@ -1651,8 +1676,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i8_array_sum")
             .expect("get func");
@@ -1675,13 +1699,15 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u8_array_max")
             .expect("get func");
         let result = func.call(&mut store, ()).expect("call");
-        assert_eq!(result, 255, "u8 array: arr[2] should be 255 (zero-extended)");
+        assert_eq!(
+            result, 255,
+            "u8 array: arr[2] should be 255 (zero-extended)"
+        );
     }
 
     #[test]
@@ -1699,8 +1725,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "i16_array_negative")
             .expect("get func");
@@ -1726,8 +1751,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u16_array_large")
             .expect("get func");
@@ -1754,8 +1778,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "i64_write_read")
             .expect("get func");
@@ -1784,8 +1807,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "call_sum_i64")
             .expect("get func");
@@ -1811,8 +1833,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "u32_array_large")
             .expect("get func");
@@ -1838,8 +1859,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "call_sum_large")
             .expect("get func");
@@ -1870,8 +1890,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "mixed_arrays")
             .expect("get func");
@@ -1901,8 +1920,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "call_double")
             .expect("get func");
@@ -1938,8 +1956,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "bool_then_i32")
             .expect("get func");
@@ -1969,15 +1986,13 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i64> = instance
             .get_typed_func(&mut store, "bool_then_i64")
             .expect("get func");
         let result = func.call(&mut store, ()).expect("call");
         assert_eq!(
-            result,
-            9_999_999_999i64,
+            result, 9_999_999_999i64,
             "bool_then_i64: flag is true, return big[0] = 9999999999"
         );
     }
@@ -2000,8 +2015,7 @@ mod base_codegen_tests {
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "caller")
             .expect("get func");
@@ -2024,13 +2038,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "add_i8_overflow")
             .expect("get func");
@@ -2049,13 +2061,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "add_u8_overflow")
             .expect("get func");
@@ -2074,13 +2084,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "neg_i8")
             .expect("get func");
@@ -2099,13 +2107,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<i32, i32> = instance
             .get_typed_func(&mut store, "bitnot_u8")
             .expect("get func");
@@ -2124,13 +2130,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "mul_u16")
             .expect("get func");
@@ -2159,13 +2163,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "consistency")
             .expect("get func");
@@ -2186,13 +2188,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(i32, i32), i32> = instance
             .get_typed_func(&mut store, "div_i8_overflow")
             .expect("get func");
@@ -2217,13 +2217,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_independence")
             .expect("get func");
@@ -2246,13 +2244,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_values")
             .expect("get func");
@@ -2389,7 +2385,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "test")
             .expect("Failed to get 'test'");
         let result = func.call(&mut store, ()).expect("test failed");
-        assert_eq!(result, 10, "second make() should return fresh [10,20,30], not modified");
+        assert_eq!(
+            result, 10,
+            "second make() should return fresh [10,20,30], not modified"
+        );
     }
 
     #[test]
@@ -2489,7 +2488,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "test")
             .expect("Failed to get 'test'");
         let result = func.call(&mut store, ()).expect("test failed");
-        assert_eq!(result, 60, "scale([1,2,3], 10) should give [10,20,30], sum=60");
+        assert_eq!(
+            result, 60,
+            "scale([1,2,3], 10) should give [10,20,30], sum=60"
+        );
     }
 
     #[test]
@@ -2537,7 +2539,9 @@ mod base_codegen_tests {
         let make_single: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "make_single")
             .expect("Failed to get 'make_single'");
-        let result = make_single.call(&mut store, ()).expect("make_single failed");
+        let result = make_single
+            .call(&mut store, ())
+            .expect("make_single failed");
         assert_eq!(result, 0, "make_single should return 0");
 
         let make_mixed: TypedFunc<(), i32> = instance
@@ -2736,13 +2740,20 @@ mod base_codegen_tests {
         let set_and_get: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "set_and_get")
             .expect("Failed to get 'set_and_get'");
-        let result = set_and_get.call(&mut store, ()).expect("set_and_get failed");
-        assert_eq!(result, 42, "set_and_get should return 42 (p.x after p.x = 42)");
+        let result = set_and_get
+            .call(&mut store, ())
+            .expect("set_and_get failed");
+        assert_eq!(
+            result, 42,
+            "set_and_get should return 42 (p.x after p.x = 42)"
+        );
 
         let swap_fields: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "swap_fields")
             .expect("Failed to get 'swap_fields'");
-        let result = swap_fields.call(&mut store, ()).expect("swap_fields failed");
+        let result = swap_fields
+            .call(&mut store, ())
+            .expect("swap_fields failed");
         assert_eq!(
             result, 30,
             "swap_fields should return 30 (p.x + p.y after swapping 10 and 20)"
@@ -2751,7 +2762,9 @@ mod base_codegen_tests {
         let modify_bool: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "modify_bool")
             .expect("Failed to get 'modify_bool'");
-        let result = modify_bool.call(&mut store, ()).expect("modify_bool failed");
+        let result = modify_bool
+            .call(&mut store, ())
+            .expect("modify_bool failed");
         assert_eq!(
             result, 100,
             "modify_bool should return 100 (f.val when f.flag is set to true)"
@@ -2848,7 +2861,10 @@ mod base_codegen_tests {
             .get_typed_func(&mut store, "call_sum")
             .expect("Failed to get 'call_sum'");
         let result = call_sum.call(&mut store, ()).expect("call_sum failed");
-        assert_eq!(result, 30, "sum_point(Point {{ x: 10, y: 20 }}) should be 30");
+        assert_eq!(
+            result, 30,
+            "sum_point(Point {{ x: 10, y: 20 }}) should be 30"
+        );
 
         // verify_copy_semantics: pass Point { x: 1, y: 2 } to modify_no_effect
         // which sets p.x = 99, but the original p.x should still be 1
@@ -3118,9 +3134,7 @@ mod base_codegen_tests {
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "copy_values_match")
             .expect("Failed to get 'copy_values_match'");
-        let result = func
-            .call(&mut store, ())
-            .expect("copy_values_match failed");
+        let result = func.call(&mut store, ()).expect("copy_values_match failed");
         assert_eq!(result, 10, "q.x + q.y should be 3 + 7 = 10");
 
         // independent_copies: p.x + p.y should still be 1 + 2 = 3
@@ -3176,13 +3190,11 @@ mod base_codegen_tests {
             }
         "#;
         let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| panic!("WASM is invalid: {e}"));
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());
-        let instance =
-            wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instantiate");
         let func: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test")
             .expect("get func");
@@ -3215,6 +3227,23 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn struct_array_field_nondet_golden_test() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 3);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 3);
+        let test_name = "struct_array_field_nondet";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
     fn struct_uzumaki_i32_inline_validation() {
         cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
         let source = r#"
@@ -3225,7 +3254,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i32 WASM is invalid: {e}"));
     }
@@ -3241,7 +3270,7 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki i64 WASM is invalid: {e}"));
     }
@@ -3257,9 +3286,89 @@ mod base_codegen_tests {
                 }
             }
         "#;
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen(source);
         inf_wasmparser::validate(&wasm_bytes)
             .unwrap_or_else(|e| panic!("Struct uzumaki mixed fields WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            pub fn test() {
+                forall {
+                    let h: HasArray = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with array field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_i64_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct HasI64Arr { arr: [i64; 2]; val: i32; }
+            pub fn test() {
+                forall {
+                    let h: HasI64Arr = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with i64 array field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_multiple_array_fields_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Multi { a: [i32; 2]; b: [i64; 2]; c: i32; }
+            pub fn test() {
+                forall {
+                    let m: Multi = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with multiple array fields uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_only_array_fields_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct ArrayOnly { a: [i32; 3]; b: [i32; 2]; }
+            pub fn test() {
+                forall {
+                    let x: ArrayOnly = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with only array fields uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_with_bool_array_field_uzumaki_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
+        let source = r#"
+            struct Flags { bits: [bool; 4]; tag: i32; }
+            pub fn test() {
+                forall {
+                    let f: Flags = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Struct with bool array field uzumaki WASM is invalid: {e}"));
     }
 
     // --- Method codegen: self parameter handling and instance method call tests ---
@@ -3323,10 +3432,7 @@ mod base_codegen_tests {
         let result = test_sum_with
             .call(&mut store, ())
             .expect("test_sum_with failed");
-        assert_eq!(
-            result, 35,
-            "p.sum_with(5) should return 35 (p.x + p.y + 5)"
-        );
+        assert_eq!(result, 35, "p.sum_with(5) should return 35 (p.x + p.y + 5)");
 
         let test_let_binding: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_let_binding")
@@ -3426,9 +3532,7 @@ mod base_codegen_tests {
         let test_new_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_new_y")
             .expect("Failed to get 'test_new_y'");
-        let result = test_new_y
-            .call(&mut store, ())
-            .expect("test_new_y failed");
+        let result = test_new_y.call(&mut store, ()).expect("test_new_y failed");
         assert_eq!(result, 7, "Point::new(3, 7).get_y() should return 7");
 
         let test_origin: TypedFunc<(), i32> = instance
@@ -3453,9 +3557,7 @@ mod base_codegen_tests {
         let test_mixed: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_mixed")
             .expect("Failed to get 'test_mixed'");
-        let result = test_mixed
-            .call(&mut store, ())
-            .expect("test_mixed failed");
+        let result = test_mixed.call(&mut store, ()).expect("test_mixed failed");
         assert_eq!(
             result, 8,
             "Point::new(5, 15).get_x() + Point::sum_of(1, 2) should return 8"
@@ -3582,10 +3684,7 @@ mod base_codegen_tests {
         let result = test_scale_x
             .call(&mut store, ())
             .expect("test_scale_x failed");
-        assert_eq!(
-            result, 12,
-            "Point(3,7).scale(4).get_x() should return 12"
-        );
+        assert_eq!(result, 12, "Point(3,7).scale(4).get_x() should return 12");
 
         let test_scale_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_scale_y")
@@ -3593,10 +3692,7 @@ mod base_codegen_tests {
         let result = test_scale_y
             .call(&mut store, ())
             .expect("test_scale_y failed");
-        assert_eq!(
-            result, 28,
-            "Point(3,7).scale(4).get_y() should return 28"
-        );
+        assert_eq!(result, 28, "Point(3,7).scale(4).get_y() should return 28");
 
         let test_original_unchanged_x: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_original_unchanged_x")
@@ -3626,10 +3722,7 @@ mod base_codegen_tests {
         let result = test_new_returns_struct_x
             .call(&mut store, ())
             .expect("test_new_returns_struct_x failed");
-        assert_eq!(
-            result, 42,
-            "Point::new(42, 99).get_x() should return 42"
-        );
+        assert_eq!(result, 42, "Point::new(42, 99).get_x() should return 42");
 
         let test_new_returns_struct_y: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_new_returns_struct_y")
@@ -3637,10 +3730,7 @@ mod base_codegen_tests {
         let result = test_new_returns_struct_y
             .call(&mut store, ())
             .expect("test_new_returns_struct_y failed");
-        assert_eq!(
-            result, 99,
-            "Point::new(42, 99).get_y() should return 99"
-        );
+        assert_eq!(result, 99, "Point::new(42, 99).get_y() should return 99");
 
         let test_return_translated: TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "test_return_translated")
@@ -4044,6 +4134,1248 @@ mod base_codegen_tests {
         assert_eq!(result, 6, "v.sum() should return 6 (1 + 2 + 3)");
     }
 
+    #[test]
+    fn nested_struct_golden_test() {
+        let test_name = "nested_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn nested_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "nested_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let create_and_read_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "create_and_read_val")
+            .expect("Failed to get 'create_and_read_val'");
+        let result = create_and_read_val
+            .call(&mut store, ())
+            .expect("create_and_read_val failed");
+        assert_eq!(result, 30, "create_and_read_val should return 30 (o.val)");
+
+        let read_via_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_via_copy")
+            .expect("Failed to get 'read_via_copy'");
+        let result = read_via_copy
+            .call(&mut store, ())
+            .expect("read_via_copy failed");
+        assert_eq!(
+            result, 10,
+            "read_via_copy should return 10 (o.inner.x via copy)"
+        );
+
+        let read_inner_y_via_copy: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_inner_y_via_copy")
+            .expect("Failed to get 'read_inner_y_via_copy'");
+        let result = read_inner_y_via_copy
+            .call(&mut store, ())
+            .expect("read_inner_y_via_copy failed");
+        assert_eq!(
+            result, 20,
+            "read_inner_y_via_copy should return 20 (o.inner.y via copy)"
+        );
+
+        let sum_all_fields: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_all_fields")
+            .expect("Failed to get 'sum_all_fields'");
+        let result = sum_all_fields
+            .call(&mut store, ())
+            .expect("sum_all_fields failed");
+        assert_eq!(result, 60, "sum_all_fields should return 60 (10 + 20 + 30)");
+
+        let write_inner_field: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_inner_field")
+            .expect("Failed to get 'write_inner_field'");
+        let result = write_inner_field
+            .call(&mut store, ())
+            .expect("write_inner_field failed");
+        assert_eq!(
+            result, 99,
+            "write_inner_field should return 99 (i.x after write)"
+        );
+
+        // Test sret return: nested_struct_return() -> Outer
+        // Outer layout: Inner { x: i32, y: i32 } at offset 0 (8 bytes), val: i32 at offset 8.
+        let nested_struct_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "nested_struct_return")
+            .expect("Failed to get 'nested_struct_return'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let sret_base: i32 = 0;
+        nested_struct_return
+            .call(&mut store, sret_base)
+            .expect("nested_struct_return failed");
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let inner_x = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let inner_y = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let val = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        assert_eq!(inner_x, 42, "nested_struct_return: inner.x should be 42");
+        assert_eq!(inner_y, 84, "nested_struct_return: inner.y should be 84");
+        assert_eq!(val, 126, "nested_struct_return: val should be 126");
+
+        // Test method accessing self.inner.x
+        let test_method_get_inner_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_get_inner_x")
+            .expect("Failed to get 'test_method_get_inner_x'");
+        let result = test_method_get_inner_x
+            .call(&mut store, ())
+            .expect("test_method_get_inner_x failed");
+        assert_eq!(
+            result, 55,
+            "test_method_get_inner_x should return 55 (self.inner.x via method)"
+        );
+
+        // Test method accessing self.inner.x + self.inner.y
+        let test_method_sum_inner: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_sum_inner")
+            .expect("Failed to get 'test_method_sum_inner'");
+        let result = test_method_sum_inner
+            .call(&mut store, ())
+            .expect("test_method_sum_inner failed");
+        assert_eq!(
+            result, 30,
+            "test_method_sum_inner should return 30 (self.inner.x + self.inner.y via method)"
+        );
+
+        // Test nested_struct_param: pass Outer via pointer
+        // Outer layout: Inner { x: i32 @ 0, y: i32 @ 4 }, val: i32 @ 8. Total: 12 bytes.
+        let param_base: i32 = 0;
+        let base = param_base as usize;
+        memory.data_mut(&mut store)[base..base + 4]
+            .copy_from_slice(&10_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 4..base + 8]
+            .copy_from_slice(&20_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 8..base + 12]
+            .copy_from_slice(&30_i32.to_le_bytes());
+
+        let nested_struct_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "nested_struct_param")
+            .expect("Failed to get 'nested_struct_param'");
+        let result = nested_struct_param
+            .call(&mut store, param_base)
+            .expect("nested_struct_param failed");
+        assert_eq!(
+            result, 10,
+            "nested_struct_param should return 10 (o.inner.x via copy)"
+        );
+
+        let sp_global = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export __stack_pointer");
+        let sp_val = sp_global.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_val, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn struct_with_array_golden_test() {
+        let test_name = "struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn struct_with_array_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let create_and_read_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "create_and_read_val")
+            .expect("Failed to get 'create_and_read_val'");
+        let result = create_and_read_val
+            .call(&mut store, ())
+            .expect("create_and_read_val failed");
+        assert_eq!(result, 42, "create_and_read_val should return 42 (s.val)");
+
+        let read_arr_first: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_arr_first")
+            .expect("Failed to get 'read_arr_first'");
+        let result = read_arr_first
+            .call(&mut store, ())
+            .expect("read_arr_first failed");
+        assert_eq!(result, 10, "read_arr_first should return 10 (s.arr[0])");
+
+        let read_arr_last: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_arr_last")
+            .expect("Failed to get 'read_arr_last'");
+        let result = read_arr_last
+            .call(&mut store, ())
+            .expect("read_arr_last failed");
+        assert_eq!(result, 30, "read_arr_last should return 30 (s.arr[2])");
+
+        let write_arr_element: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_arr_element")
+            .expect("Failed to get 'write_arr_element'");
+        let result = write_arr_element
+            .call(&mut store, ())
+            .expect("write_arr_element failed");
+        assert_eq!(
+            result, 99,
+            "write_arr_element should return 99 (s.arr[1] after write)"
+        );
+
+        let sum_arr_and_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_arr_and_val")
+            .expect("Failed to get 'sum_arr_and_val'");
+        let result = sum_arr_and_val
+            .call(&mut store, ())
+            .expect("sum_arr_and_val failed");
+        assert_eq!(
+            result, 102,
+            "sum_arr_and_val should return 102 (10+20+30+42)"
+        );
+
+        let struct_with_array_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "struct_with_array_param")
+            .expect("Failed to get 'struct_with_array_param'");
+        // Pass a pointer to a HasArray in memory -- allocate at the beginning of memory.
+        // HasArray: arr:[i32;3] at offset 0 (12 bytes), val:i32 at offset 12 (4 bytes) = 16 bytes total.
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let data = memory.data_mut(&mut store);
+        let base: usize = 0;
+        data[base..base + 4].copy_from_slice(&100_i32.to_le_bytes()); // arr[0] = 100
+        data[base + 4..base + 8].copy_from_slice(&200_i32.to_le_bytes()); // arr[1] = 200
+        data[base + 8..base + 12].copy_from_slice(&300_i32.to_le_bytes()); // arr[2] = 300
+        data[base + 12..base + 16].copy_from_slice(&50_i32.to_le_bytes()); // val = 50
+        let result = struct_with_array_param
+            .call(&mut store, base as i32)
+            .expect("struct_with_array_param failed");
+        assert_eq!(
+            result, 150,
+            "struct_with_array_param should return 150 (100+50)"
+        );
+
+        let test_method_get_arr_elem: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_get_arr_elem")
+            .expect("Failed to get 'test_method_get_arr_elem'");
+        let result = test_method_get_arr_elem
+            .call(&mut store, ())
+            .expect("test_method_get_arr_elem failed");
+        assert_eq!(
+            result, 20,
+            "test_method_get_arr_elem should return 20 (s.arr[1] via method)"
+        );
+
+        let test_method_sum_arr: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_sum_arr")
+            .expect("Failed to get 'test_method_sum_arr'");
+        let result = test_method_sum_arr
+            .call(&mut store, ())
+            .expect("test_method_sum_arr failed");
+        assert_eq!(
+            result, 60,
+            "test_method_sum_arr should return 60 (10+20+30 via method)"
+        );
+
+        // Test sret return: struct_with_array_return() -> HasArray
+        // HasArray layout: arr: [i32; 3] at offset 0 (12 bytes), val: i32 at offset 12.
+        let struct_with_array_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "struct_with_array_return")
+            .expect("Failed to get 'struct_with_array_return'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let sret_base: i32 = 0;
+        struct_with_array_return
+            .call(&mut store, sret_base)
+            .expect("struct_with_array_return failed");
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let arr0 = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let arr1 = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let arr2 = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        let val = i32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap());
+        assert_eq!(arr0, 1, "struct_with_array_return: arr[0] should be 1");
+        assert_eq!(arr1, 2, "struct_with_array_return: arr[1] should be 2");
+        assert_eq!(arr2, 3, "struct_with_array_return: arr[2] should be 3");
+        assert_eq!(val, 4, "struct_with_array_return: val should be 4");
+    }
+
+    // --- array_of_structs tests ---
+
+    #[test]
+    fn array_of_structs_golden_test() {
+        let test_name = "array_of_structs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_of_structs_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "array_of_structs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let create_and_read_field: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "create_and_read_field")
+            .expect("Failed to get 'create_and_read_field'");
+        let result = create_and_read_field
+            .call(&mut store, ())
+            .expect("create_and_read_field failed");
+        assert_eq!(
+            result, 3,
+            "create_and_read_field should return 3 (pts[1].x)"
+        );
+
+        let read_second_field: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_second_field")
+            .expect("Failed to get 'read_second_field'");
+        let result = read_second_field
+            .call(&mut store, ())
+            .expect("read_second_field failed");
+        assert_eq!(
+            result, 6,
+            "read_second_field should return 6 (pts[2].y)"
+        );
+
+        let sum_all_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum_all_x")
+            .expect("Failed to get 'sum_all_x'");
+        let result = sum_all_x
+            .call(&mut store, ())
+            .expect("sum_all_x failed");
+        assert_eq!(result, 90, "sum_all_x should return 90 (10+30+50)");
+
+        let write_element_field: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_element_field")
+            .expect("Failed to get 'write_element_field'");
+        let result = write_element_field
+            .call(&mut store, ())
+            .expect("write_element_field failed");
+        assert_eq!(
+            result, 99,
+            "write_element_field should return 99 (pts[0].x after write)"
+        );
+
+        let copy_element_to_var: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_element_to_var")
+            .expect("Failed to get 'copy_element_to_var'");
+        let result = copy_element_to_var
+            .call(&mut store, ())
+            .expect("copy_element_to_var failed");
+        assert_eq!(
+            result, 70,
+            "copy_element_to_var should return 70 (30+40)"
+        );
+
+        let write_whole_element: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_whole_element")
+            .expect("Failed to get 'write_whole_element'");
+        let result = write_whole_element
+            .call(&mut store, ())
+            .expect("write_whole_element failed");
+        assert_eq!(
+            result, 165,
+            "write_whole_element should return 165 (77+88)"
+        );
+
+        let array_of_structs_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "array_of_structs_param")
+            .expect("Failed to get 'array_of_structs_param'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let data = memory.data_mut(&mut store);
+        let base: usize = 0;
+        // Point { x: i32, y: i32 } is 8 bytes. [Point; 2] = 16 bytes.
+        // pts[0]: x=100, y=200 at offset 0
+        data[base..base + 4].copy_from_slice(&100_i32.to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&200_i32.to_le_bytes());
+        // pts[1]: x=300, y=400 at offset 8
+        data[base + 8..base + 12].copy_from_slice(&300_i32.to_le_bytes());
+        data[base + 12..base + 16].copy_from_slice(&400_i32.to_le_bytes());
+        let result = array_of_structs_param
+            .call(&mut store, base as i32)
+            .expect("array_of_structs_param failed");
+        assert_eq!(
+            result, 500,
+            "array_of_structs_param should return 500 (100+400)"
+        );
+
+        let test_method_on_element: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_method_on_element")
+            .expect("Failed to get 'test_method_on_element'");
+        let result = test_method_on_element
+            .call(&mut store, ())
+            .expect("test_method_on_element failed");
+        assert_eq!(
+            result, 30,
+            "test_method_on_element should return 30 (10+20 via p.sum())"
+        );
+
+        let sp_global = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export __stack_pointer");
+        let sp_val = sp_global.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_val, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 2);
+        cov_mark::check_count!(wasm_codegen_emit_forall_block, 2);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 2);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 2);
+        let test_name = "multidim_array_uzumaki";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_i32_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let grid: [[i32; 3]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array uzumaki i32 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_i64_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let matrix: [[i64; 2]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array uzumaki i64 WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_3d_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test_3d() {
+                forall {
+                    let cube: [[[i32; 2]; 3]; 4] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("3D array uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_4d_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test_4d() {
+                forall {
+                    let hyper: [[[[i32; 2]; 2]; 2]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
+    }
+
+    // --- nested_struct_with_array tests ---
+
+    #[test]
+    fn nested_struct_with_array_golden_test() {
+        let test_name = "nested_struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn nested_struct_with_array_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "nested_struct_with_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let test_deep_inner_arr_access: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_arr_access")
+            .expect("Failed to get 'test_deep_inner_arr_access'");
+        let result = test_deep_inner_arr_access
+            .call(&mut store, ())
+            .expect("test_deep_inner_arr_access failed");
+        assert_eq!(
+            result, 20,
+            "test_deep_inner_arr_access should return 20 (d.inner.arr[1])"
+        );
+
+        let test_deep_inner_val: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_val")
+            .expect("Failed to get 'test_deep_inner_val'");
+        let result = test_deep_inner_val
+            .call(&mut store, ())
+            .expect("test_deep_inner_val failed");
+        assert_eq!(
+            result, 99,
+            "test_deep_inner_val should return 99 (d.inner.val)"
+        );
+
+        let test_deep_tag: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_tag")
+            .expect("Failed to get 'test_deep_tag'");
+        let result = test_deep_tag
+            .call(&mut store, ())
+            .expect("test_deep_tag failed");
+        assert_eq!(result, 42, "test_deep_tag should return 42 (d.tag)");
+
+        let test_deep_inner_arr_sum: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_deep_inner_arr_sum")
+            .expect("Failed to get 'test_deep_inner_arr_sum'");
+        let result = test_deep_inner_arr_sum
+            .call(&mut store, ())
+            .expect("test_deep_inner_arr_sum failed");
+        assert_eq!(
+            result, 60,
+            "test_deep_inner_arr_sum should return 60 (10+20+30)"
+        );
+
+        // Deep struct as parameter
+        let deep_param: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "deep_param")
+            .expect("Failed to get 'deep_param'");
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        // Deep layout: inner(HasArray) at 0..16 (arr[0..12] + val@12), tag@16
+        // HasArray: arr[0]=10@0, arr[1]=20@4, arr[2]=30@8, val=99@12
+        // Deep: tag=42@16; total 20 bytes
+        let param_base: i32 = 0;
+        let base = param_base as usize;
+        memory.data_mut(&mut store)[base..base + 4].copy_from_slice(&10_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 4..base + 8].copy_from_slice(&20_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 8..base + 12].copy_from_slice(&30_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 12..base + 16].copy_from_slice(&99_i32.to_le_bytes());
+        memory.data_mut(&mut store)[base + 16..base + 20].copy_from_slice(&42_i32.to_le_bytes());
+        let result = deep_param
+            .call(&mut store, param_base)
+            .expect("deep_param failed");
+        assert_eq!(
+            result, 52,
+            "deep_param should return 52 (d.inner.arr[0]=10 + d.tag=42)"
+        );
+
+        // Deep struct as sret return
+        let deep_return: TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "deep_return")
+            .expect("Failed to get 'deep_return'");
+        let sret_base: i32 = 0;
+        deep_return
+            .call(&mut store, sret_base)
+            .expect("deep_return failed");
+        let data = memory.data(&store);
+        let sbase = sret_base as usize;
+        let arr0 = i32::from_le_bytes(data[sbase..sbase + 4].try_into().unwrap());
+        let arr1 = i32::from_le_bytes(data[sbase + 4..sbase + 8].try_into().unwrap());
+        let arr2 = i32::from_le_bytes(data[sbase + 8..sbase + 12].try_into().unwrap());
+        let val = i32::from_le_bytes(data[sbase + 12..sbase + 16].try_into().unwrap());
+        let tag = i32::from_le_bytes(data[sbase + 16..sbase + 20].try_into().unwrap());
+        assert_eq!(arr0, 10, "deep_return: inner.arr[0] should be 10");
+        assert_eq!(arr1, 20, "deep_return: inner.arr[1] should be 20");
+        assert_eq!(arr2, 30, "deep_return: inner.arr[2] should be 30");
+        assert_eq!(val, 99, "deep_return: inner.val should be 99");
+        assert_eq!(tag, 42, "deep_return: tag should be 42");
+    }
+
+    #[test]
+    fn multidim_array_param_inline_validation() {
+        let source = r#"
+            pub fn read_grid(grid: [[i32; 3]; 2]) -> i32 {
+                return grid[0][1];
+            }
+            pub fn caller() {
+                forall {
+                    let g: [[i32; 3]; 2] = @;
+                    let _v: i32 = read_grid(g);
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_param_i64_inline_validation() {
+        let source = r#"
+            pub fn read_matrix(m: [[i64; 2]; 3]) -> i64 {
+                return m[1][0];
+            }
+            pub fn caller() {
+                forall {
+                    let m: [[i64; 2]; 3] = @;
+                    let _v: i64 = read_matrix(m);
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim i64 array param WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_scalar_index_write_inline_validation() {
+        let source = r#"
+            pub fn write_and_read() {
+                forall {
+                    let mut grid: [[i32; 3]; 2] = @;
+                    grid[1][0] = 99;
+                    let _v: i32 = grid[1][0];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array scalar index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_scalar_index_write_i64_inline_validation() {
+        let source = r#"
+            pub fn write_matrix() {
+                forall {
+                    let mut m: [[i64; 2]; 2] = @;
+                    m[0][1] = 42;
+                    let _v: i64 = m[0][1];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim i64 array scalar index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_compound_index_write_inline_validation() {
+        let source = r#"
+            pub fn write_row() {
+                forall {
+                    let mut grid: [[i32; 3]; 2] = @;
+                    let row: [i32; 3] = @;
+                    grid[0] = row;
+                    let _v: i32 = grid[0][1];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen_no_analysis(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Multidim array compound index write WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_param_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn read_2d(grid: [[i32; 3]; 2]) -> i32 {
+                return grid[0][1] + grid[1][2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+        let data = memory.data_mut(&mut store);
+        let base: usize = 0;
+        // [[i32; 3]; 2] = 6 i32 values = 24 bytes
+        // grid[0][0]=10, grid[0][1]=20, grid[0][2]=30
+        data[base..base + 4].copy_from_slice(&10_i32.to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&20_i32.to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&30_i32.to_le_bytes());
+        // grid[1][0]=40, grid[1][1]=50, grid[1][2]=60
+        data[base + 12..base + 16].copy_from_slice(&40_i32.to_le_bytes());
+        data[base + 16..base + 20].copy_from_slice(&50_i32.to_le_bytes());
+        data[base + 20..base + 24].copy_from_slice(&60_i32.to_le_bytes());
+
+        let read_2d: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "read_2d")
+            .expect("Failed to get 'read_2d'");
+        let result = read_2d
+            .call(&mut store, base as i32)
+            .expect("read_2d failed");
+        assert_eq!(
+            result, 80,
+            "read_2d should return 80 (grid[0][1]=20 + grid[1][2]=60)"
+        );
+    }
+
+    #[test]
+    fn nested_struct_i64_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Inner64 { a: i64; b: i64; }
+            struct Outer64 { inner: Inner64; tag: i32; }
+            pub fn test_i64_nested() -> i64 {
+                let o: Outer64 = Outer64 { inner: Inner64 { a: 100, b: 200 }, tag: 42 };
+                return o.inner.a + o.inner.b;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_i64_nested")
+            .expect("Failed to get 'test_i64_nested'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_i64_nested failed");
+        assert_eq!(
+            result, 300i64,
+            "test_i64_nested should return 300 (o.inner.a + o.inner.b)"
+        );
+    }
+
+    #[test]
+    fn struct_with_i64_array_inline_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct HasI64Arr { vals: [i64; 2]; tag: i32; }
+            pub fn test_i64_arr_field() -> i64 {
+                let v: [i64; 2] = [1000, 2000];
+                let h: HasI64Arr = HasI64Arr { vals: v, tag: 99 };
+                return h.vals[0] + h.vals[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "test_i64_arr_field")
+            .expect("Failed to get 'test_i64_arr_field'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_i64_arr_field failed");
+        assert_eq!(
+            result, 3000i64,
+            "test_i64_arr_field should return 3000 (h.vals[0] + h.vals[1])"
+        );
+    }
+
+    #[test]
+    fn copy_struct_from_array_index_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test_copy_from_index() -> i32 {
+                let mut points: [Point; 3] = [
+                    Point { x: 10, y: 20 },
+                    Point { x: 30, y: 40 },
+                    Point { x: 50, y: 60 }
+                ];
+                let p: Point = points[1];
+                points[1].x = 99;
+                return p.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_copy_from_index")
+            .expect("Failed to get 'test_copy_from_index'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_copy_from_index failed");
+        assert_eq!(
+            result, 30,
+            "p.x should still be 30 after modifying points[1].x (value semantics via copy)"
+        );
+    }
+
+    #[test]
+    fn array_literal_reassignment_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn test_array_literal_reassign() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                arr = [4, 5, 6];
+                return arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_array_literal_reassign")
+            .expect("Failed to get 'test_array_literal_reassign'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_array_literal_reassign failed");
+        assert_eq!(
+            result, 5,
+            "arr[1] should be 5 after reassigning arr = [4, 5, 6]"
+        );
+    }
+
+    #[test]
+    fn array_variable_reassignment_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            pub fn test_array_var_reassign() -> i32 {
+                let mut arr: [i32; 3] = [1, 2, 3];
+                let other: [i32; 3] = [7, 8, 9];
+                arr = other;
+                return arr[2];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test_array_var_reassign")
+            .expect("Failed to get 'test_array_var_reassign'");
+        let result = func
+            .call(&mut store, ())
+            .expect("test_array_var_reassign failed");
+        assert_eq!(
+            result, 9,
+            "arr[2] should be 9 after reassigning arr = other"
+        );
+    }
+
+    #[test]
+    fn sret_return_array_index_struct_second_elem_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Vec2 { x: i32; y: i32; }
+            pub fn get_second_y() -> i32 {
+                let vecs: [Vec2; 3] = [
+                    Vec2 { x: 1, y: 2 },
+                    Vec2 { x: 3, y: 4 },
+                    Vec2 { x: 5, y: 6 }
+                ];
+                let v: Vec2 = get_at(vecs, 2);
+                return v.y;
+            }
+            fn get_at(arr: [Vec2; 3], idx: i32) -> Vec2 {
+                return arr[idx];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_second_y")
+            .expect("Failed to get 'get_second_y'");
+        let result = func
+            .call(&mut store, ())
+            .expect("get_second_y failed");
+        assert_eq!(
+            result, 6,
+            "get_second_y should return 6 (arr[2].y via sret array index return)"
+        );
+    }
+
+    #[test]
+    fn sret_return_array_index_struct_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn first_point_x() -> i32 {
+                let pts: [Point; 2] = [Point { x: 10, y: 20 }, Point { x: 30, y: 40 }];
+                let p: Point = get_first(pts);
+                return p.x;
+            }
+            fn get_first(pts: [Point; 2]) -> Point {
+                return pts[0];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "first_point_x")
+            .expect("Failed to get 'first_point_x'");
+        let result = func
+            .call(&mut store, ())
+            .expect("first_point_x failed");
+        assert_eq!(
+            result, 10,
+            "first_point_x should return 10 (pts[0].x via sret array index return)"
+        );
+    }
+
+    #[test]
+    fn sret_return_member_access_array_execution() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            pub fn get_arr_elem() -> i32 {
+                let h: HasArray = HasArray { arr: [10, 20, 30], val: 99 };
+                let a: [i32; 3] = get_arr(h);
+                return a[1];
+            }
+            fn get_arr(h: HasArray) -> [i32; 3] {
+                return h.arr;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_arr_elem")
+            .expect("Failed to get 'get_arr_elem'");
+        let result = func
+            .call(&mut store, ())
+            .expect("get_arr_elem failed");
+        assert_eq!(
+            result, 20,
+            "get_arr_elem should return 20 (h.arr[1] via sret member access array return)"
+        );
+    }
+
+    #[test]
+    fn nested_struct_chained_read_inline_execution() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Outer { inner: Inner; val: i32; }
+            pub fn read_chained() -> i32 {
+                let o: Outer = Outer { inner: Inner { x: 7, y: 8 }, val: 9 };
+                return o.inner.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "read_chained")
+            .expect("Failed to get 'read_chained'");
+        let result = func.call(&mut store, ()).expect("read_chained failed");
+        assert_eq!(result, 7, "o.inner.x via direct chained access should be 7");
+    }
+
+    #[test]
+    fn nested_struct_chained_write_inline_execution() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Outer { inner: Inner; val: i32; }
+            pub fn write_chained() -> i32 {
+                let mut o: Outer = Outer { inner: Inner { x: 1, y: 2 }, val: 3 };
+                o.inner.x = 42;
+                return o.inner.x;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_chained")
+            .expect("Failed to get 'write_chained'");
+        let result = func.call(&mut store, ()).expect("write_chained failed");
+        assert_eq!(result, 42, "o.inner.x after chained write should be 42");
+    }
+
+    #[test]
+    fn array_of_structs_sret_return_inline_execution() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn make_points() -> [Point; 2] {
+                let arr: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+                return arr;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should have memory");
+
+        let sret_base: i32 = 0;
+        let func: wasmtime::TypedFunc<i32, ()> = instance
+            .get_typed_func(&mut store, "make_points")
+            .expect("Failed to get 'make_points'");
+        func.call(&mut store, sret_base).expect("make_points failed");
+
+        let data = memory.data(&store);
+        let base = sret_base as usize;
+        let p0_x = i32::from_le_bytes(data[base..base + 4].try_into().unwrap());
+        let p0_y = i32::from_le_bytes(data[base + 4..base + 8].try_into().unwrap());
+        let p1_x = i32::from_le_bytes(data[base + 8..base + 12].try_into().unwrap());
+        let p1_y = i32::from_le_bytes(data[base + 12..base + 16].try_into().unwrap());
+        assert_eq!(p0_x, 1, "points[0].x");
+        assert_eq!(p0_y, 2, "points[0].y");
+        assert_eq!(p1_x, 3, "points[1].x");
+        assert_eq!(p1_y, 4, "points[1].y");
+    }
+
+    #[test]
+    fn nested_struct_with_array_write_inline_execution() {
+        let source = r#"
+            struct HasArray { arr: [i32; 3]; val: i32; }
+            struct Deep { inner: HasArray; tag: i32; }
+            pub fn write_and_read() -> i32 {
+                let ha: HasArray = HasArray { arr: [10, 20, 30], val: 99 };
+                let d: Deep = Deep { inner: ha, tag: 42 };
+                let mut ha2: HasArray = d.inner;
+                ha2.arr[1] = 77;
+                return ha2.arr[1];
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let func: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "write_and_read")
+            .expect("Failed to get 'write_and_read'");
+        let result = func.call(&mut store, ()).expect("write_and_read failed");
+        assert_eq!(result, 77, "ha.arr[1] after write should be 77");
+    }
+
+    #[test]
+    fn if_else_compound_overlap_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "if_else_compound_overlap";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "if_else_compound_overlap")
+            .unwrap_or_else(|e| panic!("Failed to get 'if_else_compound_overlap': {e}"));
+
+        let result_true = func
+            .call(&mut store, 1)
+            .unwrap_or_else(|e| panic!("Call with cond=true failed: {e}"));
+        assert_eq!(result_true, 1, "Expected a[0]=1 when cond is true");
+
+        let result_false = func
+            .call(&mut store, 0)
+            .unwrap_or_else(|e| panic!("Call with cond=false failed: {e}"));
+        assert_eq!(result_false, 20, "Expected b[1]=20 when cond is false");
+    }
 }
 
 /// Test data regeneration helpers.
@@ -4260,8 +5592,8 @@ mod regenerate {
     #[ignore]
     fn regenerate_fn_params_wasm() {
         let dir = base_test_dir().join("fn_params");
-        let source_code =
-            std::fs::read_to_string(dir.join("fn_params.inf")).expect("Failed to read fn_params.inf");
+        let source_code = std::fs::read_to_string(dir.join("fn_params.inf"))
+            .expect("Failed to read fn_params.inf");
         let actual = wasm_codegen(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
@@ -4836,4 +6168,122 @@ mod regenerate {
         regenerate_wat(&actual, &dir, "struct_nondet");
     }
 
+    #[test]
+    #[ignore]
+    fn regenerate_struct_array_field_nondet_wasm() {
+        let dir = base_test_dir().join("struct_array_field_nondet");
+        let source_code = std::fs::read_to_string(dir.join("struct_array_field_nondet.inf"))
+            .expect("Failed to read struct_array_field_nondet.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_array_field_nondet.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_array_field_nondet");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nested_struct_wasm() {
+        let dir = base_test_dir().join("nested_struct");
+        let source_code = std::fs::read_to_string(dir.join("nested_struct.inf"))
+            .expect("Failed to read nested_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nested_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "nested_struct");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_struct_with_array_wasm() {
+        let dir = base_test_dir().join("struct_with_array");
+        let source_code = std::fs::read_to_string(dir.join("struct_with_array.inf"))
+            .expect("Failed to read struct_with_array.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("struct_with_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "struct_with_array");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_of_structs_wasm() {
+        let dir = base_test_dir().join("array_of_structs");
+        let source_code = std::fs::read_to_string(dir.join("array_of_structs.inf"))
+            .expect("Failed to read array_of_structs.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("array_of_structs.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_of_structs");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_multidim_array_uzumaki_wasm() {
+        let dir = base_test_dir().join("multidim_array_uzumaki");
+        let source_code = std::fs::read_to_string(dir.join("multidim_array_uzumaki.inf"))
+            .expect("Failed to read multidim_array_uzumaki.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("multidim_array_uzumaki.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "multidim_array_uzumaki");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nested_struct_with_array_wasm() {
+        let dir = base_test_dir().join("nested_struct_with_array");
+        let source_code =
+            std::fs::read_to_string(dir.join("nested_struct_with_array.inf"))
+                .expect("Failed to read nested_struct_with_array.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nested_struct_with_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "nested_struct_with_array");
+    }
 }

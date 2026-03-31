@@ -24,8 +24,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i64.const 100
     i64.store
     local.get $__frame_ptr
@@ -60,8 +58,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i64.const 100
     i64.store
     local.get $__frame_ptr
@@ -96,8 +92,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i64.const 100
     i64.store
     local.get $__frame_ptr

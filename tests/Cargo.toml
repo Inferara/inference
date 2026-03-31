@@ -9,12 +9,12 @@ repository = { workspace = true }
 [dependencies]
 anyhow.workspace = true
 serde_json = "1.0.99"
-wasmtime="42.0.0"
+wasmtime="43.0.0"
 
 inference-analysis.workspace = true
 inference-ast.workspace = true
 inference-wasm-codegen.workspace = true
-inference-type-checker.workspace = true
+inference-type-checker = { workspace = true, features = ["test-utils"] }
 inference.workspace = true
 inf-wasmparser.workspace = true
 tree-sitter.workspace = true

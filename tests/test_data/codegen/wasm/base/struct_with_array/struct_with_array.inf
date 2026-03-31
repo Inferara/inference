@@ -1,0 +1,54 @@
+struct HasArray { arr: [i32; 3]; val: i32;
+    fn get_arr_elem(self, idx: i32) -> i32 {
+        return self.arr[idx];
+    }
+    fn sum_arr(self) -> i32 {
+        return self.arr[0] + self.arr[1] + self.arr[2];
+    }
+}
+
+pub fn create_and_read_val() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    return s.val;
+}
+
+pub fn read_arr_first() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    return s.arr[0];
+}
+
+pub fn read_arr_last() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    return s.arr[2];
+}
+
+pub fn write_arr_element() -> i32 {
+    let mut s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    s.arr[1] = 99;
+    return s.arr[1];
+}
+
+pub fn sum_arr_and_val() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    let sum: i32 = s.arr[0] + s.arr[1] + s.arr[2] + s.val;
+    return sum;
+}
+
+pub fn struct_with_array_param(s: HasArray) -> i32 {
+    return s.arr[0] + s.val;
+}
+
+pub fn struct_with_array_return() -> HasArray {
+    let s: HasArray = HasArray { arr: [1, 2, 3], val: 4 };
+    return s;
+}
+
+pub fn test_method_get_arr_elem() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    return s.get_arr_elem(1);
+}
+
+pub fn test_method_sum_arr() -> i32 {
+    let s: HasArray = HasArray { arr: [10, 20, 30], val: 42 };
+    return s.sum_arr();
+}

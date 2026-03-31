@@ -105,6 +105,21 @@ impl TypedContext {
         self.symbol_table.lookup_struct(name)
     }
 
+    /// Registers a struct definition in the type context for testing.
+    ///
+    /// Intended for unit tests in downstream crates (e.g. `wasm-codegen`) that
+    /// need a populated `TypedContext` without running the full type-checker.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    pub fn register_test_struct(
+        &mut self,
+        name: &str,
+        fields: &[(String, TypeInfo, Visibility)],
+    ) -> anyhow::Result<()> {
+        self.symbol_table
+            .register_struct(name, fields, vec![], Visibility::Public)
+    }
+
     /// Looks up a method on the given type by name and returns its metadata.
     ///
     /// Returns `None` if no method with the given name exists on the type.

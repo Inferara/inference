@@ -6,6 +6,9 @@ license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
 
+[features]
+test-utils = []
+
 [dependencies]
 inference-ast.workspace = true
 anyhow.workspace = true

@@ -135,6 +135,58 @@ pub(crate) fn walk_expr(
     }
 }
 
+/// Returns how many array layers deep a type is.
+///
+/// `[i32; 3]` => 1, `[[i32; 3]; 2]` => 2, `[[[i32; 2]; 3]; 4]` => 3,
+/// `i32` / `Point` => 0.
+pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
+    match kind {
+        TypeInfoKind::Array(elem, _) => 1 + array_nesting_depth(&elem.kind),
+        _ => 0,
+    }
+}
+
+/// Returns true if a type is compound: a struct/custom type, or an array
+/// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
+/// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
+#[must_use]
+fn is_compound_type(kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+        TypeInfoKind::Array(elem, _) => is_compound_type(&elem.kind),
+        _ => false,
+    }
+}
+
+/// Returns true if a compound type contains fields that are unsupported
+/// for struct uzumaki lowering.
+///
+/// - **Struct/Custom**: looks up the struct definition and checks whether any
+///   of its fields are nested structs, arrays of structs, or multidimensional
+///   arrays (nesting depth > 1). Fields that are 1D scalar arrays (e.g.
+///   `[i32; 3]`) are not considered compound.
+/// - **Array**: recurses into the element type.
+/// - **Scalars**: returns false.
+#[must_use]
+pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
+    match kind {
+        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            ctx.lookup_struct(name).is_some_and(|s| {
+                s.fields.iter().any(|f| match &f.type_info.kind {
+                    TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+                    TypeInfoKind::Array(_, _) => {
+                        is_compound_type(&f.type_info.kind)
+                            || array_nesting_depth(&f.type_info.kind) > 1
+                    }
+                    _ => false,
+                })
+            })
+        }
+        TypeInfoKind::Array(elem, _) => has_compound_fields(ctx, &elem.kind),
+        _ => false,
+    }
+}
+
 /// Returns `true` when `expr_id` is a function call that returns a compound
 /// type (array, struct, or custom). Used by multiple rules to detect sret
 /// calling convention restrictions.

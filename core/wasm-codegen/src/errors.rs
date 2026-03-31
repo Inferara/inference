@@ -20,4 +20,18 @@ pub(crate) enum CodegenError {
         "unsupported sret return expression in function — expected identifier, array literal, or array-returning function call"
     )]
     UnsupportedSretReturnExpression,
+    /// An array (or nested array) has too many total elements for uzumaki
+    /// unrolling. Each element produces several WASM instructions, so
+    /// unbounded unrolling leads to O(n) instruction explosion.
+    #[error(
+        "array has {total_elements} elements which exceeds the maximum of {max} for uzumaki unrolling"
+    )]
+    ArrayTooLargeForUzumaki { total_elements: u32, max: u32 },
+    /// Cycle detected in struct layout computation. The type checker should
+    /// prevent recursive struct definitions, so this variant is defense-in-depth.
+    #[error("cycle detected in struct layout for '{name}' -- the struct transitively contains itself")]
+    CycleInStructLayout { name: String },
+    /// A struct name referenced during layout computation was not found in the type context.
+    #[error("struct '{name}' not found in type context -- the type checker should have caught this")]
+    StructNotFoundInTypeContext { name: String },
 }

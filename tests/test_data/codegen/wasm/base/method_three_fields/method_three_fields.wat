@@ -27,8 +27,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i32.const 1
     i32.store
     local.get $__frame_ptr
@@ -68,8 +66,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i32.const 1
     i32.store
     local.get $__frame_ptr
@@ -109,8 +105,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i32.const 1
     i32.store
     local.get $__frame_ptr
@@ -150,8 +144,6 @@
     i32.const 16
     memory.fill
     local.get $__frame_ptr
-    i32.const 0
-    i32.add
     i32.const 1
     i32.store
     local.get $__frame_ptr
