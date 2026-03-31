@@ -22,7 +22,6 @@ pub mod return_inside_nondet_block;
 pub mod standalone_uzumaki;
 pub mod uninitialized_variable;
 pub mod uzumaki_in_reassignment;
-pub mod uzumaki_on_deep_array;
 pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
 pub mod unsupported_compound_return_expr;
@@ -52,7 +51,6 @@ use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use standalone_uzumaki::StandaloneUzumaki;
 use uninitialized_variable::UninitializedVariable;
 use uzumaki_in_reassignment::UzumakiInReassignment;
-use uzumaki_on_deep_array::UzumakiOnDeepArray;
 use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
 use unsupported_compound_return_expr::UnsupportedCompoundReturnExpr;
@@ -94,7 +92,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnNestedStruct,
         &UzumakiOnStructInArray,
         &CompoundLiteralMemberAssign,
-        &UzumakiOnDeepArray,
         &UnsupportedCompoundReturnExpr,
     ]
 }

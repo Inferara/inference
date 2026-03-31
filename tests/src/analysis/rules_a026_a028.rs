@@ -700,4 +700,22 @@ mod analysis_rules_tests {
             .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnStructInArray { .. }));
         assert!(has_a028, "uzumaki on [[Point; 2]; 3] should be rejected, got: {errors:?}");
     }
+
+    #[test]
+    fn a028_uzumaki_on_3d_struct_array_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn main() -> i32 {
+                forall {
+                    let cube: [[[Point; 2]; 3]; 4] = @;
+                }
+                return 0;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a028 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnStructInArray { .. }));
+        assert!(has_a028, "uzumaki on [[[Point; 2]; 3]; 4] should be rejected, got: {errors:?}");
+    }
 }

@@ -1,7 +1,7 @@
-/// Integration tests for analysis rules A029 and A030.
+/// Integration tests for analysis rule A029.
 ///
 /// - A029: CompoundLiteralInCompoundAssign -- compound literals cannot be assigned directly to compound elements
-/// - A030: UzumakiOnDeepArray -- uzumaki on arrays with more than 2 dimensions is rejected
+/// - A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::build_ast;
@@ -155,126 +155,24 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- A030: Uzumaki on deep array ---
+    // --- A030 removed: multidimensional scalar array uzumaki now accepted at any depth ---
 
     #[test]
-    fn a030_1d_array_uzumaki_accepted() {
+    fn a030_removed_3d_array_uzumaki_accepted() {
         let source = r#"
             fn main() -> i32 {
                 forall {
-                    let a: [i32; 3] = @;
+                    let c: [[[i32; 2]; 3]; 4] = @;
                 }
                 return 0;
             }
         "#;
         let result = analyze(source);
-        if let Err(ref e) = result {
-            let has_a030 = e
-                .errors()
-                .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-            assert!(!has_a030, "1D array uzumaki should be accepted, got: {e}");
-        }
+        assert!(result.is_ok(), "3D scalar array uzumaki should be accepted (A030 removed), got: {result:?}");
     }
 
     #[test]
-    fn a030_2d_array_uzumaki_accepted() {
-        let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let g: [[i32; 3]; 2] = @;
-                }
-                return 0;
-            }
-        "#;
-        let result = analyze(source);
-        if let Err(ref e) = result {
-            let has_a030 = e
-                .errors()
-                .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-            assert!(!has_a030, "2D array uzumaki should be accepted, got: {e}");
-        }
-    }
-
-    #[test]
-    fn a030_3d_array_uzumaki_rejected() {
-        let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let c: [[[i32; 2]; 3]; 4] = @;
-                }
-                return 0;
-            }
-        "#;
-        let errors = expect_errors(source);
-        let has_a030 = errors
-            .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-        assert!(has_a030, "3D array uzumaki should be rejected, got: {errors:?}");
-    }
-
-    #[test]
-    fn a030_rule_id_is_a030() {
-        let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let c: [[[i32; 2]; 3]; 4] = @;
-                }
-                return 0;
-            }
-        "#;
-        let errors = expect_errors(source);
-        let diag = errors
-            .iter()
-            .find(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }))
-            .expect("expected UzumakiOnDeepArray");
-        assert_eq!(diag.rule_id(), "A030");
-    }
-
-    #[test]
-    fn a030_outside_nondet_not_checked() {
-        let source = r#"
-            fn main() -> i32 {
-                let c: [[[i32; 2]; 3]; 4] = @;
-                return 0;
-            }
-        "#;
-        let errors = expect_errors(source);
-        let has_a030 = errors
-            .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-        assert!(!has_a030, "A030 should not fire outside nondet block (A006 handles it), got: {errors:?}");
-        let has_a006 = errors
-            .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOutsideNonDetBlock { .. }));
-        assert!(has_a006, "A006 should fire for uzumaki outside nondet block, got: {errors:?}");
-    }
-
-    #[test]
-    fn a030_error_message() {
-        let source = r#"
-            fn main() -> i32 {
-                forall {
-                    let c: [[[i32; 2]; 3]; 4] = @;
-                }
-                return 0;
-            }
-        "#;
-        let errors = expect_errors(source);
-        let diag = errors
-            .iter()
-            .find(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }))
-            .expect("expected UzumakiOnDeepArray");
-        let msg = diag.to_string();
-        assert!(
-            msg.contains("2 dimensions"),
-            "error message should mention 2 dimensions, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn a030_4d_array_uzumaki_rejected() {
+    fn a030_removed_4d_array_uzumaki_accepted() {
         let source = r#"
             fn main() -> i32 {
                 forall {
@@ -283,15 +181,12 @@ mod analysis_rules_tests {
                 return 0;
             }
         "#;
-        let errors = expect_errors(source);
-        let has_a030 = errors
-            .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-        assert!(has_a030, "4D array uzumaki should be rejected, got: {errors:?}");
+        let result = analyze(source);
+        assert!(result.is_ok(), "4D scalar array uzumaki should be accepted (A030 removed), got: {result:?}");
     }
 
     #[test]
-    fn a030_uzumaki_in_exists_block_rejected() {
+    fn a030_removed_uzumaki_in_exists_block_accepted() {
         let source = r#"
             fn main() -> i32 {
                 exists {
@@ -300,11 +195,23 @@ mod analysis_rules_tests {
                 return 0;
             }
         "#;
+        let result = analyze(source);
+        assert!(result.is_ok(), "3D scalar array uzumaki in exists block should be accepted (A030 removed), got: {result:?}");
+    }
+
+    #[test]
+    fn a030_removed_outside_nondet_still_caught_by_a006() {
+        let source = r#"
+            fn main() -> i32 {
+                let c: [[[i32; 2]; 3]; 4] = @;
+                return 0;
+            }
+        "#;
         let errors = expect_errors(source);
-        let has_a030 = errors
+        let has_a006 = errors
             .iter()
-            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnDeepArray { .. }));
-        assert!(has_a030, "3D array uzumaki in exists block should be rejected, got: {errors:?}");
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOutsideNonDetBlock { .. }));
+        assert!(has_a006, "A006 should fire for uzumaki outside nondet block, got: {errors:?}");
     }
 
     // --- A029: Compound literal in array index assignment ---

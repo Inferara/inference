@@ -162,9 +162,6 @@ pub enum AnalysisDiagnostic {
     #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
     CompoundLiteralInCompoundAssign { location: Location },
 
-    #[error("uzumaki (@) on arrays with more than 2 dimensions is not supported")]
-    UzumakiOnDeepArray { location: Location },
-
     #[error("return expression in compound-returning function must be a variable, literal, function call, or field/element access; assign the expression to a temporary variable first")]
     UnsupportedCompoundReturnExpression { location: Location },
 }
@@ -201,7 +198,6 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
-            | AnalysisDiagnostic::UzumakiOnDeepArray { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location } => location,
         }
     }
@@ -239,7 +235,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UzumakiOnNestedStruct { .. } => "A027",
             AnalysisDiagnostic::UzumakiOnStructInArray { .. } => "A028",
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. } => "A029",
-            AnalysisDiagnostic::UzumakiOnDeepArray { .. } => "A030",
+            // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
         }
     }

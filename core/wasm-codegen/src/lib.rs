@@ -51,6 +51,7 @@ use inference_ast::nodes::Def;
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::compiler::Compiler;
+use crate::errors::CodegenError;
 
 mod compiler;
 mod errors;
@@ -111,7 +112,7 @@ pub fn codegen(
     }
 
     if typed_context.source_files().len() != 0 {
-        traverse_t_ast_with_compiler(typed_context, &mut compiler);
+        traverse_t_ast_with_compiler(typed_context, &mut compiler)?;
     }
 
     let wasm = compiler.finish();
@@ -138,7 +139,10 @@ pub fn codegen(
 /// 2. **Body compilation** -- top-level functions are compiled first, then
 ///    method bodies are compiled with `method_struct_name` passed so that
 ///    `self` parameter handling (Phase 3+) knows which struct type is in scope.
-fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Compiler) {
+fn traverse_t_ast_with_compiler(
+    typed_context: &TypedContext,
+    compiler: &mut Compiler,
+) -> Result<(), CodegenError> {
     let arena = typed_context.arena();
     for source_file in typed_context.source_files() {
         // Collect top-level function DefIds
@@ -161,10 +165,10 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
         }
 
         // Stage 1: Register all indices before any body compilation
-        compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context);
+        compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context)?;
         #[allow(clippy::cast_possible_truncation)]
         let method_base_idx = compiler.func_idx_after_toplevel(func_def_ids.len() as u32);
-        compiler.build_method_name_to_idx(arena, &method_defs, typed_context, method_base_idx);
+        compiler.build_method_name_to_idx(arena, &method_defs, typed_context, method_base_idx)?;
 
         // Verify Stage 1 produced the expected number of index entries.
         // Catches index calculation bugs before they manifest as wrong `call` targets.
@@ -179,7 +183,7 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
 
         // Stage 2: Compile top-level function bodies
         for &def_id in &func_def_ids {
-            compiler.visit_function_definition(def_id, arena, typed_context, None);
+            compiler.visit_function_definition(def_id, arena, typed_context, None)?;
         }
 
         // Stage 2b: Compile method bodies
@@ -189,7 +193,8 @@ fn traverse_t_ast_with_compiler(typed_context: &TypedContext, compiler: &mut Com
                 arena,
                 typed_context,
                 Some(struct_name),
-            );
+            )?;
         }
     }
+    Ok(())
 }

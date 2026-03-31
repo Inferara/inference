@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document explains how Inference compiles fixed-size array types to WebAssembly linear memory with a shadow stack (similar to Rust/LLVM).
+This document explains how Inference compiles fixed-size array types, struct types, and nested compound types to WebAssembly linear memory with a shadow stack (similar to Rust/LLVM).
 
 Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism. Each function that uses arrays:
 1. Computes a frame layout at compile time
@@ -12,12 +12,16 @@ Arrays are **stack-allocated** using a frame pointer and stack pointer mechanism
 
 ## Compilation Phases
 
-### Phase 0: Type-Checking (not in wasm-codegen)
+### Phase 0: Type-Checking and Analysis (not in wasm-codegen)
 
 The `core/type-checker` crate validates:
-- Array element types are scalar: `bool`, `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`
 - Array lengths are positive compile-time constants
 - Array variables, parameters, and literals have correct types
+
+The `core/analysis` crate enforces codegen constraints:
+- Multidimensional scalar arrays (`[[i32; 3]; 2]`) support full read/write access at any depth, uzumaki initialization, and parameter passing
+- Struct-element arrays (`[Point; 3]`) are supported at one level of nesting
+- Struct fields whose type is itself a compound type (another struct or an array) are rejected by rule A026 when the nesting would exceed one level (e.g., a struct field of type `[[i32; 3]; 2]` or a struct field of a struct that itself has compound fields)
 
 ### Phase 1: Frame Layout Computation
 
@@ -123,12 +127,16 @@ This module contains all memory-related helpers:
 | Function/Type | Purpose |
 |---|---|
 | `FrameLayout` | Data structure: `total_size`, `array_offsets`, `struct_offsets`, `frame_ptr_local` |
-| `ArraySlot` | Per-array metadata: `offset`, `elem_size`, `length` |
+| `ArraySlot` | Per-array metadata: `offset`, `elem_size`, `length`, `element_layout` (optional inner struct layout for struct-element arrays) |
 | `StructSlot` | Per-struct metadata: `offset`, `total_size`, `fields` (Vec of `StructFieldSlot`) |
-| `StructFieldSlot` | Per-field metadata: `name`, `offset` (from struct base), `type_kind` |
-| `compute_struct_field_layout()` | Compute C-compatible field offsets and total size for a struct |
-| `element_size()` | Map `TypeInfoKind` → byte size (1, 2, 4, or 8) |
+| `StructFieldSlot` | Per-field metadata: `name`, `offset` (from struct base), `type_kind`, `layout` (`CompoundFieldLayout`) |
+| `CompoundFieldLayout` | Enum describing a struct field's compound layout: `Scalar` (primitive), `NestedStruct { fields, total_size }`, or `NestedArray { elem_kind, elem_size, length }` |
+| `compute_struct_field_layout()` | Compute C-compatible field offsets and total size for a struct; now takes `&TypedContext` (for nested struct lookup) and returns `Result` |
+| `type_byte_size()` | Map `TypeInfoKind` → total byte size, including structs and arrays; requires `&TypedContext` for struct size lookup |
+| `natural_alignment_for_type()` | Return the natural alignment (in bytes) of a type; uses the maximum field alignment for structs |
+| `element_size()` | Map scalar `TypeInfoKind` → byte size (1, 2, 4, or 8); does not handle structs |
 | `align_to_frame()` | Round up to 16-byte boundary |
+| `emit_ptr_offset_addr()` | Emit `local.get $ptr; i32.const offset; i32.add` for a base-pointer + byte-offset address |
 | `store_instruction()` | Select `i32.store8`, `i32.store16`, `i32.store`, or `i64.store` |
 | `load_instruction()` | Select appropriate load (sign/zero-extending as needed) |
 | `emit_stack_prologue()` | Generate frame allocation code |
@@ -142,20 +150,22 @@ This module contains all memory-related helpers:
 
 During the `pre_scan_locals()` phase (which walks all statements before instruction emission), array variables are registered as **i32 WASM locals**, identical to any other scalar variable. The type-checker sets `TypeInfoKind::Array(...)` on the variable node, and `pre_scan_locals` treats it as a non-i64 type and assigns an `i32` local.
 
-Later, during instruction emission, when an array literal is initialized, `lower_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
+Later, during instruction emission, when an array literal is initialized, `lower_array_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
 
 #### `compute_frame_layout()`
 
 ```rust
 fn compute_frame_layout(
-    block: &BlockType,
+    arena: &AstArena,
+    block_id: BlockId,
     ctx: &TypedContext,
     frame_ptr_local_idx: u32,
-    arguments: Option<&[ArgumentType]>,
-) -> Option<FrameLayout>
+    args: &[inference_ast::nodes::ArgData],
+    method_struct_name: Option<&str>,
+) -> Result<Option<FrameLayout>, CodegenError>
 ```
 
-Returns `None` if no arrays are present (no frame needed).
+Returns `None` if no arrays or structs are present (no frame needed). The `method_struct_name` parameter should be `Some("TypeName")` when compiling a method body, so that a mutable `self` parameter can look up the struct layout and allocate a frame slot for the copy.
 
 **Algorithm**:
 1. Iterate parameters: if any are array-typed, allocate copy space
@@ -169,12 +179,12 @@ Returns `None` if no arrays are present (no frame needed).
 
 ```rust
 fn lower_array_index_access(
-    &self,
-    aiae: &ArrayIndexAccessExpression,
+    &mut self,
+    arena: &AstArena,
+    aiae_expr_id: ExprId,
+    array_expr_id: ExprId,
+    index_expr_id: ExprId,
     ctx: &TypedContext,
-    func: &mut Function,
-    locals_map: &FxHashMap<String, (u32, ValType)>,
-    frame_layout: Option<&FrameLayout>,
 )
 ```
 
@@ -212,13 +222,13 @@ i32.load / i64.load / ... ;; load element
 
 ```rust
 fn lower_array_index_write(
-    &self,
-    aiae: &ArrayIndexAccessExpression,
-    assign_stmt: &AssignStatement,
+    &mut self,
+    arena: &AstArena,
+    aiae_expr_id: ExprId,
+    array_expr_id: ExprId,
+    index_expr_id: ExprId,
+    right_expr_id: ExprId,
     ctx: &TypedContext,
-    func: &mut Function,
-    locals_map: &FxHashMap<String, (u32, ValType)>,
-    frame_layout: Option<&FrameLayout>,
 )
 ```
 
@@ -255,14 +265,12 @@ i32.store / i64.store / ... ;; store element
 
 ```rust
 fn lower_array_uzumaki(
-    &self,
-    uzumaki_id: u32,
+    &mut self,
+    _arena: &AstArena,
     elem_type: &TypeInfo,
     length: u32,
-    ctx: &TypedContext,
-    func: &mut Function,
-    frame_layout: Option<&FrameLayout>,
-)
+    enclosing_var_name: &str,
+) -> Result<(), CodegenError>
 ```
 
 Lowers `let arr: [i32; 3] = @` to element-wise non-deterministic stores:
@@ -628,7 +636,6 @@ struct ArrayReturnInfo {
 
 ```rust
 struct StructReturnInfo {
-    struct_name: String,
     total_size: u32,
     field_slots: Vec<StructFieldSlot>,
 }
@@ -642,7 +649,7 @@ Structs in Inference are stack-allocated in the same shadow stack frame as array
 
 ### Field Layout
 
-`compute_struct_field_layout` visits fields in declaration order and assigns each field a byte offset aligned to its natural size (matching C `repr(C)` rules):
+`compute_struct_field_layout` visits fields in declaration order and assigns each field a byte offset aligned to its natural alignment (matching C `repr(C)` rules). It accepts a `&TypedContext` so that nested struct fields can be recursively laid out. The function now returns `Result<(u32, Vec<StructFieldSlot>), CodegenError>` — errors occur only for recursive struct definitions (defense-in-depth; the type checker's `RecursiveStructDefinition` error prevents them) or missing type-context entries.
 
 ```
 struct Point { x: i32; y: i32; }   →  total_size=8
@@ -682,7 +689,7 @@ local.set $p
 
 ### Member Access Read (`lower_member_access`)
 
-Reading `p.x` loads the field value from the struct's memory location:
+For scalar fields, reading `p.x` loads the field value from the struct's memory location:
 
 ```wasm
 local.get $p               ;; struct base pointer
@@ -691,11 +698,22 @@ i32.add
 i32.load                   ;; or i64.load, i32.load8_u, etc.
 ```
 
-`resolve_struct_field_offset` first checks `frame_layout.struct_offsets` for O(1) lookup when the struct expression is a simple identifier. It falls back to recomputing via `compute_struct_field_layout` for parameters or complex expressions.
+For compound fields (nested structs and array-typed fields), the read omits the load instruction and instead leaves a pointer to the field's memory location on the WASM stack:
+
+```wasm
+local.get $p               ;; struct base pointer
+i32.const <field_offset>   ;; omitted when offset is 0
+i32.add
+                           ;; no load — result is an i32 pointer to the compound field
+```
+
+This pointer semantics enables chaining: `outer.inner.x` lowers as two member-access address computations followed by a single scalar load for `x`. Similarly, `s.arr[1]` uses the pointer as the base for the array index calculation.
+
+`resolve_struct_field_offset` now returns a `ResolvedField` struct containing the offset, type kind, and `CompoundFieldLayout` so that callers can decide whether to emit a load or leave a pointer. The function first checks `frame_layout.struct_offsets` for O(1) lookup when the struct expression is a simple identifier. It falls back to recomputing via `compute_struct_field_layout` for parameters or complex expressions.
 
 ### Member Access Write (`lower_member_access_write`)
 
-Writing `p.x = v` stores the RHS value at the same address:
+For scalar fields, writing `p.x = v` stores the RHS value at the same address:
 
 ```wasm
 local.get $p               ;; struct base pointer
@@ -704,6 +722,19 @@ i32.add
 <lower RHS expression>
 i32.store
 ```
+
+For compound fields (nested structs or array-typed fields), the write emits a `memory.copy` from the RHS pointer to the destination field address:
+
+```wasm
+local.get $p               ;; struct base pointer (destination)
+i32.const <field_offset>
+i32.add
+<lower RHS expression>     ;; RHS is a pointer to compound data (source)
+i32.const <compound_size>
+memory.copy
+```
+
+The total byte size (`compound_size`) comes from `CompoundFieldLayout::byte_size()`: `NestedStruct.total_size` for nested structs, and `elem_size * length` for nested arrays.
 
 ### Struct Parameter Copy (`emit_struct_param_copy`)
 
@@ -768,13 +799,93 @@ local.set $p
 
 Fields with `i64` types emit `i64.uzumaki` (0xfc 0x32) followed by `i64.store`. Field types use the same type dispatch as regular struct literal stores.
 
-## Known Limitations
+### Struct Uzumaki with Array Fields (`lower_struct_uzumaki`)
 
-1. **Nested arrays**: `[[i32; 3]; 2]` not yet supported (type-checker restriction)
-2. **Arrays of structs**: Struct types as array elements not yet supported
-3. **Structs with array fields**: Array-typed struct fields not yet supported
-4. **Partial initialization**: `let arr: [i32; 5] = [1, 2, _, _, _];` not yet supported (would require optional elements or sparse initialization)
-5. **Recursion with arrays or structs**: Functions using compound types cannot currently recurse (no stack overflow protection, analysis pass needed)
+When a struct has array-typed fields (e.g., `struct HasArray { arr: [i32; 3]; val: i32; }`), uzumaki initialization stores non-deterministic values element-by-element for each array field. For each element of the array field, the compiler emits the appropriate uzumaki opcode and a store at the element's computed address within the field:
+
+```wasm
+;; For `let h: HasArray = @;` inside a forall block:
+;; field arr (offset=0, [i32; 3]):
+local.get $__frame_ptr
+i32.const <struct_offset + 0>   ;; arr[0] byte offset
+i32.add
+i32.uzumaki
+i32.store
+
+local.get $__frame_ptr
+i32.const <struct_offset + 4>   ;; arr[1] byte offset
+i32.add
+i32.uzumaki
+i32.store
+
+;; ... arr[2] ...
+
+;; field val (scalar, offset=12):
+local.get $__frame_ptr
+i32.const <struct_offset + 12>
+i32.add
+i32.uzumaki
+i32.store
+```
+
+The total element count across all fields is bounded by `MAX_UZUMAKI_UNROLL_ELEMENTS` (65 536). If a struct's fields collectively exceed this limit, `CodegenError::ArrayTooLargeForUzumaki` is returned.
+
+## Compound Field Layout
+
+The `CompoundFieldLayout` enum describes how a struct field's memory should be handled during initialization and access. It is stored in each `StructFieldSlot` and is computed by `compute_struct_field_layout`:
+
+```rust
+pub(crate) enum CompoundFieldLayout {
+    Scalar,                                      // scalar field — load/store directly
+    NestedStruct { fields: Vec<StructFieldSlot>, total_size: u32 }, // another struct
+    NestedArray  { elem_kind: TypeInfoKind, elem_size: u32, length: u32 }, // array field
+}
+```
+
+`CompoundFieldLayout::is_compound()` returns true for `NestedStruct` and `NestedArray`. `byte_size()` returns the total byte count for compound variants.
+
+**Why this matters**: During `lower_struct_literal_fields`, the dispatch on `CompoundFieldLayout` determines:
+- `Scalar`: emit a single store instruction.
+- `NestedStruct`: if the RHS is a struct literal, recurse into `lower_struct_literal_fields` for the inner fields; otherwise emit `memory.copy`.
+- `NestedArray`: if the RHS is an array literal, emit element-by-element stores; otherwise emit `memory.copy`.
+
+The same layout is consulted during member access read/write to decide whether to emit a scalar load or leave a pointer on the stack.
+
+## Arrays of Structs
+
+An array whose element type is a struct (e.g., `[Point; 3]`) is laid out in the shadow-stack frame with each element occupying `struct_total_size` bytes. The `ArraySlot` for such an array stores an `element_layout: Some(Vec<StructFieldSlot>)` so that element-level field accesses can resolve offsets without recomputing the struct layout on every read.
+
+### Initialization
+
+An array-of-structs literal (e.g., `[Point{x:1,y:2}, Point{x:3,y:4}]`) initializes each element in order. For each element:
+- If the element is a struct literal, `lower_struct_literal_fields` is called at `base + index * elem_size`.
+- If the element is a struct identifier, a `memory.copy` of `elem_size` bytes copies the source into position.
+
+### Element Field Access (`pts[1].x`)
+
+Reading a field from an indexed element compiles as:
+
+```wasm
+local.get $pts              ;; array base pointer
+i32.const <1 * elem_size>   ;; byte offset of element 1
+i32.add                     ;; pointer to element 1 (a struct pointer)
+i32.const <field_offset>    ;; field x offset within the struct
+i32.add
+i32.load                    ;; load scalar field value
+```
+
+Writing (`pts[0].x = 99`) uses the same address calculation followed by a store instruction.
+
+### Element Copy (`let p: Point = pts[1]`)
+
+Copying a whole struct element to a variable emits a `memory.copy` of `elem_size` bytes from the element's address into the destination's frame slot, then sets the variable local to point to the copy.
+
+## Limitations
+
+1. **Nested compound depth**: Nesting beyond one level (e.g., a struct containing a struct that itself contains a struct) is rejected by analysis rule A026 and cannot be lowered.
+2. **Partial initialization**: `let arr: [i32; 5] = [1, 2, _, _, _];` is not supported.
+3. **Recursion with arrays or structs**: Functions using compound types cannot recurse.
+4. **Uzumaki element count limit**: `lower_struct_uzumaki` and `lower_array_uzumaki` return `Err(CodegenError::ArrayTooLargeForUzumaki)` if the total element count exceeds `MAX_UZUMAKI_UNROLL_ELEMENTS` (65 536). This is a compile-time bound to prevent instruction explosion; practical struct and array sizes are far below this limit.
 
 ## Cov Mark Coverage
 
@@ -814,13 +925,13 @@ pub fn get_array() -> i32 {
 
   ;; Prologue
   (global.get 0)           ;; __stack_pointer
-  (i32.const 12)           ;; frame_size for 3 i32s
+  (i32.const 16)           ;; frame_size: 3 i32s = 12 bytes, aligned to 16
   (i32.sub)
   (local.tee 0)            ;; $__frame_ptr = new top
   (global.set 0)           ;; update stack pointer
   (local.get 0)
   (i32.const 0)
-  (i32.const 12)
+  (i32.const 16)
   (memory.fill)            ;; zero-fill frame
 
   ;; Initialize array
@@ -848,7 +959,7 @@ pub fn get_array() -> i32 {
 
   ;; Epilogue
   (local.get 0)
-  (i32.const 12)
+  (i32.const 16)
   (i32.add)
   (global.set 0)           ;; restore stack pointer
 
@@ -867,7 +978,7 @@ pub fn sum_array(arr: [i32; 3]) -> i32 {
 
 **Key codegen points**:
 1. Parameter `arr` gets local index 0 (pointer)
-2. `compute_frame_layout()` allocates 12 bytes (frame size for copy)
+2. `compute_frame_layout()` allocates 16 bytes (3 i32s = 12 bytes, aligned to 16)
 3. Prologue allocates frame, then `emit_array_param_copy()` copies 3 elements
 4. Each `arr[i]` read loads from frame base + offset
 5. Epilogue restores stack pointer

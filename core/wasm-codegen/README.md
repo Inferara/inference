@@ -48,9 +48,17 @@ Typed AST (TypedContext)
    allocation code (prologue) and deallocation code (epilogue). Array index access
    (read/write) compiles to load/store instructions with computed addresses. Struct field
    access (`p.x`) compiles to a load at `struct_pointer + field_offset`; struct field
-   assignment (`p.x = v`) compiles to a store at the same address. Function calls push
-   arguments in positional order and emit a `call <func_idx>` instruction. Struct-typed
-   parameters are copied into the callee's frame on entry (value semantics).
+   assignment (`p.x = v`) compiles to a store at the same address. Compound fields
+   (nested structs and array-typed struct fields) use pointer semantics during member
+   access: the member access expression pushes the field's base address rather than
+   loading a scalar. `lower_struct_literal_fields` handles nested struct literal
+   initialization and array-field initialization with element-wise stores or `memory.copy`
+   depending on whether the RHS is a literal or an identifier. Arrays of structs are
+   supported: each element occupies `struct_total_size` bytes, addressed by
+   `base + index * elem_size`; element field reads/writes use the same dispatch as plain
+   struct member access. Function calls push arguments in positional order and emit a
+   `call <func_idx>` instruction. Struct-typed parameters are copied into the callee's
+   frame on entry (value semantics).
    Assignment statements (`x = value;` where `x` is declared `mut`) are lowered by
    evaluating the right-hand side expression and emitting `local.set` to store the result.
    Array index assignment (`arr[i] = value;`) computes the element address and emits a store
@@ -227,7 +235,7 @@ The `codegen` function:
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
 - **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
-- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar fields are supported: struct literals, member access read/write, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Nested arrays, arrays of structs, arrays of arrays, partial initialization syntax, and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
+- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Multidimensional arrays (`[[i32; 3]; 2]`) are supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -251,8 +259,10 @@ Detailed design documents live in `docs/`:
 - [docs/arrays-and-memory.md](docs/arrays-and-memory.md) - Stack allocation and shadow
   stack infrastructure for fixed-size arrays and structs, including frame layout computation,
   prologue/epilogue emission, load/store instruction selection, copy-on-entry semantics for
-  array and struct parameters, struct field layout (`compute_struct_field_layout`), member
-  access lowering, and struct literal lowering.
+  array and struct parameters, struct field layout (`compute_struct_field_layout`),
+  `CompoundFieldLayout` for nested struct and array fields, member access lowering for scalar
+  and compound fields, struct literal lowering with nested dispatch, arrays of structs, and
+  struct uzumaki with array fields.
 - [docs/loops-lowering.md](docs/loops-lowering.md) - How `loop`/`break` statements are
   lowered to WASM structured control flow (`block`/`loop`/`br`), `LoopContext` depth
   tracking, and interaction with non-det blocks, if-statements, and array frames.
@@ -261,7 +271,7 @@ Detailed design documents live in `docs/`:
 
 - `lib.rs` - Public API, AST traversal (`traverse_t_ast_with_compiler`), two-stage index pre-scan (top-level functions then struct methods)
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
-- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `compute_struct_field_layout`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
+- `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
 - `errors.rs` - `CodegenError` enum for function call lowering failures
 - `output.rs` - `CodegenOutput` containing WASM bytes and metadata
 - `target.rs` - Compilation target definitions (`Wasm32`, `Soroban`)
@@ -361,6 +371,32 @@ Test data includes:
 - `method_return_struct.inf` - Methods returning struct types via the sret calling convention;
   covers associated constructors and instance methods returning structs; validated and executed
   via wasmtime
+- `nested_struct.inf` - Structs containing other structs as fields: nested struct literal
+  initialization, reading inner fields via copy (`let i: Inner = o.inner`), writing inner
+  fields on the copy, passing nested structs as function parameters, returning nested structs
+  via sret, and instance methods that access the inner struct; validated and executed via wasmtime
+- `struct_with_array.inf` - Structs with fixed-size array fields: literal initialization
+  with array field values, reading array elements from a struct field (`s.arr[0]`), writing
+  to a struct array field element (`s.arr[1] = 99`), passing structs with array fields as
+  parameters, returning them via sret, and instance methods that traverse the array field;
+  validated and executed via wasmtime
+- `array_of_structs.inf` - Fixed-size arrays where each element is a struct: initialization
+  with per-element struct literals, reading a field from an indexed element (`pts[1].x`),
+  writing a field on an indexed element (`pts[0].x = 99`), copying a whole element to a
+  variable (`let p: Point = pts[1]`), writing a whole element (`pts[0] = replacement`),
+  passing arrays of structs as parameters, and calling methods on extracted elements;
+  validated and executed via wasmtime
+- `nested_struct_with_array.inf` - A struct (`HasArray`) that contains an array field,
+  itself nested inside a second struct (`Deep`): chained member + index access
+  (`d.inner.arr[1]`), sum of array field elements, parameter passing, and sret return of the
+  outer struct; validated and executed via wasmtime
+- `multidim_array_uzumaki.inf` - Multidimensional arrays (`[[i32; 3]; 2]`, `[[i64; 2]; 2]`)
+  initialized with uzumaki (`@`) inside `forall` blocks, with subsequent element reads;
+  validated against `inf_wasmparser` (non-det modules skip WAT comparison)
+- `struct_array_field_nondet.inf` - Structs with array fields initialized with uzumaki (`@`)
+  inside `forall` blocks: structs with a single array field, structs with mixed i64 array
+  and i32 fields, and structs with two separate array fields; validated against
+  `inf_wasmparser`
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

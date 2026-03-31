@@ -4632,6 +4632,36 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("Multidim array uzumaki i64 WASM is invalid: {e}"));
     }
 
+    #[test]
+    fn multidim_array_uzumaki_3d_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test_3d() {
+                forall {
+                    let cube: [[[i32; 2]; 3]; 4] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("3D array uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn multidim_array_uzumaki_4d_inline_validation() {
+        cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 1);
+        let source = r#"
+            pub fn test_4d() {
+                forall {
+                    let hyper: [[[[i32; 2]; 2]; 2]; 2] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
+    }
+
     // --- nested_struct_with_array tests ---
 
     #[test]
@@ -5312,6 +5342,39 @@ mod base_codegen_tests {
             .expect("Failed to get 'write_and_read'");
         let result = func.call(&mut store, ()).expect("write_and_read failed");
         assert_eq!(result, 77, "ha.arr[1] after write should be 77");
+    }
+
+    #[test]
+    fn if_else_compound_overlap_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "if_else_compound_overlap";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let func: TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "if_else_compound_overlap")
+            .unwrap_or_else(|e| panic!("Failed to get 'if_else_compound_overlap': {e}"));
+
+        let result_true = func
+            .call(&mut store, 1)
+            .unwrap_or_else(|e| panic!("Call with cond=true failed: {e}"));
+        assert_eq!(result_true, 1, "Expected a[0]=1 when cond is true");
+
+        let result_false = func
+            .call(&mut store, 0)
+            .unwrap_or_else(|e| panic!("Call with cond=false failed: {e}"));
+        assert_eq!(result_false, 20, "Expected b[1]=20 when cond is false");
     }
 }
 

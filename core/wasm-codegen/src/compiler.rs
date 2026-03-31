@@ -110,6 +110,29 @@ const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
 /// impossible without any additional validation.
 const METHOD_SEPARATOR: &str = ".";
 
+/// Recurses through `Array(elem, _)` until it finds the leaf (non-array) scalar type.
+fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
+    match kind {
+        TypeInfoKind::Array(inner, _) => leaf_scalar_type(&inner.kind),
+        other => other,
+    }
+}
+
+/// Multiplies all dimension lengths together to get the total number of leaf scalars.
+///
+/// For `[[[i32; 2]; 3]; 4]` this returns `2 * 3 * 4 = 24`.
+fn total_leaf_count(kind: &TypeInfoKind, length: u32) -> u32 {
+    match kind {
+        TypeInfoKind::Array(inner, inner_len) => {
+            let sub_count = total_leaf_count(&inner.kind, *inner_len);
+            length
+                .checked_mul(sub_count)
+                .expect("total_leaf_count overflow: product of all dimension lengths exceeds u32::MAX")
+        }
+        _ => length,
+    }
+}
+
 #[derive(Default)]
 struct LoopContext {
     wasm_block_depth: u32,
@@ -282,12 +305,11 @@ impl Compiler {
         return_ty_id: TypeId,
         arena: &AstArena,
         ctx: &TypedContext,
-    ) {
+    ) -> Result<(), CodegenError> {
         let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
         match &return_type_info.kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx)
-                    .expect("sret registration: type_byte_size failed for array element");
+                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
                 self.func_array_returns.insert(
                     name,
                     ArrayReturnInfo {
@@ -299,8 +321,8 @@ impl Compiler {
             }
             TypeInfoKind::Custom(custom_name) => {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)
-                        .expect("sret registration: struct layout computation failed");
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx)?;
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
@@ -312,6 +334,7 @@ impl Compiler {
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
@@ -323,7 +346,7 @@ impl Compiler {
         arena: &AstArena,
         func_def_ids: &[DefId],
         ctx: &TypedContext,
-    ) {
+    ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
             let fn_name = arena.def_name(def_id).to_string();
@@ -333,9 +356,10 @@ impl Compiler {
             if let Def::Function { returns, .. } = &arena[def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(fn_name, *return_ty_id, arena, ctx);
+                self.register_sret_if_compound(fn_name, *return_ty_id, arena, ctx)?;
             }
         }
+        Ok(())
     }
 
     /// Builds the method name-to-WASM-index map from struct definitions.
@@ -355,7 +379,7 @@ impl Compiler {
         method_defs: &[(String, DefId)],
         ctx: &TypedContext,
         base_idx: u32,
-    ) {
+    ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
         for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
             let method_name = arena.def_name(*def_id).to_string();
@@ -374,9 +398,10 @@ impl Compiler {
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(mangled_name, *return_ty_id, arena, ctx);
+                self.register_sret_if_compound(mangled_name, *return_ty_id, arena, ctx)?;
             }
         }
+        Ok(())
     }
 
     /// Maps an Inference type to the corresponding WASM `ValType`.
@@ -425,7 +450,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
-    ) {
+    ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
                 name,
@@ -435,7 +460,7 @@ impl Compiler {
                 body,
                 ..
             } => (*name, vis.clone(), args.clone(), *returns, *body),
-            _ => return,
+            _ => return Ok(()),
         };
 
         let raw_name = arena[fn_name_id].name.clone();
@@ -545,7 +570,7 @@ impl Compiler {
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
         self.frame_layout =
-            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name);
+            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name)?;
 
         if self.frame_layout.is_some() {
             self.has_memory = true;
@@ -670,6 +695,7 @@ impl Compiler {
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         self.func_idx += 1;
+        Ok(())
     }
 
     /// Pre-scans the function body to discover all local variable declarations.
@@ -755,7 +781,7 @@ impl Compiler {
         frame_ptr_local_idx: u32,
         args: &[inference_ast::nodes::ArgData],
         method_struct_name: Option<&str>,
-    ) -> Option<FrameLayout> {
+    ) -> Result<Option<FrameLayout>, CodegenError> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
         let mut current_offset: u32 = 0;
@@ -766,16 +792,14 @@ impl Compiler {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx)
-                                .expect("frame layout: type_byte_size failed for array element");
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx)
-                                .expect("frame layout: natural_alignment failed for array element");
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
                             let aligned_offset = align_to(current_offset, align);
                             let element_layout =
-                                compute_element_layout_if_struct(&elem_type.kind, ctx);
+                                compute_element_layout_if_struct(&elem_type.kind, ctx)?;
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -792,12 +816,10 @@ impl Compiler {
                         TypeInfoKind::Custom(custom_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx)
-                                        .expect("frame layout: struct layout computation failed");
+                                    compute_struct_field_layout(&struct_info, ctx)?;
                                 if total_size > 0 {
                                     let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx)
-                                            .expect("frame layout: max_struct_alignment failed");
+                                        memory::max_struct_alignment(&field_slots, ctx)?;
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -822,12 +844,10 @@ impl Compiler {
                     );
                     if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                         let (total_size, field_slots) =
-                            compute_struct_field_layout(&struct_info, ctx)
-                                .expect("frame layout: struct layout computation failed for self");
+                            compute_struct_field_layout(&struct_info, ctx)?;
                         if total_size > 0 {
                             let max_field_align =
-                                memory::max_struct_alignment(&field_slots, ctx)
-                                    .expect("frame layout: max_struct_alignment failed for self");
+                                memory::max_struct_alignment(&field_slots, ctx)?;
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -853,10 +873,10 @@ impl Compiler {
             &mut array_offsets,
             &mut struct_offsets,
             &mut current_offset,
-        );
+        )?;
 
         if current_offset == 0 {
-            return None;
+            return Ok(None);
         }
 
         let total_size = align_to_frame(current_offset);
@@ -865,12 +885,12 @@ impl Compiler {
             "Frame size ({total_size} bytes) exceeds available stack memory ({STACK_SIZE} bytes)"
         );
 
-        Some(FrameLayout {
+        Ok(Some(FrameLayout {
             total_size,
             array_offsets,
             struct_offsets,
             frame_ptr_local: frame_ptr_local_idx,
-        })
+        }))
     }
 
     /// Recursively walks a block collecting array and struct variable declarations.
@@ -882,7 +902,7 @@ impl Compiler {
         array_offsets: &mut FxHashMap<String, ArraySlot>,
         struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
-    ) {
+    ) -> Result<(), CodegenError> {
         let block = &arena[block_id];
         for &stmt_id in &block.stmts {
             match &arena[stmt_id].kind {
@@ -892,16 +912,14 @@ impl Compiler {
                         .expect("Variable definition must have type info");
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx)
-                                .expect("collect slots: type_byte_size failed for array element");
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx)
-                                .expect("collect slots: natural_alignment failed for array element");
+                            let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
                             let aligned_offset = align_to(*current_offset, align);
                             let element_layout =
-                                compute_element_layout_if_struct(&elem_type.kind, ctx);
+                                compute_element_layout_if_struct(&elem_type.kind, ctx)?;
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -917,12 +935,10 @@ impl Compiler {
                         TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
                             if let Some(struct_info) = ctx.lookup_struct(struct_name) {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx)
-                                        .expect("collect slots: struct layout computation failed");
+                                    compute_struct_field_layout(&struct_info, ctx)?;
                                 if total_size > 0 {
                                     let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx)
-                                            .expect("collect slots: max_struct_alignment failed");
+                                        memory::max_struct_alignment(&field_slots, ctx)?;
                                     let aligned_offset = align_to(*current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -949,7 +965,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
-                    );
+                    )?;
                 }
                 Stmt::If {
                     then_block,
@@ -964,7 +980,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
-                    );
+                    )?;
                     let then_end = *current_offset;
                     if let Some(else_id) = else_block {
                         *current_offset = saved_offset;
@@ -975,7 +991,7 @@ impl Compiler {
                             array_offsets,
                             struct_offsets,
                             current_offset,
-                        );
+                        )?;
                         *current_offset = (*current_offset).max(then_end);
                     }
                 }
@@ -987,11 +1003,12 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
-                    );
+                    )?;
                 }
                 _ => {}
             }
         }
+        Ok(())
     }
 
     /// Lowers an AST statement to WASM instructions.
@@ -1945,6 +1962,7 @@ impl Compiler {
                 let elements = elements.clone();
                 if is_struct_element {
                     let field_slots = compute_element_layout_if_struct(&return_info.elem_kind, ctx)
+                        .expect("sret return: struct layout computation failed")
                         .expect("Struct element must have field layout");
                     self.lower_array_literal_struct_elements(
                         arena,
@@ -2004,7 +2022,16 @@ impl Compiler {
             Expr::StructLiteral { fields, .. } => {
                 let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
                 let field_slots = return_info.field_slots.clone();
-                self.lower_struct_literal_fields(arena, &fields, &field_slots, sret_idx, 0, ctx);
+                self.lower_struct_literal_fields(
+                    arena,
+                    &fields,
+                    &field_slots,
+                    sret_idx,
+                    0,
+                    ctx,
+                    &self.current_fn_name.clone(),
+                    0,
+                );
             }
             Expr::FunctionCall { function, args, .. } => {
                 self.lower_sret_return_call_forwarding(arena, *function, args, sret_idx, ctx)?;
@@ -2274,10 +2301,10 @@ impl Compiler {
 
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
     ///
-    /// For flat scalar arrays (e.g., `[i32; 3]`), emits one uzumaki + store per element.
-    /// For multidimensional scalar arrays (e.g., `[[i32; 3]; 2]`), flattens the nested
-    /// structure and emits uzumaki + store for each leaf scalar position. Analysis rule
-    /// A028 guarantees that struct-element arrays never reach this path.
+    /// Handles scalar arrays of any dimensionality by recursing through nested
+    /// `Array(elem, len)` layers until it reaches the leaf scalar type, then
+    /// emitting one uzumaki + store per leaf position. Analysis rule A028
+    /// guarantees that struct-element arrays never reach this path.
     fn lower_array_uzumaki(
         &mut self,
         _arena: &AstArena,
@@ -2285,9 +2312,10 @@ impl Compiler {
         length: u32,
         enclosing_var_name: &str,
     ) -> Result<(), CodegenError> {
-        if length > MAX_UZUMAKI_UNROLL_ELEMENTS {
+        let total = total_leaf_count(&elem_type.kind, length);
+        if total > MAX_UZUMAKI_UNROLL_ELEMENTS {
             return Err(CodegenError::ArrayTooLargeForUzumaki {
-                total_elements: length,
+                total_elements: total,
                 max: MAX_UZUMAKI_UNROLL_ELEMENTS,
             });
         }
@@ -2309,55 +2337,24 @@ impl Compiler {
         let slot_offset = slot.offset;
         let frame_ptr_local = layout.frame_ptr_local;
 
-        if let TypeInfoKind::Array(inner_elem, inner_len) = &elem_type.kind {
-            let inner_len = *inner_len;
-            let leaf_elem_size = memory::element_size(&inner_elem.kind);
-            let inner_array_size = leaf_elem_size
-                .checked_mul(inner_len)
-                .expect("multidim uzumaki: inner array size overflow");
-            let uzumaki_opcode = if Self::is_i64_type(&inner_elem.kind) {
-                UZUMAKI_I64_OPCODE
-            } else {
-                UZUMAKI_I32_OPCODE
-            };
-            let store_instr = memory::store_instruction(&inner_elem.kind);
-
-            for i in 0..length {
-                for j in 0..inner_len {
-                    #[allow(clippy::cast_possible_wrap)]
-                    let byte_offset = slot_offset
-                        .checked_add(i * inner_array_size)
-                        .and_then(|v| v.checked_add(j * leaf_elem_size))
-                        .expect("byte offset overflow in 2D array uzumaki")
-                        as i32;
-                    self.func()
-                        .instruction(&Instruction::LocalGet(frame_ptr_local));
-                    self.func().instruction(&Instruction::I32Const(byte_offset));
-                    self.func().instruction(&Instruction::I32Add);
-                    self.emit_uzumaki(uzumaki_opcode);
-                    self.func().instruction(&store_instr);
-                }
-            }
+        let leaf_kind = leaf_scalar_type(&elem_type.kind);
+        let leaf_size = memory::element_size(leaf_kind);
+        let uzumaki_opcode = if Self::is_i64_type(leaf_kind) {
+            UZUMAKI_I64_OPCODE
         } else {
-            let uzumaki_opcode = if Self::is_i64_type(&elem_type.kind) {
-                UZUMAKI_I64_OPCODE
-            } else {
-                UZUMAKI_I32_OPCODE
-            };
-            let store_instr = memory::store_instruction_from_slot(slot);
-            let slot_elem_size = slot.elem_size;
+            UZUMAKI_I32_OPCODE
+        };
+        let store_instr = memory::store_instruction(leaf_kind);
 
-            for i in 0..length {
-                #[allow(clippy::cast_possible_wrap)]
-                let byte_offset = (slot_offset + i * slot_elem_size) as i32;
-                self.func()
-                    .instruction(&Instruction::LocalGet(frame_ptr_local));
-                self.func().instruction(&Instruction::I32Const(byte_offset));
-                self.func().instruction(&Instruction::I32Add);
-                self.emit_uzumaki(uzumaki_opcode);
-                self.func().instruction(&store_instr);
-            }
-        }
+        self.emit_array_uzumaki_recursive(
+            &elem_type.kind,
+            length,
+            frame_ptr_local,
+            slot_offset,
+            leaf_size,
+            uzumaki_opcode,
+            &store_instr,
+        );
 
         self.func()
             .instruction(&Instruction::LocalGet(frame_ptr_local));
@@ -2368,6 +2365,69 @@ impl Compiler {
             self.func().instruction(&Instruction::I32Add);
         }
         Ok(())
+    }
+
+    /// Recursively emits uzumaki + store instructions for each leaf scalar
+    /// position in a potentially multi-dimensional array.
+    ///
+    /// For `Array(inner_elem, inner_len)` kinds, iterates over `0..count`
+    /// sub-arrays and recurses into each. For scalar kinds, iterates over
+    /// `0..count` elements, emitting a store at each offset.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_array_uzumaki_recursive(
+        &mut self,
+        kind: &TypeInfoKind,
+        count: u32,
+        frame_ptr_local: u32,
+        base_offset: u32,
+        leaf_size: u32,
+        uzumaki_opcode: u8,
+        store_instr: &Instruction<'_>,
+    ) {
+        match kind {
+            TypeInfoKind::Array(inner_elem, inner_len) => {
+                let inner_len = *inner_len;
+                let inner_total_leaves = total_leaf_count(&inner_elem.kind, inner_len);
+                let sub_array_byte_size = inner_total_leaves
+                    .checked_mul(leaf_size)
+                    .expect("sub-array byte size overflow in recursive uzumaki");
+                for i in 0..count {
+                    let sub_offset = base_offset
+                        .checked_add(
+                            i.checked_mul(sub_array_byte_size)
+                                .expect("sub-array offset overflow in recursive uzumaki"),
+                        )
+                        .expect("base + sub-array offset overflow in recursive uzumaki");
+                    self.emit_array_uzumaki_recursive(
+                        &inner_elem.kind,
+                        inner_len,
+                        frame_ptr_local,
+                        sub_offset,
+                        leaf_size,
+                        uzumaki_opcode,
+                        store_instr,
+                    );
+                }
+            }
+            _ => {
+                for i in 0..count {
+                    #[allow(clippy::cast_possible_wrap)]
+                    let byte_offset = base_offset
+                        .checked_add(
+                            i.checked_mul(leaf_size)
+                                .expect("leaf offset overflow in recursive uzumaki"),
+                        )
+                        .expect("base + leaf offset overflow in recursive uzumaki")
+                        as i32;
+                    self.func()
+                        .instruction(&Instruction::LocalGet(frame_ptr_local));
+                    self.func().instruction(&Instruction::I32Const(byte_offset));
+                    self.func().instruction(&Instruction::I32Add);
+                    self.emit_uzumaki(uzumaki_opcode);
+                    self.func().instruction(store_instr);
+                }
+            }
+        }
     }
 
     /// Lowers a struct-typed uzumaki expression to field-wise non-deterministic stores.
@@ -2884,6 +2944,8 @@ impl Compiler {
                     frame_ptr_local,
                     base_offset,
                     ctx,
+                    "<array element>",
+                    0,
                 );
             } else {
                 memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, base_offset);
@@ -2941,6 +3003,8 @@ impl Compiler {
             frame_ptr_local,
             slot_offset,
             ctx,
+            enclosing_var_name,
+            0,
         );
 
         self.func()
@@ -2964,6 +3028,11 @@ impl Compiler {
     /// For nested struct literal fields, recurses with `base_offset + field.offset`.
     /// For compound fields with non-literal values (identifiers, function calls), emits
     /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
+    ///
+    /// NOTE: This function is recursive for nested compound types, but analysis
+    /// rule A026 permanently limits nesting to one level. If A026 were ever
+    /// relaxed, uzumaki emission would also need extension for deeper nesting.
+    #[allow(clippy::too_many_arguments)]
     fn lower_struct_literal_fields(
         &mut self,
         arena: &AstArena,
@@ -2972,13 +3041,23 @@ impl Compiler {
         base_ptr_local: u32,
         base_offset: u32,
         ctx: &TypedContext,
+        struct_name: &str,
+        depth: u32,
     ) {
+        debug_assert!(
+            depth < 10,
+            "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
+             A026 should bound nesting to one level"
+        );
+
         for &(field_name_id, field_value_expr_id) in fields {
             let field_name = &arena[field_name_id].name;
             let field_slot = field_slots
                 .iter()
                 .find(|fs| fs.name == *field_name)
-                .unwrap_or_else(|| panic!("Struct field '{field_name}' not found in layout"));
+                .unwrap_or_else(|| {
+                    panic!("Struct field '{field_name}' not found in layout for struct '{struct_name}'")
+                });
 
             let offset = base_offset + field_slot.offset;
 
@@ -2992,6 +3071,10 @@ impl Compiler {
                         ..
                     } = &arena[field_value_expr_id].kind
                     {
+                        let nested_name = match &field_slot.type_kind {
+                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => name.as_str(),
+                            _ => "<nested struct>",
+                        };
                         let inner_fields: Vec<_> =
                             inner_fields.iter().map(|(id, expr)| (*id, *expr)).collect();
                         let nested_slots = nested_slots.clone();
@@ -3002,6 +3085,8 @@ impl Compiler {
                             base_ptr_local,
                             offset,
                             ctx,
+                            nested_name,
+                            depth + 1,
                         );
                     } else {
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
@@ -3064,6 +3149,11 @@ impl Compiler {
     /// i32.add                ;; result is pointer to nested compound
     /// ```
     /// This enables chaining: `outer.inner.x` = pointer + pointer + load.
+    ///
+    /// NOTE: This function supports recursive access chains for nested compound
+    /// types (e.g., `outer.inner.x`), but analysis rule A026 permanently limits
+    /// nesting to one level. If A026 were ever relaxed, uzumaki emission would
+    /// also need extension for deeper nesting.
     fn lower_member_access(
         &mut self,
         arena: &AstArena,
@@ -3349,15 +3439,16 @@ impl Compiler {
 fn compute_element_layout_if_struct(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
-) -> Option<Vec<memory::StructFieldSlot>> {
+) -> Result<Option<Vec<memory::StructFieldSlot>>, CodegenError> {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            let struct_info = ctx.lookup_struct(name)?;
-            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)
-                .expect("element layout: struct layout computation failed");
-            Some(field_slots)
+            let Some(struct_info) = ctx.lookup_struct(name) else {
+                return Ok(None);
+            };
+            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
+            Ok(Some(field_slots))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 

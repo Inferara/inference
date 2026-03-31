@@ -67,6 +67,12 @@ A003 and A005 require a single exit point per function to simplify formal verifi
 | A010 | `MethodNeverAccessesSelf` | warning | method declares `self` but never reads or writes a field through it |
 | A011 | `EmptyStructDefinition` | warning | struct with no fields and no methods |
 
+### Variable Initialization (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A025 | `UninitializedVariable` | error | variable declared without an initializer |
+
 ### Codegen Restrictions (errors)
 
 These rules cover constructs that are valid in the type system but cannot yet be lowered by the code generator. They live here rather than in the type checker because they are implementation limits, not type errors.
@@ -84,6 +90,12 @@ These rules cover constructs that are valid in the type system but cannot yet be
 | A022 | `LiteralOutOfRange` | error | numeric literal is outside the valid range for its declared type |
 | A023 | `UzumakiInReassignment` | error | uzumaki (`@`) used in a variable reassignment (only `let` initializers are supported) |
 | A024 | `ExternFunctionCall` | error | call to an external (`extern`) function (not yet implemented in codegen) |
+| A026 | `NestedCompoundDepth` | error | struct field is itself a nested compound type beyond one level of nesting |
+| A027 | `UzumakiOnNestedStruct` | error | uzumaki (`@`) assigned to a struct whose fields include another struct or an array of structs |
+| A028 | `UzumakiOnStructInArray` | error | uzumaki (`@`) assigned to an array whose element type is a struct |
+| A029 | `CompoundLiteralMemberAssign` | error | compound literal (struct or array) used directly as the RHS of a member-access or array-index assignment |
+| A030 | *(removed)* | — | *(uzumaki on scalar arrays now supported at any depth)* |
+| A031 | `UnsupportedCompoundReturnExpr` | error | return expression in a compound-returning function is not a supported form (identifier, literal, call, or field/element access) |
 
 ## Diagnostic Output Format
 
@@ -149,6 +161,12 @@ Rules that need scoping logic beyond `loop_depth` and `nondet_depth` can impleme
 
 Using `dyn FnMut` instead of a generic parameter avoids monomorphization cost when the number of rules grows.
 
+The walker module also exposes several type-inspection helpers used by multiple rules:
+
+- `array_nesting_depth(kind)` — returns how many array layers deep a type is (`[[i32; 3]; 2]` → 2, `i32` → 0)
+- `has_compound_fields(ctx, kind)` — returns true if a struct or array type contains fields that are themselves structs, arrays of structs, or multidimensional arrays; used by A026, A027, and A028
+- `is_compound_return_call(arena, expr_id, ctx)` — returns true when an expression is a function call that returns a compound type (struct or array); used by A016, A017, and A018
+
 ## Testing
 
 Unit tests live alongside each source file in `src/`. The integration test `rule_ids_match_diagnostic_rule_ids` in `lib.rs` asserts that:
@@ -160,6 +178,20 @@ End-to-end tests that compile `.inf` source and assert on diagnostic output live
 ```
 cargo test -p inference-tests analysis
 ```
+
+Test files are organized by rule group:
+
+| File | Rules covered |
+|------|---------------|
+| `rules_a006_a011.rs` | A006–A011 (uzumaki, missing return, lint warnings) |
+| `rules_a012_a022.rs` | A012–A022 (codegen restrictions, literal range) |
+| `rules_a023.rs` | A023 (uzumaki in reassignment) |
+| `rules_a024.rs` | A024 (extern function calls) |
+| `rules_a025.rs` | A025 (uninitialized variable) |
+| `rules_a026_a028.rs` | A026–A028 (nested compound depth, uzumaki on nested structs, uzumaki on struct arrays) |
+| `rules_a029_a030.rs` | A029 (compound literal in compound assign), A030 removal acceptance tests |
+| `rules_a031.rs` | A031 (unsupported compound return expression) |
+| `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
 
@@ -174,3 +206,4 @@ cargo test -p inference-tests analysis
 1. The walker visits all statements but does not expose expression-level traversal. Rules that need to inspect expressions must do their own descent.
 2. Rules are executed sequentially on a single thread. The infrastructure is designed for parallel execution (rules are `Send + Sync`) but parallelism is not yet enabled.
 3. `AssignToImmutable` and `VariableShadowed` remain in the type checker because they depend on scope state that the type checker tracks but the analysis pass does not replicate.
+4. Nested compound type support (A026) limits nesting depth to one level. Structs whose fields are structs or arrays of structs are permitted; structs whose fields contain further nested structs or arrays-of-structs are rejected. This bound matches what the code generator can lower.

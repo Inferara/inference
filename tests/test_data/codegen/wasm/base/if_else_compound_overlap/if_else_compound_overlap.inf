@@ -1,0 +1,9 @@
+pub fn if_else_compound_overlap(cond: bool) -> i32 {
+    if cond {
+        let a: [i32; 4] = [1, 2, 3, 4];
+        return a[0];
+    } else {
+        let b: [i32; 4] = [10, 20, 30, 40];
+        return b[1];
+    }
+}
