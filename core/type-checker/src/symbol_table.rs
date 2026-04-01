@@ -86,6 +86,7 @@ pub struct EnumInfo {
 impl EnumInfo {
     /// Returns the zero-based tag index for a variant name, or `None` if
     /// the variant does not belong to this enum.
+    #[inline]
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn variant_index(&self, variant_name: &str) -> Option<usize> {
         self.variants.iter().position(|v| v == variant_name)

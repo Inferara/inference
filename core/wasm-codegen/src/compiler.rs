@@ -125,9 +125,9 @@ fn total_leaf_count(kind: &TypeInfoKind, length: u32) -> u32 {
     match kind {
         TypeInfoKind::Array(inner, inner_len) => {
             let sub_count = total_leaf_count(&inner.kind, *inner_len);
-            length
-                .checked_mul(sub_count)
-                .expect("total_leaf_count overflow: product of all dimension lengths exceeds u32::MAX")
+            length.checked_mul(sub_count).expect(
+                "total_leaf_count overflow: product of all dimension lengths exceeds u32::MAX",
+            )
         }
         _ => length,
     }
@@ -321,8 +321,7 @@ impl Compiler {
             }
             TypeInfoKind::Custom(custom_name) => {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) =
-                        compute_struct_field_layout(&struct_info, ctx)?;
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
@@ -720,7 +719,7 @@ impl Compiler {
                             .kind
                         {
                             TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
-                            TypeInfoKind::Enum(_) => ValType::I32,
+                            // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                             _ => ValType::I32,
                         };
                         let prev = locals_map.insert(const_name.clone(), (*local_idx, val_type));
@@ -740,7 +739,7 @@ impl Compiler {
                         .kind
                     {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
-                        TypeInfoKind::Enum(_) => ValType::I32,
+                        // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                         _ => ValType::I32,
                     };
                     let prev = locals_map.insert(var_name.clone(), (*local_idx, val_type));
@@ -850,8 +849,7 @@ impl Compiler {
                         let (total_size, field_slots) =
                             compute_struct_field_layout(&struct_info, ctx)?;
                         if total_size > 0 {
-                            let max_field_align =
-                                memory::max_struct_alignment(&field_slots, ctx)?;
+                            let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -1292,7 +1290,9 @@ impl Compiler {
             .array_offsets
             .get(var_name)
             .expect("Destination array not in frame layout");
-        let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+        let byte_size = dest_slot
+            .elem_size
+            .checked_mul(dest_slot.length)
             .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
         let dest_offset = dest_slot.offset;
         let frame_ptr_local = layout.frame_ptr_local;
@@ -1438,8 +1438,7 @@ impl Compiler {
                     let tag = enum_info
                         .variant_index(variant_name)
                         .expect("TypeMemberAccess: unknown enum variant");
-                    self.func()
-                        .instruction(&Instruction::I32Const(tag as i32));
+                    self.func().instruction(&Instruction::I32Const(tag as i32));
                 } else {
                     todo!(
                         "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
@@ -1900,7 +1899,9 @@ impl Compiler {
                 } else if is_array_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.array_offsets[name];
-                    let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+                    let byte_size = dest_slot
+                        .elem_size
+                        .checked_mul(dest_slot.length)
                         .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
                     // dest = local (already points to frame slot)
                     self.func().instruction(&Instruction::LocalGet(local_idx));
@@ -3079,7 +3080,9 @@ impl Compiler {
                 .iter()
                 .find(|fs| fs.name == *field_name)
                 .unwrap_or_else(|| {
-                    panic!("Struct field '{field_name}' not found in layout for struct '{struct_name}'")
+                    panic!(
+                        "Struct field '{field_name}' not found in layout for struct '{struct_name}'"
+                    )
                 });
 
             let offset = base_offset + field_slot.offset;
@@ -3095,7 +3098,9 @@ impl Compiler {
                     } = &arena[field_value_expr_id].kind
                     {
                         let nested_name = match &field_slot.type_kind {
-                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => name.as_str(),
+                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                                name.as_str()
+                            }
                             _ => "<nested struct>",
                         };
                         let inner_fields: Vec<_> =
@@ -3138,8 +3143,9 @@ impl Compiler {
                             self.func().instruction(&store_instr);
                         }
                     } else {
-                        let array_byte_size = elem_size.checked_mul(*length)
-                            .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
+                        let array_byte_size = elem_size.checked_mul(*length).expect(
+                            "Array byte size overflow: elem_size * length exceeds u32::MAX",
+                        );
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
                         self.emit_memory_copy(array_byte_size);

@@ -1,0 +1,19 @@
+enum Status { Active, Inactive }
+
+struct Item {
+    status: Status;
+    value: i32;
+}
+
+pub fn get_status() -> i32 {
+    let item: Item = Item { status: Status::Inactive, value: 42 };
+    if item.status == Status::Inactive {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn get_value() -> i32 {
+    let item: Item = Item { status: Status::Active, value: 99 };
+    return item.value;
+}

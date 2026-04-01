@@ -5544,6 +5544,20 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn enum_in_struct_golden_test() {
+        let test_name = "enum_in_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
     fn enum_params_execution_test() {
         use wasmtime::{Engine, Module, Store};
 
@@ -5652,32 +5666,22 @@ mod base_codegen_tests {
     }
 
     #[test]
-    fn enum_struct_field_execution_test() {
-        let source = r#"
-            enum Status { Active, Inactive }
-            struct Item { status: Status; value: i32; }
-            pub fn get_status() -> i32 {
-                let item: Item = Item { status: Status::Inactive, value: 42 };
-                if item.status == Status::Inactive {
-                    return 1;
-                }
-                return 0;
-            }
-            pub fn get_value() -> i32 {
-                let item: Item = Item { status: Status::Active, value: 99 };
-                return item.value;
-            }
-        "#;
-        let wasm_bytes = wasm_codegen(source);
-        inf_wasmparser::validate(&wasm_bytes)
-            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+    fn enum_in_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store};
 
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, &wasm_bytes)
-            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
-        let mut store = wasmtime::Store::new(&engine, ());
+        let test_name = "enum_in_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
         let instance = wasmtime::Instance::new(&mut store, &module, &[])
-            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
 
         let get_status: wasmtime::TypedFunc<(), i32> = instance
             .get_typed_func(&mut store, "get_status")
@@ -6988,5 +6992,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "enum_array");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_in_struct_wasm() {
+        let dir = base_test_dir().join("enum_in_struct");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_in_struct.inf"))
+                .expect("Failed to read enum_in_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_in_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_in_struct");
     }
 }
