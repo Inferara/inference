@@ -432,9 +432,7 @@ impl Compiler {
             TypeNode::Qualified { .. } => todo!(),
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
-                if ctx.lookup_struct(name).is_some() {
-                    Some(ValType::I32)
-                } else if ctx.lookup_enum(name).is_some() {
+                if ctx.lookup_struct(name).is_some() || ctx.lookup_enum(name).is_some() {
                     Some(ValType::I32)
                 } else {
                     todo!("Unsupported custom type in WASM codegen: {name}")
@@ -1438,7 +1436,9 @@ impl Compiler {
                     let tag = enum_info
                         .variant_index(variant_name)
                         .expect("TypeMemberAccess: unknown enum variant");
-                    self.func().instruction(&Instruction::I32Const(tag as i32));
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let tag_i32 = tag as i32;
+                    self.func().instruction(&Instruction::I32Const(tag_i32));
                 } else {
                     todo!(
                         "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
