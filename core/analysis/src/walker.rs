@@ -150,10 +150,11 @@ pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
 /// whose innermost element type is compound. Scalar arrays like `[i32; 3]`
 /// and multidimensional scalar arrays like `[[i32; 3]; 2]` are not compound.
 #[must_use]
-fn is_compound_type(kind: &TypeInfoKind) -> bool {
+fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
-        TypeInfoKind::Array(elem, _) => is_compound_type(&elem.kind),
+        TypeInfoKind::Struct(_) => true,
+        TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
+        TypeInfoKind::Array(elem, _) => is_compound_type(ctx, &elem.kind),
         _ => false,
     }
 }
@@ -176,7 +177,7 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
                     TypeInfoKind::Struct(_) => true,
                     TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
                     TypeInfoKind::Array(_, _) => {
-                        is_compound_type(&f.type_info.kind)
+                        is_compound_type(ctx, &f.type_info.kind)
                             || array_nesting_depth(&f.type_info.kind) > 1
                     }
                     _ => false,
@@ -196,10 +197,11 @@ pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) ->
         return false;
     }
     if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
-        matches!(
-            ti.kind,
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
-        )
+        match &ti.kind {
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) => true,
+            TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
+            _ => false,
+        }
     } else {
         false
     }
