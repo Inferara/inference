@@ -108,7 +108,7 @@ mod type_checker;
 pub mod type_info;
 pub mod typed_context;
 
-pub use symbol_table::{StructFieldInfo, StructInfo};
+pub use symbol_table::{EnumInfo, StructFieldInfo, StructInfo};
 pub use typed_context::MethodMetadata;
 
 /// Marker state indicating builder has not yet been initialized with an arena.

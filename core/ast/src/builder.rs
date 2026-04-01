@@ -1062,6 +1062,7 @@ impl<'a> Builder<'a> {
                     kind: Expr::UnitLiteral,
                 })
             }
+            "type_member_access_expression" => self.build_expression(node, code),
             _ => {
                 self.errors.push(anyhow::anyhow!(
                     "Unexpected literal type '{}' at {}",

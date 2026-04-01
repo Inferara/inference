@@ -5345,6 +5345,20 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn if_else_compound_overlap_golden_test() {
+        let test_name = "if_else_compound_overlap";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
     fn if_else_compound_overlap_execution_test() {
         use wasmtime::{Engine, Module, Store, TypedFunc};
 
@@ -5375,6 +5389,552 @@ mod base_codegen_tests {
             .call(&mut store, 0)
             .unwrap_or_else(|e| panic!("Call with cond=false failed: {e}"));
         assert_eq!(result_false, 20, "Expected b[1]=20 when cond is false");
+    }
+
+    #[test]
+    fn enum_variant_golden_test() {
+        let test_name = "enum_variant";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_multi_golden_test() {
+        let test_name = "enum_multi";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_variant_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_variant";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let get_red: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_red")
+            .expect("Failed to get 'get_red'");
+        assert_eq!(get_red.call(&mut store, ()).unwrap(), 0, "Red should be tag 0");
+
+        let get_green: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_green")
+            .expect("Failed to get 'get_green'");
+        assert_eq!(get_green.call(&mut store, ()).unwrap(), 1, "Green should be tag 1");
+
+        let get_blue: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_blue")
+            .expect("Failed to get 'get_blue'");
+        assert_eq!(get_blue.call(&mut store, ()).unwrap(), 2, "Blue should be tag 2");
+    }
+
+    #[test]
+    fn enum_multi_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_multi";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let direction_west: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "direction_west")
+            .expect("Failed to get 'direction_west'");
+        assert_eq!(direction_west.call(&mut store, ()).unwrap(), 3, "West should be tag 3");
+
+        let shape_triangle: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "shape_triangle")
+            .expect("Failed to get 'shape_triangle'");
+        assert_eq!(shape_triangle.call(&mut store, ()).unwrap(), 2, "Triangle should be tag 2");
+
+        let first_variants: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "first_variants")
+            .expect("Failed to get 'first_variants'");
+        assert_eq!(first_variants.call(&mut store, ()).unwrap(), 0, "North should be tag 0");
+    }
+
+    #[test]
+    fn enum_params_golden_test() {
+        let test_name = "enum_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_compare_golden_test() {
+        let test_name = "enum_compare";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_assign_golden_test() {
+        let test_name = "enum_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_array_golden_test() {
+        let test_name = "enum_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_in_struct_golden_test() {
+        let test_name = "enum_in_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn enum_params_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_params";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let is_up: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "is_up")
+            .expect("Failed to get 'is_up'");
+        assert_eq!(is_up.call(&mut store, 0).unwrap(), 1, "Dir::Up (tag 0) should return true");
+        assert_eq!(is_up.call(&mut store, 1).unwrap(), 0, "Dir::Down (tag 1) should return false");
+        assert_eq!(is_up.call(&mut store, 3).unwrap(), 0, "Dir::Right (tag 3) should return false");
+
+        let dir_to_int: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "dir_to_int")
+            .expect("Failed to get 'dir_to_int'");
+        assert_eq!(dir_to_int.call(&mut store, 0).unwrap(), 10, "Up should map to 10");
+        assert_eq!(dir_to_int.call(&mut store, 1).unwrap(), 20, "Down should map to 20");
+        assert_eq!(dir_to_int.call(&mut store, 2).unwrap(), 30, "Left should map to 30");
+        assert_eq!(dir_to_int.call(&mut store, 3).unwrap(), 40, "Right should map to 40");
+
+        let pass_through: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "pass_through")
+            .expect("Failed to get 'pass_through'");
+        assert_eq!(pass_through.call(&mut store, 0).unwrap(), 0, "pass_through should return same tag");
+        assert_eq!(pass_through.call(&mut store, 2).unwrap(), 2, "pass_through should return same tag");
+    }
+
+    #[test]
+    fn enum_compare_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_compare";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let are_equal: wasmtime::TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "are_equal")
+            .expect("Failed to get 'are_equal'");
+        assert_eq!(are_equal.call(&mut store, (0, 0)).unwrap(), 1, "Active == Active should be true");
+        assert_eq!(are_equal.call(&mut store, (0, 1)).unwrap(), 0, "Active == Inactive should be false");
+        assert_eq!(are_equal.call(&mut store, (1, 1)).unwrap(), 1, "Inactive == Inactive should be true");
+
+        let are_not_equal: wasmtime::TypedFunc<(i32, i32), i32> = instance
+            .get_typed_func(&mut store, "are_not_equal")
+            .expect("Failed to get 'are_not_equal'");
+        assert_eq!(are_not_equal.call(&mut store, (0, 1)).unwrap(), 1, "Active != Inactive should be true");
+        assert_eq!(are_not_equal.call(&mut store, (0, 0)).unwrap(), 0, "Active != Active should be false");
+
+        let is_active: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "is_active")
+            .expect("Failed to get 'is_active'");
+        assert_eq!(is_active.call(&mut store, 0).unwrap(), 1, "Active should return true");
+        assert_eq!(is_active.call(&mut store, 1).unwrap(), 0, "Inactive should return false");
+    }
+
+    #[test]
+    fn enum_assign_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_assign";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let reassign: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "reassign")
+            .expect("Failed to get 'reassign'");
+        assert_eq!(reassign.call(&mut store, ()).unwrap(), 2, "reassign should return Blue (tag 2)");
+
+        let assign_from_param: wasmtime::TypedFunc<i32, i32> = instance
+            .get_typed_func(&mut store, "assign_from_param")
+            .expect("Failed to get 'assign_from_param'");
+        assert_eq!(assign_from_param.call(&mut store, 1).unwrap(), 1, "assign_from_param(Green) should return 1");
+        assert_eq!(assign_from_param.call(&mut store, 2).unwrap(), 2, "assign_from_param(Blue) should return 2");
+    }
+
+    #[test]
+    fn enum_in_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_in_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let get_status: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_status")
+            .expect("Failed to get 'get_status'");
+        assert_eq!(get_status.call(&mut store, ()).unwrap(), 1, "Inactive status check should return 1");
+
+        let get_value: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_value")
+            .expect("Failed to get 'get_value'");
+        assert_eq!(get_value.call(&mut store, ()).unwrap(), 99, "Value field should be 99");
+    }
+
+    #[test]
+    fn enum_const_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn get_default() -> Color {
+                const DEFAULT: Color = Color::Green;
+                return DEFAULT;
+            }
+            pub fn is_default_green() -> bool {
+                const DEFAULT: Color = Color::Green;
+                return DEFAULT == Color::Green;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let get_default: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "get_default")
+            .expect("Failed to get 'get_default'");
+        assert_eq!(get_default.call(&mut store, ()).unwrap(), 1, "Green should be tag 1");
+
+        let is_default_green: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "is_default_green")
+            .expect("Failed to get 'is_default_green'");
+        assert_eq!(is_default_green.call(&mut store, ()).unwrap(), 1, "DEFAULT == Green should be true");
+    }
+
+    #[test]
+    fn enum_array_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "enum_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let second_color: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "second_color")
+            .expect("Failed to get 'second_color'");
+        assert_eq!(second_color.call(&mut store, ()).unwrap(), 1, "colors[1] == Green should be true");
+
+        let third_tag: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "third_tag")
+            .expect("Failed to get 'third_tag'");
+        assert_eq!(third_tag.call(&mut store, ()).unwrap(), 2, "colors[2] should be Blue (tag 2)");
+    }
+
+    #[test]
+    fn enum_direct_return_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn red() -> Color {
+                return Color::Red;
+            }
+            pub fn green() -> Color {
+                return Color::Green;
+            }
+            pub fn blue() -> Color {
+                return Color::Blue;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let red: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "red")
+            .expect("Failed to get 'red'");
+        assert_eq!(red.call(&mut store, ()).unwrap(), 0, "Red should be tag 0");
+
+        let green: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "green")
+            .expect("Failed to get 'green'");
+        assert_eq!(green.call(&mut store, ()).unwrap(), 1, "Green should be tag 1");
+
+        let blue: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "blue")
+            .expect("Failed to get 'blue'");
+        assert_eq!(blue.call(&mut store, ()).unwrap(), 2, "Blue should be tag 2");
+    }
+
+    #[test]
+    fn enum_integration_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            enum Status { Active, Inactive }
+
+            fn get_color() -> Color {
+                return Color::Green;
+            }
+
+            fn get_status() -> Status {
+                return Status::Active;
+            }
+
+            pub fn check_color() -> i32 {
+                if get_color() == Color::Green {
+                    return 1;
+                } else {
+                    return 0;
+                }
+            }
+
+            pub fn check_both() -> i32 {
+                if get_color() == Color::Green {
+                    if get_status() == Status::Active {
+                        return 42;
+                    }
+                    return 1;
+                }
+                return 0;
+            }
+
+            pub fn nested_compare() -> i32 {
+                let c: Color = get_color();
+                let s: Status = get_status();
+                if c == Color::Red {
+                    return 10;
+                }
+                if c == Color::Green {
+                    if s != Status::Inactive {
+                        return 20;
+                    }
+                    return 30;
+                }
+                return 40;
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create module: {e}"));
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate: {e}"));
+
+        let check_color: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "check_color")
+            .expect("Failed to get 'check_color'");
+        assert_eq!(check_color.call(&mut store, ()).unwrap(), 1, "get_color() == Green should be true");
+
+        let check_both: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "check_both")
+            .expect("Failed to get 'check_both'");
+        assert_eq!(check_both.call(&mut store, ()).unwrap(), 42, "Green + Active should return 42");
+
+        let nested_compare: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "nested_compare")
+            .expect("Failed to get 'nested_compare'");
+        assert_eq!(nested_compare.call(&mut store, ()).unwrap(), 20, "Green + not Inactive should return 20");
+    }
+
+    #[test]
+    fn enum_uzumaki_scalar_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn nondet_color() {
+                forall {
+                    let c: Color = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+    }
+
+    #[test]
+    fn enum_uzumaki_array_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn nondet_colors() {
+                forall {
+                    let colors: [Color; 3] = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+    }
+
+    #[test]
+    fn enum_uzumaki_struct_field_execution_test() {
+        let source = r#"
+            enum Status { Active, Inactive }
+            struct Item { status: Status; value: i32; }
+            pub fn nondet_item() {
+                forall {
+                    let item: Item = @;
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
+    }
+
+    #[test]
+    fn enum_uzumaki_assume_execution_test() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn nondet_assume_color() {
+                forall {
+                    let c: Color = @;
+                    assume {
+                        let ok: bool = c == Color::Red;
+                    }
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("WASM validation failed: {e}"));
     }
 }
 
@@ -6285,5 +6845,173 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "nested_struct_with_array");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_if_else_compound_overlap_wasm() {
+        let dir = base_test_dir().join("if_else_compound_overlap");
+        let source_code =
+            std::fs::read_to_string(dir.join("if_else_compound_overlap.inf"))
+                .expect("Failed to read if_else_compound_overlap.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("if_else_compound_overlap.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "if_else_compound_overlap");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_variant_wasm() {
+        let dir = base_test_dir().join("enum_variant");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_variant.inf"))
+                .expect("Failed to read enum_variant.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_variant.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_variant");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_multi_wasm() {
+        let dir = base_test_dir().join("enum_multi");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_multi.inf"))
+                .expect("Failed to read enum_multi.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_multi.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_multi");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_params_wasm() {
+        let dir = base_test_dir().join("enum_params");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_params.inf"))
+                .expect("Failed to read enum_params.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_params.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_params");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_compare_wasm() {
+        let dir = base_test_dir().join("enum_compare");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_compare.inf"))
+                .expect("Failed to read enum_compare.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_compare.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_compare");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_assign_wasm() {
+        let dir = base_test_dir().join("enum_assign");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_assign.inf"))
+                .expect("Failed to read enum_assign.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_assign.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_assign");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_array_wasm() {
+        let dir = base_test_dir().join("enum_array");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_array.inf"))
+                .expect("Failed to read enum_array.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_array");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_enum_in_struct_wasm() {
+        let dir = base_test_dir().join("enum_in_struct");
+        let source_code =
+            std::fs::read_to_string(dir.join("enum_in_struct.inf"))
+                .expect("Failed to read enum_in_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("enum_in_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "enum_in_struct");
     }
 }

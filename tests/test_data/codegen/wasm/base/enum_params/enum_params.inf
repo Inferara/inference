@@ -1,0 +1,31 @@
+enum Dir {
+    Up,
+    Down,
+    Left,
+    Right
+}
+
+pub fn is_up(d: Dir) -> bool {
+    if d == Dir::Up {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+pub fn dir_to_int(d: Dir) -> i32 {
+    if d == Dir::Up {
+        return 10;
+    }
+    if d == Dir::Down {
+        return 20;
+    }
+    if d == Dir::Left {
+        return 30;
+    }
+    return 40;
+}
+
+pub fn pass_through(d: Dir) -> Dir {
+    return d;
+}

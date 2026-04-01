@@ -1,0 +1,17 @@
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+pub fn reassign() -> Color {
+    let mut c: Color = Color::Red;
+    c = Color::Blue;
+    return c;
+}
+
+pub fn assign_from_param(c: Color) -> Color {
+    let mut result: Color = Color::Red;
+    result = c;
+    return result;
+}

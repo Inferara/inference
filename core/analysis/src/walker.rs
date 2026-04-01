@@ -173,7 +173,8 @@ pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bo
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
             ctx.lookup_struct(name).is_some_and(|s| {
                 s.fields.iter().any(|f| match &f.type_info.kind {
-                    TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+                    TypeInfoKind::Struct(_) => true,
+                    TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
                     TypeInfoKind::Array(_, _) => {
                         is_compound_type(&f.type_info.kind)
                             || array_nesting_depth(&f.type_info.kind) > 1

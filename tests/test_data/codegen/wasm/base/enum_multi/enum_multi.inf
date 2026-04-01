@@ -1,0 +1,28 @@
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+enum Shape {
+    Circle,
+    Square,
+    Triangle
+}
+
+pub fn direction_west() -> Direction {
+    let d: Direction = Direction::West;
+    return d;
+}
+
+pub fn shape_triangle() -> Shape {
+    let s: Shape = Shape::Triangle;
+    return s;
+}
+
+pub fn first_variants() -> Direction {
+    let d: Direction = Direction::North;
+    let s: Shape = Shape::Circle;
+    return d;
+}

@@ -125,9 +125,9 @@ fn total_leaf_count(kind: &TypeInfoKind, length: u32) -> u32 {
     match kind {
         TypeInfoKind::Array(inner, inner_len) => {
             let sub_count = total_leaf_count(&inner.kind, *inner_len);
-            length
-                .checked_mul(sub_count)
-                .expect("total_leaf_count overflow: product of all dimension lengths exceeds u32::MAX")
+            length.checked_mul(sub_count).expect(
+                "total_leaf_count overflow: product of all dimension lengths exceeds u32::MAX",
+            )
         }
         _ => length,
     }
@@ -321,8 +321,7 @@ impl Compiler {
             }
             TypeInfoKind::Custom(custom_name) => {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) =
-                        compute_struct_field_layout(&struct_info, ctx)?;
+                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
                     self.func_struct_returns.insert(
                         name,
                         StructReturnInfo {
@@ -433,7 +432,7 @@ impl Compiler {
             TypeNode::Qualified { .. } => todo!(),
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
-                if ctx.lookup_struct(name).is_some() {
+                if ctx.lookup_struct(name).is_some() || ctx.lookup_enum(name).is_some() {
                     Some(ValType::I32)
                 } else {
                     todo!("Unsupported custom type in WASM codegen: {name}")
@@ -718,6 +717,7 @@ impl Compiler {
                             .kind
                         {
                             TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                            // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                             _ => ValType::I32,
                         };
                         let prev = locals_map.insert(const_name.clone(), (*local_idx, val_type));
@@ -737,6 +737,7 @@ impl Compiler {
                         .kind
                     {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                        // Explicit: enums are i32 tags; keep visible if the catch-all changes.
                         _ => ValType::I32,
                     };
                     let prev = locals_map.insert(var_name.clone(), (*local_idx, val_type));
@@ -846,8 +847,7 @@ impl Compiler {
                         let (total_size, field_slots) =
                             compute_struct_field_layout(&struct_info, ctx)?;
                         if total_size > 0 {
-                            let max_field_align =
-                                memory::max_struct_alignment(&field_slots, ctx)?;
+                            let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -894,6 +894,9 @@ impl Compiler {
     }
 
     /// Recursively walks a block collecting array and struct variable declarations.
+    ///
+    /// Enum types are intentionally excluded — they are pure i32 scalars with no
+    /// linear memory footprint, so they do not need frame slots.
     #[allow(clippy::too_many_lines)]
     fn collect_compound_slots(
         arena: &AstArena,
@@ -1285,7 +1288,9 @@ impl Compiler {
             .array_offsets
             .get(var_name)
             .expect("Destination array not in frame layout");
-        let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+        let byte_size = dest_slot
+            .elem_size
+            .checked_mul(dest_slot.length)
             .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
         let dest_offset = dest_slot.offset;
         let frame_ptr_local = layout.frame_ptr_local;
@@ -1419,11 +1424,27 @@ impl Compiler {
             Expr::MemberAccess { expr, name } => {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
             }
-            Expr::TypeMemberAccess { .. } => {
-                todo!(
-                    "TypeMemberAccess expressions (including enum variant access like \
-                     `Enum::Variant`) are not yet supported in wasm codegen"
-                );
+            Expr::TypeMemberAccess {
+                expr: type_expr,
+                name: variant_name_id,
+            } => {
+                let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
+                    .expect("TypeMemberAccess: could not extract type name");
+                let variant_name = &arena[variant_name_id].name;
+
+                if let Some(enum_info) = ctx.lookup_enum(&type_name) {
+                    let tag = enum_info
+                        .variant_index(variant_name)
+                        .expect("TypeMemberAccess: unknown enum variant");
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let tag_i32 = tag as i32;
+                    self.func().instruction(&Instruction::I32Const(tag_i32));
+                } else {
+                    todo!(
+                        "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
+                         is not yet supported in wasm codegen"
+                    );
+                }
             }
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
@@ -1534,7 +1555,8 @@ impl Compiler {
                         | NumberType::U16
                         | NumberType::I32
                         | NumberType::U32,
-                    ) => {
+                    )
+                    | TypeInfoKind::Enum(_) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
                     }
@@ -1877,7 +1899,9 @@ impl Compiler {
                 } else if is_array_type {
                     let layout = self.frame_layout.as_ref().unwrap();
                     let dest_slot = &layout.array_offsets[name];
-                    let byte_size = dest_slot.elem_size.checked_mul(dest_slot.length)
+                    let byte_size = dest_slot
+                        .elem_size
+                        .checked_mul(dest_slot.length)
                         .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
                     // dest = local (already points to frame slot)
                     self.func().instruction(&Instruction::LocalGet(local_idx));
@@ -2556,7 +2580,7 @@ impl Compiler {
                 }
             }
             CompoundFieldLayout::NestedStruct { .. } => {
-                panic!(
+                unreachable!(
                     "emit_struct_field_uzumaki called for nested struct field '{}'; \
                      analysis rule A027 should have rejected uzumaki on structs with nested struct fields",
                     field.name
@@ -3045,9 +3069,9 @@ impl Compiler {
         depth: u32,
     ) {
         debug_assert!(
-            depth < 10,
+            depth < 3,
             "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
-             A026 should bound nesting to one level"
+             A026 bounds nesting to one level (max expected depth is 2)"
         );
 
         for &(field_name_id, field_value_expr_id) in fields {
@@ -3056,7 +3080,9 @@ impl Compiler {
                 .iter()
                 .find(|fs| fs.name == *field_name)
                 .unwrap_or_else(|| {
-                    panic!("Struct field '{field_name}' not found in layout for struct '{struct_name}'")
+                    panic!(
+                        "Struct field '{field_name}' not found in layout for struct '{struct_name}'"
+                    )
                 });
 
             let offset = base_offset + field_slot.offset;
@@ -3072,7 +3098,9 @@ impl Compiler {
                     } = &arena[field_value_expr_id].kind
                     {
                         let nested_name = match &field_slot.type_kind {
-                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => name.as_str(),
+                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                                name.as_str()
+                            }
                             _ => "<nested struct>",
                         };
                         let inner_fields: Vec<_> =
@@ -3115,8 +3143,9 @@ impl Compiler {
                             self.func().instruction(&store_instr);
                         }
                     } else {
-                        let array_byte_size = elem_size.checked_mul(*length)
-                            .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
+                        let array_byte_size = elem_size.checked_mul(*length).expect(
+                            "Array byte size overflow: elem_size * length exceeds u32::MAX",
+                        );
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
                         self.emit_memory_copy(array_byte_size);

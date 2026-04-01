@@ -1,0 +1,14 @@
+enum Color { Red, Green, Blue }
+
+pub fn second_color() -> i32 {
+    let colors: [Color; 3] = [Color::Red, Color::Green, Color::Blue];
+    if colors[1] == Color::Green {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn third_tag() -> Color {
+    let colors: [Color; 3] = [Color::Red, Color::Green, Color::Blue];
+    return colors[2];
+}
