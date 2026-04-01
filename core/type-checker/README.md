@@ -71,7 +71,7 @@ TypeCheckerBuilder
 
 - [`type_info`] - Type representation system with `TypeInfo` and `TypeInfoKind`
 - [`typed_context`] - Storage for type annotations on AST nodes
-- [`errors`] - Comprehensive error types with 46 distinct variants
+- [`errors`] - Comprehensive error types with 45 distinct variants
 - `symbol_table` (internal) - Hierarchical scope and symbol management
 - `type_checker` (internal) - Core type inference implementation
 
@@ -254,7 +254,24 @@ if let Some(type_info) = typed_context.get_node_typeinfo(node_id) {
     if type_info.is_generic() { /* ... */ }
     if type_info.has_unresolved_params() { /* ... */ }
 }
+
+// Look up an enum by name; returns None if the name is unknown
+if let Some(enum_info) = typed_context.lookup_enum("Color") {
+    // Variants are in declaration order, giving zero-based tag indices
+    if let Some(tag) = enum_info.variant_index("Green") {
+        println!("Green = {}", tag);  // 1
+    }
+}
 ```
+
+### Public API Surface
+
+The following types are re-exported from `inference_type_checker` for downstream crates:
+
+- `StructInfo` — struct field information
+- `StructFieldInfo` — individual field name and type
+- `EnumInfo` — enum variant list and `variant_index()` helper
+- `MethodMetadata` — method parameter types, return type, and `has_self` flag
 
 ## Testing
 
@@ -274,6 +291,7 @@ Test organization:
 - `tests/src/type_checker/array_tests.rs` - Array type checking
 - `tests/src/type_checker/struct_tests.rs` - Struct type checking (literals, field access, mutability, sret restrictions, shadowing, empty struct/unused self errors)
 - `tests/src/type_checker/associated_functions.rs` - Distinguishing instance methods from associated functions; verifies `InstanceMethodCalledAsAssociated` and `AssociatedFunctionCalledAsMethod` errors
+- `tests/src/type_checker/features.rs` - Feature-level tests: enum operator constraints (arithmetic rejected, ordering rejected, equality accepted), enum negation, enum in boolean context
 - `tests/src/type_checker/coverage.rs` - Comprehensive coverage tests
 
 ## Recent Changes
@@ -350,6 +368,22 @@ Test organization:
 
 **Compound-Returning Method Restrictions**:
 - These restrictions are now enforced by the analysis pass (A016–A018). The type checker tracks compound return types and exposes them through `TypedContext` for the analysis pass to query.
+
+### Enum Codegen Support (Issue #179)
+
+**`EnumInfo` made public**:
+- `EnumInfo`, its fields (`name`, `variants`, `visibility`, `definition_scope_id`), and `variant_index()` are now `pub` (previously `pub(crate)`)
+- `EnumInfo` is re-exported from the crate root alongside `StructInfo` and `StructFieldInfo`
+- `variants` changed from `FxHashSet<String>` to `Vec<String>` to guarantee deterministic declaration-order iteration; this preserves stable zero-based tag assignment for WASM codegen across compilations
+
+**New `TypedContext` methods**:
+- `lookup_enum(name)` — looks up an enum by name and returns its `EnumInfo`; returns `None` if the name is not registered. Variants in the returned `EnumInfo` are in declaration order, which determines their zero-based integer tags in WASM.
+- `register_test_enum(name, variants)` — available under the `test-utils` feature for unit tests in downstream crates that need a populated `TypedContext` without running the full pipeline
+
+**Operator constraints on enum values**:
+- Arithmetic operators (`+`, `-`, `*`, `/`, `%`) are rejected when applied to enum values (`InvalidBinaryOperand`)
+- Ordering comparisons (`<`, `<=`, `>`, `>=`) are rejected on enum values
+- Equality comparisons (`==`, `!=`) are accepted for enum values
 
 ### Bug Fixes and Validation Hardening
 

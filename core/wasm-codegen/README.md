@@ -44,7 +44,13 @@ Typed AST (TypedContext)
    instructions. `let` definitions are lowered via a push instruction followed by
    `local.set`; `const` definitions use the same path. Supported initializer expression
    kinds are literals, identifiers, uzumaki (`@`) expressions, function calls, array
-   literals, and struct literals. Array and struct variables automatically get frame
+   literals, struct literals, and enum variant accesses. Enum variant access
+   (`Color::Red`) is lowered via `Expr::TypeMemberAccess`: the type name is resolved via
+   `ctx.lookup_enum()`, the variant name is looked up using `EnumInfo::variant_index()`,
+   and an `i32.const <tag>` instruction is emitted. Enum values carry no linear memory
+   footprint and are treated identically to `i32` scalars in locals, parameters, return
+   values, and array elements (using the same `i32.load`/`i32.store` as `u32`).
+   Array and struct variables automatically get frame
    allocation code (prologue) and deallocation code (epilogue). Array index access
    (read/write) compiles to load/store instructions with computed addresses. Struct field
    access (`p.x`) compiles to a load at `struct_pointer + field_offset`; struct field
@@ -164,18 +170,19 @@ pub fn example() {
 
 Inference types map to WebAssembly types:
 
-| Inference Type | WASM Type |
-|----------------|-----------|
-| `unit`         | -         |
-| `bool`         | i32       |
-| `i8`, `u8`     | i32       |
-| `i16`, `u16`   | i32       |
-| `i32`, `u32`   | i32       |
-| `i64`, `u64`   | i64       |
-| `[T; N]`       | i32       |
-| `struct S`     | i32       |
+| Inference Type | WASM Type | Notes                                      |
+|----------------|-----------|--------------------------------------------|
+| `unit`         | -         | No value produced                          |
+| `bool`         | i32       |                                            |
+| `i8`, `u8`     | i32       |                                            |
+| `i16`, `u16`   | i32       |                                            |
+| `i32`, `u32`   | i32       |                                            |
+| `i64`, `u64`   | i64       |                                            |
+| `[T; N]`       | i32       | Pointer to shadow-stack frame              |
+| `struct S`     | i32       | Pointer to shadow-stack frame              |
+| `enum E`       | i32       | Zero-based variant tag; no heap allocation |
 
-WebAssembly only supports `i32`, `i64`, `f32`, and `f64` as value types. Smaller integer types use `i32` with appropriate truncation and extension during operations. Arrays and structs are represented as i32 pointers to linear memory; the compiler manages a shadow stack and emits prologue/epilogue code for frame allocation. Struct fields are laid out with C-compatible natural alignment.
+WebAssembly only supports `i32`, `i64`, `f32`, and `f64` as value types. Smaller integer types use `i32` with appropriate truncation and extension during operations. Arrays and structs are represented as i32 pointers to linear memory; the compiler manages a shadow stack and emits prologue/epilogue code for frame allocation. Struct fields are laid out with C-compatible natural alignment. Enum values are pure scalars — a variant is compiled to its zero-based index (`Red = 0`, `Green = 1`, `Blue = 2`) and stored directly in an `i32` local or register without touching linear memory.
 
 ## WebAssembly Execution Model
 
@@ -235,7 +242,7 @@ The `codegen` function:
 - **Multi-file support** - Only single-file compilation is fully implemented
 - **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
 - **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
-- **Expression types** - Fixed-size arrays with scalar element types are supported, including array-returning functions via the sret calling convention. Structs with scalar and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Multidimensional arrays (`[[i32; 3]; 2]`) are supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
+- **Expression types** - Fixed-size arrays with scalar and enum element types are supported, including array-returning functions via the sret calling convention. Enum types are fully supported: variant access (`Color::Red`), enum-typed locals and parameters, enum return values, enum fields inside structs, enums in arrays, equality/inequality comparisons (`==`, `!=`), reassignment, and uzumaki initialization. Arithmetic operations and ordering comparisons on enum values are rejected by the type checker. Structs with scalar, enum, and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Multidimensional arrays (`[[i32; 3]; 2]`) are supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
 - **Recursion with compound types** - Functions using arrays or structs cannot currently recurse (no stack overflow analysis). Recursion detection and stack bounds checking are future work.
 - **Return-path analysis** - The analysis pass (rule A007) detects non-void functions missing a `return` on all paths and emits a compile-time error before codegen is reached. An `unreachable` trap is also emitted as a defence-in-depth runtime safety net; see [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
@@ -397,6 +404,23 @@ Test data includes:
   inside `forall` blocks: structs with a single array field, structs with mixed i64 array
   and i32 fields, and structs with two separate array fields; validated against
   `inf_wasmparser`
+- `enum_variant.inf` - Basic enum variant access (`Color::Red`, `Color::Green`,
+  `Color::Blue`): assigns a variant to a local and returns it; verifies zero-based tag
+  assignment and correct i32 return value; validated and executed via wasmtime
+- `enum_multi.inf` - Two independent enum types in the same module (`Direction`, `Shape`):
+  verifies that each enum's variant indices are independent and do not collide; validated
+  and executed via wasmtime
+- `enum_params.inf` - Enum-typed function parameters: pass-through, comparison inside
+  `if`, and reassignment from a parameter; validated and executed via wasmtime
+- `enum_compare.inf` - Equality and inequality comparisons on enum values (`==`, `!=`)
+  and comparison against a literal variant; validated and executed via wasmtime
+- `enum_assign.inf` - Reassignment of a `mut` enum local and assignment from a parameter;
+  validated and executed via wasmtime
+- `enum_array.inf` - Fixed-size array of enum values (`[Color; 3]`): initialization with
+  variant literals, index read with equality check, and returning an enum element from an
+  array; validated and executed via wasmtime
+- `enum_in_struct.inf` - Enum-typed struct field: struct literal with an enum field,
+  reading the field and comparing it to a variant; validated and executed via wasmtime
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

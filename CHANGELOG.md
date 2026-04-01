@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Methods returning compound types (structs, arrays) use sret calling convention
   - `ResolvedCallee` enum consolidates three callee patterns (Function, AssociatedFunction, InstanceMethod) across all call paths
   - `assert!` on mangled name collision: detects `TypeName.method_name` conflicts with top-level functions in release builds
+- Add enum type codegen: unit enum variants lowered as i32 constants with zero-based tags ([#179])
+  - Enum variant access (`Color::Red`) emits `i32.const <tag>` via `TypeMemberAccess` lowering
+  - Enums work in all value positions: locals, parameters, return values, struct fields, arrays, const declarations
+  - Equality (`==`) and inequality (`!=`) comparisons use native i32 instructions
+  - Uzumaki support: `let c: Color = @;` emits `i32.uzumaki` in non-det blocks
+  - Enum-typed struct fields stored as 4-byte i32 scalars with proper load/store/alignment
+  - Arrays of enums (`[Color; N]`) use element_size=4 with standard array memory layout
+  - `EnumInfo.variants` changed from `FxHashSet` to `Vec` for deterministic declaration-order tag assignment
+  - `TypedContext::lookup_enum()` exposed for cross-crate enum metadata access
+  - Analysis `has_compound_fields()` made enum-aware: enum-typed `Custom` fields treated as scalar
 - Add nested compound type codegen: struct-in-struct, array-in-struct, struct-in-array ([#161])
   - Recursive `type_byte_size()` computes byte sizes for nested compound types via `TypedContext` struct lookup
   - `CompoundFieldLayout` enum (`Scalar`, `NestedStruct`, `NestedArray`) caches sub-layout on `StructFieldSlot` for efficient chained access
@@ -253,6 +263,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- Add 7 enum codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#179])
+  - `enum_variant`: basic variant access, variable declaration, return values
+  - `enum_multi`: multiple enum definitions in one module
+  - `enum_params`: enum as function parameter with branching on tags
+  - `enum_compare`: equality and inequality comparisons
+  - `enum_assign`: mutable reassignment, assignment from parameter
+  - `enum_array`: arrays of enum values in linear memory
+  - `enum_in_struct`: enum-typed struct fields
+- Add 12 enum execution tests with Wasmtime assertions: variant tags, params, comparisons, reassignment, arrays, struct fields, const declarations, uzumaki ([#179])
+- Add 7 type-checker tests for enum operator constraints: equality/inequality accepted, arithmetic/ordering/negation/boolean-context rejected ([#179])
 - Rewrite all 85 AST builder tests in `tests/src/ast/helpers.rs` with deep structural verification
   - 50+ test helper functions for constructing and asserting on AST nodes
   - Tests now verify node positions, field values, and parent-child relationships
@@ -611,3 +631,4 @@ Initial tagged release.
 [#156]: https://github.com/Inferara/inference/pull/156
 [#161]: https://github.com/Inferara/inference/pull/185
 [#162]: https://github.com/Inferara/inference/pull/178
+[#179]: https://github.com/Inferara/inference/pull/187

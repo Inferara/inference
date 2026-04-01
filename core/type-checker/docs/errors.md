@@ -4,7 +4,7 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 46 distinct error variants, each with specific context and location
+The type checker produces 45 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
 Not all variants are covered in detail below. The authoritative list of variants and their
