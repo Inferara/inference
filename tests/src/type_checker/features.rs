@@ -898,6 +898,137 @@ mod enum_tests {
             result.err()
         );
     }
+
+    #[test]
+    fn test_enum_arithmetic_rejected() {
+        let source = r#"enum Color { Red, Green, Blue } fn test() -> Color { return Color::Red + Color::Green; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Arithmetic on enums should be rejected by the type checker"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("arithmetic") || error_msg.contains("non-number"),
+                "Error should mention invalid arithmetic operand types, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_enum_ordering_rejected() {
+        let source = r#"enum Color { Red, Green, Blue } fn test(a: Color, b: Color) -> bool { return a < b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Ordering comparison on enums should be rejected by the type checker"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("comparison") || error_msg.contains("non-numeric"),
+                "Error should mention invalid comparison operand types, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_enum_equality_accepted() {
+        let source = r#"enum Color { Red, Green, Blue } fn test(a: Color, b: Color) -> bool { return a == b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Equality comparison on enums should be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_enum_inequality_accepted() {
+        let source = r#"enum Color { Red, Green, Blue } fn test(a: Color, b: Color) -> bool { return a != b; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Inequality comparison on enums should be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_enum_subtraction_rejected() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            fn test() -> Color {
+                return Color::Red - Color::Green;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Subtraction on enum values should be rejected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("arithmetic") || error_msg.contains("non-number"),
+                "Error should mention arithmetic or non-number type, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_enum_negation_rejected() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            fn test() -> i32 {
+                let x: i32 = -Color::Red;
+                return x;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Negation of enum values should be rejected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("Neg") || error_msg.contains("negate") || error_msg.contains("signed integers"),
+                "Error should mention invalid negation, got: {}",
+                error_msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_enum_boolean_context_rejected() {
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            fn test() -> i32 {
+                if Color::Red {
+                    return 1;
+                }
+                return 0;
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Using enum in boolean context should be rejected"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("bool") || error_msg.contains("condition") || error_msg.contains("type"),
+                "Error should mention boolean or condition type mismatch, got: {}",
+                error_msg
+            );
+        }
+    }
 }
 
 /// Tests for generic type instantiation

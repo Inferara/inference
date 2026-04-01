@@ -1,0 +1,16 @@
+enum Status {
+    Active,
+    Inactive
+}
+
+pub fn are_equal(a: Status, b: Status) -> bool {
+    return a == b;
+}
+
+pub fn are_not_equal(a: Status, b: Status) -> bool {
+    return a != b;
+}
+
+pub fn is_active(s: Status) -> bool {
+    return s == Status::Active;
+}

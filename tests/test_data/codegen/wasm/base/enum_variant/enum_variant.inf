@@ -1,0 +1,20 @@
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+pub fn get_red() -> Color {
+    let c: Color = Color::Red;
+    return c;
+}
+
+pub fn get_green() -> Color {
+    let c: Color = Color::Green;
+    return c;
+}
+
+pub fn get_blue() -> Color {
+    let c: Color = Color::Blue;
+    return c;
+}

@@ -4,7 +4,7 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
-    symbol_table::{StructInfo, SymbolTable},
+    symbol_table::{EnumInfo, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -105,6 +105,16 @@ impl TypedContext {
         self.symbol_table.lookup_struct(name)
     }
 
+    /// Looks up an enum by name and returns its type information.
+    ///
+    /// Returns `None` if no enum with the given name exists in the current scope.
+    /// Variants in the returned [`EnumInfo`] are in declaration order, which
+    /// determines their zero-based integer tag for WASM codegen.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
+        self.symbol_table.lookup_enum(name)
+    }
+
     /// Registers a struct definition in the type context for testing.
     ///
     /// Intended for unit tests in downstream crates (e.g. `wasm-codegen`) that
@@ -118,6 +128,21 @@ impl TypedContext {
     ) -> anyhow::Result<()> {
         self.symbol_table
             .register_struct(name, fields, vec![], Visibility::Public)
+    }
+
+    /// Registers an enum definition in the type context for testing.
+    ///
+    /// Intended for unit tests in downstream crates (e.g. `wasm-codegen`) that
+    /// need a populated `TypedContext` without running the full type-checker.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    pub fn register_test_enum(
+        &mut self,
+        name: &str,
+        variants: &[&str],
+    ) -> anyhow::Result<()> {
+        self.symbol_table
+            .register_enum(name, variants, Visibility::Public)
     }
 
     /// Looks up a method on the given type by name and returns its metadata.

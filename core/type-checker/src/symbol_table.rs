@@ -29,7 +29,7 @@ use crate::type_info::{TypeInfo, TypeInfoKind};
 use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::{ArgKind, Def, Location, Visibility};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 pub(crate) type ScopeRef = Arc<RefCell<Scope>>;
 pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
@@ -72,12 +72,24 @@ impl StructInfo {
 /// Information about an enum type including its variants.
 /// Simple unit variants only - associated data support is out of scope.
 /// Visibility and definition_scope_id are used for visibility checking during variant access.
+///
+/// Variants are stored as a `Vec<String>` in declaration order to ensure
+/// deterministic zero-based tag assignment for WASM codegen.
 #[derive(Debug, Clone)]
-pub(crate) struct EnumInfo {
-    pub(crate) name: String,
-    pub(crate) variants: FxHashSet<String>,
-    pub(crate) visibility: Visibility,
-    pub(crate) definition_scope_id: u32,
+pub struct EnumInfo {
+    pub name: String,
+    pub variants: Vec<String>,
+    pub visibility: Visibility,
+    pub definition_scope_id: u32,
+}
+
+impl EnumInfo {
+    /// Returns the zero-based tag index for a variant name, or `None` if
+    /// the variant does not belong to this enum.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn variant_index(&self, variant_name: &str) -> Option<usize> {
+        self.variants.iter().position(|v| v == variant_name)
+    }
 }
 
 /// Information about a method defined on a type.
@@ -1012,6 +1024,7 @@ impl SymbolTable {
 mod tests {
     use super::*;
     use crate::type_info::{NumberType, TypeInfoKind};
+    use rustc_hash::FxHashSet;
 
     mod symbol_type_alias {
         use super::*;
@@ -1490,6 +1503,34 @@ mod tests {
                 instance_method.has_self
             );
             assert_eq!(associated_fn.is_instance_method(), associated_fn.has_self);
+        }
+    }
+
+    mod enum_info_tests {
+        use super::*;
+
+        #[test]
+        fn variant_index_returns_correct_position() {
+            let info = EnumInfo {
+                name: "Color".into(),
+                variants: vec!["Red".into(), "Green".into(), "Blue".into()],
+                visibility: Visibility::Public,
+                definition_scope_id: 0,
+            };
+            assert_eq!(info.variant_index("Red"), Some(0));
+            assert_eq!(info.variant_index("Green"), Some(1));
+            assert_eq!(info.variant_index("Blue"), Some(2));
+        }
+
+        #[test]
+        fn variant_index_returns_none_for_unknown() {
+            let info = EnumInfo {
+                name: "Color".into(),
+                variants: vec!["Red".into(), "Green".into(), "Blue".into()],
+                visibility: Visibility::Public,
+                definition_scope_id: 0,
+            };
+            assert_eq!(info.variant_index("Yellow"), None);
         }
     }
 }

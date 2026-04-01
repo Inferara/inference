@@ -435,6 +435,8 @@ impl Compiler {
                 let name = &arena[*ident_id].name;
                 if ctx.lookup_struct(name).is_some() {
                     Some(ValType::I32)
+                } else if ctx.lookup_enum(name).is_some() {
+                    Some(ValType::I32)
                 } else {
                     todo!("Unsupported custom type in WASM codegen: {name}")
                 }
@@ -718,6 +720,7 @@ impl Compiler {
                             .kind
                         {
                             TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                            TypeInfoKind::Enum(_) => ValType::I32,
                             _ => ValType::I32,
                         };
                         let prev = locals_map.insert(const_name.clone(), (*local_idx, val_type));
@@ -737,6 +740,7 @@ impl Compiler {
                         .kind
                     {
                         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => ValType::I64,
+                        TypeInfoKind::Enum(_) => ValType::I32,
                         _ => ValType::I32,
                     };
                     let prev = locals_map.insert(var_name.clone(), (*local_idx, val_type));
@@ -894,6 +898,9 @@ impl Compiler {
     }
 
     /// Recursively walks a block collecting array and struct variable declarations.
+    ///
+    /// Enum types are intentionally excluded — they are pure i32 scalars with no
+    /// linear memory footprint, so they do not need frame slots.
     #[allow(clippy::too_many_lines)]
     fn collect_compound_slots(
         arena: &AstArena,
@@ -1419,11 +1426,26 @@ impl Compiler {
             Expr::MemberAccess { expr, name } => {
                 self.lower_member_access(arena, expr_id, expr, name, ctx);
             }
-            Expr::TypeMemberAccess { .. } => {
-                todo!(
-                    "TypeMemberAccess expressions (including enum variant access like \
-                     `Enum::Variant`) are not yet supported in wasm codegen"
-                );
+            Expr::TypeMemberAccess {
+                expr: type_expr,
+                name: variant_name_id,
+            } => {
+                let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
+                    .expect("TypeMemberAccess: could not extract type name");
+                let variant_name = &arena[variant_name_id].name;
+
+                if let Some(enum_info) = ctx.lookup_enum(&type_name) {
+                    let tag = enum_info
+                        .variant_index(variant_name)
+                        .expect("TypeMemberAccess: unknown enum variant");
+                    self.func()
+                        .instruction(&Instruction::I32Const(tag as i32));
+                } else {
+                    todo!(
+                        "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
+                         is not yet supported in wasm codegen"
+                    );
+                }
             }
             Expr::FunctionCall { function, args, .. } => {
                 let args: Vec<_> = args.iter().map(|(l, e)| (*l, *e)).collect();
@@ -1534,7 +1556,8 @@ impl Compiler {
                         | NumberType::U16
                         | NumberType::I32
                         | NumberType::U32,
-                    ) => {
+                    )
+                    | TypeInfoKind::Enum(_) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
                     }
@@ -2556,7 +2579,7 @@ impl Compiler {
                 }
             }
             CompoundFieldLayout::NestedStruct { .. } => {
-                panic!(
+                unreachable!(
                     "emit_struct_field_uzumaki called for nested struct field '{}'; \
                      analysis rule A027 should have rejected uzumaki on structs with nested struct fields",
                     field.name
@@ -3045,9 +3068,9 @@ impl Compiler {
         depth: u32,
     ) {
         debug_assert!(
-            depth < 10,
+            depth < 3,
             "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
-             A026 should bound nesting to one level"
+             A026 bounds nesting to one level (max expected depth is 2)"
         );
 
         for &(field_name_id, field_value_expr_id) in fields {

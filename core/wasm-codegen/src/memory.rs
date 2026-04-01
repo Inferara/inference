@@ -219,7 +219,7 @@ fn compute_struct_field_layout_with_visited(
             } => elem_size
                 .checked_mul(*length)
                 .expect("Array byte count overflow: element size * length exceeds u32::MAX"),
-            CompoundFieldLayout::Scalar => element_size(&field.type_info.kind),
+            CompoundFieldLayout::Scalar => type_byte_size(&field.type_info.kind, ctx)?,
         };
 
         let align = natural_alignment_for_type(&field.type_info.kind, ctx)?;
@@ -229,10 +229,16 @@ fn compute_struct_field_layout_with_visited(
             max_align = align;
         }
 
+        let resolved_kind = match &field.type_info.kind {
+            TypeInfoKind::Custom(name) if ctx.lookup_enum(name).is_some() => {
+                TypeInfoKind::Enum(name.clone())
+            }
+            other => other.clone(),
+        };
         field_slots.push(StructFieldSlot {
             name: field.name.clone(),
             offset: aligned_offset,
-            type_kind: field.type_info.kind.clone(),
+            type_kind: resolved_kind,
             layout,
         });
 
@@ -260,6 +266,8 @@ fn compute_field_layout_with_visited(
                 let (total_size, fields) =
                     compute_struct_field_layout_with_visited(&inner_struct, ctx, visited)?;
                 Ok(CompoundFieldLayout::NestedStruct { fields, total_size })
+            } else if ctx.lookup_enum(name).is_some() {
+                Ok(CompoundFieldLayout::Scalar)
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
             }
@@ -297,7 +305,7 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
     match kind {
         TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::I8 | NumberType::U8) => 1,
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => 2,
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => 4,
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => 4,
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => 8,
         // The type checker restricts array element types to: bool, i8, u8, i16, u16,
         // i32, u32, i64, u64. This arm is unreachable for valid programs. When
@@ -335,6 +343,8 @@ fn type_byte_size_with_visited(
                 let (total_size, _) =
                     compute_struct_field_layout_with_visited(&struct_info, ctx, visited)?;
                 Ok(total_size)
+            } else if ctx.lookup_enum(name).is_some() {
+                Ok(element_size(&TypeInfoKind::Enum(name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
             }
@@ -402,6 +412,8 @@ fn natural_alignment_with_visited(
                     }
                 }
                 Ok(max_align)
+            } else if ctx.lookup_enum(name).is_some() {
+                Ok(element_size(&TypeInfoKind::Enum(name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
             }
@@ -484,11 +496,13 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
             Instruction::I32Store8(memarg)
         }
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => Instruction::I32Store16(memarg),
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => Instruction::I32Store(memarg),
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => {
+            Instruction::I32Store(memarg)
+        }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Store(memarg),
         // The type checker restricts array element types to: bool, i8, u8, i16, u16,
-        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
-        // struct/string array elements are supported, this will need to be extended.
+        // i32, u32, i64, u64, and enums. This arm is unreachable for valid programs.
+        // When struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type for store: {elem_type:?}"),
     }
 }
@@ -510,11 +524,13 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
         TypeInfoKind::Number(NumberType::I8) => Instruction::I32Load8S(memarg),
         TypeInfoKind::Number(NumberType::U16) => Instruction::I32Load16U(memarg),
         TypeInfoKind::Number(NumberType::I16) => Instruction::I32Load16S(memarg),
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) => Instruction::I32Load(memarg),
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => {
+            Instruction::I32Load(memarg)
+        }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Load(memarg),
         // The type checker restricts array element types to: bool, i8, u8, i16, u16,
-        // i32, u32, i64, u64. This arm is unreachable for valid programs. When
-        // struct/string array elements are supported, this will need to be extended.
+        // i32, u32, i64, u64, and enums. This arm is unreachable for valid programs.
+        // When struct/string array elements are supported, this will need to be extended.
         _ => todo!("Unsupported array element type for load: {elem_type:?}"),
     }
 }
