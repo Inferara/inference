@@ -50,10 +50,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_last (;1;) (type 1) (result i32)
@@ -93,10 +89,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_middle (;2;) (type 2) (result i32)
@@ -136,10 +128,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_with_variable (;3;) (type 3) (param $i i32) (result i32)
@@ -181,10 +169,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_bool_true (;4;) (type 4) (result i32)
@@ -204,11 +188,6 @@
     i32.const 1
     i32.store8
     local.get $__frame_ptr
-    i32.const 1
-    i32.add
-    i32.const 0
-    i32.store8
-    local.get $__frame_ptr
     i32.const 2
     i32.add
     i32.const 1
@@ -231,10 +210,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_bool_false (;5;) (type 5) (result i32)
@@ -254,11 +229,6 @@
     i32.const 1
     i32.store8
     local.get $__frame_ptr
-    i32.const 1
-    i32.add
-    i32.const 0
-    i32.store8
-    local.get $__frame_ptr
     i32.const 2
     i32.add
     i32.const 1
@@ -283,10 +253,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

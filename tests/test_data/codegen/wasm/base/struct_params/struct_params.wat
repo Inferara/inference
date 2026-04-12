@@ -48,10 +48,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_sum (;1;) (type 1) (result i32)
@@ -82,10 +78,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $modify_no_effect (;2;) (type 2) (param $p i32) (result i32)
@@ -115,10 +107,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $verify_copy_semantics (;3;) (type 3) (result i32)
@@ -152,10 +140,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_mixed (;4;) (type 4) (param $m i32) (result i64)
@@ -184,10 +168,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_read_mixed (;5;) (type 5) (result i64)
@@ -218,10 +198,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $two_struct_params (;6;) (type 6) (param $a i32) (param $b i32) (result i32)
@@ -271,10 +247,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_two_params (;7;) (type 7) (result i32)
@@ -320,10 +292,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

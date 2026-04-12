@@ -51,10 +51,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_get_y (;1;) (type 1) (result i32)
@@ -85,10 +81,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_sum (;2;) (type 2) (result i32)
@@ -119,10 +111,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_sum_with (;3;) (type 3) (result i32)
@@ -154,10 +142,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_let_binding (;4;) (type 4) (result i32)
@@ -190,10 +174,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_standalone (;5;) (type 5) (result i32)
@@ -226,10 +206,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_binary_op (;6;) (type 6) (result i32)
@@ -263,10 +239,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_on_param (;7;) (type 7) (param $p i32) (result i32)
@@ -293,10 +265,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Point.get_x (;8;) (type 8) (param $self i32) (result i32)

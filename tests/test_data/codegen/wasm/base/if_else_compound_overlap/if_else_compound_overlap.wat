@@ -80,10 +80,6 @@
       global.set 0
       return
     end
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

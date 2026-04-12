@@ -73,10 +73,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $fill_and_sum (;1;) (type 1) (param $n i32) (result i32)
@@ -90,31 +86,6 @@
     i32.const 0
     i32.const 32
     memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.add
-    i32.const 0
-    i32.store
-    local.get $__frame_ptr
-    i32.const 4
-    i32.add
-    i32.const 0
-    i32.store
-    local.get $__frame_ptr
-    i32.const 8
-    i32.add
-    i32.const 0
-    i32.store
-    local.get $__frame_ptr
-    i32.const 12
-    i32.add
-    i32.const 0
-    i32.store
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    i32.const 0
-    i32.store
     local.get $__frame_ptr
     local.set $arr
     i32.const 0
@@ -169,10 +140,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
 )

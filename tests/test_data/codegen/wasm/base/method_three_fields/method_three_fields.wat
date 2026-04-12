@@ -48,10 +48,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_get_y (;1;) (type 1) (result i32)
@@ -87,10 +83,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_get_z (;2;) (type 2) (result i32)
@@ -126,10 +118,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_sum (;3;) (type 3) (result i32)
@@ -165,10 +153,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Vec3.get_x (;4;) (type 4) (param $self i32) (result i32)

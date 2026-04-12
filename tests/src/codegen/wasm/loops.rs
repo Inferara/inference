@@ -647,7 +647,7 @@ mod loops_tests {
         cov_mark::check_count!(wasm_codegen_emit_loop_statement, 1);
         cov_mark::check_count!(wasm_codegen_emit_loop_conditional, 1);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 1);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 2);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 1);
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 2);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 1);
         let test_name = "loop_return_array";

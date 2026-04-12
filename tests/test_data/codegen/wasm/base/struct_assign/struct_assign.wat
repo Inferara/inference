@@ -40,10 +40,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $swap_fields (;1;) (type 1) (result i32)
@@ -93,10 +89,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $modify_bool (;2;) (type 2) (result i32)
@@ -110,9 +102,6 @@
     i32.const 0
     i32.const 16
     memory.fill
-    local.get $__frame_ptr
-    i32.const 0
-    i32.store8
     local.get $__frame_ptr
     i32.const 4
     i32.add
@@ -142,10 +131,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

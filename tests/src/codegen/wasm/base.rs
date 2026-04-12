@@ -975,7 +975,7 @@ mod base_codegen_tests {
     fn array_literal_test() {
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 4);
         let test_name = "array_literal";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1211,11 +1211,125 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn array_zero_literal_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 4);
+        let test_name = "array_zero_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn array_zero_literal_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "array_zero_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("Module should export memory");
+
+        {
+            let all_zeros_i32: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "all_zeros_i32")
+                .expect("Failed to get 'all_zeros_i32'");
+            let sret_ptr: i32 = 0;
+            all_zeros_i32
+                .call(&mut store, sret_ptr)
+                .expect("all_zeros_i32 failed");
+            let data = memory.data(&store);
+            for i in 0..4 {
+                let offset = (sret_ptr as usize) + i * 4;
+                let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                assert_eq!(val, 0, "all_zeros_i32[{i}] should be 0");
+            }
+        }
+
+        {
+            let mixed_values: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "mixed_values")
+                .expect("Failed to get 'mixed_values'");
+            let sret_ptr: i32 = 0;
+            mixed_values
+                .call(&mut store, sret_ptr)
+                .expect("mixed_values failed");
+            let data = memory.data(&store);
+            let expected_vals = [0i32, 1, 0];
+            for (i, &expected) in expected_vals.iter().enumerate() {
+                let offset = (sret_ptr as usize) + i * 4;
+                let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                assert_eq!(
+                    val, expected,
+                    "mixed_values[{i}] should be {expected}"
+                );
+            }
+        }
+
+        {
+            let all_zeros_bool: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "all_zeros_bool")
+                .expect("Failed to get 'all_zeros_bool'");
+            let sret_ptr: i32 = 0;
+            all_zeros_bool
+                .call(&mut store, sret_ptr)
+                .expect("all_zeros_bool failed");
+            let data = memory.data(&store);
+            for i in 0..2 {
+                let offset = (sret_ptr as usize) + i;
+                assert_eq!(
+                    data[offset], 0,
+                    "all_zeros_bool[{i}] should be 0 (false)"
+                );
+            }
+        }
+
+        {
+            let sret_direct_zeros: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "sret_direct_zeros")
+                .expect("Failed to get 'sret_direct_zeros'");
+            let sret_ptr: i32 = 0;
+            sret_direct_zeros
+                .call(&mut store, sret_ptr)
+                .expect("sret_direct_zeros failed");
+            let data = memory.data(&store);
+            for i in 0..3 {
+                let offset = (sret_ptr as usize) + i * 4;
+                let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                assert_eq!(
+                    val, 0,
+                    "sret_direct_zeros[{i}] should be 0 (stores must NOT be elided in sret path)"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn array_index_test() {
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 6);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 6);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 14);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
         let test_name = "array_index";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1368,7 +1482,7 @@ mod base_codegen_tests {
         cov_mark::check_count!(wasm_codegen_emit_array_index_read, 11);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 5);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 11);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
         let test_name = "array_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1464,7 +1578,7 @@ mod base_codegen_tests {
         cov_mark::check_count!(wasm_codegen_emit_array_param_copy, 5);
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 17);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 9);
         let test_name = "array_params";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -2498,7 +2612,7 @@ mod base_codegen_tests {
     fn struct_literal_test() {
         cov_mark::check_count!(wasm_codegen_emit_struct_literal, 3);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 3);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 3);
         let test_name = "struct_literal";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -5952,7 +6066,7 @@ mod base_codegen_tests {
 /// byte-different WASM output (e.g., after architecture refactoring).
 #[cfg(test)]
 mod regenerate {
-    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen};
+    use crate::utils::{get_test_data_path, regenerate_wat, wasm_codegen, wasm_codegen_no_analysis};
 
     /// Base directory for codegen/wasm/base test data.
     fn base_test_dir() -> std::path::PathBuf {
@@ -6004,7 +6118,7 @@ mod regenerate {
         let dir = base_test_dir().join("nondet");
         let source_code =
             std::fs::read_to_string(dir.join("nondet.inf")).expect("Failed to read nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("nondet.wasm");
@@ -6024,7 +6138,7 @@ mod regenerate {
         let dir = base_test_dir().join("i64_uzumaki");
         let source_code = std::fs::read_to_string(dir.join("i64_uzumaki.inf"))
             .expect("Failed to read i64_uzumaki.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("i64_uzumaki.wasm");
@@ -6116,7 +6230,7 @@ mod regenerate {
         let dir = base_test_dir().join("local_variables");
         let source_code = std::fs::read_to_string(dir.join("local_variables.inf"))
             .expect("Failed to read local_variables.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("local_variables.wasm");
@@ -6294,7 +6408,7 @@ mod regenerate {
         let dir = base_test_dir().join("assign_nondet");
         let source_code = std::fs::read_to_string(dir.join("assign_nondet.inf"))
             .expect("Failed to read assign_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("assign_nondet.wasm");
@@ -6394,7 +6508,7 @@ mod regenerate {
         let dir = base_test_dir().join("array_nondet");
         let source_code = std::fs::read_to_string(dir.join("array_nondet.inf"))
             .expect("Failed to read array_nondet.inf");
-        let actual = wasm_codegen(&source_code);
+        let actual = wasm_codegen_no_analysis(&source_code);
         inf_wasmparser::validate(&actual)
             .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
         let wasm_path = dir.join("array_nondet.wasm");
@@ -7013,5 +7127,25 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "enum_in_struct");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_array_zero_literal_wasm() {
+        let dir = base_test_dir().join("array_zero_literal");
+        let source_code = std::fs::read_to_string(dir.join("array_zero_literal.inf"))
+            .expect("Failed to read array_zero_literal.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("array_zero_literal.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "array_zero_literal");
     }
 }

@@ -1,0 +1,23 @@
+pub fn all_zeros_i32() -> [i32; 4] {
+    let arr: [i32; 4] = [0, 0, 0, 0];
+    return arr;
+}
+
+pub fn all_zeros_u64() -> [u64; 3] {
+    let arr: [u64; 3] = [0, 0, 0];
+    return arr;
+}
+
+pub fn mixed_values() -> [i32; 3] {
+    let arr: [i32; 3] = [0, 1, 0];
+    return arr;
+}
+
+pub fn all_zeros_bool() -> [bool; 2] {
+    let arr: [bool; 2] = [false, false];
+    return arr;
+}
+
+pub fn sret_direct_zeros() -> [i32; 3] {
+    return [0, 0, 0];
+}

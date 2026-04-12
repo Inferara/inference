@@ -58,10 +58,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_via_copy (;1;) (type 1) (result i32)
@@ -107,10 +103,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_inner_y_via_copy (;2;) (type 2) (result i32)
@@ -158,10 +150,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $sum_all_fields (;3;) (type 3) (result i32)
@@ -219,10 +207,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $write_inner_field (;4;) (type 4) (result i32)
@@ -271,10 +255,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $nested_struct_param (;5;) (type 5) (param $o i32) (result i32)
@@ -311,10 +291,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $nested_struct_return (;6;) (type 6) (param $sret i32)
@@ -352,10 +328,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_get_inner_x (;7;) (type 7) (result i32)
@@ -391,10 +363,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_sum_inner (;8;) (type 8) (result i32)
@@ -430,10 +398,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Outer.get_inner_x (;9;) (type 9) (param $self i32) (result i32)
@@ -460,10 +424,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Outer.sum_inner (;10;) (type 10) (param $self i32) (result i32)
@@ -495,10 +455,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

@@ -65,10 +65,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_translate_y (;1;) (type 1) (result i32)
@@ -110,10 +106,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_scale_x (;2;) (type 2) (result i32)
@@ -154,10 +146,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_scale_y (;3;) (type 3) (result i32)
@@ -198,10 +186,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_original_unchanged_x (;4;) (type 4) (result i32)
@@ -243,10 +227,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_original_unchanged_y (;5;) (type 5) (result i32)
@@ -288,10 +268,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_new_returns_struct_x (;6;) (type 6) (result i32)
@@ -318,10 +294,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_new_returns_struct_y (;7;) (type 7) (result i32)
@@ -348,10 +320,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_translated (;8;) (type 8) (result i32)
@@ -396,10 +364,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Point.translate (;9;) (type 9) (param $sret i32) (param $self i32) (param $dx i32) (param $dy i32)

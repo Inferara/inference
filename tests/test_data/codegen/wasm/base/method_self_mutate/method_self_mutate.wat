@@ -40,10 +40,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_increment_value_semantics (;1;) (type 1) (result i32)
@@ -71,10 +67,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_add_value_semantics (;2;) (type 2) (result i32)
@@ -103,10 +95,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_mut_self_does_not_affect_caller (;3;) (type 3) (result i32)
@@ -137,10 +125,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_multiple_increments (;4;) (type 4) (result i32)
@@ -172,10 +156,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Counter.get (;5;) (type 5) (param $self i32) (result i32)

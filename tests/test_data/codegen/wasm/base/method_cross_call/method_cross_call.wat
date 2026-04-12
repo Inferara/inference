@@ -49,10 +49,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_calls_toplevel_fn (;2;) (type 2) (result i32)
@@ -70,11 +66,6 @@
     i32.const 5
     i32.store
     local.get $__frame_ptr
-    i32.const 4
-    i32.add
-    i32.const 0
-    i32.store
-    local.get $__frame_ptr
     local.set $v
     local.get $v
     call $Vec2.get_x
@@ -84,10 +75,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_toplevel_fn_calls_method (;3;) (type 3) (result i32)
@@ -115,10 +102,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Vec2.get_x (;4;) (type 4) (param $self i32) (result i32)

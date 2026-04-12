@@ -52,10 +52,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $copy_values_match (;1;) (type 1) (result i32)
@@ -101,10 +97,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $independent_copies (;2;) (type 2) (result i32)
@@ -168,10 +160,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $copy_mixed (;3;) (type 3) (result i64)
@@ -214,10 +202,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
 )
