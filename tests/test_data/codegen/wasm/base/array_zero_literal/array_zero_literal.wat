@@ -4,6 +4,8 @@
   (type (;2;) (func (param i32)))
   (type (;3;) (func (param i32)))
   (type (;4;) (func (param i32)))
+  (type (;5;) (func (param i32)))
+  (type (;6;) (func (param i32)))
   (memory (;0;) 1 1)
   (global (;0;) (mut i32) i32.const 65536)
   (export "all_zeros_i32" (func $all_zeros_i32))
@@ -11,6 +13,8 @@
   (export "mixed_values" (func $mixed_values))
   (export "all_zeros_bool" (func $all_zeros_bool))
   (export "sret_direct_zeros" (func $sret_direct_zeros))
+  (export "parenthesized_zeros" (func $parenthesized_zeros))
+  (export "negated_zeros" (func $negated_zeros))
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $all_zeros_i32 (;0;) (type 0) (param $sret i32)
@@ -128,6 +132,54 @@
     i32.add
     i32.const 0
     i32.store
+    return
+    unreachable
+  )
+  (func $parenthesized_zeros (;5;) (type 5) (param $sret i32)
+    (local $arr i32) (local $__frame_ptr i32)
+    global.get 0
+    i32.const 16
+    i32.sub
+    local.tee $__frame_ptr
+    global.set 0
+    local.get $__frame_ptr
+    i32.const 0
+    i32.const 16
+    memory.fill
+    local.get $__frame_ptr
+    local.set $arr
+    local.get $sret
+    local.get $arr
+    i32.const 8
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
+    global.set 0
+    return
+    unreachable
+  )
+  (func $negated_zeros (;6;) (type 6) (param $sret i32)
+    (local $arr i32) (local $__frame_ptr i32)
+    global.get 0
+    i32.const 16
+    i32.sub
+    local.tee $__frame_ptr
+    global.set 0
+    local.get $__frame_ptr
+    i32.const 0
+    i32.const 16
+    memory.fill
+    local.get $__frame_ptr
+    local.set $arr
+    local.get $sret
+    local.get $arr
+    i32.const 8
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
+    global.set 0
     return
     unreachable
   )

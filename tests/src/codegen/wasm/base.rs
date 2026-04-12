@@ -1212,9 +1212,9 @@ mod base_codegen_tests {
 
     #[test]
     fn array_zero_literal_test() {
-        cov_mark::check_count!(wasm_codegen_emit_array_literal, 4);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 4);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 4);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
         let test_name = "array_zero_literal";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1263,6 +1263,22 @@ mod base_codegen_tests {
                 let offset = (sret_ptr as usize) + i * 4;
                 let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
                 assert_eq!(val, 0, "all_zeros_i32[{i}] should be 0");
+            }
+        }
+
+        {
+            let all_zeros_u64: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "all_zeros_u64")
+                .expect("Failed to get 'all_zeros_u64'");
+            let sret_ptr: i32 = 0;
+            all_zeros_u64
+                .call(&mut store, sret_ptr)
+                .expect("all_zeros_u64 failed");
+            let data = memory.data(&store);
+            for i in 0..3 {
+                let offset = (sret_ptr as usize) + i * 8;
+                let val = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+                assert_eq!(val, 0, "all_zeros_u64[{i}] should be 0");
             }
         }
 
@@ -1320,6 +1336,38 @@ mod base_codegen_tests {
                     val, 0,
                     "sret_direct_zeros[{i}] should be 0 (stores must NOT be elided in sret path)"
                 );
+            }
+        }
+
+        {
+            let parenthesized_zeros: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "parenthesized_zeros")
+                .expect("Failed to get 'parenthesized_zeros'");
+            let sret_ptr: i32 = 0;
+            parenthesized_zeros
+                .call(&mut store, sret_ptr)
+                .expect("parenthesized_zeros failed");
+            let data = memory.data(&store);
+            for i in 0..2 {
+                let offset = (sret_ptr as usize) + i * 4;
+                let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                assert_eq!(val, 0, "parenthesized_zeros[{i}] should be 0");
+            }
+        }
+
+        {
+            let negated_zeros: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "negated_zeros")
+                .expect("Failed to get 'negated_zeros'");
+            let sret_ptr: i32 = 0;
+            negated_zeros
+                .call(&mut store, sret_ptr)
+                .expect("negated_zeros failed");
+            let data = memory.data(&store);
+            for i in 0..2 {
+                let offset = (sret_ptr as usize) + i * 4;
+                let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                assert_eq!(val, 0, "negated_zeros[{i}] should be 0");
             }
         }
     }
@@ -2610,9 +2658,9 @@ mod base_codegen_tests {
 
     #[test]
     fn struct_literal_test() {
-        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 3);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 3);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 3);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 7);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 7);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 7);
         let test_name = "struct_literal";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -2663,6 +2711,38 @@ mod base_codegen_tests {
             .expect("Failed to get 'make_mixed'");
         let result = make_mixed.call(&mut store, ()).expect("make_mixed failed");
         assert_eq!(result, 0, "make_mixed should return 0");
+
+        let zero_point_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "zero_point_x")
+            .expect("Failed to get 'zero_point_x'");
+        let result = zero_point_x
+            .call(&mut store, ())
+            .expect("zero_point_x failed");
+        assert_eq!(result, 0, "zero_point_x should return 0");
+
+        let zero_point_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "zero_point_y")
+            .expect("Failed to get 'zero_point_y'");
+        let result = zero_point_y
+            .call(&mut store, ())
+            .expect("zero_point_y failed");
+        assert_eq!(result, 0, "zero_point_y should return 0");
+
+        let mixed_zero_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "mixed_zero_x")
+            .expect("Failed to get 'mixed_zero_x'");
+        let result = mixed_zero_x
+            .call(&mut store, ())
+            .expect("mixed_zero_x failed");
+        assert_eq!(result, 0, "mixed_zero_x should return 0 (zero-elided field)");
+
+        let mixed_zero_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "mixed_zero_y")
+            .expect("Failed to get 'mixed_zero_y'");
+        let result = mixed_zero_y
+            .call(&mut store, ())
+            .expect("mixed_zero_y failed");
+        assert_eq!(result, 42, "mixed_zero_y should return 42 (non-zero field preserved)");
 
         let _memory = instance
             .get_memory(&mut store, "memory")

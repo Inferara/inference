@@ -2872,15 +2872,15 @@ impl Compiler {
     /// This is a conservative, local check with no side effects in any matched
     /// pattern. Only false negatives are possible (e.g., `0x0`, `0_0`), which
     /// result in a redundant store -- never a missing one.
-    fn is_zero_literal(arena: &AstArena, expr_id: ExprId) -> bool {
+    fn is_compile_time_zero(arena: &AstArena, expr_id: ExprId) -> bool {
         match &arena[expr_id].kind {
             Expr::NumberLiteral { value } => value == "0" || value == "-0",
             Expr::BoolLiteral { value } => !value,
-            Expr::Parenthesized { expr } => Self::is_zero_literal(arena, *expr),
+            Expr::Parenthesized { expr } => Self::is_compile_time_zero(arena, *expr),
             Expr::PrefixUnary {
                 op: UnaryOperatorKind::Neg,
                 expr,
-            } => Self::is_zero_literal(arena, *expr),
+            } => Self::is_compile_time_zero(arena, *expr),
             _ => false,
         }
     }
@@ -2892,8 +2892,10 @@ impl Compiler {
     /// to recursively emit field stores. Non-literal struct elements (identifiers,
     /// function calls) are handled via `memory.copy`.
     ///
-    /// Zero-valued elements are skipped because the function prologue's
-    /// `memory.fill 0` already initialized the frame to zero (see AD-1, AD-4).
+    /// Zero-valued elements are skipped unconditionally because this function is
+    /// only called from frame-local initialization (via `lower_expression`), never
+    /// from sret return paths. The function prologue's `memory.fill 0` guarantees
+    /// the frame is already zeroed.
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
@@ -2947,7 +2949,7 @@ impl Compiler {
         } else {
             let store_instr = memory::store_instruction_from_slot(slot);
             for (i, &element_id) in elements.iter().enumerate() {
-                if Self::is_zero_literal(arena, element_id) {
+                if Self::is_compile_time_zero(arena, element_id) {
                     continue;
                 }
                 #[allow(clippy::cast_possible_truncation)]
@@ -2992,6 +2994,11 @@ impl Compiler {
         skip_zero_stores: bool,
     ) {
         let field_slots_clone = field_slots.to_vec();
+        debug_assert!(
+            !skip_zero_stores
+                || frame_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
+            "zero-store elision requires frame pointer base, got local {frame_ptr_local}"
+        );
         for (i, &element_id) in elements.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let base_offset = slot_offset
@@ -3095,9 +3102,10 @@ impl Compiler {
     /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
     ///
     /// When `skip_zero_stores` is `true`, scalar fields and nested array elements that
-    /// are compile-time zero literals are skipped because the function prologue's
+    /// are compile-time zero values are skipped because the function prologue's
     /// `memory.fill 0` already initialized the frame to zero. This flag must be `false`
-    /// for sret return paths where the destination is caller memory (see AD-4).
+    /// for sret return paths where the destination is caller memory, not the callee's
+    /// zero-filled frame.
     ///
     /// NOTE: This function is recursive for nested compound types, but analysis
     /// rule A026 permanently limits nesting to one level. If A026 were ever
@@ -3119,6 +3127,11 @@ impl Compiler {
             depth < 3,
             "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
              A026 bounds nesting to one level (max expected depth is 2)"
+        );
+        debug_assert!(
+            !skip_zero_stores
+                || base_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
+            "zero-store elision requires frame pointer base, got local {base_ptr_local}"
         );
 
         for &(field_name_id, field_value_expr_id) in fields {
@@ -3184,7 +3197,7 @@ impl Compiler {
                         let store_instr = memory::store_instruction(elem_kind);
                         let elements: Vec<_> = elements.clone();
                         for (i, &element_id) in elements.iter().enumerate() {
-                            if skip_zero_stores && Self::is_zero_literal(arena, element_id) {
+                            if skip_zero_stores && Self::is_compile_time_zero(arena, element_id) {
                                 continue;
                             }
                             #[allow(clippy::cast_possible_truncation)]
@@ -3203,7 +3216,7 @@ impl Compiler {
                     }
                 }
                 memory::CompoundFieldLayout::Scalar => {
-                    if !(skip_zero_stores && Self::is_zero_literal(arena, field_value_expr_id)) {
+                    if !(skip_zero_stores && Self::is_compile_time_zero(arena, field_value_expr_id)) {
                         let store_instr = memory::store_instruction(&field_slot.type_kind);
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);

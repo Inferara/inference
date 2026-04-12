@@ -18,3 +18,23 @@ pub fn make_mixed() -> i32 {
     let m: Mixed = Mixed { flag: true, val: 100 };
     return 0;
 }
+
+pub fn zero_point_x() -> i32 {
+    let p: Point = Point { x: 0, y: 0 };
+    return p.x;
+}
+
+pub fn zero_point_y() -> i32 {
+    let p: Point = Point { x: 0, y: 0 };
+    return p.y;
+}
+
+pub fn mixed_zero_x() -> i32 {
+    let p: Point = Point { x: 0, y: 42 };
+    return p.x;
+}
+
+pub fn mixed_zero_y() -> i32 {
+    let p: Point = Point { x: 0, y: 42 };
+    return p.y;
+}
