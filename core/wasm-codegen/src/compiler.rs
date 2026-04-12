@@ -244,6 +244,11 @@ pub(crate) struct Compiler {
     frame_layout: Option<FrameLayout>,
     loop_ctx: LoopContext,
     parent_blocks_stack: Vec<BlockKind>,
+    /// When true, zero-valued stores into frame memory can be elided because
+    /// the function prologue's `memory.fill 0` guarantees all slots start at
+    /// zero. Set only during variable initialization (`Stmt::VarDef`), never
+    /// during assignment where slots may hold non-zero data.
+    init_zero_elision: bool,
 }
 
 impl Compiler {
@@ -270,6 +275,7 @@ impl Compiler {
             frame_layout: None,
             loop_ctx: LoopContext::default(),
             parent_blocks_stack: Vec::new(),
+            init_zero_elision: false,
         }
     }
 
@@ -1154,7 +1160,9 @@ impl Compiler {
                                 ctx,
                             );
                         } else {
+                            self.init_zero_elision = true;
                             self.lower_expression(arena, val_expr_id, ctx, Some(&var_name));
+                            self.init_zero_elision = false;
                             self.func().instruction(&Instruction::LocalSet(local_idx));
                         }
                     }
@@ -2892,12 +2900,12 @@ impl Compiler {
     /// to recursively emit field stores. Non-literal struct elements (identifiers,
     /// function calls) are handled via `memory.copy`.
     ///
-    /// Zero-valued elements are skipped unconditionally because this function is
-    /// only called from frame-local initialization (via `lower_expression`), never
-    /// from sret return paths. Sret returns use `lower_array_sret_return` directly,
-    /// which emits stores unconditionally because the sret destination is caller
-    /// memory (not zero-filled by this function's prologue). The function prologue's
-    /// `memory.fill 0` guarantees the frame is already zeroed.
+    /// Zero-valued elements are skipped when `init_zero_elision` is set, which is
+    /// only true during variable initialization (not assignment). This is safe
+    /// because the function prologue's `memory.fill 0` guarantees the frame is
+    /// zeroed at initialization time, but assignment may target slots with
+    /// non-zero data from prior operations. Sret returns use
+    /// `lower_array_sret_return` directly, which always emits stores.
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
@@ -2946,12 +2954,12 @@ impl Compiler {
                 slot_offset,
                 slot_elem_size,
                 ctx,
-                true,
+                self.init_zero_elision,
             );
         } else {
             let store_instr = memory::store_instruction_from_slot(slot);
             for (i, &element_id) in elements.iter().enumerate() {
-                if Self::is_syntactic_zero(arena, element_id) {
+                if self.init_zero_elision && Self::is_syntactic_zero(arena, element_id) {
                     continue;
                 }
                 #[allow(clippy::cast_possible_truncation)]
@@ -3078,7 +3086,7 @@ impl Compiler {
             ctx,
             enclosing_var_name,
             0,
-            true,
+            self.init_zero_elision,
         );
 
         self.func()
