@@ -2876,8 +2876,8 @@ impl Compiler {
         match &arena[expr_id].kind {
             Expr::NumberLiteral { value } => value == "0" || value == "-0",
             Expr::BoolLiteral { value } => !value,
-            Expr::Parenthesized { expr } => Self::is_syntactic_zero(arena, *expr),
-            Expr::PrefixUnary {
+            Expr::Parenthesized { expr }
+            | Expr::PrefixUnary {
                 op: UnaryOperatorKind::Neg,
                 expr,
             } => Self::is_syntactic_zero(arena, *expr),
