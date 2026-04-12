@@ -2859,7 +2859,7 @@ impl Compiler {
         }
     }
 
-    /// Returns `true` if the expression is a compile-time zero value that matches
+    /// Returns `true` if the expression is a syntactic zero value that matches
     /// what `memory.fill 0` writes. Used to skip redundant stores into frame slots
     /// that were already zero-initialized by the function prologue.
     ///
@@ -2872,15 +2872,15 @@ impl Compiler {
     /// This is a conservative, local check with no side effects in any matched
     /// pattern. Only false negatives are possible (e.g., `0x0`, `0_0`), which
     /// result in a redundant store -- never a missing one.
-    fn is_compile_time_zero(arena: &AstArena, expr_id: ExprId) -> bool {
+    fn is_syntactic_zero(arena: &AstArena, expr_id: ExprId) -> bool {
         match &arena[expr_id].kind {
             Expr::NumberLiteral { value } => value == "0" || value == "-0",
             Expr::BoolLiteral { value } => !value,
-            Expr::Parenthesized { expr } => Self::is_compile_time_zero(arena, *expr),
+            Expr::Parenthesized { expr } => Self::is_syntactic_zero(arena, *expr),
             Expr::PrefixUnary {
                 op: UnaryOperatorKind::Neg,
                 expr,
-            } => Self::is_compile_time_zero(arena, *expr),
+            } => Self::is_syntactic_zero(arena, *expr),
             _ => false,
         }
     }
@@ -2894,8 +2894,10 @@ impl Compiler {
     ///
     /// Zero-valued elements are skipped unconditionally because this function is
     /// only called from frame-local initialization (via `lower_expression`), never
-    /// from sret return paths. The function prologue's `memory.fill 0` guarantees
-    /// the frame is already zeroed.
+    /// from sret return paths. Sret returns use `lower_array_sret_return` directly,
+    /// which emits stores unconditionally because the sret destination is caller
+    /// memory (not zero-filled by this function's prologue). The function prologue's
+    /// `memory.fill 0` guarantees the frame is already zeroed.
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
@@ -2949,7 +2951,7 @@ impl Compiler {
         } else {
             let store_instr = memory::store_instruction_from_slot(slot);
             for (i, &element_id) in elements.iter().enumerate() {
-                if Self::is_compile_time_zero(arena, element_id) {
+                if Self::is_syntactic_zero(arena, element_id) {
                     continue;
                 }
                 #[allow(clippy::cast_possible_truncation)]
@@ -3102,7 +3104,7 @@ impl Compiler {
     /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
     ///
     /// When `skip_zero_stores` is `true`, scalar fields and nested array elements that
-    /// are compile-time zero values are skipped because the function prologue's
+    /// are syntactic zero values are skipped because the function prologue's
     /// `memory.fill 0` already initialized the frame to zero. This flag must be `false`
     /// for sret return paths where the destination is caller memory, not the callee's
     /// zero-filled frame.
@@ -3197,7 +3199,7 @@ impl Compiler {
                         let store_instr = memory::store_instruction(elem_kind);
                         let elements: Vec<_> = elements.clone();
                         for (i, &element_id) in elements.iter().enumerate() {
-                            if skip_zero_stores && Self::is_compile_time_zero(arena, element_id) {
+                            if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
                                 continue;
                             }
                             #[allow(clippy::cast_possible_truncation)]
@@ -3216,7 +3218,7 @@ impl Compiler {
                     }
                 }
                 memory::CompoundFieldLayout::Scalar => {
-                    if !(skip_zero_stores && Self::is_compile_time_zero(arena, field_value_expr_id)) {
+                    if !(skip_zero_stores && Self::is_syntactic_zero(arena, field_value_expr_id)) {
                         let store_instr = memory::store_instruction(&field_slot.type_kind);
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
                         self.lower_expression(arena, field_value_expr_id, ctx, None);
