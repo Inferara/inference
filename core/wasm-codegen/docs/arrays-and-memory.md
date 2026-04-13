@@ -489,6 +489,59 @@ i32.load / i64.load / ...  ;; load element
 
 The same three-case specialization applies to array index writes (`arr[i] = x`): zero-index emits no offset instruction, constant non-zero index folds to a single `i32.const`, and variable index uses runtime multiply.
 
+## Zero-Store Elision During Initialization
+
+The function prologue emits `memory.fill 0` to zero-initialize the entire stack frame before any instructions run. This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
+
+### The Optimization
+
+During variable initialization (inside a `Stmt::VarDef` handler), the compiler sets the `init_zero_elision` flag on the `Compiler` struct to `true` before calling the expression lowering path, and resets it to `false` immediately after. While this flag is set:
+
+- **Scalar array elements** — if `is_syntactic_zero(element_expr)` returns `true`, the element's store is skipped entirely.
+- **Struct scalar fields** — if `is_syntactic_zero(field_value_expr)` returns `true`, the field's store is skipped.
+- **Struct nested-array field elements** — each element is checked individually; zero elements are skipped.
+
+The flag is threaded into recursive helpers as the `skip_zero_stores: bool` parameter on `lower_struct_literal_fields` and the struct-element array path in `lower_array_literal`.
+
+### Recognized Zero Patterns
+
+`is_syntactic_zero` recognizes the following syntactic forms as producing a zero value:
+
+| Expression | Reason |
+|---|---|
+| `NumberLiteral { value: "0" }` | Literal zero |
+| `NumberLiteral { value: "-0" }` | Negative-zero literal (same bit pattern) |
+| `BoolLiteral { value: false }` | Stored as `i32` 0 |
+| `Parenthesized(e)` where `e` is zero | Transparent wrapper |
+| `PrefixUnary { op: Neg, expr: e }` where `e` is zero | `-(0)` == 0 |
+
+This is a conservative check: only false negatives are possible (e.g., `0x0` or `0_0` are not recognized and will emit a redundant store). False positives — incorrectly skipping a non-zero store — cannot occur.
+
+### Why Initialization Only
+
+The optimization applies exclusively to `VarDef` (`let`/`const`) initialization, never to assignment (`x = value;`). During assignment, the destination slot may hold non-zero data from a prior operation. Emitting no store would leave stale data in memory — a correctness bug. The `init_zero_elision` flag is never set during the assignment path, which guarantees that `lower_struct_literal_fields` with `skip_zero_stores = true` is only called when the destination is a freshly-zeroed frame slot.
+
+As a defense-in-depth assertion, both `lower_struct_literal_fields` and the struct-element array path assert that `skip_zero_stores` is only `true` when `frame_ptr_local` equals the function's own `frame_layout.frame_ptr_local`. This catches any future caller that incorrectly passes a non-frame pointer with elision enabled.
+
+The sret return path (`lower_array_sret_return`, `lower_struct_literal` in sret context) always passes `skip_zero_stores = false` because the destination is the caller's frame, not the callee's zero-filled frame.
+
+### Effect on Code Size
+
+The elision eliminates a cluster of instructions for each zero element:
+
+```wasm
+;; Without elision (arr[0] = 0, frame already zero):
+local.get $__frame_ptr
+i32.const 0
+i32.add
+i32.const 0
+i32.store          ;; redundant — frame was already 0
+
+;; With elision: no instructions emitted for this element
+```
+
+For a `[i32; 8]` array initialized to all zeros, eight 4-instruction sequences (32 instructions total) are eliminated. For struct literals with many zero fields the savings scale proportionally.
+
 ## Array Return Types (sret Calling Convention)
 
 Functions that return array types use the **sret** (struct-return) calling convention. Returning a raw pointer to the callee's stack frame would produce a dangling pointer — the frame is freed in the epilogue before the caller can read the data. The sret convention avoids this by letting the caller own the destination storage.
