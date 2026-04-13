@@ -70,10 +70,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_second_field (;1;) (type 1) (result i32)
@@ -128,10 +124,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $sum_all_x (;2;) (type 2) (result i32)
@@ -194,10 +186,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $write_element_field (;3;) (type 3) (result i32)
@@ -241,10 +229,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $copy_element_to_var (;4;) (type 4) (result i32)
@@ -302,10 +286,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $write_whole_element (;5;) (type 5) (result i32)
@@ -369,10 +349,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $array_of_structs_param (;6;) (type 6) (param $pts i32) (result i32)
@@ -406,10 +382,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_on_element (;7;) (type 7) (result i32)
@@ -460,10 +432,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Point.sum (;8;) (type 8) (param $self i32) (result i32)

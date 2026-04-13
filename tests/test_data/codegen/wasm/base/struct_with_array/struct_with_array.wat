@@ -63,10 +63,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_arr_first (;1;) (type 1) (result i32)
@@ -107,10 +103,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $read_arr_last (;2;) (type 2) (result i32)
@@ -153,10 +145,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $write_arr_element (;3;) (type 3) (result i32)
@@ -204,10 +192,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $sum_arr_and_val (;4;) (type 4) (result i32)
@@ -265,10 +249,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $struct_with_array_param (;5;) (type 5) (param $s i32) (result i32)
@@ -300,10 +280,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $struct_with_array_return (;6;) (type 6) (param $sret i32)
@@ -346,10 +322,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_get_arr_elem (;7;) (type 7) (result i32)
@@ -391,10 +363,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_method_sum_arr (;8;) (type 8) (result i32)
@@ -435,10 +403,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $HasArray.get_arr_elem (;9;) (type 9) (param $self i32) (param $idx i32) (result i32)

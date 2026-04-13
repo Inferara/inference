@@ -70,10 +70,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 48
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_deep_inner_val (;1;) (type 1) (result i32)
@@ -131,10 +127,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 48
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_deep_tag (;2;) (type 2) (result i32)
@@ -192,10 +184,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 48
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_deep_inner_arr_sum (;3;) (type 3) (result i32)
@@ -261,10 +249,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 48
-    i32.add
-    global.set 0
     unreachable
   )
   (func $deep_param (;4;) (type 4) (param $d i32) (result i32)
@@ -296,10 +280,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $deep_return (;5;) (type 5) (param $sret i32)
@@ -357,10 +337,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 48
-    i32.add
-    global.set 0
     unreachable
   )
 )

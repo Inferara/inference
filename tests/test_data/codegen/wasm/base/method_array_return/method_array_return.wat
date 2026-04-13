@@ -46,10 +46,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_to_array_second (;1;) (type 1) (result i32)
@@ -91,10 +87,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Pair.to_array (;2;) (type 2) (param $sret i32) (param $self i32)
@@ -133,10 +125,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $Pair.get_x (;3;) (type 3) (param $self i32) (result i32)

@@ -56,10 +56,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_new_y (;1;) (type 1) (result i32)
@@ -86,10 +82,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_origin (;2;) (type 2) (result i32)
@@ -117,10 +109,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_sum_of (;3;) (type 3) (result i32)
@@ -158,10 +146,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_new (;5;) (type 5) (param $sret i32) (param $x i32) (param $y i32)
@@ -190,10 +174,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_new_direct (;6;) (type 6) (param $sret i32) (param $x i32) (param $y i32)
@@ -228,10 +208,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_new_get_y (;8;) (type 8) (result i32)
@@ -258,10 +234,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_new_direct_get_x (;9;) (type 9) (result i32)
@@ -288,10 +260,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_return_new_direct_get_y (;10;) (type 10) (result i32)
@@ -318,10 +286,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $test_standalone (;11;) (type 11) (result i32)

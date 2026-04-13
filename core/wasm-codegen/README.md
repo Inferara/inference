@@ -51,7 +51,17 @@ Typed AST (TypedContext)
    footprint and are treated identically to `i32` scalars in locals, parameters, return
    values, and array elements (using the same `i32.load`/`i32.store` as `u32`).
    Array and struct variables automatically get frame
-   allocation code (prologue) and deallocation code (epilogue). Array index access
+   allocation code (prologue) and deallocation code (epilogue). During variable
+   initialization (`let` and `const`), array and struct literal elements whose value is
+   syntactically zero (the literal `0`, `-0`, `false`, or any of these wrapped in
+   parentheses or a unary negation) are not stored to linear memory; the function
+   prologue's `memory.fill 0` already guarantees those bytes are zero. This
+   zero-store elision applies only at initialization time — assignment statements always
+   emit stores regardless of value because the destination may hold non-zero data from
+   a prior operation. The elision is controlled by the `init_zero_elision` flag on
+   `Compiler` and the `skip_zero_stores` parameter on `lower_struct_literal_fields`.
+   See [docs/arrays-and-memory.md](docs/arrays-and-memory.md) for details.
+   Array index access
    (read/write) compiles to load/store instructions with computed addresses. Struct field
    access (`p.x`) compiles to a load at `struct_pointer + field_offset`; struct field
    assignment (`p.x = v`) compiles to a store at the same address. Compound fields
@@ -331,12 +341,20 @@ Test data includes:
 - `array_literal.inf` - Fixed-size array literal declarations with i32 and bool element types,
   including single-element and multi-array cases; validated against `inf_wasmparser` and
   executed via wasmtime
+- `array_zero_literal.inf` - Array literal initialization where all or some elements are
+  syntactic zeros (`0`, `false`, `(0)`, `-0`, `-(0)`): verifies that zero-valued stores are
+  elided during `let` initialization (the frame is already zeroed by the prologue's
+  `memory.fill`), that mixed-value arrays emit stores only for non-zero elements, that sret
+  returns via `return [0, 0, 0]` always store (no elision), and that `[true, false, true]`
+  emits stores for the `true` elements but not `false`; validated and executed via wasmtime
 - `array_index.inf` - Array index read access (both constant and variable indices) with i32
   and bool arrays, including reading array elements for use in conditions; validated and
   executed via wasmtime
 - `array_assign.inf` - Array element write operations including simple writes, multiple
   assignments, element swapping, writes with computed indices, and bool array mutations;
-  validated and executed via wasmtime
+  also includes `reassign_zeros` which verifies that zero stores are emitted during
+  assignment (not elided, because the destination may hold non-zero values); validated and
+  executed via wasmtime
 - `array_params.inf` - Array-typed function parameters, copy-on-entry semantics, value
   semantics verification (callee mutations don't affect caller's array), multi-parameter
   functions, and bool array parameters; validated and executed via wasmtime
@@ -344,12 +362,17 @@ Test data includes:
   non-deterministic array initialization (`@`) inside blocks; validated against `inf_wasmparser`
   (non-det modules skip WAT comparison)
 - `struct_literal.inf` - Struct literal initialization: simple structs with i32 fields, single-field
-  structs, and mixed-type structs (`bool`, `i64`); validated against `inf_wasmparser` and executed
-  via wasmtime
+  structs, and mixed-type structs (`bool`, `i64`); also includes structs initialized entirely with
+  zero fields and structs where only some fields are zero — verifies that zero fields are elided
+  during initialization and that non-zero fields are still stored; validated against
+  `inf_wasmparser` and executed via wasmtime
 - `struct_access.inf` - Struct field read access (`p.x`, `p.y`, `p.x + p.y`) for i32, bool, and
   i64 field types; validated and executed via wasmtime
 - `struct_assign.inf` - Assignment to struct fields on mutable struct variables (`p.x = 42`,
-  field swapping, bool field mutation); validated and executed via wasmtime
+  field swapping, bool field mutation); also includes `reassign_zeros` which assigns an all-zero
+  struct literal to an already-initialized variable, verifying that zero stores are not elided
+  during assignment (because the destination already holds non-zero data); validated and executed
+  via wasmtime
 - `struct_params.inf` - Struct-typed function parameters: copy-on-entry value semantics
   (callee mutations don't affect caller's struct), mixed-type struct params, multiple struct
   params; validated and executed via wasmtime

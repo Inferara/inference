@@ -45,10 +45,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $bool_array (;1;) (type 1) (result i32)
@@ -68,19 +64,9 @@
     i32.const 1
     i32.store8
     local.get $__frame_ptr
-    i32.const 1
-    i32.add
-    i32.const 0
-    i32.store8
-    local.get $__frame_ptr
     i32.const 2
     i32.add
     i32.const 1
-    i32.store8
-    local.get $__frame_ptr
-    i32.const 3
-    i32.add
-    i32.const 0
     i32.store8
     local.get $__frame_ptr
     local.set $flags
@@ -90,10 +76,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $two_arrays (;2;) (type 2) (result i32)
@@ -139,10 +121,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $single_element (;3;) (type 3) (result i32)
@@ -169,10 +147,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )

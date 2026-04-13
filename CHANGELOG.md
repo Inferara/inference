@@ -99,6 +99,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Struct uzumaki with array fields: `let s: HasArray = @;` emits per-element uzumaki for array-typed fields
   - `element_layout: Option<Vec<StructFieldSlot>>` on `ArraySlot` for cached struct-element array layouts
   - One level of compound nesting permitted (enforced by analysis rule A026)
+- Add per-element zero-store elision in array and struct literal codegen ([#188])
+  - Individual stores of zero-valued elements skipped during variable initialization — the prologue `memory.fill 0` already zeroed the frame
+  - Per-element granularity: mixed arrays like `[0, 1, 0]` emit only the non-zero store
+  - `is_syntactic_zero()` recognizes `0`, `-0`, `false`, parenthesized and negated zero forms
+  - Applies to scalar arrays, struct fields, nested array-in-struct and struct-in-array fields
+  - Correctly scoped to frame-local initialization only — sret return paths and assignment always emit all stores
+  - `init_zero_elision` flag on `Compiler` gates elision to `VarDef` context; `skip_zero_stores` parameter threads through recursive helpers
+- Eliminate dead trailing epilogue in non-void functions ([#188])
+  - Remove unreachable `emit_stack_epilogue` before the trailing `unreachable` sentinel
+  - Each `return` statement already emits its own epilogue; the trailing one was dead code
+  - Precondition: analysis rule A007 guarantees all non-void functions return on every path
+  - Reduces WASM binary size across all non-void functions with stack frames
 - Add assignment statement lowering to WebAssembly codegen ([#146])
   - `mut` keyword support in AST: `is_mut: bool` field on `VariableDefinitionStatement`
   - Mutability enforcement in type-checker: `AssignToImmutable` error for assignment to non-`mut` variables
@@ -632,3 +644,4 @@ Initial tagged release.
 [#161]: https://github.com/Inferara/inference/pull/185
 [#162]: https://github.com/Inferara/inference/pull/178
 [#179]: https://github.com/Inferara/inference/pull/187
+[#188]: https://github.com/Inferara/inference/pull/188

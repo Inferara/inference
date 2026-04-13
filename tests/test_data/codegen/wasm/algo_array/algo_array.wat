@@ -117,10 +117,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $binary_search (;1;) (type 1) (param $target i32) (result i32)
@@ -233,10 +229,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $bubble_sort_element (;2;) (type 2) (param $idx i32) (result i32)
@@ -370,10 +362,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $dot_product (;3;) (type 3) (result i32)
@@ -473,10 +461,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $array_max (;4;) (type 4) (param $n i32) (result i32)
@@ -574,10 +558,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $prefix_sum_element (;5;) (type 5) (param $idx i32) (result i32)
@@ -669,10 +649,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $sum_u8_array (;6;) (type 6) (result i32)
@@ -763,10 +739,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $min_i8_array (;7;) (type 7) (result i32)
@@ -851,10 +823,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $max_i16_array (;8;) (type 8) (result i32)
@@ -939,10 +907,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $sum_u16_array (;9;) (type 9) (result i32)
@@ -1023,10 +987,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $search_u32_array (;10;) (type 10) (param $target i32) (result i32)
@@ -1109,10 +1069,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 32
-    i32.add
-    global.set 0
     unreachable
   )
   (func $dot_product_i64 (;11;) (type 11) (result i64)
@@ -1212,10 +1168,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 64
-    i32.add
-    global.set 0
     unreachable
   )
 )

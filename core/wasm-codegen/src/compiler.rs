@@ -244,6 +244,11 @@ pub(crate) struct Compiler {
     frame_layout: Option<FrameLayout>,
     loop_ctx: LoopContext,
     parent_blocks_stack: Vec<BlockKind>,
+    /// When true, zero-valued stores into frame memory can be elided because
+    /// the function prologue's `memory.fill 0` guarantees all slots start at
+    /// zero. Set only during variable initialization (`Stmt::VarDef`), never
+    /// during assignment where slots may hold non-zero data.
+    init_zero_elision: bool,
 }
 
 impl Compiler {
@@ -270,6 +275,7 @@ impl Compiler {
             frame_layout: None,
             loop_ctx: LoopContext::default(),
             parent_blocks_stack: Vec::new(),
+            init_zero_elision: false,
         }
     }
 
@@ -660,9 +666,12 @@ impl Compiler {
         }
 
         if has_return_value {
-            if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
-                emit_stack_epilogue(func, layout);
-            }
+            // All non-void paths exit via explicit `return` which emits its own epilogue.
+            // The trailing epilogue would be dead code. Keep only `unreachable` so that WASM
+            // validators accept the implicit `end` (unreachable is polymorphic on the stack).
+            // Precondition: analysis rule A007 guarantees all non-void functions return on
+            // every path. Without that guarantee, this site could be the only stack-pointer
+            // restoration on a missing-return path.
             self.func().instruction(&Instruction::Unreachable);
         } else if let (Some(layout), Some(func)) = (&self.frame_layout, &mut self.func) {
             emit_stack_epilogue(func, layout);
@@ -1151,7 +1160,12 @@ impl Compiler {
                                 ctx,
                             );
                         } else {
+                            // Safety: flag is reset immediately after lower_expression.
+                            // No early-return (returns ()) or ? operator in the call.
+                            // Panics are fatal to the compiler process.
+                            self.init_zero_elision = true;
                             self.lower_expression(arena, val_expr_id, ctx, Some(&var_name));
+                            self.init_zero_elision = false;
                             self.func().instruction(&Instruction::LocalSet(local_idx));
                         }
                     }
@@ -1996,6 +2010,7 @@ impl Compiler {
                         0,
                         elem_size,
                         ctx,
+                        false,
                     );
                 } else {
                     let store_instr = memory::store_instruction(&return_info.elem_kind);
@@ -2055,6 +2070,7 @@ impl Compiler {
                     ctx,
                     &self.current_fn_name.clone(),
                     0,
+                    false,
                 );
             }
             Expr::FunctionCall { function, args, .. } => {
@@ -2854,12 +2870,45 @@ impl Compiler {
         }
     }
 
+    /// Returns `true` if the expression is a syntactic zero value that matches
+    /// what `memory.fill 0` writes. Used to skip redundant stores into frame slots
+    /// that were already zero-initialized by the function prologue.
+    ///
+    /// Recognized patterns:
+    /// - `NumberLiteral { value: "0" }` or `NumberLiteral { value: "-0" }`
+    /// - `BoolLiteral { value: false }` (stored as 0)
+    /// - `Parenthesized { expr }` wrapping a zero literal
+    /// - `PrefixUnary { op: Neg, expr }` wrapping a zero literal
+    ///
+    /// This is a conservative, local check with no side effects in any matched
+    /// pattern. Only false negatives are possible (e.g., `0x0`, `0_0`), which
+    /// result in a redundant store -- never a missing one.
+    fn is_syntactic_zero(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::NumberLiteral { value } => value == "0" || value == "-0",
+            Expr::BoolLiteral { value } => !value,
+            Expr::Parenthesized { expr }
+            | Expr::PrefixUnary {
+                op: UnaryOperatorKind::Neg,
+                expr,
+            } => Self::is_syntactic_zero(arena, *expr),
+            _ => false,
+        }
+    }
+
     /// Lowers an array literal expression.
     ///
     /// For scalar-element arrays, emits per-element stores. For struct-element
     /// arrays, uses `lower_struct_literal_fields` at each element's base offset
     /// to recursively emit field stores. Non-literal struct elements (identifiers,
     /// function calls) are handled via `memory.copy`.
+    ///
+    /// Zero-valued elements are skipped when `init_zero_elision` is set, which is
+    /// only true during variable initialization (not assignment). This is safe
+    /// because the function prologue's `memory.fill 0` guarantees the frame is
+    /// zeroed at initialization time, but assignment may target slots with
+    /// non-zero data from prior operations. Sret returns use
+    /// `lower_array_sret_return` directly, which always emits stores.
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
@@ -2908,10 +2957,17 @@ impl Compiler {
                 slot_offset,
                 slot_elem_size,
                 ctx,
+                self.init_zero_elision,
             );
         } else {
             let store_instr = memory::store_instruction_from_slot(slot);
             for (i, &element_id) in elements.iter().enumerate() {
+                // Scalar path checks self.init_zero_elision directly (single call site,
+                // no recursion). Struct/nested paths use skip_zero_stores parameter
+                // for recursive descent through lower_struct_literal_fields.
+                if self.init_zero_elision && Self::is_syntactic_zero(arena, element_id) {
+                    continue;
+                }
                 #[allow(clippy::cast_possible_truncation)]
                 let byte_offset = slot_offset + (i as u32) * slot_elem_size;
                 self.func()
@@ -2951,8 +3007,14 @@ impl Compiler {
         slot_offset: u32,
         elem_size: u32,
         ctx: &TypedContext,
+        skip_zero_stores: bool,
     ) {
         let field_slots_clone = field_slots.to_vec();
+        assert!(
+            !skip_zero_stores
+                || frame_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
+            "zero-store elision requires frame pointer base, got local {frame_ptr_local}"
+        );
         for (i, &element_id) in elements.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let base_offset = slot_offset
@@ -2970,6 +3032,7 @@ impl Compiler {
                     ctx,
                     "<array element>",
                     0,
+                    skip_zero_stores,
                 );
             } else {
                 memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, base_offset);
@@ -3029,6 +3092,7 @@ impl Compiler {
             ctx,
             enclosing_var_name,
             0,
+            self.init_zero_elision,
         );
 
         self.func()
@@ -3053,6 +3117,12 @@ impl Compiler {
     /// For compound fields with non-literal values (identifiers, function calls), emits
     /// `memory.copy` from the source pointer to `base_ptr + base_offset + field.offset`.
     ///
+    /// When `skip_zero_stores` is `true`, scalar fields and nested array elements that
+    /// are syntactic zero values are skipped because the function prologue's
+    /// `memory.fill 0` already initialized the frame to zero. This flag must be `false`
+    /// for sret return paths where the destination is caller memory, not the callee's
+    /// zero-filled frame.
+    ///
     /// NOTE: This function is recursive for nested compound types, but analysis
     /// rule A026 permanently limits nesting to one level. If A026 were ever
     /// relaxed, uzumaki emission would also need extension for deeper nesting.
@@ -3067,11 +3137,17 @@ impl Compiler {
         ctx: &TypedContext,
         struct_name: &str,
         depth: u32,
+        skip_zero_stores: bool,
     ) {
         debug_assert!(
             depth < 3,
             "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
              A026 bounds nesting to one level (max expected depth is 2)"
+        );
+        assert!(
+            !skip_zero_stores
+                || base_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
+            "zero-store elision requires frame pointer base, got local {base_ptr_local}"
         );
 
         for &(field_name_id, field_value_expr_id) in fields {
@@ -3115,6 +3191,7 @@ impl Compiler {
                             ctx,
                             nested_name,
                             depth + 1,
+                            skip_zero_stores,
                         );
                     } else {
                         emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
@@ -3136,6 +3213,9 @@ impl Compiler {
                         let store_instr = memory::store_instruction(elem_kind);
                         let elements: Vec<_> = elements.clone();
                         for (i, &element_id) in elements.iter().enumerate() {
+                            if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
+                                continue;
+                            }
                             #[allow(clippy::cast_possible_truncation)]
                             let elem_byte_offset = offset + (i as u32) * elem_size;
                             emit_ptr_offset_addr(self.func(), base_ptr_local, elem_byte_offset);
@@ -3152,10 +3232,12 @@ impl Compiler {
                     }
                 }
                 memory::CompoundFieldLayout::Scalar => {
-                    let store_instr = memory::store_instruction(&field_slot.type_kind);
-                    emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
-                    self.lower_expression(arena, field_value_expr_id, ctx, None);
-                    self.func().instruction(&store_instr);
+                    if !(skip_zero_stores && Self::is_syntactic_zero(arena, field_value_expr_id)) {
+                        let store_instr = memory::store_instruction(&field_slot.type_kind);
+                        emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
+                        self.lower_expression(arena, field_value_expr_id, ctx, None);
+                        self.func().instruction(&store_instr);
+                    }
                 }
             }
         }

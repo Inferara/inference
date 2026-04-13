@@ -71,10 +71,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_sum (;1;) (type 1) (result i32)
@@ -112,10 +108,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $mutate_copy (;2;) (type 2) (param $arr i32) (result i32)
@@ -163,10 +155,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $verify_copy_semantics (;3;) (type 3) (result i32)
@@ -207,10 +195,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $two_array_params (;4;) (type 4) (param $a i32) (param $b i32) (result i32)
@@ -278,10 +262,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_two_params (;5;) (type 5) (result i32)
@@ -329,10 +309,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $bool_array_param (;6;) (type 6) (param $flags i32) (result i32)
@@ -392,10 +368,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
   (func $call_bool_param (;7;) (type 7) (result i32)
@@ -415,11 +387,6 @@
     i32.const 1
     i32.store8
     local.get $__frame_ptr
-    i32.const 1
-    i32.add
-    i32.const 0
-    i32.store8
-    local.get $__frame_ptr
     i32.const 2
     i32.add
     i32.const 1
@@ -433,10 +400,6 @@
     i32.add
     global.set 0
     return
-    local.get $__frame_ptr
-    i32.const 16
-    i32.add
-    global.set 0
     unreachable
   )
 )
