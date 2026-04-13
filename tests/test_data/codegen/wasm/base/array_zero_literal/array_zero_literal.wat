@@ -6,6 +6,8 @@
   (type (;4;) (func (param i32)))
   (type (;5;) (func (param i32)))
   (type (;6;) (func (param i32)))
+  (type (;7;) (func (param i32)))
+  (type (;8;) (func (param i32)))
   (memory (;0;) 1 1)
   (global (;0;) (mut i32) i32.const 65536)
   (export "all_zeros_i32" (func $all_zeros_i32))
@@ -15,6 +17,8 @@
   (export "sret_direct_zeros" (func $sret_direct_zeros))
   (export "parenthesized_zeros" (func $parenthesized_zeros))
   (export "negated_zeros" (func $negated_zeros))
+  (export "single_zero" (func $single_zero))
+  (export "mixed_bool" (func $mixed_bool))
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $all_zeros_i32 (;0;) (type 0) (param $sret i32)
@@ -175,6 +179,64 @@
     local.get $sret
     local.get $arr
     i32.const 8
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
+    global.set 0
+    return
+    unreachable
+  )
+  (func $single_zero (;7;) (type 7) (param $sret i32)
+    (local $arr i32) (local $__frame_ptr i32)
+    global.get 0
+    i32.const 16
+    i32.sub
+    local.tee $__frame_ptr
+    global.set 0
+    local.get $__frame_ptr
+    i32.const 0
+    i32.const 16
+    memory.fill
+    local.get $__frame_ptr
+    local.set $arr
+    local.get $sret
+    local.get $arr
+    i32.const 4
+    memory.copy
+    local.get $__frame_ptr
+    i32.const 16
+    i32.add
+    global.set 0
+    return
+    unreachable
+  )
+  (func $mixed_bool (;8;) (type 8) (param $sret i32)
+    (local $arr i32) (local $__frame_ptr i32)
+    global.get 0
+    i32.const 16
+    i32.sub
+    local.tee $__frame_ptr
+    global.set 0
+    local.get $__frame_ptr
+    i32.const 0
+    i32.const 16
+    memory.fill
+    local.get $__frame_ptr
+    i32.const 0
+    i32.add
+    i32.const 1
+    i32.store8
+    local.get $__frame_ptr
+    i32.const 2
+    i32.add
+    i32.const 1
+    i32.store8
+    local.get $__frame_ptr
+    local.set $arr
+    local.get $sret
+    local.get $arr
+    i32.const 3
     memory.copy
     local.get $__frame_ptr
     i32.const 16

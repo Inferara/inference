@@ -2959,6 +2959,9 @@ impl Compiler {
         } else {
             let store_instr = memory::store_instruction_from_slot(slot);
             for (i, &element_id) in elements.iter().enumerate() {
+                // Scalar path checks self.init_zero_elision directly (single call site,
+                // no recursion). Struct/nested paths use skip_zero_stores parameter
+                // for recursive descent through lower_struct_literal_fields.
                 if self.init_zero_elision && Self::is_syntactic_zero(arena, element_id) {
                     continue;
                 }
@@ -3004,7 +3007,7 @@ impl Compiler {
         skip_zero_stores: bool,
     ) {
         let field_slots_clone = field_slots.to_vec();
-        debug_assert!(
+        assert!(
             !skip_zero_stores
                 || frame_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
             "zero-store elision requires frame pointer base, got local {frame_ptr_local}"
@@ -3138,7 +3141,7 @@ impl Compiler {
             "lower_struct_literal_fields recursion depth {depth} exceeds limit; \
              A026 bounds nesting to one level (max expected depth is 2)"
         );
-        debug_assert!(
+        assert!(
             !skip_zero_stores
                 || base_ptr_local == self.frame_layout.as_ref().unwrap().frame_ptr_local,
             "zero-store elision requires frame pointer base, got local {base_ptr_local}"

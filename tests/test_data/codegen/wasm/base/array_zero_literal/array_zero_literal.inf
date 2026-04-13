@@ -31,3 +31,13 @@ pub fn negated_zeros() -> [i32; 2] {
     let arr: [i32; 2] = [-(0), -0];
     return arr;
 }
+
+pub fn single_zero() -> [i32; 1] {
+    let arr: [i32; 1] = [0];
+    return arr;
+}
+
+pub fn mixed_bool() -> [bool; 3] {
+    let arr: [bool; 3] = [true, false, true];
+    return arr;
+}

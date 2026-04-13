@@ -1212,9 +1212,9 @@ mod base_codegen_tests {
 
     #[test]
     fn array_zero_literal_test() {
-        cov_mark::check_count!(wasm_codegen_emit_array_literal, 6);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 8);
         let test_name = "array_zero_literal";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1369,6 +1369,33 @@ mod base_codegen_tests {
                 let val = i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
                 assert_eq!(val, 0, "negated_zeros[{i}] should be 0");
             }
+        }
+
+        {
+            let single_zero: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "single_zero")
+                .expect("Failed to get 'single_zero'");
+            let sret_ptr: i32 = 0;
+            single_zero
+                .call(&mut store, sret_ptr)
+                .expect("single_zero failed");
+            let data = memory.data(&store);
+            let val = i32::from_le_bytes(data[0..4].try_into().unwrap());
+            assert_eq!(val, 0, "single_zero[0] should be 0");
+        }
+
+        {
+            let mixed_bool: wasmtime::TypedFunc<i32, ()> = instance
+                .get_typed_func(&mut store, "mixed_bool")
+                .expect("Failed to get 'mixed_bool'");
+            let sret_ptr: i32 = 0;
+            mixed_bool
+                .call(&mut store, sret_ptr)
+                .expect("mixed_bool failed");
+            let data = memory.data(&store);
+            assert_eq!(data[0], 1, "mixed_bool[0] should be 1 (true)");
+            assert_eq!(data[1], 0, "mixed_bool[1] should be 0 (false, zero-elided)");
+            assert_eq!(data[2], 1, "mixed_bool[2] should be 1 (true)");
         }
     }
 
@@ -6222,6 +6249,8 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_nondet_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains nondet patterns
+        // (uzumaki, forall, exists, assume, unique) that analysis would reject.
         let dir = base_test_dir().join("nondet");
         let source_code =
             std::fs::read_to_string(dir.join("nondet.inf")).expect("Failed to read nondet.inf");
@@ -6242,6 +6271,8 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_i64_uzumaki_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains uzumaki (@) patterns
+        // that analysis would reject.
         let dir = base_test_dir().join("i64_uzumaki");
         let source_code = std::fs::read_to_string(dir.join("i64_uzumaki.inf"))
             .expect("Failed to read i64_uzumaki.inf");
@@ -6334,6 +6365,8 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_local_variables_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains nondet patterns
+        // that analysis would reject.
         let dir = base_test_dir().join("local_variables");
         let source_code = std::fs::read_to_string(dir.join("local_variables.inf"))
             .expect("Failed to read local_variables.inf");
@@ -6512,6 +6545,8 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_assign_nondet_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains nondet patterns
+        // that analysis would reject.
         let dir = base_test_dir().join("assign_nondet");
         let source_code = std::fs::read_to_string(dir.join("assign_nondet.inf"))
             .expect("Failed to read assign_nondet.inf");
@@ -6612,6 +6647,8 @@ mod regenerate {
     #[test]
     #[ignore]
     fn regenerate_array_nondet_wasm() {
+        // Uses wasm_codegen_no_analysis: fixture contains nondet patterns
+        // (forall, exists, uzumaki on arrays) that analysis would reject.
         let dir = base_test_dir().join("array_nondet");
         let source_code = std::fs::read_to_string(dir.join("array_nondet.inf"))
             .expect("Failed to read array_nondet.inf");
