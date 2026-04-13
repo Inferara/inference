@@ -1160,6 +1160,9 @@ impl Compiler {
                                 ctx,
                             );
                         } else {
+                            // Safety: flag is reset immediately after lower_expression.
+                            // No early-return (returns ()) or ? operator in the call.
+                            // Panics are fatal to the compiler process.
                             self.init_zero_elision = true;
                             self.lower_expression(arena, val_expr_id, ctx, Some(&var_name));
                             self.init_zero_elision = false;
