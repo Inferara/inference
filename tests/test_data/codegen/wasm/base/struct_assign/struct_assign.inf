@@ -24,3 +24,9 @@ pub fn modify_bool() -> i32 {
     }
     return 0;
 }
+
+pub fn reassign_zeros() -> i32 {
+    let mut p: Point = Point { x: 10, y: 20 };
+    p = Point { x: 0, y: 0 };
+    return p.x + p.y;
+}

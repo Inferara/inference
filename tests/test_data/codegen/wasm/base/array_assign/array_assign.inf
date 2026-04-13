@@ -37,3 +37,9 @@ pub fn write_bool() -> i32 {
     }
     return 0;
 }
+
+pub fn reassign_zeros() -> i32 {
+    let mut arr: [i32; 3] = [1, 2, 3];
+    arr = [0, 0, 0];
+    return arr[0] + arr[1] + arr[2];
+}

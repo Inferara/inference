@@ -1527,10 +1527,10 @@ mod base_codegen_tests {
     #[test]
     fn array_assign_test() {
         cov_mark::check_count!(wasm_codegen_emit_array_index_write, 9);
-        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 11);
-        cov_mark::check_count!(wasm_codegen_emit_array_literal, 5);
-        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 5);
-        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_array_index_read, 14);
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 7);
+        cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 6);
+        cov_mark::check_count!(wasm_codegen_emit_stack_epilogue, 7);
         let test_name = "array_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -1612,6 +1612,20 @@ mod base_codegen_tests {
             .expect("Failed to get 'write_bool'");
         let result = write_bool.call(&mut store, ()).expect("write_bool failed");
         assert_eq!(result, 1, "flags[0]=true, flags[2]=true, both checked -> 1");
+
+        // reassign_zeros: arr=[1,2,3], arr=[0,0,0], return sum -> 0
+        {
+            let reassign_zeros: wasmtime::TypedFunc<(), i32> = instance
+                .get_typed_func(&mut store, "reassign_zeros")
+                .expect("Failed to get 'reassign_zeros'");
+            let result = reassign_zeros
+                .call(&mut store, ())
+                .expect("reassign_zeros failed");
+            assert_eq!(
+                result, 0,
+                "reassign_zeros should return 0 (zero stores must NOT be elided during reassignment)"
+            );
+        }
 
         // Verify stack pointer is fully restored after all calls
         let final_sp = stack_pointer.get(&mut store).i32().unwrap();
@@ -2898,8 +2912,8 @@ mod base_codegen_tests {
     #[test]
     fn struct_assign_test() {
         cov_mark::check_count!(wasm_codegen_emit_member_access_write, 4);
-        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 7);
-        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 3);
+        cov_mark::check_count!(wasm_codegen_emit_member_access_read, 9);
+        cov_mark::check_count!(wasm_codegen_emit_struct_literal, 5);
         let test_name = "struct_assign";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -2963,6 +2977,19 @@ mod base_codegen_tests {
             result, 100,
             "modify_bool should return 100 (f.val when f.flag is set to true)"
         );
+
+        {
+            let reassign_zeros: TypedFunc<(), i32> = instance
+                .get_typed_func(&mut store, "reassign_zeros")
+                .expect("Failed to get 'reassign_zeros'");
+            let result = reassign_zeros
+                .call(&mut store, ())
+                .expect("reassign_zeros failed");
+            assert_eq!(
+                result, 0,
+                "reassign_zeros should return 0 (zero stores must NOT be elided during reassignment)"
+            );
+        }
 
         let _memory = instance
             .get_memory(&mut store, "memory")
