@@ -3,3 +3,9 @@ build-full = "build --workspace"
 test-full = "test --workspace"
 check-full = "check --workspace"
 clippy-w = "clippy --verbose -- -D warnings"
+
+# Workaround for MinGW binutils 2.44+ rejecting multiple weak definitions of
+# `.__rustc_debug_gdb_scripts_section__.default` emitted per codegen-unit under
+# incremental + debuginfo=2. See rust-lang/rust#128981.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
