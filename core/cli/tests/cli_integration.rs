@@ -196,3 +196,23 @@ fn fails_with_parse_error() {
         .failure()
         .stderr(predicate::str::contains("Parse error"));
 }
+
+/// Verifies that `--commit-hash` prints the embedded git commit and exits 0
+/// without requiring a source file argument.
+///
+/// **Expected behavior**: Exit with code 0, print a non-empty commit string
+/// to stdout (either the short git hash or the `unknown` fallback).
+#[test]
+fn commit_hash_flag_prints_and_exits() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.arg("--commit-hash");
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let hash = stdout.trim();
+    assert!(!hash.is_empty(), "commit-hash stdout was empty");
+    assert!(
+        hash == "unknown" || hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "commit-hash stdout was not hex or 'unknown': {hash:?}"
+    );
+}
