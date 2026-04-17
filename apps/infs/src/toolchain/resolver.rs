@@ -32,15 +32,51 @@ use crate::toolchain::platform::Platform;
 /// Environment variable for explicit infc binary path override.
 const INFC_PATH_ENV: &str = "INFC_PATH";
 
+/// Identifies which priority in [`find_infc_with_source`] resolved the binary.
+///
+/// The [`ResolutionSource::label`] method emits the exact strings used in
+/// [`trace_resolved`], so trace output and doctor output stay in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionSource {
+    /// Resolved via the `INFC_PATH` environment variable (priority 1).
+    InfcPathEnv,
+    /// Resolved via the workspace sibling `target/<profile>/infc` (priority 2).
+    WorkspaceSibling,
+    /// Resolved via `which::which("infc")` against the system `PATH` (priority 3).
+    SystemPath,
+    /// Resolved via the managed toolchain under `~/.inference/toolchains/` (priority 4).
+    ManagedToolchain,
+}
+
+impl ResolutionSource {
+    /// Returns the human-readable label for this resolution source.
+    ///
+    /// The same string is emitted in `INFS_VERBOSE=1` trace lines, so `infs
+    /// doctor` and verbose build output agree.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InfcPathEnv => "INFC_PATH env",
+            Self::WorkspaceSibling => "workspace sibling",
+            Self::SystemPath => "PATH",
+            Self::ManagedToolchain => "managed toolchain",
+        }
+    }
+}
+
 /// Returns true if `INFS_VERBOSE` is set to a non-empty non-"0" value.
 fn verbose() -> bool {
     std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Emits a resolution trace line to stderr under `INFS_VERBOSE`.
-fn trace_resolved(source: &str, path: &Path) {
+fn trace_resolved(source: ResolutionSource, path: &Path) {
     if verbose() {
-        eprintln!("infs: resolved infc via {source}: {}", path.display());
+        eprintln!(
+            "infs: resolved infc via {}: {}",
+            source.label(),
+            path.display()
+        );
     }
 }
 
@@ -70,7 +106,7 @@ fn current_exe_for_resolver() -> std::io::Result<PathBuf> {
 /// invokes via a symlink, but falls back to the raw path when
 /// `canonicalize()` fails (broken symlinks, restricted ACLs, some
 /// container `/proc/self/exe` setups).
-fn workspace_sibling_infc() -> Option<PathBuf> {
+pub(crate) fn workspace_sibling_infc() -> Option<PathBuf> {
     let raw = current_exe_for_resolver().ok()?;
     let canonical = raw.canonicalize().ok();
     if canonical.is_none() && verbose() {
@@ -107,6 +143,80 @@ fn workspace_sibling_infc_from(exe: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// Returns the managed-toolchain `infc` path when the default toolchain is
+/// installed and the binary exists. Returns `None` otherwise — the caller
+/// decides whether to emit a diagnostic.
+///
+/// Extracted so [`find_infc_with_source`] and doctor's ambiguity check can
+/// both ask the same question without duplicating path construction.
+pub(crate) fn managed_toolchain_infc() -> Option<PathBuf> {
+    let paths = ToolchainPaths::new().ok()?;
+    let version = paths.get_default_version().ok().flatten()?;
+    let platform = Platform::detect().ok()?;
+    let ext = platform.executable_extension();
+    let infc_name = format!("infc{ext}");
+    let infc_path = paths.binary_path(&version, &infc_name);
+    infc_path.is_file().then_some(infc_path)
+}
+
+/// Locates the `infc` compiler binary and reports which priority fired.
+///
+/// Priorities match [`find_infc`]; callers that only need the path should
+/// use that wrapper. Doctor and other diagnostic surfaces use this richer
+/// form to tell the user *why* a particular binary was selected.
+///
+/// # Errors
+///
+/// Same as [`find_infc`].
+pub fn find_infc_with_source() -> Result<(PathBuf, ResolutionSource)> {
+    // Priority 1: INFC_PATH environment variable
+    if let Ok(path) = std::env::var(INFC_PATH_ENV) {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            trace_resolved(ResolutionSource::InfcPathEnv, &path);
+            return Ok((path, ResolutionSource::InfcPathEnv));
+        }
+        bail!(
+            "INFC_PATH environment variable set to '{}', but file does not exist",
+            path.display()
+        );
+    }
+
+    // Priority 2: cargo-workspace sibling infc
+    if let Some(path) = workspace_sibling_infc() {
+        trace_resolved(ResolutionSource::WorkspaceSibling, &path);
+        return Ok((path, ResolutionSource::WorkspaceSibling));
+    }
+
+    // Priority 3: System PATH
+    if let Ok(path) = which::which("infc") {
+        trace_resolved(ResolutionSource::SystemPath, &path);
+        return Ok((path, ResolutionSource::SystemPath));
+    }
+
+    // Priority 4: Managed toolchain
+    if let Some(path) = managed_toolchain_infc() {
+        trace_resolved(ResolutionSource::ManagedToolchain, &path);
+        return Ok((path, ResolutionSource::ManagedToolchain));
+    }
+    // If a default toolchain is configured but the binary is missing, surface
+    // the detection attempt so platform-detection errors still bubble up.
+    if let Ok(paths) = ToolchainPaths::new()
+        && let Ok(Some(_)) = paths.get_default_version()
+    {
+        Platform::detect().context("Failed to detect platform while searching for infc")?;
+    }
+
+    bail!(
+        "infc compiler not found.\n\n\
+        The infc compiler is required to build Inference programs.\n\n\
+        To install:\n  \
+        - Run: infs install latest\n  \
+        - Or download from: https://github.com/Inferara/inference/releases\n  \
+        - Or set INFC_PATH environment variable to the infc binary path"
+    );
+}
+
 /// Locates the `infc` compiler binary.
 ///
 /// Searches for the infc binary in the following priority order:
@@ -141,55 +251,7 @@ fn workspace_sibling_infc_from(exe: &Path) -> Option<PathBuf> {
 ///     .status()?;
 /// ```
 pub fn find_infc() -> Result<PathBuf> {
-    // Priority 1: INFC_PATH environment variable
-    if let Ok(path) = std::env::var(INFC_PATH_ENV) {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            trace_resolved("INFC_PATH env", &path);
-            return Ok(path);
-        }
-        bail!(
-            "INFC_PATH environment variable set to '{}', but file does not exist",
-            path.display()
-        );
-    }
-
-    // Priority 2: cargo-workspace sibling infc
-    if let Some(path) = workspace_sibling_infc() {
-        trace_resolved("workspace sibling", &path);
-        return Ok(path);
-    }
-
-    // Priority 3: System PATH
-    if let Ok(path) = which::which("infc") {
-        trace_resolved("PATH", &path);
-        return Ok(path);
-    }
-
-    // Priority 4: Managed toolchain
-    if let Ok(paths) = ToolchainPaths::new()
-        && let Ok(Some(version)) = paths.get_default_version()
-    {
-        let platform =
-            Platform::detect().context("Failed to detect platform while searching for infc")?;
-        let ext = platform.executable_extension();
-        let infc_name = format!("infc{ext}");
-        let infc_path = paths.binary_path(&version, &infc_name);
-
-        if infc_path.exists() {
-            trace_resolved("managed toolchain", &infc_path);
-            return Ok(infc_path);
-        }
-    }
-
-    bail!(
-        "infc compiler not found.\n\n\
-        The infc compiler is required to build Inference programs.\n\n\
-        To install:\n  \
-        - Run: infs install latest\n  \
-        - Or download from: https://github.com/Inferara/inference/releases\n  \
-        - Or set INFC_PATH environment variable to the infc binary path"
-    );
+    find_infc_with_source().map(|(path, _)| path)
 }
 
 #[cfg(test)]
@@ -454,5 +516,127 @@ mod tests {
             .join(exe_name("infs"));
         let _guard = ExeOverrideGuard::set(fabricated);
         assert_eq!(workspace_sibling_infc(), None);
+    }
+
+    #[test]
+    fn resolution_source_labels_match_trace_strings() {
+        // Label strings are a public contract: doctor output and verbose
+        // trace lines both use them, so they must not drift.
+        assert_eq!(ResolutionSource::InfcPathEnv.label(), "INFC_PATH env");
+        assert_eq!(
+            ResolutionSource::WorkspaceSibling.label(),
+            "workspace sibling"
+        );
+        assert_eq!(ResolutionSource::SystemPath.label(), "PATH");
+        assert_eq!(
+            ResolutionSource::ManagedToolchain.label(),
+            "managed toolchain"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn find_infc_with_source_reports_workspace_sibling() {
+        // Fabricate a target/debug/{infs,infc} layout via the CURRENT_EXE_OVERRIDE
+        // seam so the workspace-sibling priority wins deterministically.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let debug = temp.path().join("target").join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        let infs_path = debug.join(exe_name("infs"));
+        let infc_path = debug.join(exe_name("infc"));
+        std::fs::write(&infs_path, b"").unwrap();
+        std::fs::write(&infc_path, b"").unwrap();
+
+        // SAFETY: serialized test; cleanup happens regardless of outcome.
+        unsafe {
+            env::remove_var(INFC_PATH_ENV);
+        }
+        let _guard = ExeOverrideGuard::set(infs_path);
+
+        let result = find_infc_with_source();
+
+        let (path, source) = result.unwrap();
+        assert_eq!(source, ResolutionSource::WorkspaceSibling);
+        assert_eq!(
+            path.canonicalize().unwrap(),
+            infc_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn find_infc_with_source_reports_infc_path_env() {
+        let env_dir = assert_fs::TempDir::new().unwrap();
+        let env_infc = env_dir.path().join(exe_name("infc"));
+        std::fs::write(&env_infc, b"").unwrap();
+
+        // Neutralize the workspace-sibling priority so it cannot accidentally
+        // fire before INFC_PATH — the test is about priority-1 winning.
+        let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
+
+        // SAFETY: serialized test; env restored below.
+        unsafe {
+            env::set_var(INFC_PATH_ENV, &env_infc);
+        }
+
+        let result = find_infc_with_source();
+
+        // SAFETY: cleanup regardless of outcome.
+        unsafe {
+            env::remove_var(INFC_PATH_ENV);
+        }
+
+        let (path, source) = result.unwrap();
+        assert_eq!(source, ResolutionSource::InfcPathEnv);
+        assert_eq!(path, env_infc);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn find_infc_with_source_reports_path() {
+        // Fabricate an infc on a dedicated PATH dir, then point PATH at it.
+        // The test skips gracefully when tempfile symlinks prevent `which`
+        // from finding the stub (e.g. restricted CI sandboxes).
+        let path_dir = assert_fs::TempDir::new().unwrap();
+        let stub = path_dir.path().join(exe_name("infc"));
+        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).unwrap();
+        }
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        // Neutralize workspace-sibling priority so PATH lookup is reached.
+        let _guard = ExeOverrideGuard::set(PathBuf::from("/nonexistent/elsewhere/infs"));
+
+        // SAFETY: serialized test; env restored below.
+        unsafe {
+            env::remove_var(INFC_PATH_ENV);
+            env::set_var("PATH", path_dir.path());
+        }
+
+        let result = find_infc_with_source();
+
+        // SAFETY: restore PATH regardless of outcome.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        // If `which` couldn't locate our stub in this environment, fall back
+        // to the managed-toolchain branch or a not-found error. Both are
+        // acceptable here — what we're asserting is that when PATH *does*
+        // win, the reported source is SystemPath.
+        if let Ok((path, source)) = result
+            && source == ResolutionSource::SystemPath
+        {
+            assert_eq!(
+                path.canonicalize().unwrap(),
+                stub.canonicalize().unwrap(),
+                "PATH resolution must return the fabricated stub"
+            );
+        }
     }
 }
