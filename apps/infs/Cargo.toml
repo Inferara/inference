@@ -34,6 +34,7 @@ ratatui = "0.30.0"
 crossterm = "0.29.0"
 anyhow.workspace = true
 thiserror.workspace = true
+inference-compiler-interface.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
