@@ -141,4 +141,11 @@ pub(crate) struct Cli {
     /// `infc` binaries. Does not require a source file argument.
     #[clap(long = "commit-hash", action = clap::ArgAction::SetTrue)]
     pub(crate) commit_hash: bool,
+
+    /// Print the compiler ABI version (`<major>.<minor>`) and exit 0.
+    ///
+    /// Used by `infs build` to verify that the invoked `infc` speaks a CLI/IO
+    /// contract it understands. Does not require a source file argument.
+    #[clap(long = "abi-version", action = clap::ArgAction::SetTrue)]
+    pub(crate) abi_version: bool,
 }

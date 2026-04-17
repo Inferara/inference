@@ -34,6 +34,7 @@ inference-cli = { path = "./core/cli", version = "0.0.1" }
 inference-wasm-to-v-translator = { path = "./core/wasm-to-v", version = "0.0.1" }
 inference-wasm-codegen = { path = "./core/wasm-codegen", version = "0.0.1" }
 inference-analysis = { path = "./core/analysis", version = "0.0.1" }
+inference-compiler-interface = { path = "./core/compiler-interface", version = "0.0.1" }
 
 # IDE support crates
 inference-base-db = { path = "./ide/base-db", version = "0.0.1" }

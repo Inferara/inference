@@ -216,3 +216,19 @@ fn commit_hash_flag_prints_and_exits() {
         "commit-hash stdout was not hex or 'unknown': {hash:?}"
     );
 }
+
+/// Verifies that `--abi-version` prints the compiler ABI version and exits 0
+/// without requiring a source file argument.
+///
+/// **Expected behavior**: Exit with code 0, print `<major>.<minor>` to stdout
+/// matching the constants exported by `inference-compiler-interface`.
+#[test]
+fn abi_version_flag_prints_and_exits() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.arg("--abi-version");
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.trim();
+    assert_eq!(version, inference_compiler_interface::abi_version_string());
+}

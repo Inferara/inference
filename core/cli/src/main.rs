@@ -222,6 +222,11 @@ fn main() {
         process::exit(0);
     }
 
+    if args.abi_version {
+        println!("{}", inference_compiler_interface::abi_version_string());
+        process::exit(0);
+    }
+
     let Some(path) = args.path.clone() else {
         eprintln!("Error: source file argument required");
         process::exit(1);
@@ -364,6 +369,7 @@ mod tests {
             generate_wasm_output: false,
             generate_v_output: false,
             commit_hash: false,
+            abi_version: false,
         }
     }
 
