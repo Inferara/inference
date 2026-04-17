@@ -741,6 +741,49 @@ fn doctor_shows_all_checks() {
         .stdout(predicate::str::contains("infc"));
 }
 
+/// Verifies that `infs doctor` output respects the VS Code extension's line contract.
+///
+/// The VS Code extension at `editors/vscode/src/toolchain/doctor.ts:32` parses check
+/// lines with the regex `/^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)/`. Any change to
+/// the line shape breaks the extension's doctor rendering. This test locks the
+/// format in place so drift is caught in CI before it reaches editors/vscode.
+///
+/// **Test setup**: Runs `infs doctor` with an isolated `INFERENCE_HOME` so the
+/// user's real toolchain state does not influence the output, and with
+/// `INFC_PATH` removed so resolver priorities behave deterministically.
+#[test]
+fn doctor_output_respects_vscode_check_line_contract() {
+    let check_pattern =
+        regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", temp.path())
+        .env_remove("INFC_PATH")
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let check_lines: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .collect();
+
+    assert!(
+        !check_lines.is_empty(),
+        "doctor produced zero check lines. Output was:\n{stdout}"
+    );
+
+    for line in &check_lines {
+        assert!(
+            check_pattern.is_match(line),
+            "line violates VS Code contract (editors/vscode/src/toolchain/doctor.ts): {line:?}"
+        );
+    }
+}
+
 /// Verifies that `infs doctor` shows the checking message.
 ///
 /// **Expected behavior**: Output contains the initial "Checking" message.

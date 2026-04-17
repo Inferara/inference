@@ -18,9 +18,13 @@
 //!
 //! ## Output Format (Public Contract)
 //!
-//! The output format of this command is parsed by `editors/vscode/src/toolchain/doctor.ts`.
-//! Each check line has the format: `  [OK|WARN|FAIL] <name>: <message>`
-//! Changes to this format require a corresponding update in the VS Code extension.
+//! OUTPUT CONTRACT: check lines MUST match the regex
+//!   `/^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)/`
+//! Parsed by `editors/vscode/src/toolchain/doctor.ts`. Do not change the
+//! line shape (leading whitespace, bracket status, colon-space, message)
+//! without coordinating with the VS Code extension. A snapshot test at
+//! `apps/infs/tests/cli_integration.rs::doctor_output_respects_vscode_check_line_contract`
+//! enforces this invariant.
 
 use anyhow::Result;
 
