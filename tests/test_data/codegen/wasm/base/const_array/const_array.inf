@@ -1,0 +1,4 @@
+pub fn test() -> i32 {
+    const ARR: [i32; 3] = [1, 2, 3];
+    return ARR[0];
+}

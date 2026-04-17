@@ -190,6 +190,77 @@ mod analysis_rules_tests {
         }
     }
 
+    #[test]
+    fn a015_array_literal_in_const_initializer_accepted() {
+        let source = r#"
+            fn test() -> i32 {
+                const ARR: [i32; 3] = [1, 2, 3];
+                return ARR[0];
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(errors) = &result {
+            let has_a015 = errors
+                .errors()
+                .iter()
+                .any(|e| {
+                    matches!(e, AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. })
+                });
+            assert!(
+                !has_a015,
+                "array literal in const initializer should NOT trigger A015, got: {errors}"
+            );
+        }
+    }
+
+    #[test]
+    fn a015_compound_literal_in_forbidden_subposition_of_const_initializer_rejected() {
+        // The outer array literal is the const's initializer (allowed position),
+        // but the inner `[1, 2, 3]` literals sit as operands of a binary `==`,
+        // which the rule treats as a forbidden sub-position. Confirms the
+        // ConstDef arm does not accidentally mark *every* nested compound
+        // literal as allowed. Mirrors `a015_compound_literal_in_if_condition_rejected`.
+        let source = r#"
+            fn test() -> bool {
+                const R: [bool; 1] = [[1, 2, 3] == [1, 2, 3]];
+                return R[0];
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a015 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. }));
+        assert!(
+            has_a015,
+            "expected CompoundLiteralInUnsupportedPosition for array literal in \
+             binary `==` sub-position of a const initializer, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a015_struct_literal_in_const_initializer_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            fn test() -> i32 {
+                const P: Point = Point { x: 1, y: 2 };
+                return P.x;
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(errors) = &result {
+            let has_a015 = errors
+                .errors()
+                .iter()
+                .any(|e| {
+                    matches!(e, AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. })
+                });
+            assert!(
+                !has_a015,
+                "struct literal in const initializer should NOT trigger A015, got: {errors}"
+            );
+        }
+    }
+
     // --- A016: CompoundReturnCallInExpressionPosition ---
 
     #[test]
@@ -1071,6 +1142,197 @@ mod analysis_rules_tests {
         assert!(
             has_a022,
             "expected LiteralOutOfRange in loop condition, got: {errors:?}"
+        );
+    }
+
+    // --- A016: CompoundReturnCallInExpressionPosition in const initializers ---
+
+    #[test]
+    fn a016_compound_return_call_indexed_in_const_initializer_rejected() {
+        let source = r#"
+            fn make() -> [i32; 3] { return [1, 2, 3]; }
+            fn test() -> i32 {
+                const X: i32 = make()[0];
+                return X;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a016 = errors
+            .iter()
+            .any(|e| {
+                matches!(e, AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { .. })
+            });
+        assert!(
+            has_a016,
+            "expected CompoundReturnCallInExpressionPosition for indexed compound call in const init, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a016_compound_return_call_as_arg_in_const_initializer_rejected() {
+        let source = r#"
+            fn make() -> [i32; 3] { return [1, 2, 3]; }
+            fn consume(a: [i32; 3]) -> i32 { return a[0]; }
+            fn test() -> i32 {
+                const X: i32 = consume(make());
+                return X;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a016 = errors
+            .iter()
+            .any(|e| {
+                matches!(e, AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { .. })
+            });
+        assert!(
+            has_a016,
+            "expected CompoundReturnCallInExpressionPosition for nested compound call in const init, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a016_compound_return_call_directly_in_const_initializer_accepted() {
+        let source = r#"
+            fn make() -> [i32; 3] { return [1, 2, 3]; }
+            fn test() -> i32 {
+                const ARR: [i32; 3] = make();
+                return ARR[0];
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(errors) = &result {
+            let has_a016 = errors
+                .errors()
+                .iter()
+                .any(|e| {
+                    matches!(e, AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { .. })
+                });
+            assert!(
+                !has_a016,
+                "direct compound-returning call in const initializer should NOT trigger A016 (sret destination), got: {errors}"
+            );
+        }
+    }
+
+    // --- A018: MethodCallChainOnCompoundReturn in const initializers ---
+
+    #[test]
+    fn a018_method_chain_on_compound_return_in_const_initializer_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn translate(self, dx: i32, dy: i32) -> Point {
+                    return Point { x: self.x + dx, y: self.y + dy };
+                }
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test() -> i32 {
+                let p: Point = Point { x: 10, y: 20 };
+                const X: i32 = p.translate(5, 3).get_x();
+                return X;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a018 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::MethodCallChainOnCompoundReturn { .. }));
+        assert!(
+            has_a018,
+            "expected MethodCallChainOnCompoundReturn for method chain in const init, got: {errors:?}"
+        );
+    }
+
+    /// Positive const-analogue mirroring the VarDef `p.translate(5, 3).get_x()` chain,
+    /// but with the chain rooted at an associated-function call that returns a struct.
+    /// Covers the `Call` -> `MethodCall` chain shape (as distinct from the
+    /// `MethodCall` -> `MethodCall` shape above) inside a `ConstDef` initializer.
+    #[test]
+    fn a018_method_chain_on_assoc_fn_compound_return_in_const_initializer_rejected() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    return Point { x: x, y: y };
+                }
+                fn get_x(self) -> i32 { return self.x; }
+            }
+            fn test() -> i32 {
+                const R: i32 = Point::new(1, 2).get_x();
+                return R;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a018 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::MethodCallChainOnCompoundReturn { .. }));
+        assert!(
+            has_a018,
+            "expected MethodCallChainOnCompoundReturn for assoc-fn -> method chain in const init, got: {errors:?}"
+        );
+        let diag = errors
+            .iter()
+            .find(|e| matches!(e, AnalysisDiagnostic::MethodCallChainOnCompoundReturn { .. }))
+            .expect("expected MethodCallChainOnCompoundReturn");
+        let msg = diag.to_string();
+        assert!(
+            msg.to_lowercase().contains("method")
+                || msg.to_lowercase().contains("chain")
+                || msg.to_lowercase().contains("compound"),
+            "diagnostic message should reference the method/chain/compound concept, got: {msg}"
+        );
+    }
+
+    /// Negative sanity for A018 in const initializers: a const with a single
+    /// non-chained call (no method chained on top of a compound-returning call)
+    /// must NOT fire A018. Prevents false positives on innocuous const inits
+    /// after the rule was extended from VarDef to ConstDef.
+    #[test]
+    fn a018_single_compound_return_call_in_const_initializer_accepted() {
+        let source = r#"
+            struct Point { x: i32; y: i32;
+                fn new(x: i32, y: i32) -> Point {
+                    return Point { x: x, y: y };
+                }
+            }
+            fn test() -> i32 {
+                const P: Point = Point::new(1, 2);
+                return P.x;
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(errors) = &result {
+            let has_a018 = errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::MethodCallChainOnCompoundReturn { .. }));
+            assert!(
+                !has_a018,
+                "single unchained compound-returning call in const init should NOT trigger A018, got: {errors}"
+            );
+        }
+    }
+
+    /// Positive const-analogue for A016: a compound-returning call used in a
+    /// sub-expression position (operand of `+`) inside a const initializer.
+    /// Confirms that extending A016 to `ConstDef` does not stop at the top-level
+    /// RHS — it must recurse into operands. Mirrors the `make()[0]` and
+    /// `consume(make())` cases above but for a binary-op shape.
+    #[test]
+    fn a016_compound_return_call_in_binary_op_in_const_initializer_rejected() {
+        let source = r#"
+            fn make_arr() -> [i32; 3] { return [1, 2, 3]; }
+            fn test() -> i32 {
+                const X: i32 = make_arr()[0] + make_arr()[1];
+                return X;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a016 = errors
+            .iter()
+            .any(|e| {
+                matches!(e, AnalysisDiagnostic::CompoundReturnCallInExpressionPosition { .. })
+            });
+        assert!(
+            has_a016,
+            "expected CompoundReturnCallInExpressionPosition for compound call in binary-op sub-position of const init, got: {errors:?}"
         );
     }
 

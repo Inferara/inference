@@ -2,6 +2,7 @@ use crate::utils::{
     assert_constant_def, assert_function_signature, assert_variable_def, build_ast,
     collect_exprs_matching, find_function_by_name, try_build_ast,
 };
+use inference_ast::arena::AstArena;
 use inference_ast::builder::Builder;
 use inference_ast::ids::*;
 use inference_ast::nodes::{
@@ -705,6 +706,78 @@ fn test_parse_constant_definition_at_module_level() {
     let source = r#"const GLOBAL: i32 = 42;"#;
     let arena = build_ast(source.to_string());
     assert_constant_def(&arena, "GLOBAL");
+}
+
+/// Returns the `value` ExprId of the first `const` statement inside the function
+/// named `fn_name`. Panics if not found — intended for test use only.
+fn first_function_scope_const_value(arena: &AstArena, fn_name: &str) -> ExprId {
+    let func_id = find_function_by_name(arena, fn_name).expect("function not found");
+    let Def::Function { body, .. } = &arena[func_id].kind else {
+        panic!("{fn_name} is not a function")
+    };
+    let block = &arena[*body];
+    for &stmt_id in &block.stmts {
+        if let Stmt::ConstDef(def_id) = arena[stmt_id].kind
+            && let Def::Constant { value, .. } = arena[def_id].kind
+        {
+            return value;
+        }
+    }
+    panic!("no Stmt::ConstDef found in body of {fn_name}")
+}
+
+#[test]
+fn test_parse_const_initializer_accepts_struct_literal() {
+    let source = r#"struct Point { x: i32; y: i32; }
+fn test() { const P: Point = Point { x: 1, y: 2 }; }"#;
+    let arena = build_ast(source.to_string());
+    let value = first_function_scope_const_value(&arena, "test");
+    assert!(
+        matches!(&arena[value].kind, Expr::StructLiteral { .. }),
+        "const initializer should parse as StructLiteral, got {:?}",
+        &arena[value].kind
+    );
+}
+
+#[test]
+fn test_parse_const_initializer_accepts_array_literal() {
+    let source = r#"fn test() { const ARR: [i32; 3] = [1, 2, 3]; }"#;
+    let arena = build_ast(source.to_string());
+    let value = first_function_scope_const_value(&arena, "test");
+    assert!(
+        matches!(&arena[value].kind, Expr::ArrayLiteral { .. }),
+        "const initializer should parse as ArrayLiteral, got {:?}",
+        &arena[value].kind
+    );
+}
+
+#[test]
+fn test_parse_const_initializer_accepts_identifier_copy() {
+    let source = r#"struct Point { x: i32; y: i32; }
+fn test() {
+    let base: Point = Point { x: 1, y: 2 };
+    const P: Point = base;
+}"#;
+    let arena = build_ast(source.to_string());
+    let value = first_function_scope_const_value(&arena, "test");
+    assert!(
+        matches!(&arena[value].kind, Expr::Identifier(_)),
+        "const initializer should parse as Identifier, got {:?}",
+        &arena[value].kind
+    );
+}
+
+#[test]
+fn test_parse_const_initializer_accepts_function_call() {
+    let source = r#"fn make() -> [i32; 3] { return [1, 2, 3]; }
+fn test() { const ARR: [i32; 3] = make(); }"#;
+    let arena = build_ast(source.to_string());
+    let value = first_function_scope_const_value(&arena, "test");
+    assert!(
+        matches!(&arena[value].kind, Expr::FunctionCall { .. }),
+        "const initializer should parse as FunctionCall, got {:?}",
+        &arena[value].kind
+    );
 }
 
 /// Test for arguments

@@ -103,7 +103,7 @@ pub enum AnalysisDiagnostic {
     #[error("array uzumaki (@) cannot be used as a function argument; assign to a variable first")]
     ArrayUzumakiAsArgument { location: Location },
 
-    #[error("{kind} literals can only be used in variable declarations, assignments, return statements, or as struct field values")]
+    #[error("{kind} literals can only be used in variable declarations, const initializers, assignments, return statements, or as struct field values")]
     CompoundLiteralInUnsupportedPosition {
         kind: &'static str,
         location: Location,
@@ -164,6 +164,9 @@ pub enum AnalysisDiagnostic {
 
     #[error("return expression in compound-returning function must be a variable, literal, function call, or field/element access; assign the expression to a temporary variable first")]
     UnsupportedCompoundReturnExpression { location: Location },
+
+    #[error("top-level `const` declarations are not yet supported; declare `{name}` inside a function body, or track progress at https://github.com/Inferara/inference/issues/171")]
+    TopLevelConstNotSupported { name: String, location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -198,7 +201,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
-            | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location } => location,
+            | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
+            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. } => location,
         }
     }
 
@@ -237,6 +241,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { .. } => "A029",
             // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
+            AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
         }
     }
 }
@@ -677,6 +682,44 @@ mod tests {
         assert!(
             result.is_err(),
             "AnalysisErrors::new should panic when errors is empty"
+        );
+    }
+
+    #[test]
+    fn display_compound_literal_in_unsupported_position_lists_const_initializer() {
+        let err = AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition {
+            kind: "array",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("const initializer"),
+            "A015 diagnostic must mention `const initializers` among permitted positions, got: {text}"
+        );
+        assert!(
+            text.contains("variable declarations"),
+            "A015 diagnostic must mention variable declarations, got: {text}"
+        );
+    }
+
+    #[test]
+    fn display_top_level_const_not_supported() {
+        let err = AnalysisDiagnostic::TopLevelConstNotSupported {
+            name: "X".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("top-level `const`"),
+            "A032 diagnostic must mention top-level const, got: {text}"
+        );
+        assert!(
+            text.contains('X'),
+            "A032 diagnostic must include the constant name, got: {text}"
+        );
+        assert!(
+            text.contains("inside a function body"),
+            "A032 diagnostic must suggest declaring inside a function body, got: {text}"
         );
     }
 

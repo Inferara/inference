@@ -1,0 +1,7 @@
+struct Point { x: i32; y: i32; }
+
+pub fn copy_x() -> i32 {
+    let base: Point = Point { x: 7, y: 8 };
+    const P: Point = base;
+    return P.x;
+}

@@ -1,12 +1,13 @@
 //! A015: Compound literals only in supported positions.
 //!
 //! Struct and array literals can only appear as variable initializers,
-//! assignment RHS, return values, or struct field values. They cannot
-//! be used in arbitrary expression positions due to codegen limitations.
+//! const initializers, assignment RHS, return values, or struct field
+//! values. They cannot be used in arbitrary expression positions due to
+//! codegen limitations.
 
 use inference_ast::arena::AstArena;
 use inference_ast::ids::ExprId;
-use inference_ast::nodes::{Expr, Stmt};
+use inference_ast::nodes::{Def, Expr, Stmt};
 
 use crate::{errors::AnalysisDiagnostic, walker};
 
@@ -35,6 +36,13 @@ fn check_stmt(
         Stmt::VarDef { value: Some(expr_id), .. } => {
             // Compound literals are allowed as the init expression
             check_expr(arena, *expr_id, true, errors);
+        }
+        Stmt::ConstDef(def_id) => {
+            // Const initializers are treated symmetrically to let initializers:
+            // the initializer ExprId is an allowed compound-literal position.
+            if let Def::Constant { value, .. } = &arena[*def_id].kind {
+                check_expr(arena, *value, true, errors);
+            }
         }
         Stmt::Assign { left, right } => {
             check_expr(arena, *left, false, errors);
