@@ -11,6 +11,7 @@
 //! - Default toolchain configuration
 //! - `infc` compiler binary presence
 
+use super::conflict::enumerate_infc_on_path;
 use super::resolver::{self, find_infc_with_source};
 use super::{Platform, ToolchainPaths};
 
@@ -201,6 +202,11 @@ pub fn check_default_toolchain() -> DoctorCheck {
 }
 
 /// Checks if the infc compiler binary is available.
+///
+/// Enumerates *every* `infc` on `PATH` (not just the first hit) so
+/// developers can see shadowed copies at a glance. The output stays
+/// on one line per the VS Code `[OK|WARN|FAIL] <name>: <msg>`
+/// contract; duplicates are inlined with `; ` separators.
 #[must_use]
 pub fn check_infc() -> DoctorCheck {
     let Ok(platform) = Platform::detect() else {
@@ -209,8 +215,27 @@ pub fn check_infc() -> DoctorCheck {
 
     let binary_with_ext = format!("infc{}", platform.executable_extension());
 
-    if which::which(&binary_with_ext).is_ok() {
-        return DoctorCheck::ok("infc", format!("Found {binary_with_ext} in PATH"));
+    let on_path = enumerate_infc_on_path();
+    match on_path.len() {
+        0 => {} // Fall through to managed-toolchain check below.
+        1 => {
+            return DoctorCheck::ok("infc", format!("Found {binary_with_ext} in PATH"));
+        }
+        _ => {
+            let enumerated = on_path
+                .iter()
+                .enumerate()
+                .map(|(idx, p)| format!("{}. {}", idx + 1, p.display()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return DoctorCheck::warning(
+                "infc",
+                format!(
+                    "{} {binary_with_ext} binaries on PATH (first wins): {enumerated}",
+                    on_path.len()
+                ),
+            );
+        }
     }
 
     let Ok(paths) = ToolchainPaths::new() else {

@@ -25,7 +25,10 @@
 use anyhow::Result;
 
 use crate::toolchain::ToolchainPaths;
-use crate::toolchain::conflict::{detect_path_conflicts, format_doctor_conflict_warning};
+use crate::toolchain::conflict::{
+    detect_path_conflicts, enumerate_infc_on_path, format_doctor_conflict_warning,
+    format_duplicate_path_warning,
+};
 use crate::toolchain::doctor::{DoctorCheckStatus, run_all_checks};
 
 /// Executes the doctor command.
@@ -63,6 +66,18 @@ pub async fn execute() -> Result<()> {
                     println!("         {line}");
                 }
             }
+        }
+    }
+
+    // Duplicate infc binaries on PATH. The single-line [WARN] above inside
+    // check_infc keeps the VS Code regex contract; the expanded block here
+    // mirrors the detect_path_conflicts rendering for human readers.
+    let on_path = enumerate_infc_on_path();
+    if on_path.len() > 1 {
+        has_warnings = true;
+        println!();
+        for line in format_duplicate_path_warning(&on_path) {
+            println!("         {line}");
         }
     }
 
