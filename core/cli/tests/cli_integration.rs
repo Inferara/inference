@@ -230,5 +230,10 @@ fn abi_version_flag_prints_and_exits() {
     let output = assert.get_output();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let version = stdout.trim();
-    assert_eq!(version, inference_compiler_interface::abi_version_string());
+    let expected = format!(
+        "{}.{}",
+        inference_compiler_interface::COMPILER_ABI_MAJOR,
+        inference_compiler_interface::COMPILER_ABI_MINOR,
+    );
+    assert_eq!(version, expected);
 }

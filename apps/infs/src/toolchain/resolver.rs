@@ -126,7 +126,18 @@ fn workspace_sibling_infc_from(exe: &Path) -> Option<PathBuf> {
     if profile != "debug" && profile != "release" {
         return None;
     }
-    if dir.parent()?.file_name()?.to_str()? != "target" {
+    // Accept both the standard `target/<profile>/` layout and the
+    // `target/<triple>/<profile>/` layout produced by `cargo build
+    // --target <triple>`. Nightly CI and cross-compilation builds
+    // routinely put the triple between `target` and the profile dir.
+    let grandparent = dir.parent()?;
+    let is_target = grandparent.file_name().and_then(|n| n.to_str()) == Some("target")
+        || grandparent
+            .parent()
+            .and_then(|gg| gg.file_name())
+            .and_then(|n| n.to_str())
+            == Some("target");
+    if !is_target {
         return None;
     }
     let expected_infs = format!("infs{ext}");
@@ -393,6 +404,61 @@ mod tests {
         std::fs::create_dir_all(&build).unwrap();
         let infs_path = build.join(exe_name("infs"));
         let infc_path = build.join(exe_name("infc"));
+        std::fs::write(&infs_path, b"").unwrap();
+        std::fs::write(&infc_path, b"").unwrap();
+
+        let result = workspace_sibling_infc_from(&infs_path);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn sibling_infc_found_when_exe_in_target_triple_debug() {
+        // `cargo build --target x86_64-unknown-linux-gnu` produces
+        // `target/<triple>/debug/` — the sibling heuristic must accept it.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let debug = temp
+            .path()
+            .join("target")
+            .join("x86_64-unknown-linux-gnu")
+            .join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        let infs_path = debug.join(exe_name("infs"));
+        let infc_path = debug.join(exe_name("infc"));
+        std::fs::write(&infs_path, b"").unwrap();
+        std::fs::write(&infc_path, b"").unwrap();
+
+        let result = workspace_sibling_infc_from(&infs_path);
+        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
+    }
+
+    #[test]
+    fn sibling_infc_found_when_exe_in_target_triple_release() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let release = temp
+            .path()
+            .join("target")
+            .join("aarch64-apple-darwin")
+            .join("release");
+        std::fs::create_dir_all(&release).unwrap();
+        let infs_path = release.join(exe_name("infs"));
+        let infc_path = release.join(exe_name("infc"));
+        std::fs::write(&infs_path, b"").unwrap();
+        std::fs::write(&infc_path, b"").unwrap();
+
+        let result = workspace_sibling_infc_from(&infs_path);
+        assert_eq!(result.as_deref(), Some(infc_path.as_path()));
+    }
+
+    #[test]
+    fn sibling_returns_none_when_no_target_ancestor_at_either_depth() {
+        // foo/bar/debug/infs — neither parent nor grandparent is named
+        // "target"; must reject even though the profile dir is valid and
+        // a sibling infc exists.
+        let temp = assert_fs::TempDir::new().unwrap();
+        let debug = temp.path().join("foo").join("bar").join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        let infs_path = debug.join(exe_name("infs"));
+        let infc_path = debug.join(exe_name("infc"));
         std::fs::write(&infs_path, b"").unwrap();
         std::fs::write(&infc_path, b"").unwrap();
 

@@ -64,8 +64,14 @@ pub async fn execute() -> Result<()> {
         if !conflicts.is_empty() {
             has_warnings = true;
             println!();
-            println!("  [WARN] PATH conflict detected:");
-            for line in format_doctor_conflict_warning(&conflicts) {
+            // Print a regex-compliant [WARN] check line so the VS Code
+            // extension keeps a structured entry for this warning, then
+            // render the rest of the detail as plain indented continuation
+            // (no leading `[`, so the regex filter skips them).
+            let detail = format_doctor_conflict_warning(&conflicts);
+            let summary = path_conflict_summary(&detail);
+            println!("  [WARN] PATH conflict: {summary}");
+            for line in detail {
                 if !line.is_empty() {
                     println!("         {line}");
                 }
@@ -73,9 +79,10 @@ pub async fn execute() -> Result<()> {
         }
     }
 
-    // Duplicate infc binaries on PATH. The single-line [WARN] above inside
-    // check_infc keeps the VS Code regex contract; the expanded block here
-    // mirrors the detect_path_conflicts rendering for human readers.
+    // Duplicate infc binaries on PATH. The expanded block here mirrors the
+    // detect_path_conflicts rendering for human readers. Header is plain
+    // text (no `[WARN]` prefix) to stay outside the VS Code check-line
+    // regex filter — duplicate-binary reporting is informational only.
     let on_path = enumerate_infc_on_path();
     if on_path.len() > 1 {
         has_warnings = true;
@@ -97,4 +104,74 @@ pub async fn execute() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Reduces a multi-line `format_doctor_conflict_warning` block to a one-line
+/// summary suitable for the `[WARN] PATH conflict: <summary>` check line.
+///
+/// The VS Code extension regex requires a non-empty message after the colon.
+/// The first informational line ("'infc' resolves to ...") is the best fit:
+/// it names the shadowing binary in a self-contained way. Falls back to a
+/// generic phrase when `detail` is empty (should not happen in practice —
+/// `format_doctor_conflict_warning` only returns an empty vec for empty
+/// input, and the caller already guards on that).
+fn path_conflict_summary(detail: &[String]) -> String {
+    detail
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "managed toolchain shadowed by PATH".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The VS Code extension parses check lines with this regex. The helper
+    /// lives here so the test can verify the full `[WARN] PATH conflict: …`
+    /// line round-trips through the regex.
+    fn vscode_regex() -> regex::Regex {
+        regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap()
+    }
+
+    #[test]
+    fn conflict_summary_returns_first_nonempty_line() {
+        let detail = vec![
+            "'infc' resolves to /usr/local/bin/infc".to_string(),
+            "  but managed version is at /home/u/.inference/bin/infc".to_string(),
+        ];
+        assert_eq!(path_conflict_summary(&detail), detail[0]);
+    }
+
+    #[test]
+    fn conflict_summary_skips_leading_blank_lines() {
+        let detail = vec![
+            String::new(),
+            "'infc' resolves to /usr/local/bin/infc".to_string(),
+        ];
+        assert_eq!(
+            path_conflict_summary(&detail),
+            "'infc' resolves to /usr/local/bin/infc"
+        );
+    }
+
+    #[test]
+    fn conflict_summary_falls_back_on_empty_input() {
+        let detail: Vec<String> = vec![];
+        assert!(!path_conflict_summary(&detail).is_empty());
+    }
+
+    #[test]
+    fn path_conflict_header_line_matches_vscode_regex() {
+        // Reconstruct the exact line emitted in execute() and assert it
+        // passes the VS Code extension's check-line regex. Guards against
+        // future edits that would silently break the extension.
+        let detail = vec!["'infc' resolves to /usr/local/bin/infc".to_string()];
+        let summary = path_conflict_summary(&detail);
+        let line = format!("  [WARN] PATH conflict: {summary}");
+        assert!(
+            vscode_regex().is_match(&line),
+            "header line violates VS Code contract: {line:?}"
+        );
+    }
 }

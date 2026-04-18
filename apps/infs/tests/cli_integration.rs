@@ -784,6 +784,77 @@ fn doctor_output_respects_vscode_check_line_contract() {
     }
 }
 
+/// Regression test for the PATH-conflict block in `infs doctor`.
+///
+/// The baseline `doctor_output_respects_vscode_check_line_contract` test
+/// does not trigger the conflict branch — with a pristine `INFERENCE_HOME`,
+/// `detect_path_conflicts` returns empty. This test builds a layout where
+/// `INFERENCE_HOME/bin/infc` exists *and* a differently-located `infc` is
+/// visible on `PATH`, so `detect_path_conflicts` reports a mismatch and
+/// the `[WARN] PATH conflict: …` header is actually emitted. Then the same
+/// VS Code regex must still match every bracketed line.
+///
+/// Gated on `unix` because the stub invocation relies on a `#!/bin/sh`
+/// shebang with chmod +x — Windows would need a distinct stub builder.
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn doctor_output_respects_vscode_contract_on_path_conflict() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let check_pattern =
+        regex::Regex::new(r"^\s+\[(OK|WARN|FAIL)]\s+(.+?):\s+(.*)").unwrap();
+
+    // Build a managed toolchain layout: INFERENCE_HOME/bin/infc must exist
+    // so `detect_path_conflicts` considers the expected location "real".
+    let home = assert_fs::TempDir::new().unwrap();
+    let bin_dir = home.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let managed_infc = bin_dir.join("infc");
+    std::fs::write(&managed_infc, b"#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = std::fs::metadata(&managed_infc).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&managed_infc, perms).unwrap();
+
+    // Build a separate PATH dir with its own infc stub; pointing PATH here
+    // makes `which::which` resolve to a path that differs from `managed_infc`.
+    let stub_dir = assert_fs::TempDir::new().unwrap();
+    let stub_infc = stub_dir.path().join("infc");
+    std::fs::write(&stub_infc, b"#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = std::fs::metadata(&stub_infc).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&stub_infc, perms).unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("infs"))
+        .arg("doctor")
+        .env("INFERENCE_HOME", home.path())
+        .env("PATH", stub_dir.path())
+        .env_remove("INFC_PATH")
+        .output()
+        .expect("doctor should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let check_lines: Vec<_> = stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .collect();
+
+    assert!(
+        check_lines
+            .iter()
+            .any(|l| l.contains("PATH conflict:")),
+        "expected a `[WARN] PATH conflict: …` line. Output was:\n{stdout}"
+    );
+
+    for line in &check_lines {
+        assert!(
+            check_pattern.is_match(line),
+            "line violates VS Code contract (editors/vscode/src/toolchain/doctor.ts): {line:?}"
+        );
+    }
+}
+
 /// Verifies that `infs doctor` shows the checking message.
 ///
 /// **Expected behavior**: Output contains the initial "Checking" message.

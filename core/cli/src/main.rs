@@ -223,7 +223,11 @@ fn main() {
     }
 
     if args.abi_version {
-        println!("{}", inference_compiler_interface::abi_version_string());
+        println!(
+            "{}.{}",
+            inference_compiler_interface::COMPILER_ABI_MAJOR,
+            inference_compiler_interface::COMPILER_ABI_MINOR,
+        );
         process::exit(0);
     }
 
