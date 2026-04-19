@@ -217,6 +217,352 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn const_array_test() {
+        // Defends against a future type-checker refactor silently breaking the
+        // NodeId::Stmt typeinfo lookup that lower_named_binding_init relies on.
+        cov_mark::check!(wasm_codegen_const_typeinfo_lookup);
+        let test_name = "const_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_array_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_array";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let test_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test")
+            .unwrap_or_else(|e| panic!("Failed to get 'test' function: {}", e));
+        let result = test_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'test' function: {}", e));
+        assert_eq!(result, 1, "Expected 'test' to return 1");
+    }
+
+    /// Divergence-1 companion: the original `const_array` fixture only loads
+    /// ARR[0], so a codegen bug affecting non-zero element offsets would slip
+    /// through. This fixture reads every element of a 3-element const array
+    /// and asserts the sum, matching the master plan's intent to exercise all
+    /// load offsets.
+    #[test]
+    fn const_array_sum_test() {
+        let test_name = "const_array_sum";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_array_sum_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_array_sum";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let sum_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum")
+            .unwrap_or_else(|e| panic!("Failed to get 'sum' function: {}", e));
+        let result = sum_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'sum' function: {}", e));
+        assert_eq!(result, 6, "Expected 'sum' to return 1 + 2 + 3 = 6");
+    }
+
+    #[test]
+    fn const_struct_test() {
+        let test_name = "const_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_struct_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_struct";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let test_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "test")
+            .unwrap_or_else(|e| panic!("Failed to get 'test' function: {}", e));
+        let result = test_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'test' function: {}", e));
+        assert_eq!(result, 10, "Expected 'test' to return 10");
+    }
+
+    #[test]
+    fn const_compound_mixed_test() {
+        let test_name = "const_compound_mixed";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_compound_mixed_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_compound_mixed";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let combined_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "combined")
+            .unwrap_or_else(|e| panic!("Failed to get 'combined' function: {}", e));
+        let result = combined_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'combined' function: {}", e));
+        assert_eq!(
+            result, 107,
+            "Expected 'combined' to return 3 + 4 + 100 = 107"
+        );
+    }
+
+    #[test]
+    fn const_sret_call_test() {
+        let test_name = "const_sret_call";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_sret_call_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_sret_call";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let sum_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "sum")
+            .unwrap_or_else(|e| panic!("Failed to get 'sum' function: {}", e));
+        let result = sum_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'sum' function: {}", e));
+        assert_eq!(result, 60, "Expected 'sum' to return 10 + 20 + 30 = 60");
+    }
+
+    #[test]
+    fn const_compound_copy_test() {
+        let test_name = "const_compound_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn const_compound_copy_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "const_compound_copy";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {}", e));
+
+        let mut store = Store::new(&engine, ());
+
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {}", e));
+
+        let copy_x_func: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "copy_x")
+            .unwrap_or_else(|e| panic!("Failed to get 'copy_x' function: {}", e));
+        let result = copy_x_func
+            .call(&mut store, ())
+            .unwrap_or_else(|e| panic!("Failed to execute 'copy_x' function: {}", e));
+        assert_eq!(result, 7, "Expected 'copy_x' to return 7");
+    }
+
+    /// Verifies that compound `const` declarations inside a `forall` block
+    /// emit the same shadow-stack frame slot machinery as a `let` binding,
+    /// confirming Phase 4's interaction with non-deterministic blocks.
+    /// No execution test: forall blocks are non-deterministic and not directly
+    /// callable like ordinary functions.
+    #[test]
+    fn const_in_forall_test() {
+        let test_name = "const_in_forall";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    /// AD-5 verification: compound `const` and immutable `let` lower to
+    /// byte-identical WASM. If this test ever fails, either Phase 3's
+    /// `Stmt::ConstDef` arm has drifted from `Stmt::VarDef`, or the
+    /// drift is intentional and AD-5 needs a documented exception in the
+    /// master plan. Covers all four compound-init dispatch paths in
+    /// `lower_named_binding_init`: array literal, struct literal, sret call,
+    /// and compound copy.
+    #[test]
+    fn const_compound_byte_identical_to_let() {
+        let const_source = r#"
+            struct Point { x: i32; y: i32; }
+            fn make_arr() -> [i32; 3] { return [10, 20, 30]; }
+            fn make_point() -> Point { return Point { x: 1, y: 2 }; }
+            pub fn arr_sum() -> i32 {
+                const ARR: [i32; 3] = [1, 2, 3];
+                return ARR[0] + ARR[1] + ARR[2];
+            }
+            pub fn struct_x() -> i32 {
+                const P: Point = Point { x: 10, y: 20 };
+                return P.x;
+            }
+            pub fn arr_sret_sum() -> i32 {
+                const A: [i32; 3] = make_arr();
+                return A[0] + A[1] + A[2];
+            }
+            pub fn struct_sret_x() -> i32 {
+                const P: Point = make_point();
+                return P.x;
+            }
+            pub fn arr_copy_first() -> i32 {
+                let base: [i32; 3] = [4, 5, 6];
+                const C: [i32; 3] = base;
+                return C[0];
+            }
+            pub fn struct_copy_x() -> i32 {
+                let base: Point = Point { x: 7, y: 8 };
+                const C: Point = base;
+                return C.x;
+            }
+            pub fn arr_zero_init_first() -> i32 {
+                const Z: [i32; 3] = [0, 0, 0];
+                return Z[0];
+            }
+        "#;
+        let let_source = const_source.replace("const ", "let ");
+        let const_wasm = wasm_codegen(const_source);
+        let let_wasm = wasm_codegen(&let_source);
+        assert_eq!(
+            const_wasm, let_wasm,
+            "AD-5: function-scope compound `const` must lower to byte-identical \
+             WASM as the same program with immutable `let`. Divergence indicates \
+             either drift between the Stmt::VarDef and Stmt::ConstDef arms or an \
+             intentional change that must be documented in the master plan."
+        );
+    }
+
+    #[test]
     fn numeric_literals_test() {
         let test_name = "numeric_literals";
         let test_file_path = get_test_file_path(module_path!(), test_name);
@@ -6244,6 +6590,134 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "const");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_array_wasm() {
+        let dir = base_test_dir().join("const_array");
+        let source_code = std::fs::read_to_string(dir.join("const_array.inf"))
+            .expect("Failed to read const_array.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_array.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_array");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_array_sum_wasm() {
+        let dir = base_test_dir().join("const_array_sum");
+        let source_code = std::fs::read_to_string(dir.join("const_array_sum.inf"))
+            .expect("Failed to read const_array_sum.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_array_sum.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_array_sum");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_struct_wasm() {
+        let dir = base_test_dir().join("const_struct");
+        let source_code = std::fs::read_to_string(dir.join("const_struct.inf"))
+            .expect("Failed to read const_struct.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_struct.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_struct");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_compound_mixed_wasm() {
+        let dir = base_test_dir().join("const_compound_mixed");
+        let source_code = std::fs::read_to_string(dir.join("const_compound_mixed.inf"))
+            .expect("Failed to read const_compound_mixed.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_compound_mixed.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_compound_mixed");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_sret_call_wasm() {
+        let dir = base_test_dir().join("const_sret_call");
+        let source_code = std::fs::read_to_string(dir.join("const_sret_call.inf"))
+            .expect("Failed to read const_sret_call.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_sret_call.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_sret_call");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_compound_copy_wasm() {
+        let dir = base_test_dir().join("const_compound_copy");
+        let source_code = std::fs::read_to_string(dir.join("const_compound_copy.inf"))
+            .expect("Failed to read const_compound_copy.inf");
+        let actual = wasm_codegen(&source_code);
+        let wasm_path = dir.join("const_compound_copy.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_compound_copy");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_const_in_forall_wasm() {
+        let dir = base_test_dir().join("const_in_forall");
+        let source_code = std::fs::read_to_string(dir.join("const_in_forall.inf"))
+            .expect("Failed to read const_in_forall.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let wasm_path = dir.join("const_in_forall.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "const_in_forall");
     }
 
     #[test]

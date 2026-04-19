@@ -5,7 +5,7 @@
 //! appear in variable definitions or return statements.
 
 use inference_ast::ids::ExprId;
-use inference_ast::nodes::{Expr, Stmt};
+use inference_ast::nodes::{Def, Expr, Stmt};
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::{errors::AnalysisDiagnostic, walker};
@@ -35,6 +35,14 @@ fn check_stmt(
             // Compound-returning calls are allowed directly as init value,
             // but we still need to recurse into subexpressions
             check_expr_children_only(ctx, *expr_id, errors);
+        }
+        Stmt::ConstDef(def_id) => {
+            // Const initializers are symmetric to let initializers: a direct
+            // compound-returning call is the whole point of sret, but any
+            // nested compound-returning call in a subexpression is a violation.
+            if let Def::Constant { value, .. } = &ctx.arena()[*def_id].kind {
+                check_expr_children_only(ctx, *value, errors);
+            }
         }
         Stmt::Return { expr } => {
             // Compound-returning calls are allowed directly in return,

@@ -1,0 +1,15 @@
+struct Point { x: i32; y: i32; }
+
+pub fn const_array_in_forall() {
+    forall {
+        const ARR: [i32; 2] = [1, 2];
+        let x: i32 = ARR[0];
+    }
+}
+
+pub fn const_struct_in_forall() {
+    forall {
+        const P: Point = Point { x: 7, y: 8 };
+        let y: i32 = P.x;
+    }
+}

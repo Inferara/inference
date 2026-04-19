@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
+- Add codegen support for function-scoped compound `const` ([#171])
+  - `const NAME: T = EXPR` inside a function body now lowers identically to immutable `let` for arrays, structs, and any compound copy / sret-call / literal initializer
+  - `collect_compound_slots` allocates `ArraySlot` / `StructSlot` for `Stmt::ConstDef`, and `lower_statement`'s `Stmt::ConstDef` arm dispatches to the same four-way path (`lower_sret_var_init`, `lower_array_copy_var_init`, `lower_struct_copy_var_init`, `lower_expression` with zero-elision) as `Stmt::VarDef`
+  - AD-5: function-scope compound `const` and immutable `let` produce byte-identical WASM (regression-guarded by `const_compound_byte_identical_to_let`, which now covers literal-init, sret-call, compound-copy, and zero-init paths for both arrays and structs); contract holds until CTFE for `const` is introduced
+  - New analysis rule rejects module-scope `Def::Constant` with a clear "not yet supported" diagnostic, replacing the previous silent panic at use sites (AD-6)
+  - `core/ast/src/builder.rs::build_constant_definition` routes the const initializer through `build_expression` so `struct_expression` (and other non-literal initializers) are accepted symmetrically to `let`
+  - New base codegen fixtures: `const_array`, `const_struct`, `const_compound_mixed`, `const_sret_call`, `const_compound_copy`, `const_in_forall`
+  - AD-1 invariant tests pin that `const ARR = ...; ARR = ...;`, `ARR[0] = ...;`, and `P.x = ...;` against compound consts all surface `AssignToImmutable`, since immutability is enforced solely upstream by the type checker
+  - A026 (one-level compound nesting) symmetry test pinned via `a026_depth_2_via_const_initializer_rejected`
+  - AD-1 documents the explicit Zig-alignment of Inference's `const`-allows-runtime-initializer policy (vs Rust's CTFE-only `const`)
 - Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
   - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
   - Rewrite `compiler.rs` to generate WASM binary directly in-process
@@ -643,5 +653,6 @@ Initial tagged release.
 [#156]: https://github.com/Inferara/inference/pull/156
 [#161]: https://github.com/Inferara/inference/pull/185
 [#162]: https://github.com/Inferara/inference/pull/178
+[#171]: https://github.com/Inferara/inference/issues/171
 [#179]: https://github.com/Inferara/inference/pull/187
 [#188]: https://github.com/Inferara/inference/pull/188

@@ -57,6 +57,7 @@
 //! - A029: Compound literal in compound element assignment
 //! - A030: (removed — uzumaki on scalar arrays now supported at any depth)
 //! - A031: Unsupported expression form in compound-returning function return
+//! - A032: Top-level (module-scope) `const` declaration (not yet implemented)
 //!
 //! ## Pipeline Position
 //!
@@ -159,6 +160,7 @@ mod tests {
             AnalysisDiagnostic::UzumakiOnStructInArray { location: dummy_location() },
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location: dummy_location() },
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location: dummy_location() },
+            AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

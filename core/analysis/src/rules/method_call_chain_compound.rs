@@ -5,7 +5,7 @@
 //! result to a variable first.
 
 use inference_ast::ids::ExprId;
-use inference_ast::nodes::{Expr, Stmt};
+use inference_ast::nodes::{Def, Expr, Stmt};
 use inference_type_checker::typed_context::TypedContext;
 
 use crate::{errors::AnalysisDiagnostic, walker};
@@ -33,6 +33,12 @@ fn visit_stmt(
     match stmt {
         Stmt::VarDef { value: Some(expr_id), .. } | Stmt::Expr(expr_id) => {
             check_expr(ctx, *expr_id, errors);
+        }
+        Stmt::ConstDef(def_id) => {
+            // Const initializers need the same chain check as let initializers.
+            if let Def::Constant { value, .. } = &ctx.arena()[*def_id].kind {
+                check_expr(ctx, *value, errors);
+            }
         }
         Stmt::Assign { left, right } => {
             check_expr(ctx, *left, errors);

@@ -20,6 +20,7 @@ pub mod nested_compound_depth;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod standalone_uzumaki;
+pub mod top_level_const;
 pub mod uninitialized_variable;
 pub mod uzumaki_in_reassignment;
 pub mod uzumaki_on_nested_struct;
@@ -49,6 +50,7 @@ use nested_compound_depth::NestedCompoundDepth;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use standalone_uzumaki::StandaloneUzumaki;
+use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
 use uzumaki_in_reassignment::UzumakiInReassignment;
 use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
@@ -93,5 +95,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UzumakiOnStructInArray,
         &CompoundLiteralMemberAssign,
         &UnsupportedCompoundReturnExpr,
+        &TopLevelConstNotSupported,
     ]
 }

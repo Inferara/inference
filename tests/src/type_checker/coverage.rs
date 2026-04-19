@@ -324,6 +324,160 @@ mod statement_coverage {
             result.err()
         );
     }
+
+    /// AD-1 invariant: compound `const` immutability is enforced solely by the
+    /// type checker (`is_mut = false`). These three tests pin that the rebind,
+    /// element-write, and field-write paths all surface `AssignToImmutable`,
+    /// so any future refactor of the symbol-table or assignment-target walk
+    /// fails loudly instead of silently producing writable compound consts.
+    #[test]
+    fn test_const_compound_rebind_rejected() {
+        let source = r#"fn test() -> i32 { const ARR: [i32; 2] = [1, 2]; ARR = [3, 4]; return ARR[0]; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Rebinding a const array must fail");
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("cannot assign to immutable variable"),
+            "Expected immutability diagnostic, got: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_const_array_element_write_rejected() {
+        let source = r#"fn test() -> i32 { const ARR: [i32; 2] = [1, 2]; ARR[0] = 9; return ARR[0]; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Writing to a const array element must fail");
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("cannot assign to immutable variable"),
+            "Expected immutability diagnostic, got: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_const_struct_field_write_rejected() {
+        let source = r#"struct Point { x: i32; y: i32; } fn test() -> i32 { const P: Point = Point { x: 1, y: 2 }; P.x = 9; return P.x; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Writing to a const struct field must fail");
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("cannot assign to immutable variable"),
+            "Expected immutability diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Pin type-checker enforcement of size/shape for compound `const`
+    /// initializers. These mirror the `let`-side checks and guard against
+    /// regressions where the const path drifts out of sync with the var path.
+    #[test]
+    fn test_const_array_size_mismatch_rejected() {
+        let source = r#"fn test() -> i32 { const ARR: [i32; 3] = [1, 2]; return ARR[0]; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Const array size mismatch must fail");
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("type mismatch"),
+            "Expected type mismatch diagnostic, got: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_const_struct_missing_field_rejected() {
+        let source = r#"struct Point { x: i32; y: i32; } fn test() -> i32 { const P: Point = Point { x: 1 }; return P.x; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Const struct missing field must fail");
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("missing field"),
+            "Expected missing field diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Pin element-type validation for compound `const` array initializers.
+    /// Symmetric to the size-mismatch case: the array element type must match
+    /// the declared type, not just the count.
+    #[test]
+    fn test_const_array_element_type_mismatch_rejected() {
+        let source = r#"fn test() -> i32 { const ARR: [i32; 2] = [true, false]; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const array with bool elements for i32 declared type must fail"
+        );
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("type mismatch"),
+            "Expected type mismatch diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Symmetric companion to `test_const_array_size_mismatch_rejected`:
+    /// guards the too-many-elements branch of the size check.
+    #[test]
+    fn test_const_array_length_exceeds_declared_rejected() {
+        let source = r#"fn test() -> i32 { const ARR: [i32; 2] = [1, 2, 3]; return ARR[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const array with too many elements must fail"
+        );
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("type mismatch"),
+            "Expected type mismatch diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Const struct initializer providing a field not in the struct definition
+    /// must be rejected with `UnknownStructField`.
+    #[test]
+    fn test_const_struct_extra_field_rejected() {
+        let source = r#"struct Point { x: i32; y: i32; } fn test() -> i32 { const P: Point = Point { x: 1, y: 2, z: 3 }; return P.x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const struct with extra field must fail"
+        );
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("unknown field"),
+            "Expected unknown field diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Const struct initializer repeating a field must be rejected with
+    /// `DuplicateStructField`.
+    #[test]
+    fn test_const_struct_duplicate_field_rejected() {
+        let source = r#"struct Point { x: i32; y: i32; } fn test() -> i32 { const P: Point = Point { x: 1, x: 2, y: 3 }; return P.x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const struct with duplicate field must fail"
+        );
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("duplicate field"),
+            "Expected duplicate field diagnostic, got: {error_msg}"
+        );
+    }
+
+    /// Const struct initializer assigning a bool value to an i32 field must be
+    /// rejected with a type mismatch diagnostic.
+    #[test]
+    fn test_const_struct_wrong_type_field_value_rejected() {
+        let source = r#"struct Point { x: i32; y: i32; } fn test() -> i32 { const P: Point = Point { x: true, y: 2 }; return P.y; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Const struct with bool field value for i32 field must fail"
+        );
+        let error_msg = result.err().unwrap().to_string();
+        assert!(
+            error_msg.contains("type mismatch"),
+            "Expected type mismatch diagnostic, got: {error_msg}"
+        );
+    }
 }
 
 #[cfg(test)]
