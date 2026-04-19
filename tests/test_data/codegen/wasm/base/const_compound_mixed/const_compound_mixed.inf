@@ -1,0 +1,6 @@
+struct Point { x: i32; y: i32; }
+pub fn combined() -> i32 {
+    const ARR: [i32; 2] = [3, 4];
+    const P: Point = Point { x: 100, y: 200 };
+    return ARR[0] + ARR[1] + P.x;
+}

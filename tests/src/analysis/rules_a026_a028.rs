@@ -261,6 +261,33 @@ mod analysis_rules_tests {
         }
     }
 
+    /// AD-1 / AD-5 symmetry: A026 fires on struct *definitions*, not on
+    /// bindings, so a depth-2 nested struct used as a `const` initializer
+    /// is rejected via the same code path as `let`. Pinned here so that any
+    /// future short-circuit in the const-init path that bypasses struct-def
+    /// analysis (e.g., a future CTFE pre-pass) re-trips A026.
+    #[test]
+    fn a026_depth_2_via_const_initializer_rejected() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Middle { inner: Inner; val: i32; }
+            struct Deep { middle: Middle; z: i32; }
+            fn main() -> i32 {
+                const D: Deep = Deep { middle: Middle { inner: Inner { x: 1, y: 2 }, val: 3 }, z: 4 };
+                return D.z;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let a026_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisDiagnostic::NestedCompoundDepthExceeded { .. }))
+            .collect();
+        assert!(
+            !a026_errors.is_empty(),
+            "depth-2 nested struct used in const initializer should be rejected by A026, got: {errors:?}"
+        );
+    }
+
     /// Module definitions are not yet supported by the parser. This test
     /// confirms the parser rejects them — once supported, A026 should
     /// detect depth-2 nesting inside modules.
@@ -717,5 +744,44 @@ mod analysis_rules_tests {
             .iter()
             .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnStructInArray { .. }));
         assert!(has_a028, "uzumaki on [[[Point; 2]; 3]; 4] should be rejected, got: {errors:?}");
+    }
+
+    // --- A027/A028: Uzumaki in const initializers ---
+
+    #[test]
+    fn a027_uzumaki_on_nested_struct_via_const_rejected() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            struct Outer { inner: Inner; val: i32; }
+            fn main() -> i32 {
+                forall {
+                    const O: Outer = @;
+                }
+                return 0;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a027 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnNestedStruct { .. }));
+        assert!(has_a027, "uzumaki on nested struct via const should be rejected, got: {errors:?}");
+    }
+
+    #[test]
+    fn a028_uzumaki_on_struct_in_array_via_const_rejected() {
+        let source = r#"
+            struct Inner { x: i32; y: i32; }
+            fn main() -> i32 {
+                forall {
+                    const ARR: [Inner; 2] = @;
+                }
+                return 0;
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_a028 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnStructInArray { .. }));
+        assert!(has_a028, "uzumaki on struct-in-array via const should be rejected, got: {errors:?}");
     }
 }

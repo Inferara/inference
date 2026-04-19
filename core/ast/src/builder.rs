@@ -287,12 +287,18 @@ impl<'a> Builder<'a> {
         Field { name, ty }
     }
 
+    /// Builds a `const` definition. The initializer is routed through
+    /// `build_expression` so that const RHS accepts the same grammar as `let`
+    /// bindings: struct literals, array literals, identifier copies, function
+    /// calls, etc. Semantic restrictions on what a const may actually contain
+    /// are enforced by later passes (type checker and analysis rules), not
+    /// here.
     fn build_constant_definition(&mut self, node: &Node, code: &[u8]) -> DefId {
         self.collect_errors(node, code);
         let location = Self::get_location(node, code);
         let ty = self.build_type(&node.child_by_field_name("type").unwrap(), code);
         let name = self.build_identifier(&node.child_by_field_name("name").unwrap(), code);
-        let value = self.build_literal(&node.child_by_field_name("value").unwrap(), code);
+        let value = self.build_expression(&node.child_by_field_name("value").unwrap(), code);
 
         self.arena.defs.alloc(DefData {
             location,

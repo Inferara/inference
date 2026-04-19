@@ -1,0 +1,4 @@
+pub fn sum() -> i32 {
+    const ARR: [i32; 3] = [1, 2, 3];
+    return ARR[0] + ARR[1] + ARR[2];
+}

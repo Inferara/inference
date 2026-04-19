@@ -902,11 +902,80 @@ impl Compiler {
         }))
     }
 
+    /// Allocates a single frame slot for a named binding (either a `let` or
+    /// `const`) whose declared type is compound (array or struct).
+    ///
+    /// Scalar bindings (including enum tags) produce no frame slot and are
+    /// intentionally no-ops here — they are tracked by `pre_scan_locals` as
+    /// WASM locals instead. Zero-sized structs also produce no slot.
+    fn collect_compound_slot_for_type(
+        arena: &AstArena,
+        name_id: IdentId,
+        type_kind: &TypeInfoKind,
+        ctx: &TypedContext,
+        array_offsets: &mut FxHashMap<String, ArraySlot>,
+        struct_offsets: &mut FxHashMap<String, StructSlot>,
+        current_offset: &mut u32,
+    ) -> Result<(), CodegenError> {
+        match type_kind {
+            TypeInfoKind::Array(elem_type, length) => {
+                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                let byte_count = elem_sz.checked_mul(*length).expect(
+                    "Array byte count overflow: element size * length exceeds u32::MAX",
+                );
+                let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
+                let aligned_offset = align_to(*current_offset, align);
+                let element_layout = compute_element_layout_if_struct(&elem_type.kind, ctx)?;
+                let slot = ArraySlot {
+                    offset: aligned_offset,
+                    elem_size: elem_sz,
+                    length: *length,
+                    element_layout,
+                };
+                let binding_name = arena[name_id].name.clone();
+                array_offsets.insert(binding_name, slot);
+                *current_offset = aligned_offset.checked_add(byte_count).expect(
+                    "Frame offset overflow: total array allocation exceeds u32::MAX",
+                );
+            }
+            TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
+                let struct_info = ctx.lookup_struct(struct_name);
+                debug_assert!(
+                    struct_info.is_some()
+                        || matches!(type_kind, TypeInfoKind::Custom(_))
+                            && ctx.lookup_enum(struct_name).is_some(),
+                    "collect_compound_slot_for_type: unresolved Struct/Custom type '{struct_name}' — \
+                     type checker should reject unresolved names before codegen",
+                );
+                if let Some(struct_info) = struct_info {
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx)?;
+                    if total_size > 0 {
+                        let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
+                        let aligned_offset = align_to(*current_offset, max_field_align);
+                        let slot = StructSlot {
+                            offset: aligned_offset,
+                            total_size,
+                            fields: field_slots,
+                        };
+                        let binding_name = arena[name_id].name.clone();
+                        struct_offsets.insert(binding_name, slot);
+                        *current_offset = aligned_offset.checked_add(total_size).expect(
+                            "Frame offset overflow: struct allocation exceeds u32::MAX",
+                        );
+                    }
+                }
+            }
+            // Scalars (incl. enum tags) and zero-sized structs: no frame slot needed.
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Recursively walks a block collecting array and struct variable declarations.
     ///
     /// Enum types are intentionally excluded — they are pure i32 scalars with no
     /// linear memory footprint, so they do not need frame slots.
-    #[allow(clippy::too_many_lines)]
     fn collect_compound_slots(
         arena: &AstArena,
         block_id: BlockId,
@@ -922,51 +991,30 @@ impl Compiler {
                     let type_info = ctx
                         .get_node_typeinfo(NodeId::Stmt(stmt_id))
                         .expect("Variable definition must have type info");
-                    match &type_info.kind {
-                        TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
-                            let byte_count = elem_sz.checked_mul(*length).expect(
-                                "Array byte count overflow: element size * length exceeds u32::MAX",
-                            );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
-                            let aligned_offset = align_to(*current_offset, align);
-                            let element_layout =
-                                compute_element_layout_if_struct(&elem_type.kind, ctx)?;
-                            let slot = ArraySlot {
-                                offset: aligned_offset,
-                                elem_size: elem_sz,
-                                length: *length,
-                                element_layout,
-                            };
-                            let var_name = arena[*name].name.clone();
-                            array_offsets.insert(var_name, slot);
-                            *current_offset = aligned_offset.checked_add(byte_count).expect(
-                                "Frame offset overflow: total array allocation exceeds u32::MAX",
-                            );
-                        }
-                        TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
-                            if let Some(struct_info) = ctx.lookup_struct(struct_name) {
-                                let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx)?;
-                                if total_size > 0 {
-                                    let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx)?;
-                                    let aligned_offset = align_to(*current_offset, max_field_align);
-                                    let slot = StructSlot {
-                                        offset: aligned_offset,
-                                        total_size,
-                                        fields: field_slots,
-                                    };
-                                    let var_name = arena[*name].name.clone();
-                                    struct_offsets.insert(var_name, slot);
-                                    *current_offset =
-                                        aligned_offset.checked_add(total_size).expect(
-                                            "Frame offset overflow: struct allocation exceeds u32::MAX",
-                                        );
-                                }
-                            }
-                        }
-                        _ => {}
+                    Self::collect_compound_slot_for_type(
+                        arena,
+                        *name,
+                        &type_info.kind,
+                        ctx,
+                        array_offsets,
+                        struct_offsets,
+                        current_offset,
+                    )?;
+                }
+                Stmt::ConstDef(const_def_id) => {
+                    if let Def::Constant { name, .. } = &arena[*const_def_id].kind {
+                        let type_info = ctx
+                            .get_node_typeinfo(NodeId::Stmt(stmt_id))
+                            .expect("Constant definition must have type info");
+                        Self::collect_compound_slot_for_type(
+                            arena,
+                            *name,
+                            &type_info.kind,
+                            ctx,
+                            array_offsets,
+                            struct_offsets,
+                            current_offset,
+                        )?;
                     }
                 }
                 Stmt::Block(inner_block_id) => {
@@ -1094,80 +1142,16 @@ impl Compiler {
             Stmt::VarDef { name, value, .. } => {
                 cov_mark::hit!(wasm_codegen_emit_variable_definition);
                 let var_name = arena[name].name.clone();
-                let (local_idx, _) = self
-                    .locals_map
-                    .get(&var_name)
-                    .expect("Variable local not found in pre-scan");
                 match value {
                     None => todo!("Uninitialized variable definitions are not supported"),
                     Some(val_expr_id) => {
-                        let local_idx = *local_idx;
-
-                        let var_type_info = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id));
-                        let is_array_type = matches!(
-                            var_type_info.as_ref().map(|ti| &ti.kind),
-                            Some(TypeInfoKind::Array(_, _))
+                        self.lower_named_binding_init(
+                            arena,
+                            &var_name,
+                            val_expr_id,
+                            stmt_id,
+                            ctx,
                         );
-                        let is_struct_type = matches!(
-                            var_type_info.as_ref().map(|ti| &ti.kind),
-                            Some(TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
-                        ) && self
-                            .frame_layout
-                            .as_ref()
-                            .is_some_and(|layout| layout.struct_offsets.contains_key(&var_name));
-                        let is_compound_type = is_array_type || is_struct_type;
-
-                        // Detect sret call (array-returning or struct-returning function/method)
-                        let is_sret_call =
-                            is_compound_type && self.is_sret_function_call(arena, val_expr_id, ctx);
-
-                        // Detect array-to-array copy
-                        let is_array_copy = is_array_type
-                            && matches!(
-                                arena[val_expr_id].kind,
-                                Expr::Identifier(_)
-                                    | Expr::ArrayIndexAccess { .. }
-                                    | Expr::MemberAccess { .. }
-                            );
-
-                        // Detect struct-to-struct copy (from identifier, member access, or array index)
-                        let is_struct_copy = is_struct_type
-                            && matches!(
-                                arena[val_expr_id].kind,
-                                Expr::Identifier(_)
-                                    | Expr::MemberAccess { .. }
-                                    | Expr::ArrayIndexAccess { .. }
-                            );
-
-                        if is_sret_call {
-                            self.lower_sret_var_init(arena, val_expr_id, local_idx, &var_name, ctx);
-                        } else if is_array_copy {
-                            cov_mark::hit!(wasm_codegen_emit_array_copy);
-                            self.lower_array_copy_var_init(
-                                arena,
-                                val_expr_id,
-                                local_idx,
-                                &var_name,
-                                ctx,
-                            );
-                        } else if is_struct_copy {
-                            cov_mark::hit!(wasm_codegen_emit_struct_copy);
-                            self.lower_struct_copy_var_init(
-                                arena,
-                                val_expr_id,
-                                local_idx,
-                                &var_name,
-                                ctx,
-                            );
-                        } else {
-                            // Safety: flag is reset immediately after lower_expression.
-                            // No early-return (returns ()) or ? operator in the call.
-                            // Panics are fatal to the compiler process.
-                            self.init_zero_elision = true;
-                            self.lower_expression(arena, val_expr_id, ctx, Some(&var_name));
-                            self.init_zero_elision = false;
-                            self.func().instruction(&Instruction::LocalSet(local_idx));
-                        }
                     }
                 }
             }
@@ -1177,16 +1161,75 @@ impl Compiler {
                 cov_mark::hit!(wasm_codegen_emit_constant_definition);
                 if let Def::Constant { name, value, .. } = &arena[const_def_id].kind {
                     let const_name = arena[*name].name.clone();
-                    let value = *value;
-                    self.lower_expression(arena, value, ctx, None);
-                    let (local_idx, _) = self
-                        .locals_map
-                        .get(&const_name)
-                        .expect("Local not found in pre-scan");
-                    let local_idx = *local_idx;
-                    self.func().instruction(&Instruction::LocalSet(local_idx));
+                    self.lower_named_binding_init(arena, &const_name, *value, stmt_id, ctx);
                 }
             }
+        }
+    }
+
+    /// Lowers the initializer of a `let`/`const` binding, dispatching among the
+    /// sret, array-copy, struct-copy, and scalar/literal paths. AD-1 / AD-5
+    /// commit to byte-identical WASM emission between function-scoped `const`
+    /// and the equivalent immutable `let`; this helper is the single dispatch
+    /// site that both arms route through.
+    fn lower_named_binding_init(
+        &mut self,
+        arena: &AstArena,
+        name: &str,
+        value_expr_id: ExprId,
+        stmt_id: StmtId,
+        ctx: &TypedContext,
+    ) {
+        let (local_idx, _) = self
+            .locals_map
+            .get(name)
+            .expect("Binding local not found in pre-scan");
+        let local_idx = *local_idx;
+
+        cov_mark::hit!(wasm_codegen_const_typeinfo_lookup);
+        let type_info = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id));
+        let is_array_type = matches!(
+            type_info.as_ref().map(|ti| &ti.kind),
+            Some(TypeInfoKind::Array(_, _))
+        );
+        let is_struct_type = matches!(
+            type_info.as_ref().map(|ti| &ti.kind),
+            Some(TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
+        ) && self
+            .frame_layout
+            .as_ref()
+            .is_some_and(|layout| layout.struct_offsets.contains_key(name));
+        let is_compound_type = is_array_type || is_struct_type;
+
+        let is_sret_call =
+            is_compound_type && self.is_sret_function_call(arena, value_expr_id, ctx);
+
+        let is_array_copy = is_array_type
+            && matches!(
+                arena[value_expr_id].kind,
+                Expr::Identifier(_) | Expr::ArrayIndexAccess { .. } | Expr::MemberAccess { .. }
+            );
+
+        let is_struct_copy = is_struct_type
+            && matches!(
+                arena[value_expr_id].kind,
+                Expr::Identifier(_) | Expr::MemberAccess { .. } | Expr::ArrayIndexAccess { .. }
+            );
+
+        if is_sret_call {
+            self.lower_sret_var_init(arena, value_expr_id, local_idx, name, ctx);
+        } else if is_array_copy {
+            cov_mark::hit!(wasm_codegen_emit_array_copy);
+            self.lower_array_copy_var_init(arena, value_expr_id, local_idx, name, ctx);
+        } else if is_struct_copy {
+            cov_mark::hit!(wasm_codegen_emit_struct_copy);
+            self.lower_struct_copy_var_init(arena, value_expr_id, local_idx, name, ctx);
+        } else {
+            // init_zero_elision must not leak past lower_expression; reset before LocalSet runs.
+            self.init_zero_elision = true;
+            self.lower_expression(arena, value_expr_id, ctx, Some(name));
+            self.init_zero_elision = false;
+            self.func().instruction(&Instruction::LocalSet(local_idx));
         }
     }
 

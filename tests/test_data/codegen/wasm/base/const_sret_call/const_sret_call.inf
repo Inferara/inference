@@ -1,0 +1,8 @@
+fn make_arr() -> [i32; 3] {
+    return [10, 20, 30];
+}
+
+pub fn sum() -> i32 {
+    const ARR: [i32; 3] = make_arr();
+    return ARR[0] + ARR[1] + ARR[2];
+}

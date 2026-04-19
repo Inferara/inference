@@ -3166,6 +3166,46 @@ mod const_type_mismatch_tests {
             result.as_ref().err()
         );
     }
+
+    /// Symmetric to `test_const_valid_array_literal`: verifies the type
+    /// checker accepts a struct literal as a const initializer. Function-
+    /// scope to dodge the top-level-const analysis rejection (AD-6).
+    #[test]
+    fn test_const_valid_struct_literal() {
+        let source = r#"struct Point { x: i32; y: i32; } fn main() -> i32 { const P: Point = Point { x: 1, y: 2 }; return P.x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Const with matching struct literal should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    /// One level of nesting (struct inside array) is permitted by A026, so the
+    /// type checker must accept an array-of-struct const initializer.
+    #[test]
+    fn test_const_valid_array_of_struct_literal() {
+        let source = r#"struct Point { x: i32; y: i32; } fn main() -> i32 { const PS: [Point; 2] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]; return PS[0].x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Const with array-of-struct literal should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    /// One level of nesting (array inside struct) is permitted by A026, so the
+    /// type checker must accept a struct-with-array-field const initializer.
+    #[test]
+    fn test_const_valid_struct_with_array_field_literal() {
+        let source = r#"struct Buf { data: [i32; 3]; } fn main() -> i32 { const B: Buf = Buf { data: [1, 2, 3] }; return B.data[0]; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Const with struct-of-array literal should pass, got: {:?}",
+            result.as_ref().err()
+        );
+    }
 }
 
 #[cfg(test)]
