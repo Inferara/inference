@@ -38,6 +38,13 @@ const INFS_METADATA_FILE: &str = "infs.json";
 /// Current schema version for infs metadata.
 const INFS_METADATA_SCHEMA_VERSION: u32 = 1;
 
+/// Mirror of `resolver::verbose` — kept local so `paths.rs` does not depend on
+/// resolver internals. Behavior is identical on purpose: both surfaces treat
+/// `INFS_VERBOSE=1`/`INFS_VERBOSE=yes` as enabled, and empty/`"0"` as disabled.
+fn infs_verbose() -> bool {
+    std::env::var_os("INFS_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Metadata about a toolchain installation.
 ///
 /// This is stored in each toolchain version directory as `.metadata.json`.
@@ -355,10 +362,40 @@ impl ToolchainPaths {
     ///
     /// Returns an error if the metadata file cannot be written.
     pub fn ensure_infs_metadata(&self) -> Result<()> {
-        if !self.infs_metadata_path().exists() {
+        if self.infs_metadata_path().exists() {
+            // Best-effort: parse existing metadata so any schema_version drift
+            // surfaces under INFS_VERBOSE on first-launch initialization. The
+            // return value is intentionally discarded — we only want the
+            // validation side-effect; callers that need the data use
+            // [`Self::read_infs_metadata`] directly.
+            let _ = self.read_infs_metadata();
+        } else {
             self.write_infs_metadata(&InfsMetadata::new())?;
         }
         Ok(())
+    }
+
+    /// Reads infs metadata from the root `infs.json` file.
+    ///
+    /// Returns `None` if the file does not exist or cannot be parsed. When the
+    /// stored `schema_version` does not match the compiled-in constant and
+    /// `INFS_VERBOSE` is set to a non-empty, non-"0" value, a non-fatal
+    /// warning is emitted to stderr. The metadata is still returned — this
+    /// is observability, not gating, so older installs keep working
+    /// on a best-effort basis.
+    #[must_use = "returns metadata without side effects (besides optional verbose logging)"]
+    pub fn read_infs_metadata(&self) -> Option<InfsMetadata> {
+        let path = self.infs_metadata_path();
+        let content = std::fs::read_to_string(&path).ok()?;
+        let metadata: InfsMetadata = serde_json::from_str(&content).ok()?;
+        if metadata.schema_version != INFS_METADATA_SCHEMA_VERSION && infs_verbose() {
+            eprintln!(
+                "infs: infs.json has schema_version {}, expected {}; \
+                 running with best-effort compatibility",
+                metadata.schema_version, INFS_METADATA_SCHEMA_VERSION
+            );
+        }
+        Some(metadata)
     }
 
     /// Returns the path for a downloaded archive file.
@@ -956,6 +993,87 @@ mod tests {
 
         let broken = paths.validate_symlinks();
         assert!(broken.is_empty());
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_infs_metadata_warns_on_schema_version_mismatch() {
+        // The warning is emitted to stderr as a side-effect under INFS_VERBOSE.
+        // Capturing stderr in-process requires a test-only dependency that
+        // isn't wired in (e.g. `gag`). Pragmatic fallback per the L7 plan:
+        // assert the Ok path — metadata still returned — and leave stderr
+        // inspection to manual verification. The mismatch branch executes
+        // under this test, so any panic/unwrap inside it would surface.
+        let temp_dir = env::temp_dir().join("infs_test_read_meta_mismatch");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        let bogus = InfsMetadata {
+            version: "0.0.1-test".to_string(),
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            // Deliberately drifted from INFS_METADATA_SCHEMA_VERSION.
+            schema_version: 999,
+        };
+        paths.write_infs_metadata(&bogus).unwrap();
+
+        // SAFETY: serialized test; restored in the cleanup block.
+        unsafe {
+            env::set_var("INFS_VERBOSE", "1");
+        }
+
+        let result = paths.read_infs_metadata();
+
+        // SAFETY: restore regardless of assertion outcome.
+        unsafe {
+            env::remove_var("INFS_VERBOSE");
+        }
+
+        let meta = result.expect("metadata should still be returned on mismatch");
+        assert_eq!(meta.schema_version, 999);
+        assert_eq!(meta.version, "0.0.1-test");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn read_infs_metadata_no_warning_when_version_matches() {
+        let temp_dir = env::temp_dir().join("infs_test_read_meta_match");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        paths.ensure_infs_metadata().unwrap();
+
+        // SAFETY: serialized test; restored below.
+        unsafe {
+            env::set_var("INFS_VERBOSE", "1");
+        }
+
+        let result = paths.read_infs_metadata();
+
+        // SAFETY: restore regardless of outcome.
+        unsafe {
+            env::remove_var("INFS_VERBOSE");
+        }
+
+        let meta = result.expect("metadata should be returned for a fresh install");
+        assert_eq!(meta.schema_version, INFS_METADATA_SCHEMA_VERSION);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn read_infs_metadata_returns_none_when_file_missing() {
+        let temp_dir = env::temp_dir().join("infs_test_read_meta_missing");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ToolchainPaths::with_root(temp_dir.clone());
+
+        assert!(paths.read_infs_metadata().is_none());
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

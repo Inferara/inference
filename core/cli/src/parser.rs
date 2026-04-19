@@ -68,7 +68,11 @@ pub(crate) struct Cli {
     ///
     /// Currently only single-file compilation is supported. Multi-file projects
     /// and project file (`.infp`) support is planned for future releases.
-    pub(crate) path: std::path::PathBuf,
+    ///
+    /// Optional so informational flags (e.g. `--commit-hash`) can run without
+    /// a source file argument. Regular compilation still requires a path and
+    /// exits with an error if one is not supplied.
+    pub(crate) path: Option<std::path::PathBuf>,
 
     /// Run the parse phase to build the typed AST.
     ///
@@ -130,4 +134,18 @@ pub(crate) struct Cli {
     /// Rocq proof assistant.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub(crate) generate_v_output: bool,
+
+    /// Print the git commit hash embedded at build time and exit 0.
+    ///
+    /// Used by `infs build` to detect version drift between paired `infs` and
+    /// `infc` binaries. Does not require a source file argument.
+    #[clap(long = "commit-hash", action = clap::ArgAction::SetTrue)]
+    pub(crate) commit_hash: bool,
+
+    /// Print the compiler ABI version (`<major>.<minor>`) and exit 0.
+    ///
+    /// Used by `infs build` to verify that the invoked `infc` speaks a CLI/IO
+    /// contract it understands. Does not require a source file argument.
+    #[clap(long = "abi-version", action = clap::ArgAction::SetTrue)]
+    pub(crate) abi_version: bool,
 }

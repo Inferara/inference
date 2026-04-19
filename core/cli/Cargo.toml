@@ -5,6 +5,7 @@ edition = { workspace = true }
 license = { workspace = true }
 homepage = { workspace = true }
 repository = { workspace = true }
+build = "build.rs"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
@@ -12,6 +13,7 @@ walkdir = "2.5.0"
 anyhow.workspace = true
 inference.workspace = true
 inference-wasm-codegen.workspace = true
+inference-compiler-interface.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.1.1"

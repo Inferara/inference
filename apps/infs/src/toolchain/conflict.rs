@@ -4,6 +4,11 @@
 //! shadows the managed toolchain binary. This helps users understand why the
 //! managed toolchain might not be used when they run commands.
 //!
+//! It also enumerates *all* `infc` binaries on `PATH` so developers can
+//! see duplicates — e.g. a stale `~/bin/infc` shadowed by a fresh
+//! `/usr/local/bin/infc`. This is a common failure mode that single-hit
+//! `which::which` lookups hide.
+//!
 //! ## Usage
 //!
 //! ```ignore
@@ -74,6 +79,53 @@ pub fn detect_path_conflicts(bin_dir: &Path) -> Vec<PathConflict> {
     }
 
     conflicts
+}
+
+/// Enumerates every `infc` binary visible on the current `PATH`, in
+/// first-wins order (the same order `which::which` would traverse).
+///
+/// Returns an empty vector when nothing is found or when platform
+/// detection fails. More than one entry means the later entries are
+/// shadowed; `infs build` will invoke the first one.
+///
+/// Uses [`which::which_all`] rather than [`which::which`] so both
+/// active and shadowed binaries are visible — the common pitfall a
+/// single-hit lookup hides. No new crate dependency: `which` is
+/// already in the tree and v8 exposes `which_all` directly.
+#[must_use]
+pub fn enumerate_infc_on_path() -> Vec<PathBuf> {
+    let Ok(platform) = Platform::detect() else {
+        return vec![];
+    };
+    let binary_with_ext = format!("{}{}", ToolchainPaths::MANAGED_BINARY, platform.executable_extension());
+    which::which_all(&binary_with_ext)
+        .map(Iterator::collect)
+        .unwrap_or_default()
+}
+
+/// Formats a multi-line warning describing duplicate `infc` binaries
+/// on `PATH`. Returns an empty vector when `paths.len() <= 1`; the
+/// caller is expected to check for the duplicate case before
+/// rendering.
+///
+/// The first entry is labelled `(active)` and the rest `(shadowed)`
+/// because `which::which_all` iterates in the order `PATH` would
+/// resolve — which is also the order `infs build` effectively uses
+/// when the `PATH` priority fires.
+#[must_use]
+pub fn format_duplicate_path_warning(paths: &[PathBuf]) -> Vec<String> {
+    if paths.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    lines.push("Multiple infc binaries found on PATH (first wins):".to_string());
+    for (idx, path) in paths.iter().enumerate() {
+        let tag = if idx == 0 { "active" } else { "shadowed" };
+        lines.push(format!("  {}. {} ({})", idx + 1, path.display(), tag));
+    }
+    lines.push("Use INFC_PATH to pin a specific binary.".to_string());
+    lines
 }
 
 /// Formats a user-friendly warning message for PATH conflicts.
@@ -351,5 +403,129 @@ mod tests {
         let debug_str = format!("{conflict:?}");
         assert!(debug_str.contains("PathConflict"));
         assert!(debug_str.contains("test"));
+    }
+
+    /// Creates an executable `infc[.exe]` stub in `dir` so `which::which_all`
+    /// will count it as a match.
+    fn write_executable_infc_stub(dir: &Path) -> PathBuf {
+        let platform = Platform::detect().unwrap();
+        let name = format!("{}{}", ToolchainPaths::MANAGED_BINARY, platform.executable_extension());
+        let stub = dir.join(&name);
+        std::fs::write(&stub, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub, perms).unwrap();
+        }
+        stub
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn multiple_infc_on_path_all_reported() {
+        let dir_a = assert_fs::TempDir::new().unwrap();
+        let dir_b = assert_fs::TempDir::new().unwrap();
+        let stub_a = write_executable_infc_stub(dir_a.path());
+        let stub_b = write_executable_infc_stub(dir_b.path());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+        let joined = env::join_paths([dir_a.path(), dir_b.path()]).unwrap();
+
+        // SAFETY: serialized; cleaned up below regardless of outcome.
+        unsafe {
+            env::set_var("PATH", &joined);
+        }
+
+        let found = enumerate_infc_on_path();
+
+        // SAFETY: restore PATH before assertions so a panic doesn't leak state.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        // Some CI sandboxes resolve symlinks asymmetrically; accept either
+        // the raw tempdir path or its canonical form, but require PATH order.
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        assert_eq!(found.len(), 2, "expected both infc stubs to be enumerated: {found:?}");
+        assert_eq!(canon(&found[0]), canon(&stub_a), "first hit must be the first PATH entry");
+        assert_eq!(canon(&found[1]), canon(&stub_b), "second hit must be the second PATH entry");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn single_infc_on_path_no_duplicate_warning() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        write_executable_infc_stub(dir.path());
+
+        let original_path = env::var("PATH").unwrap_or_default();
+
+        // SAFETY: serialized; cleaned up below regardless of outcome.
+        unsafe {
+            env::set_var("PATH", dir.path());
+        }
+
+        let found = enumerate_infc_on_path();
+
+        // SAFETY: restore PATH before assertions.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        assert_eq!(found.len(), 1, "exactly one infc should be visible: {found:?}");
+        // A single entry must not trigger the duplicate-warning block.
+        let warning = format_duplicate_path_warning(&found);
+        assert!(
+            warning.is_empty(),
+            "single PATH entry must not produce a duplicate warning: {warning:?}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn no_infc_on_path_no_warning() {
+        let empty_dir = assert_fs::TempDir::new().unwrap();
+        let original_path = env::var("PATH").unwrap_or_default();
+
+        // SAFETY: serialized; cleaned up below regardless of outcome.
+        unsafe {
+            env::set_var("PATH", empty_dir.path());
+        }
+
+        let found = enumerate_infc_on_path();
+
+        // SAFETY: restore PATH before assertions.
+        unsafe {
+            env::set_var("PATH", original_path);
+        }
+
+        assert!(
+            found.is_empty(),
+            "empty PATH directory must yield no infc matches: {found:?}"
+        );
+        let warning = format_duplicate_path_warning(&found);
+        assert!(warning.is_empty(), "empty enumeration must not warn");
+    }
+
+    #[test]
+    fn format_duplicate_path_warning_lists_active_and_shadowed() {
+        let paths = vec![
+            PathBuf::from("/usr/local/bin/infc"),
+            PathBuf::from("/home/user/bin/infc"),
+        ];
+        let lines = format_duplicate_path_warning(&paths);
+
+        assert!(!lines.is_empty());
+        assert!(lines.iter().any(|l| l.contains("Multiple infc binaries")));
+        assert!(lines.iter().any(|l| l.contains("1. /usr/local/bin/infc (active)")));
+        assert!(lines.iter().any(|l| l.contains("2. /home/user/bin/infc (shadowed)")));
+        assert!(lines.iter().any(|l| l.contains("INFC_PATH")));
+    }
+
+    #[test]
+    fn format_duplicate_path_warning_empty_for_zero_paths() {
+        let lines = format_duplicate_path_warning(&[]);
+        assert!(lines.is_empty());
     }
 }

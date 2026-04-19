@@ -216,7 +216,26 @@ pub(crate) fn normalize_args(args: &mut Cli) {
 #[allow(clippy::too_many_lines)]
 fn main() {
     let mut args = Cli::parse();
-    if !args.path.exists() {
+
+    if args.commit_hash {
+        println!("{}", env!("INFC_GIT_COMMIT"));
+        process::exit(0);
+    }
+
+    if args.abi_version {
+        println!(
+            "{}.{}",
+            inference_compiler_interface::COMPILER_ABI_MAJOR,
+            inference_compiler_interface::COMPILER_ABI_MINOR,
+        );
+        process::exit(0);
+    }
+
+    let Some(path) = args.path.clone() else {
+        eprintln!("Error: source file argument required");
+        process::exit(1);
+    };
+    if !path.exists() {
         eprintln!("Error: path not found");
         process::exit(1);
     }
@@ -228,7 +247,7 @@ fn main() {
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
 
-    let source_code = match fs::read_to_string(&args.path) {
+    let source_code = match fs::read_to_string(&path) {
         Ok(content) => content,
         Err(e) => {
             eprintln!("Error reading source file: {e}");
@@ -239,7 +258,7 @@ fn main() {
     if need_codegen || need_analyze || need_parse {
         match parse(source_code.as_str()) {
             Ok(ast) => {
-                println!("Parsed: {}", args.path.display());
+                println!("Parsed: {}", path.display());
                 t_ast = Some(ast);
             }
             Err(e) => {
@@ -275,7 +294,7 @@ fn main() {
                     }
                 }
                 typed_context = Some(tctx);
-                println!("Analyzed: {}", args.path.display());
+                println!("Analyzed: {}", path.display());
             }
         }
     }
@@ -296,8 +315,7 @@ fn main() {
             }
         };
         println!("Codegen complete");
-        let source_fname = args
-            .path
+        let source_fname = path
             .file_stem()
             .unwrap_or_else(|| std::ffi::OsStr::new("module"))
             .to_str()
@@ -348,12 +366,14 @@ mod tests {
 
     fn make_args(parse: bool, analyze: bool, codegen: bool) -> Cli {
         Cli {
-            path: PathBuf::from("test.inf"),
+            path: Some(PathBuf::from("test.inf")),
             parse,
             analyze,
             codegen,
             generate_wasm_output: false,
             generate_v_output: false,
+            commit_hash: false,
+            abi_version: false,
         }
     }
 
