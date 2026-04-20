@@ -1279,19 +1279,16 @@ impl TypeChecker {
                     }
                     Expr::Identifier(ident_id) => arena[*ident_id].name.clone(),
                     _ => {
-                        if let Some(expr_type) = self.infer_expression(inner_expr, ctx) {
-                            match &expr_type.kind {
-                                TypeInfoKind::Enum(name) => name.clone(),
-                                _ => {
-                                    self.errors.push(TypeCheckError::ExpectedEnumType {
-                                        found: expr_type,
-                                        location,
-                                    });
-                                    return None;
-                                }
+                        let expr_type = self.infer_expression(inner_expr, ctx)?;
+                        match &expr_type.kind {
+                            TypeInfoKind::Enum(name) => name.clone(),
+                            _ => {
+                                self.errors.push(TypeCheckError::ExpectedEnumType {
+                                    found: expr_type,
+                                    location,
+                                });
+                                return None;
                             }
-                        } else {
-                            return None;
                         }
                     }
                 };

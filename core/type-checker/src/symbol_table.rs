@@ -888,13 +888,9 @@ impl SymbolTable {
                 .find(|c| c.borrow().name == *segment)
                 .cloned();
 
-            match child {
-                Some(c) => {
-                    drop(scope);
-                    current_scope = c;
-                }
-                None => return None,
-            }
+            let c = child?;
+            drop(scope);
+            current_scope = c;
         }
 
         None
