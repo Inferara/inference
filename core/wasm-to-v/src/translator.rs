@@ -503,11 +503,16 @@ impl WasmParseData<'_> {
 
         // Generate Theorems
         res.push('\n');
+        res.push_str("Section Host.\n");
+        res.push_str("Context `{ho: host}.\n");
+        res.push('\n');
         res.push_str("(* Theorems *)\n");
         res.push_str(format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
         res.push_str("Proof.\n");
         res.push_str("  (* TODO: fill the proof *)\n");
         res.push_str("Qed.\n");
+        res.push('\n');
+        res.push_str("End Host.\n");
         Ok(res)
     }
 
