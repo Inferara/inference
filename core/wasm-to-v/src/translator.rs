@@ -308,7 +308,7 @@ impl WasmParseData<'_> {
         res.push_str("Require Import ZArith.\n");
         res.push_str("From Wasm Require Import bytes.\n");
         res.push_str("From Wasm Require Import numerics.\n");
-        res.push_str("From Wasm Require Import datatypes.\n");
+        res.push_str("From Wasm Require Import datatypes verifier.\n");
         res.push('\n');
         res.push_str("Definition Vi32 i := VAL_int32 (Wasm_int.int_of_Z i32m i).\n");
         res.push_str("Definition Vi64 i := VAL_int64 (Wasm_int.int_of_Z i64m i).\n");
@@ -500,6 +500,19 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_imports :=\n{translated_imports};\n").as_str());
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
+
+        // Generate Theorems
+        res.push('\n');
+        res.push_str("Section Host.\n");
+        res.push_str("Context `{ho: host}.\n");
+        res.push('\n');
+        res.push_str("(* Theorems *)\n");
+        res.push_str(format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
+        res.push_str("Proof.\n");
+        res.push_str("  (* TODO: fill the proof *)\n");
+        res.push_str("Qed.\n");
+        res.push('\n');
+        res.push_str("End Host.\n");
         Ok(res)
     }
 
