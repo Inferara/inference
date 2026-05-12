@@ -47,8 +47,24 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Install MSYS2 for MinGW toolchain
-          choco install msys2 -y --no-progress
+          # Install MSYS2 for MinGW toolchain. The Chocolatey community feed
+          # intermittently returns 503s, so retry the install itself before
+          # the pacman retry loop below.
+          $chocoMaxRetries = 5
+          $chocoRetry = 0
+          while (-not (Test-Path "C:\tools\msys64\usr\bin\bash.exe") -and $chocoRetry -lt $chocoMaxRetries) {
+              $chocoRetry++
+              Write-Output "Attempt $chocoRetry of $chocoMaxRetries to install msys2 via Chocolatey..."
+              choco install msys2 -y --no-progress
+              if (-not (Test-Path "C:\tools\msys64\usr\bin\bash.exe") -and $chocoRetry -lt $chocoMaxRetries) {
+                  Write-Output "Chocolatey install failed; waiting 20 seconds before retry..."
+                  Start-Sleep -Seconds 20
+              }
+          }
+          if (-not (Test-Path "C:\tools\msys64\usr\bin\bash.exe")) {
+              Write-Error "Failed to install msys2 via Chocolatey after $chocoMaxRetries attempts"
+              exit 1
+          }
 
           # Configure pacman with faster mirrors and retry settings
           # This helps avoid "Operation too slow" errors from unresponsive mirrors
