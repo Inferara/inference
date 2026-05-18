@@ -1,0 +1,71 @@
+pub fn assert_literal_true() -> i32 {
+    assert(true);
+    return 1;
+}
+
+pub fn assert_variable(x: i32) -> i32 {
+    assert(x > 0);
+    return x;
+}
+
+pub fn assert_in_if(x: i32) -> i32 {
+    if x > 0 {
+        assert(x < 100);
+        return x;
+    }
+    return 0;
+}
+
+pub fn assert_in_loop_with_break(n: i32) -> i32 {
+    let mut i: i32 = 0;
+    loop i < n {
+        assert(i < n);
+        if i >= 5 {
+            break;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+pub fn double_assert(x: i32, y: i32) -> i32 {
+    assert(x > 0);
+    assert(y > 0);
+    return x + y;
+}
+
+pub fn assert_bool_param(b: bool) -> i32 {
+    assert(b);
+    return 1;
+}
+
+pub fn assert_not(b: bool) -> i32 {
+    assert(!b);
+    return 1;
+}
+
+pub fn assert_and(a: bool, b: bool) -> i32 {
+    assert(a && b);
+    return 1;
+}
+
+pub fn assert_or(a: bool, b: bool) -> i32 {
+    assert(a || b);
+    return 1;
+}
+
+pub fn assert_eq_i32(x: i32, y: i32) -> i32 {
+    assert(x == y);
+    return x;
+}
+
+pub fn assert_complex(a: i32, b: i32, c: i32) -> i32 {
+    assert((a > 0) && ((b < 10) || (c == 0)));
+    return a + b + c;
+}
+
+pub fn assert_bool_local(x: i32) -> i32 {
+    let b: bool = x > 0;
+    assert(b);
+    return x;
+}

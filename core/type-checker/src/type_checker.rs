@@ -941,17 +941,11 @@ impl TypeChecker {
             }
             Stmt::Loop { condition, body } => {
                 if let Some(condition_expr_id) = condition {
-                    let condition_type = self.infer_expression(condition_expr_id, ctx);
-                    if condition_type.is_none()
-                        || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                    {
-                        self.errors.push(TypeCheckError::TypeMismatch {
-                            expected: TypeInfo::boolean(),
-                            found: condition_type.unwrap_or_default(),
-                            context: TypeMismatchContext::Condition,
-                            location,
-                        });
-                    }
+                    self.validate_bool_expression(
+                        condition_expr_id,
+                        TypeMismatchContext::Condition,
+                        ctx,
+                    );
                 }
                 self.symbol_table.push_scope();
                 let stmts: Vec<StmtId> = ctx.arena()[body].stmts.clone();
@@ -966,17 +960,7 @@ impl TypeChecker {
                 then_block,
                 else_block,
             } => {
-                let condition_type = self.infer_expression(condition, ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
-                    self.errors.push(TypeCheckError::TypeMismatch {
-                        expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
-                        context: TypeMismatchContext::Condition,
-                        location,
-                    });
-                }
+                self.validate_bool_expression(condition, TypeMismatchContext::Condition, ctx);
 
                 self.symbol_table.push_scope();
                 let then_stmts: Vec<StmtId> = ctx.arena()[then_block].stmts.clone();
@@ -1100,17 +1084,7 @@ impl TypeChecker {
                 }
             }
             Stmt::Assert { expr } => {
-                let condition_type = self.infer_expression(expr, ctx);
-                if condition_type.is_none()
-                    || condition_type.as_ref().unwrap().kind != TypeInfoKind::Bool
-                {
-                    self.errors.push(TypeCheckError::TypeMismatch {
-                        expected: TypeInfo::boolean(),
-                        found: condition_type.unwrap_or_default(),
-                        context: TypeMismatchContext::Condition,
-                        location,
-                    });
-                }
+                self.validate_bool_expression(expr, TypeMismatchContext::Assert, ctx);
             }
             Stmt::ConstDef(ref const_def_id) => {
                 let cdi = *const_def_id;
@@ -1151,6 +1125,28 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(NodeId::Stmt(stmt_id), constant_type);
                 }
             }
+        }
+    }
+
+    /// Enforces that `expr_id` evaluates to `bool`. On failure, records a
+    /// `TypeMismatch` error tagged with `context` (so `if`/`loop` and `assert`
+    /// can render distinct diagnostics) and located at the expression itself,
+    /// not the enclosing statement — the user sees a caret on the offending
+    /// sub-expression.
+    fn validate_bool_expression(
+        &mut self,
+        expr_id: ExprId,
+        context: TypeMismatchContext,
+        ctx: &mut TypedContext,
+    ) {
+        let expr_type = self.infer_expression(expr_id, ctx);
+        if expr_type.is_none() || expr_type.as_ref().unwrap().kind != TypeInfoKind::Bool {
+            self.errors.push(TypeCheckError::TypeMismatch {
+                expected: TypeInfo::boolean(),
+                found: expr_type.unwrap_or_default(),
+                context,
+                location: ctx.arena()[expr_id].location,
+            });
         }
     }
 

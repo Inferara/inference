@@ -1221,6 +1221,133 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn assert_test() {
+        cov_mark::check_count!(wasm_codegen_emit_assert_statement, 13);
+        let test_name = "assert";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn assert_execution_test() {
+        use wasmtime::{Engine, Module, Store, Trap, TypedFunc};
+
+        let test_name = "assert";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        macro_rules! call_ok {
+            ($name:expr, $ty:ty, $args:expr, $expected:expr) => {{
+                let f: TypedFunc<_, $ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let result = f
+                    .call(&mut store, $args)
+                    .unwrap_or_else(|e| panic!("Call to '{}' failed: {e}", $name));
+                assert_eq!(
+                    result, $expected,
+                    "{}({:?}) expected {:?}",
+                    $name, $args, $expected
+                );
+            }};
+        }
+
+        macro_rules! call_trap {
+            ($name:expr, $arg_ty:ty, $ret_ty:ty, $args:expr) => {{
+                let f: TypedFunc<$arg_ty, $ret_ty> = instance
+                    .get_typed_func(&mut store, $name)
+                    .unwrap_or_else(|e| panic!("Failed to get '{}': {e}", $name));
+                let err = f.call(&mut store, $args).expect_err(concat!(
+                    "Call to '",
+                    $name,
+                    "' expected to trap but returned Ok"
+                ));
+                let trap = err.downcast_ref::<Trap>().unwrap_or_else(|| {
+                    panic!("Expected wasmtime Trap from '{}', got: {err}", $name)
+                });
+                assert_eq!(
+                    *trap,
+                    Trap::UnreachableCodeReached,
+                    "Expected unreachable trap from '{}', got: {trap:?}",
+                    $name
+                );
+            }};
+        }
+
+        // assert(true) always passes; function returns 1.
+        call_ok!("assert_literal_true", i32, (), 1_i32);
+
+        // assert(x > 0): pass when x > 0, trap otherwise.
+        call_ok!("assert_variable", i32, 7_i32, 7_i32);
+        call_trap!("assert_variable", i32, i32, 0_i32);
+        call_trap!("assert_variable", i32, i32, -1_i32);
+
+        // assert inside an if body: only reached when x > 0, traps when x >= 100.
+        call_ok!("assert_in_if", i32, 5_i32, 5_i32);
+        call_ok!("assert_in_if", i32, -3_i32, 0_i32);
+        call_trap!("assert_in_if", i32, i32, 100_i32);
+
+        // assert inside a loop body, with break: condition stays true so no trap.
+        call_ok!("assert_in_loop_with_break", i32, 10_i32, 5_i32);
+        call_ok!("assert_in_loop_with_break", i32, 3_i32, 3_i32);
+
+        // Two consecutive asserts in one function.
+        call_ok!("double_assert", i32, (3_i32, 4_i32), 7_i32);
+        call_trap!("double_assert", (i32, i32), i32, (0_i32, 4_i32));
+        call_trap!("double_assert", (i32, i32), i32, (3_i32, 0_i32));
+
+        // Bare bool parameter as the assert expression.
+        call_ok!("assert_bool_param", i32, 1_i32, 1_i32);
+        call_trap!("assert_bool_param", i32, i32, 0_i32);
+
+        // Unary `!` on bool parameter.
+        call_ok!("assert_not", i32, 0_i32, 1_i32);
+        call_trap!("assert_not", i32, i32, 1_i32);
+
+        // Short-circuit AND.
+        call_ok!("assert_and", i32, (1_i32, 1_i32), 1_i32);
+        call_trap!("assert_and", (i32, i32), i32, (1_i32, 0_i32));
+        call_trap!("assert_and", (i32, i32), i32, (0_i32, 1_i32));
+
+        // Short-circuit OR.
+        call_ok!("assert_or", i32, (1_i32, 0_i32), 1_i32);
+        call_ok!("assert_or", i32, (0_i32, 1_i32), 1_i32);
+        call_trap!("assert_or", (i32, i32), i32, (0_i32, 0_i32));
+
+        // Equality between two i32 operands.
+        call_ok!("assert_eq_i32", i32, (7_i32, 7_i32), 7_i32);
+        call_trap!("assert_eq_i32", (i32, i32), i32, (7_i32, 8_i32));
+
+        // Compound: `(a > 0) && ((b < 10) || (c == 0))`.
+        call_ok!("assert_complex", i32, (1_i32, 5_i32, 1_i32), 7_i32);
+        call_ok!("assert_complex", i32, (1_i32, 100_i32, 0_i32), 101_i32);
+        call_trap!("assert_complex", (i32, i32, i32), i32, (-1_i32, 5_i32, 0_i32));
+        call_trap!("assert_complex", (i32, i32, i32), i32, (1_i32, 100_i32, 5_i32));
+
+        // Local bool binding fed into assert.
+        call_ok!("assert_bool_local", i32, 4_i32, 4_i32);
+        call_trap!("assert_bool_local", i32, i32, 0_i32);
+    }
+
+    #[test]
     fn assign_test() {
         cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 10);
         let test_name = "assign";
@@ -1315,6 +1442,16 @@ mod base_codegen_tests {
             b"\0asm",
             "Soroban output should start with WASM magic number"
         );
+    }
+
+    #[test]
+    fn soroban_accepts_assert() {
+        // `assert` lowers to baseline `i32.eqz; if; unreachable; end`, none of which
+        // live in the custom 0xfc non-det prefix space. Soroban should accept it.
+        let source = "pub fn check(x: i32) -> i32 { assert(x > 0); return x; }";
+        let wasm_bytes = wasm_codegen_with_target(source, inference_wasm_codegen::Target::Soroban);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Soroban WASM with assert is invalid: {e}"));
     }
 
     #[test]
@@ -6954,6 +7091,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "if_else");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_assert_wasm() {
+        let dir = base_test_dir().join("assert");
+        let source_code =
+            std::fs::read_to_string(dir.join("assert.inf")).expect("Failed to read assert.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("assert.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "assert");
     }
 
     #[test]

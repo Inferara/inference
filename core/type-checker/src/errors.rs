@@ -120,6 +120,7 @@ pub enum TypeMismatchContext {
     VariableDefinition,
     BinaryOperation(OperatorKind),
     Condition,
+    Assert,
     FunctionArgument {
         function_name: String,
         arg_name: String,
@@ -142,6 +143,7 @@ impl Display for TypeMismatchContext {
             TypeMismatchContext::VariableDefinition => write!(f, "in variable definition"),
             TypeMismatchContext::BinaryOperation(op) => write!(f, "in binary operation `{op:?}`"),
             TypeMismatchContext::Condition => write!(f, "in condition"),
+            TypeMismatchContext::Assert => write!(f, "in assert statement"),
             TypeMismatchContext::FunctionArgument {
                 function_name,
                 arg_name,
@@ -667,6 +669,11 @@ mod tests {
         assert_eq!(
             TypeMismatchContext::Return.to_string(),
             "in return statement"
+        );
+        assert_eq!(TypeMismatchContext::Condition.to_string(), "in condition");
+        assert_eq!(
+            TypeMismatchContext::Assert.to_string(),
+            "in assert statement"
         );
         assert_eq!(
             TypeMismatchContext::FunctionArgument {

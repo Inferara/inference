@@ -84,15 +84,22 @@ mod statement_coverage {
 
     #[test]
     fn test_if_with_non_bool_condition() {
+        //                          1111111111222222222233333333334
+        //                 1234567890123456789012345678901234567890
         let source = r#"fn test() -> i32 { if 42 { return 1; } return 0; }"#;
         let result = try_type_check(source);
         assert!(result.is_err(), "If with non-bool condition should fail");
         if let Err(error) = result {
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("type mismatch") || error_msg.contains("expected Bool"),
-                "Error should mention type mismatch: {}",
-                error_msg
+                error_msg.contains("type mismatch") && error_msg.contains("in condition"),
+                "Error should mention a condition type mismatch: {error_msg}"
+            );
+            // Location must point at the offending expression `42` (column 23),
+            // not at the `if` keyword (column 20).
+            assert!(
+                error_msg.starts_with("1:23:"),
+                "Error location should point at the bad expression: {error_msg}"
             );
         }
     }
@@ -110,17 +117,167 @@ mod statement_coverage {
 
     #[test]
     fn test_assert_statement_with_non_bool() {
+        //                          1111111111222222222233333333334
+        //                 1234567890123456789012345678901234567890
         let source = r#"fn test() -> i32 { assert 42; return 0; }"#;
         let result = try_type_check(source);
         assert!(result.is_err(), "Assert with non-bool should fail");
         if let Err(error) = result {
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("type mismatch") || error_msg.contains("expected Bool"),
-                "Error should mention type mismatch: {}",
-                error_msg
+                error_msg.contains("type mismatch") && error_msg.contains("in assert statement"),
+                "Error should mention an assert-statement type mismatch: {error_msg}"
+            );
+            // Location must point at the offending expression `42` (column 27),
+            // not at the `assert` keyword (column 20).
+            assert!(
+                error_msg.starts_with("1:27:"),
+                "Error location should point at the bad expression: {error_msg}"
             );
         }
+    }
+
+    #[test]
+    fn test_assert_statement_location_is_expression_not_keyword() {
+        // `assert` on line 2, but the bad expression on line 3, so the line
+        // number alone distinguishes "statement location" from "expression location".
+        let source = "fn test() -> i32 {\n    assert\n        42\n    ;\n    return 0;\n}\n";
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assert spanning multiple lines with non-bool should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.starts_with("3:"),
+                "Error should point at the expression line (3), not the `assert` keyword line (2): {error_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_assert_statement_with_number_variable() {
+        let source =
+            r#"fn test() -> i32 { let x: i32 = 5; assert x; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Assert with i32 variable should fail");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("in assert statement"),
+                "Error should mention assert statement context: {error_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_assert_statement_with_arithmetic_expr() {
+        let source = r#"fn test() -> i32 { assert 1 + 2; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assert with arithmetic expression should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("in assert statement"),
+                "Error should mention assert statement context: {error_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_assert_statement_with_string_literal() {
+        let source = r#"fn test() -> i32 { assert "hello"; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Assert with string literal should fail");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("in assert statement"),
+                "Error should mention assert statement context: {error_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_assert_statement_with_function_returning_i32() {
+        let source = r#"
+            fn helper() -> i32 { return 7; }
+            fn test() -> i32 { assert helper(); return 0; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Assert with non-bool function call should fail"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            assert!(
+                error_msg.contains("in assert statement"),
+                "Error should mention assert statement context: {error_msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_assert_statement_with_comparison() {
+        let source = r#"fn test(x: i32, y: i32) -> i32 { assert x < y; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assert with comparison should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assert_statement_with_logical_and() {
+        let source = r#"fn test(a: bool, b: bool) -> i32 { assert a && b; return 1; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assert with logical AND should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assert_statement_with_negation() {
+        let source = r#"fn test(b: bool) -> i32 { assert !b; return 1; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assert with unary negation should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assert_statement_with_bool_local() {
+        let source = r#"fn test(x: i32) -> i32 { let b: bool = x > 0; assert b; return x; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assert with bool local binding should succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_assert_statement_with_function_returning_bool() {
+        let source = r#"
+            fn is_positive(x: i32) -> bool { return x > 0; }
+            fn test(x: i32) -> i32 { assert is_positive(x); return x; }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "Assert with bool-returning function call should succeed, got: {:?}",
+            result.err()
+        );
     }
 
     #[test]

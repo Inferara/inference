@@ -1156,7 +1156,9 @@ impl Compiler {
                 }
             }
             Stmt::TypeDef { .. } => todo!(),
-            Stmt::Assert { .. } => todo!(),
+            Stmt::Assert { expr } => {
+                self.lower_assert_statement(arena, expr, ctx);
+            }
             Stmt::ConstDef(const_def_id) => {
                 cov_mark::hit!(wasm_codegen_emit_constant_definition);
                 if let Def::Constant { name, value, .. } = &arena[const_def_id].kind {
@@ -2256,6 +2258,30 @@ impl Compiler {
             }
         }
 
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
+    }
+
+    /// Lowers `assert(<cond>)` to a trap-on-false WASM sequence.
+    ///
+    /// Emits `<cond>; i32.eqz; if (empty); unreachable; end`. The asserted-true
+    /// branch falls through with an empty `then`; the asserted-false branch
+    /// executes `unreachable`, which every WASM host treats as a trap and which
+    /// the Rocq translator already maps to `BI_unreachable`.
+    fn lower_assert_statement(
+        &mut self,
+        arena: &AstArena,
+        condition: ExprId,
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_assert_statement);
+
+        self.lower_expression(arena, condition, ctx, None);
+        self.func().instruction(&Instruction::I32Eqz);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
         self.loop_ctx.wasm_block_depth -= 1;
         self.func().instruction(&Instruction::End);
     }
