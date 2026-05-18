@@ -32,6 +32,7 @@ use crate::target::{CompilationMode, OptLevel, Target};
 ///     OptLevel::O3,
 ///     "output".to_string(),
 ///     false,
+///     Vec::new(),
 /// );
 ///
 /// assert!(!output.wasm().is_empty());
@@ -40,6 +41,7 @@ use crate::target::{CompilationMode, OptLevel, Target};
 /// assert_eq!(output.opt_level(), OptLevel::O3);
 /// assert_eq!(output.module_name(), "output");
 /// assert!(!output.has_main());
+/// assert!(output.spec_func_indices().is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct CodegenOutput {
@@ -68,6 +70,13 @@ pub struct CodegenOutput {
     /// When true, the runtime can use `main` as an entry point. The compiler
     /// discovers this during code generation when it encounters a `pub fn main()`.
     has_main: bool,
+
+    /// WASM function indices of functions that originated in `spec` blocks.
+    ///
+    /// Empty in `compile` mode. In `proof` mode, contains the indices in registration
+    /// order (spec functions first, then spec-nested methods). The Rocq translator
+    /// uses this to emit the `<module>_specs` list consumed by the `ValidModule` theorem.
+    spec_func_indices: Vec<u32>,
 }
 
 impl CodegenOutput {
@@ -80,6 +89,7 @@ impl CodegenOutput {
         opt_level: OptLevel,
         module_name: String,
         has_main: bool,
+        spec_func_indices: Vec<u32>,
     ) -> Self {
         Self {
             wasm,
@@ -88,7 +98,14 @@ impl CodegenOutput {
             opt_level,
             module_name,
             has_main,
+            spec_func_indices,
         }
+    }
+
+    /// Returns the WASM function indices for functions originating in `spec` blocks.
+    #[must_use]
+    pub fn spec_func_indices(&self) -> &[u32] {
+        &self.spec_func_indices
     }
 
     /// Returns the WASM binary bytes.
@@ -149,6 +166,7 @@ mod tests {
             OptLevel::O3,
             "output".to_string(),
             false,
+            Vec::new(),
         )
     }
 
@@ -160,6 +178,7 @@ mod tests {
             OptLevel::O3,
             "output".to_string(),
             true,
+            Vec::new(),
         )
     }
 
@@ -217,8 +236,23 @@ mod tests {
             OptLevel::Oz,
             "soroban_module".to_string(),
             false,
+            Vec::new(),
         );
         assert_eq!(output.target(), Target::Soroban);
+    }
+
+    #[test]
+    fn spec_func_indices_round_trip() {
+        let output = CodegenOutput::new(
+            Vec::new(),
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "output".to_string(),
+            false,
+            vec![3, 4, 7],
+        );
+        assert_eq!(output.spec_func_indices(), &[3, 4, 7]);
     }
 
     #[test]

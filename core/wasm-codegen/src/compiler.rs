@@ -249,6 +249,10 @@ pub(crate) struct Compiler {
     /// zero. Set only during variable initialization (`Stmt::VarDef`), never
     /// during assignment where slots may hold non-zero data.
     init_zero_elision: bool,
+    /// WASM function indices for functions that originated in `spec` blocks.
+    /// Populated during Stage 1 registration in proof mode; consumed by `CodegenOutput`
+    /// so the Rocq translator can emit them as the `_specs` list argument to `ValidModule`.
+    spec_func_indices: Vec<u32>,
 }
 
 impl Compiler {
@@ -276,7 +280,24 @@ impl Compiler {
             loop_ctx: LoopContext::default(),
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
+            spec_func_indices: Vec::new(),
         }
+    }
+
+    /// Removes and returns the recorded spec function indices.
+    ///
+    /// Called once after all function registration/lowering is complete so that
+    /// downstream consumers (currently `CodegenOutput`) can store them.
+    pub(crate) fn take_spec_func_indices(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.spec_func_indices)
+    }
+
+    /// Records `[base, base + count)` as spec-originated WASM function indices.
+    pub(crate) fn record_spec_indices(&mut self, base: u32, count: u32) {
+        let end = base
+            .checked_add(count)
+            .expect("spec function index range overflows u32");
+        self.spec_func_indices.extend(base..end);
     }
 
     fn func(&mut self) -> &mut Function {
@@ -344,6 +365,10 @@ impl Compiler {
 
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
     ///
+    /// `base_idx` is the WASM function index assigned to `func_def_ids[0]`. Top-level
+    /// functions pass 0; spec-originated functions pass the count of previously
+    /// registered functions/methods.
+    ///
     /// Must be called before `visit_function_definition` so that forward references
     /// resolve correctly during call lowering.
     pub(crate) fn build_func_name_to_idx(
@@ -351,12 +376,19 @@ impl Compiler {
         arena: &AstArena,
         func_def_ids: &[DefId],
         ctx: &TypedContext,
+        base_idx: u32,
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
             let fn_name = arena.def_name(def_id).to_string();
+            assert!(
+                !self.func_name_to_idx.contains_key(&fn_name),
+                "Function name '{fn_name}' collides with an existing definition; \
+                 a top-level function and a spec-inner function share this name. \
+                 The type-checker should have rejected the duplicate at the source level."
+            );
             self.func_name_to_idx
-                .insert(fn_name.clone(), idx as u32 + self.func_idx);
+                .insert(fn_name.clone(), idx as u32 + base_idx);
 
             if let Def::Function { returns, .. } = &arena[def_id].kind
                 && let Some(return_ty_id) = returns

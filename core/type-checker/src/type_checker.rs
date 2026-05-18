@@ -79,10 +79,13 @@ impl TypeChecker {
         // Continue to inference phase even if registration had errors
         // to collect all errors before returning
         let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = arena
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
+        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
+            arena,
+            &arena
+                .source_files()
+                .flat_map(|sf| sf.defs.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         for def_id in all_def_ids {
             let kind = ctx.arena()[def_id].kind.clone();
             match &kind {
@@ -116,10 +119,13 @@ impl TypeChecker {
     /// Registers `Def::TypeAlias`, `Def::Struct`, `Def::Enum`, and `Def::Spec`
     fn register_types(&mut self, ctx: &mut TypedContext) {
         let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = arena
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
+        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
+            arena,
+            &arena
+                .source_files()
+                .flat_map(|sf| sf.defs.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         for def_id in all_def_ids {
             let arena = ctx.arena();
             let def_data = &arena[def_id];
@@ -397,10 +403,13 @@ impl TypeChecker {
     #[allow(clippy::too_many_lines)]
     fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
         let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = arena
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
+        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
+            arena,
+            &arena
+                .source_files()
+                .flat_map(|sf| sf.defs.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         for def_id in all_def_ids {
             let (location, kind) = {
                 let arena = ctx.arena();
@@ -2594,4 +2603,23 @@ impl TypeChecker {
         self.errors.push(error);
     }
 
+}
+
+/// Flatten a top-level def list to include inner defs of every `Def::Spec`.
+///
+/// The spec itself is preserved in the output (its match arm registers the spec scope);
+/// then its inner defs follow, so they go through the same per-def processing as
+/// top-level defs. Nested specs are intentionally not flattened: handle them when
+/// the language permits the construct.
+fn flatten_defs_with_spec_inner(arena: &AstArena, defs: &[DefId]) -> Vec<DefId> {
+    let mut out = Vec::with_capacity(defs.len());
+    for &def_id in defs {
+        out.push(def_id);
+        if let Def::Spec { defs: inner, .. } = &arena[def_id].kind {
+            for &inner_id in inner {
+                out.push(inner_id);
+            }
+        }
+    }
+    out
 }

@@ -122,7 +122,7 @@
 //! let typed_context = type_check(arena)?;
 //! let codegen_output = codegen(&typed_context)?;
 //! // WASM bytes are directly available from codegen output:
-//! // wasm_to_v("MyModule", codegen_output.wasm())
+//! // wasm_to_v("MyModule", codegen_output.wasm(), codegen_output.spec_func_indices())
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -194,7 +194,11 @@
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     let codegen_output = codegen(&typed_context)?;
-//!     let rocq_code = wasm_to_v(module_name, codegen_output.wasm())?;
+//!     let rocq_code = wasm_to_v(
+//!         module_name,
+//!         codegen_output.wasm(),
+//!         codegen_output.spec_func_indices(),
+//!     )?;
 //!     Ok(rocq_code)
 //! }
 //! ```
@@ -597,7 +601,11 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
+/// let rocq_code = wasm_to_v(
+///     "EvenChecker",
+///     codegen_output.wasm(),
+///     codegen_output.spec_func_indices(),
+/// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -619,7 +627,11 @@ pub fn codegen(
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
 /// let codegen_output = codegen(&typed_context)?;
-/// let rocq_code = wasm_to_v("CommutativityProof", codegen_output.wasm())?;
+/// let rocq_code = wasm_to_v(
+///     "CommutativityProof",
+///     codegen_output.wasm(),
+///     codegen_output.spec_func_indices(),
+/// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 ///
@@ -654,6 +666,10 @@ pub fn codegen(
 /// - `mod_name`: The name of the Rocq module to generate. Should be a valid
 ///   Rocq identifier (alphanumeric, starting with an uppercase letter).
 /// - `wasm`: The WebAssembly binary to translate, as produced by [`codegen`].
+/// - `spec_func_indices`: WASM function indices that originated from `spec`
+///   blocks (typically obtained from [`CodegenOutput::spec_func_indices`]).
+///   Emitted as a `Definition <mod_name>_specs : list N` consumed by the
+///   generated `ValidModule` theorem. Pass `&[]` when no spec marker is needed.
 ///
 /// # Errors
 ///
@@ -689,10 +705,15 @@ pub fn codegen(
 /// - [WebAssembly Specification](https://webassembly.github.io/spec/)
 /// - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 /// - [`inference_wasm_to_v_translator`] for implementation details
-pub fn wasm_to_v(mod_name: &str, wasm: &[u8]) -> anyhow::Result<String> {
-    if let Ok(v) = inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm) {
-        Ok(v)
-    } else {
-        Err(anyhow::anyhow!("Error translating WebAssembly to V"))
-    }
+pub fn wasm_to_v(
+    mod_name: &str,
+    wasm: &[u8],
+    spec_func_indices: &[u32],
+) -> anyhow::Result<String> {
+    inference_wasm_to_v_translator::wasm_parser::translate_bytes(
+        mod_name,
+        wasm,
+        spec_func_indices,
+    )
+    .map_err(|e| anyhow::anyhow!("Error translating WebAssembly to V: {e}"))
 }

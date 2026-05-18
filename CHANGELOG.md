@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
+- Emit spec-block functions to WASM in `Proof` mode and propagate their indices to the Rocq translator
+  - Type-checker `flatten_defs_with_spec_inner` recurses into `Def::Spec.defs` so spec-inner `Def::Function` / `Def::Struct` / `Def::Constant` / `Def::TypeAlias` are registered and inferred in the global scope
+  - `wasm-codegen` adds `Compiler::spec_func_indices: Vec<u32>` populated during Stage 1; `collect_emittable_functions` sorts top-level defs into `funcs / methods / spec_funcs / spec_methods` buckets, spec buckets are non-empty only in `Proof` mode
+  - `build_func_name_to_idx` now takes an explicit `base_idx: u32` and asserts on name collisions (top-level `foo` and `spec S { fn foo }` are rejected at codegen)
+  - `CodegenOutput` carries `spec_func_indices: Vec<u32>` (empty in `Compile` mode); `wasm_to_v` / `translate_bytes` signatures take `spec_func_indices: &[u32]`
+  - Rocq output now emits `Definition <module>_specs : list N := [...]%N.` after the module record and `Theorem valid_<module> : ValidModule <module> <module>_specs.` consuming it (always emitted, `[]%N` when empty so the theorem signature is stable across modes)
 - Lower `assert(<bool>)` to a WASM trap-on-false (previously panicked codegen) ([#195])
   - Emits `<cond>; i32.eqz; if (empty); unreachable; end` — the smallest correct shape, and one that `wasm-to-v` already maps to `BI_unreachable` for proof-mode translation
   - Asserts are emitted in both `Compile` and `Proof` modes (Stmt-level, not Def-level); no `CompilationMode` branching

@@ -153,11 +153,15 @@ use crate::translator::WasmParseData;
 /// let rocq_code = translate_bytes("Program", codegen_output.wasm())?;
 /// std::fs::write("program.v", rocq_code)?;
 /// ```
-pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
+pub fn translate_bytes(
+    mod_name: &str,
+    bytes: &[u8],
+    spec_func_indices: &[u32],
+) -> anyhow::Result<String> {
     let mut data = Vec::new();
     let mut reader = std::io::Cursor::new(bytes);
     reader.read_to_end(&mut data).unwrap();
-    match parse(mod_name.to_string(), &data) {
+    match parse(mod_name.to_string(), &data, spec_func_indices.to_vec()) {
         Ok(mut parse_data) => parse_data.translate(),
         Err(e) => Err(anyhow::anyhow!(e.to_string())),
     }
@@ -201,9 +205,13 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
 ///
 /// Returns an error if WASM bytecode is malformed or contains invalid section data.
 #[allow(clippy::match_same_arms)]
-fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> {
+fn parse(
+    mod_name: String,
+    data: &'_ [u8],
+    spec_func_indices: Vec<u32>,
+) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
-    let mut wasm_parse_data = WasmParseData::new(mod_name);
+    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_func_indices);
 
     for payload in parser.parse_all(data) {
         match payload? {

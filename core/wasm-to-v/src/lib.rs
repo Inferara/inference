@@ -33,7 +33,7 @@
 //! ```ignore
 //! use inference::wasm_to_v;
 //!
-//! let rocq_code = wasm_to_v("module_name", &wasm_bytes)?;
+//! let rocq_code = wasm_to_v("module_name", &wasm_bytes, &[])?;
 //! ```
 //!
 //! ## Architecture
@@ -221,7 +221,7 @@ mod tests {
 
             // Catch panics from unimplemented features
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                translate_bytes(module_name, &bytes)
+                translate_bytes(module_name, &bytes, &[])
             }));
 
             match result {
@@ -256,6 +256,38 @@ mod tests {
         println!(
             "Success rate: {:.1}%",
             (success_count as f64 / wasm_files.len() as f64) * 100.0
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn translate_bytes_emits_specs_definition_and_theorem_args() {
+        let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
+        let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
+
+        let output = translate_bytes("Fac", &bytes, &[3, 4, 7]).expect("translate succeeds");
+
+        assert!(
+            output.contains("Definition Fac_specs : list N := [3; 4; 7]%N."),
+            "output should contain Fac_specs definition; got:\n{output}",
+        );
+        assert!(
+            output.contains("Theorem valid_Fac : ValidModule Fac Fac_specs."),
+            "output should reference Fac_specs in the theorem; got:\n{output}",
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn translate_bytes_emits_empty_specs_when_no_indices() {
+        let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
+        let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
+
+        let output = translate_bytes("Fac", &bytes, &[]).expect("translate succeeds");
+
+        assert!(
+            output.contains("Definition Fac_specs : list N := []%N."),
+            "output should contain empty Fac_specs definition; got:\n{output}",
         );
     }
 }

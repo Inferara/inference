@@ -181,7 +181,11 @@ let source = r#"
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
 let codegen_output = codegen(&typed_context)?;
-let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
+let rocq_code = wasm_to_v(
+    "EvenChecker",
+    codegen_output.wasm(),
+    codegen_output.spec_func_indices(),
+)?;
 
 fs::write("even_checker.v", rocq_code)?;
 ```
@@ -259,7 +263,11 @@ fn verify_program(source_path: &str, module_name: &str) -> anyhow::Result<()> {
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
     let codegen_output = codegen(&typed_context)?;
-    let rocq = wasm_to_v(module_name, codegen_output.wasm())?;
+    let rocq = wasm_to_v(
+        module_name,
+        codegen_output.wasm(),
+        codegen_output.spec_func_indices(),
+    )?;
 
     let output = format!("{}.v", module_name.to_lowercase());
     fs::write(&output, rocq)?;

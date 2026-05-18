@@ -46,6 +46,7 @@
 
 #![warn(clippy::pedantic)]
 
+use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::Def;
 use inference_type_checker::typed_context::TypedContext;
@@ -112,9 +113,10 @@ pub fn codegen(
     }
 
     if typed_context.source_files().len() != 0 {
-        traverse_t_ast_with_compiler(typed_context, &mut compiler)?;
+        traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
+    let spec_func_indices = compiler.take_spec_func_indices();
     let wasm = compiler.finish();
     let has_main = compiler.has_main();
 
@@ -125,6 +127,7 @@ pub fn codegen(
         opt_level,
         module_name.to_string(),
         has_main,
+        spec_func_indices,
     ))
 }
 
@@ -142,52 +145,84 @@ pub fn codegen(
 fn traverse_t_ast_with_compiler(
     typed_context: &TypedContext,
     compiler: &mut Compiler,
+    mode: CompilationMode,
 ) -> Result<(), CodegenError> {
     let arena = typed_context.arena();
     for source_file in typed_context.source_files() {
-        // Collect top-level function DefIds
-        let func_def_ids: Vec<DefId> = source_file
-            .defs
-            .iter()
-            .copied()
-            .filter(|&def_id| matches!(arena[def_id].kind, Def::Function { .. }))
-            .collect();
+        let buckets = collect_emittable_functions(arena, &source_file.defs, mode);
 
-        // Collect method DefIds with their parent struct name
-        let mut method_defs: Vec<(String, DefId)> = Vec::new();
-        for &def_id in &source_file.defs {
-            if let Def::Struct { name, methods, .. } = &arena[def_id].kind {
-                let struct_name = arena[*name].name.clone();
-                for &method_def_id in methods {
-                    method_defs.push((struct_name.clone(), method_def_id));
-                }
-            }
-        }
-
-        // Stage 1: Register all indices before any body compilation
-        compiler.build_func_name_to_idx(arena, &func_def_ids, typed_context)?;
         #[allow(clippy::cast_possible_truncation)]
-        let method_base_idx = compiler.func_idx_after_toplevel(func_def_ids.len() as u32);
-        compiler.build_method_name_to_idx(arena, &method_defs, typed_context, method_base_idx)?;
+        let toplevel_count = buckets.funcs.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let method_count = buckets.methods.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let spec_func_count = buckets.spec_funcs.len() as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        let spec_method_count = buckets.spec_methods.len() as u32;
+
+        // Stage 1: Register all indices before any body compilation. Order:
+        //   regular fns (base 0) → regular methods → spec fns → spec methods.
+        compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, 0)?;
+        let method_base_idx = compiler.func_idx_after_toplevel(toplevel_count);
+        compiler.build_method_name_to_idx(
+            arena,
+            &buckets.methods,
+            typed_context,
+            method_base_idx,
+        )?;
+
+        let spec_func_base = toplevel_count + method_count;
+        let spec_method_base = spec_func_base + spec_func_count;
+        compiler.build_func_name_to_idx(
+            arena,
+            &buckets.spec_funcs,
+            typed_context,
+            spec_func_base,
+        )?;
+        compiler.build_method_name_to_idx(
+            arena,
+            &buckets.spec_methods,
+            typed_context,
+            spec_method_base,
+        )?;
+        let spec_total = spec_func_count + spec_method_count;
+        if spec_total > 0 {
+            compiler.record_spec_indices(spec_func_base, spec_total);
+        }
 
         // Verify Stage 1 produced the expected number of index entries.
         // Catches index calculation bugs before they manifest as wrong `call` targets.
         debug_assert_eq!(
             compiler.registered_function_count(),
-            func_def_ids.len() + method_defs.len(),
+            buckets.funcs.len()
+                + buckets.methods.len()
+                + buckets.spec_funcs.len()
+                + buckets.spec_methods.len(),
             "func_name_to_idx entry count after Stage 1 registration does not match \
-             expected count (top-level functions: {}, methods: {})",
-            func_def_ids.len(),
-            method_defs.len(),
+             expected count (top-level functions: {}, methods: {}, spec functions: {}, \
+             spec methods: {})",
+            buckets.funcs.len(),
+            buckets.methods.len(),
+            buckets.spec_funcs.len(),
+            buckets.spec_methods.len(),
         );
 
-        // Stage 2: Compile top-level function bodies
-        for &def_id in &func_def_ids {
+        // Stage 2: Compile bodies in the same order as registration.
+        for &def_id in &buckets.funcs {
             compiler.visit_function_definition(def_id, arena, typed_context, None)?;
         }
-
-        // Stage 2b: Compile method bodies
-        for (struct_name, method_def_id) in &method_defs {
+        for (struct_name, method_def_id) in &buckets.methods {
+            compiler.visit_function_definition(
+                *method_def_id,
+                arena,
+                typed_context,
+                Some(struct_name),
+            )?;
+        }
+        for &def_id in &buckets.spec_funcs {
+            compiler.visit_function_definition(def_id, arena, typed_context, None)?;
+        }
+        for (struct_name, method_def_id) in &buckets.spec_methods {
             compiler.visit_function_definition(
                 *method_def_id,
                 arena,
@@ -197,4 +232,66 @@ fn traverse_t_ast_with_compiler(
         }
     }
     Ok(())
+}
+
+struct EmittableFunctions {
+    funcs: Vec<DefId>,
+    methods: Vec<(String, DefId)>,
+    spec_funcs: Vec<DefId>,
+    spec_methods: Vec<(String, DefId)>,
+}
+
+/// Sorts top-level defs into the four buckets used by Stage 1 registration.
+///
+/// `Def::ExternFunction` is intentionally skipped — extern functions are not currently
+/// emitted to the WASM import section (top-level or spec-inner). When extern-fn
+/// emission lands, spec-inner externs will need to either join `spec_funcs` or be
+/// surfaced in a sibling `<mod>_spec_imports` list in the Rocq output.
+///
+/// In `compile` mode the spec buckets stay empty (specs are stripped). In `proof`
+/// mode, top-level `Def::Spec.defs` is recursed one level deep to surface inner
+/// functions and inner struct methods. Nested specs and module-nested specs are
+/// out of scope until those constructs are wired through codegen.
+fn collect_emittable_functions(
+    arena: &AstArena,
+    defs: &[DefId],
+    mode: CompilationMode,
+) -> EmittableFunctions {
+    let mut buckets = EmittableFunctions {
+        funcs: Vec::new(),
+        methods: Vec::new(),
+        spec_funcs: Vec::new(),
+        spec_methods: Vec::new(),
+    };
+
+    for &def_id in defs {
+        match &arena[def_id].kind {
+            Def::Function { .. } => buckets.funcs.push(def_id),
+            Def::Struct { name, methods, .. } => {
+                let struct_name = arena[*name].name.clone();
+                for &method_def_id in methods {
+                    buckets.methods.push((struct_name.clone(), method_def_id));
+                }
+            }
+            Def::Spec { defs: inner, .. } if mode == CompilationMode::Proof => {
+                for &inner_id in inner {
+                    match &arena[inner_id].kind {
+                        Def::Function { .. } => buckets.spec_funcs.push(inner_id),
+                        Def::Struct { name, methods, .. } => {
+                            let struct_name = arena[*name].name.clone();
+                            for &method_def_id in methods {
+                                buckets
+                                    .spec_methods
+                                    .push((struct_name.clone(), method_def_id));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    buckets
 }

@@ -36,7 +36,7 @@ The translator is invoked as the final phase of the Inference compilation pipeli
 ```rust
 use inference::wasm_to_v;
 
-let rocq_output = wasm_to_v("module_name", &wasm_bytes)?;
+let rocq_output = wasm_to_v("module_name", &wasm_bytes, &[])?;
 ```
 
 See the [`inference`](../inference/README.md) crate for complete pipeline documentation.

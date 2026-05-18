@@ -226,13 +226,17 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_types: Vec<RecGroup>,
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
+    /// WASM function indices that originated from `spec` blocks in the source.
+    /// Emitted as the `<mod_name>_specs : list N` Rocq definition consumed by
+    /// the `ValidModule` theorem.
+    pub(crate) spec_func_indices: Vec<u32>,
 
     translated_function_names: Vec<String>,
     translated_functions_string: String,
 }
 
 impl WasmParseData<'_> {
-    /// Creates a new empty [`WasmParseData`] with the given module name.
+    /// Creates a new empty [`WasmParseData`] with the given module name and spec indices.
     ///
     /// All section vectors are initialized as empty. This is called by the parser
     /// before streaming through WASM sections.
@@ -240,7 +244,8 @@ impl WasmParseData<'_> {
     /// # Parameters
     ///
     /// - `mod_name`: Default Rocq module name (may be overridden by custom name section)
-    pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
+    /// - `spec_func_indices`: WASM function indices flagged as originating in spec blocks
+    pub(crate) fn new<'a>(mod_name: String, spec_func_indices: Vec<u32>) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
             func_names_map: None,
@@ -256,6 +261,7 @@ impl WasmParseData<'_> {
             function_types: Vec::new(),
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
+            spec_func_indices,
 
             translated_function_names: Vec::new(),
             translated_functions_string: String::new(),
@@ -501,13 +507,32 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
+        // Emit the list of WASM function indices originating from `spec` blocks.
+        // The list is always emitted (empty when there are no specs) so the
+        // ValidModule theorem signature is stable across compile/proof modes.
+        let indices_str = self
+            .spec_func_indices
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        res.push('\n');
+        res.push_str(
+            format!("Definition {module_name}_specs : list N := [{indices_str}]%N.\n").as_str(),
+        );
+
         // Generate Theorems
         res.push('\n');
         res.push_str("Section Host.\n");
         res.push_str("Context `{ho: host}.\n");
         res.push('\n');
         res.push_str("(* Theorems *)\n");
-        res.push_str(format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
+        res.push_str(
+            format!(
+                "Theorem valid_{module_name} : ValidModule {module_name} {module_name}_specs.\n"
+            )
+            .as_str(),
+        );
         res.push_str("Proof.\n");
         res.push_str("  (* TODO: fill the proof *)\n");
         res.push_str("Qed.\n");
