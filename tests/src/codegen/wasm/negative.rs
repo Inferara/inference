@@ -4,35 +4,6 @@
 //! is correctly rejected (or panics) during WebAssembly code generation, and that the
 //! resulting error message contains the expected diagnostic substring.
 
-mod unimplemented_statements {
-    use crate::utils::try_codegen;
-
-    #[test]
-    fn assert_statement() {
-        let result = try_codegen("pub fn test() { assert(true); }");
-        assert!(result.is_err(), "assert statement should fail codegen");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("not yet implemented"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn assert_with_expression() {
-        let result = try_codegen("pub fn test(x: i32) { assert(x > 0); }");
-        assert!(
-            result.is_err(),
-            "assert with expression should fail codegen"
-        );
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("not yet implemented"),
-            "unexpected error message: {err}"
-        );
-    }
-}
-
 mod unimplemented_operators {
     use crate::utils::try_codegen;
 

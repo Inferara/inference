@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
+- Lower `assert(<bool>)` to a WASM trap-on-false (previously panicked codegen) ([#195])
+  - Emits `<cond>; i32.eqz; if (empty); unreachable; end` — the smallest correct shape, and one that `wasm-to-v` already maps to `BI_unreachable` for proof-mode translation
+  - Asserts are emitted in both `Compile` and `Proof` modes (Stmt-level, not Def-level); no `CompilationMode` branching
+  - Soroban target accepts asserts — `Unreachable` is baseline WASM, not a 0xfc non-det opcode
+  - New golden fixture `tests/test_data/codegen/wasm/base/assert/` exercises literal, variable, nested-in-if, loop+break, double-assert, bool param, unary `!`, `&&`, `||`, `==`, compound `(a > 0) && ((b < 10) || (c == 0))`, and bool-local scenarios, with wasmtime execution coverage that distinguishes pass paths from `Trap::UnreachableCodeReached` paths
+
+### Type Checker
+
+- Reject `assert <non-bool>` with a dedicated diagnostic context ([#195])
+  - The assert site now uses `TypeMismatchContext::Assert` (renders as "in assert statement") instead of the generic `Condition` context shared with `if` / `loop`
+  - Coverage added for `assert` on i32 variables, arithmetic expressions, string literals, and non-bool function-call results; positive coverage added for comparison, `&&`, unary `!`, bool-local binding, and bool-returning function calls
 - Add codegen support for function-scoped compound `const` ([#171])
   - `const NAME: T = EXPR` inside a function body now lowers identically to immutable `let` for arrays, structs, and any compound copy / sret-call / literal initializer
   - `collect_compound_slots` allocates `ArraySlot` / `StructSlot` for `Stmt::ConstDef`, and `lower_statement`'s `Stmt::ConstDef` arm dispatches to the same four-way path (`lower_sret_var_init`, `lower_array_copy_var_init`, `lower_struct_copy_var_init`, `lower_expression` with zero-elision) as `Stmt::VarDef`
