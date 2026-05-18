@@ -42,6 +42,8 @@ jobs:
             ${{ runner.os }}-cargo-miri-
 
       - name: Run Miri on core crates
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: |
           cargo miri test -p inference-ast
           cargo miri test -p inference-type-checker
