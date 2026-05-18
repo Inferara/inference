@@ -25,24 +25,11 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-14]
-        toolchain:
-          - nightly
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Setup Rust
+      - name: Checkout
         uses: actions/checkout@v4.1.3
-      
-      - name: Update Rust
-        run: |
-          rustup update ${{ matrix.toolchain }}
-          rustup default ${{ matrix.toolchain }}
-      
-      - name: Add MinGW target (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          rustup target add x86_64-pc-windows-gnu
-          rustup default ${{ matrix.toolchain }}-x86_64-pc-windows-gnu
-      
+
       - name: Install MinGW (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -114,10 +101,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "C:\tools\msys64\ucrt64\bin"
 
           Write-Output "Installed MSYS2 UCRT64 MinGW toolchain"
-      
-      - name: Install clippy nightly
-        run: rustup component add clippy-preview
-      
+
       - name: Build (Non-Windows)
         if: runner.os != 'Windows' && !inputs.release-build
         run: cargo build --verbose

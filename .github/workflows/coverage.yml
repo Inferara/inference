@@ -28,11 +28,8 @@ jobs:
           lfs: true
           fetch-depth: 0
       
-      - name: Install Rust toolchain
-        run: |
-          rustup update nightly
-          rustup default nightly
-          rustup component add llvm-tools-preview
+      - name: Install llvm-tools
+        run: rustup component add llvm-tools-preview
       
       - name: Cache cargo registry
         uses: actions/cache@v4
