@@ -171,6 +171,123 @@ fn v_flag_alone_produces_wasm_and_v() {
     assert!(temp.child("out").child("trivial.v").path().exists());
 }
 
+/// Verifies that `--mode proof` produces both `.wasm` and `.v` outputs.
+///
+/// Proof mode implies `-v` because the Rocq translation IS the proof-mode
+/// deliverable; emitting only `.wasm` in proof mode would silently waste the
+/// unoptimized spec preservation work.
+#[test]
+fn mode_proof_produces_v_alongside_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--mode")
+        .arg("proof");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+    assert!(temp.child("out").child("trivial.v").path().exists());
+}
+
+/// `-v` with no explicit `--mode` must auto-promote to proof mode so the
+/// emitted `.v` contains per-spec definitions and theorems. Without this
+/// implication, `compile` mode strips spec functions and the `.v` is a
+/// near-useless empty-specs file (the original reported UX bug).
+#[test]
+fn dash_v_implies_proof_mode_produces_per_spec_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("with_spec.inf");
+    let dest = temp.child("with_spec.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path()).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    let v_path = temp.child("out").child("with_spec.v");
+    assert!(v_path.path().exists(), "expected out/with_spec.v");
+    let v_contents = std::fs::read_to_string(v_path.path()).unwrap();
+    // The Rocq module name comes from the WASM custom `name` section (currently
+    // hardcoded to "output" by codegen). The CLI-passed `source_fname` only
+    // names the output file. What matters here is that the per-spec
+    // Definition + Theorem are present at all — the empty-specs bug had
+    // ZERO such entries regardless of the module name prefix.
+    assert!(
+        v_contents.contains("__MySpec_specs"),
+        "expected a per-spec Definition for MySpec in:\n{v_contents}"
+    );
+    assert!(
+        v_contents.contains("valid_") && v_contents.contains("__MySpec"),
+        "expected a per-spec Theorem for MySpec in:\n{v_contents}"
+    );
+}
+
+/// Regression guard: an explicit `--mode compile -v` must keep compile-mode
+/// semantics — specs are stripped from the WASM and therefore absent from the
+/// `.v`. Users who legitimately want V output from a spec-stripped WASM rely
+/// on this escape hatch.
+#[test]
+fn explicit_mode_compile_plus_v_keeps_compile_semantics() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("with_spec.inf");
+    let dest = temp.child("with_spec.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("V generated"));
+
+    let v_path = temp.child("out").child("with_spec.v");
+    assert!(v_path.path().exists(), "expected out/with_spec.v");
+    let v_contents = std::fs::read_to_string(v_path.path()).unwrap();
+    assert!(
+        !v_contents.contains("__MySpec_specs"),
+        "explicit --mode compile must strip spec content from the .v; got:\n{v_contents}"
+    );
+}
+
+/// Regression guard: without `--mode proof` and without `-v`, the default
+/// (compile) mode must not emit a `.v` file. Existing behavior must be
+/// preserved.
+#[test]
+fn mode_compile_default_does_not_emit_v_without_v_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+
+    cmd.assert().success();
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("trivial.v").path().exists(),
+        "default compile mode without -v must not emit .v"
+    );
+}
+
 /// Verifies that the `--version` flag displays the correct version information.
 ///
 /// **Expected behavior**: Exit with code 0 and print the version string to stdout.

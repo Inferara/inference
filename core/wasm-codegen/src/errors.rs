@@ -34,4 +34,12 @@ pub(crate) enum CodegenError {
     /// A struct name referenced during layout computation was not found in the type context.
     #[error("struct '{name}' not found in type context -- the type checker should have caught this")]
     StructNotFoundInTypeContext { name: String },
+    /// A `spec` block contained another `spec` block. Nested specs have no
+    /// defined Rocq emission; the codegen pipeline refuses rather than
+    /// silently dropping the inner definitions.
+    #[error("nested specs are not supported: spec '{outer_spec}' contains spec '{inner_spec}'")]
+    NestedSpecsNotSupported {
+        outer_spec: String,
+        inner_spec: String,
+    },
 }

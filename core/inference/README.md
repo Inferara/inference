@@ -49,7 +49,7 @@ The crate exposes five primary functions:
 | [`type_check`] | `Arena` | `TypedContext` | Type check and infer types |
 | [`analyze`] | `&TypedContext` | `()` | Semantic analysis (WIP) |
 | [`codegen`] | `&TypedContext` | `CodegenOutput` | Generate WebAssembly bytecode |
-| [`wasm_to_v`] | `&str`, `&[u8]` | `String` | Translate WASM to Rocq |
+| [`wasm_to_v`] | `&str`, `&[u8]`, `&FxHashMap<String, Vec<u32>>` | `String` | Translate WASM to Rocq |
 
 ## Compilation Pipeline
 
@@ -133,7 +133,7 @@ let codegen_output = codegen(&typed_context)?;
 fs::write("output.wasm", codegen_output.wasm())?;
 ```
 
-The code generator supports Inference's non-deterministic extensions via custom WebAssembly instructions in the `0xfc prefix space:
+The code generator supports Inference's non-deterministic extensions via custom WebAssembly instructions in the `0xfc` prefix space:
 
 | Construct | Opcode | Purpose |
 |-----------|--------|---------|
@@ -181,7 +181,11 @@ let source = r#"
 let arena = parse(source)?;
 let typed_context = type_check(arena)?;
 let codegen_output = codegen(&typed_context)?;
-let rocq_code = wasm_to_v("EvenChecker", codegen_output.wasm())?;
+let rocq_code = wasm_to_v(
+    "EvenChecker",
+    codegen_output.wasm(),
+    codegen_output.spec_func_indices_by_spec(),
+)?;
 
 fs::write("even_checker.v", rocq_code)?;
 ```
@@ -259,7 +263,11 @@ fn verify_program(source_path: &str, module_name: &str) -> anyhow::Result<()> {
     let arena = parse(&source)?;
     let typed_context = type_check(arena)?;
     let codegen_output = codegen(&typed_context)?;
-    let rocq = wasm_to_v(module_name, codegen_output.wasm())?;
+    let rocq = wasm_to_v(
+        module_name,
+        codegen_output.wasm(),
+        codegen_output.spec_func_indices_by_spec(),
+    )?;
 
     let output = format!("{}.v", module_name.to_lowercase());
     fs::write(&output, rocq)?;

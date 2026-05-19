@@ -92,8 +92,11 @@ use inf_wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
-use std::{collections::HashMap, io::Read};
+use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
+use crate::errors::WasmToVError;
+use crate::rocq_names::validate_rocq_identifier;
 use crate::translator::WasmParseData;
 
 /// Translates WebAssembly bytecode into Rocq (Coq) formal verification code.
@@ -132,9 +135,10 @@ use crate::translator::WasmParseData;
 ///
 /// ```ignore
 /// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+/// use rustc_hash::FxHashMap;
 ///
 /// let wasm_bytes = std::fs::read("output.wasm")?;
-/// let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+/// let rocq_code = translate_bytes("my_module", &wasm_bytes, &FxHashMap::default())?;
 /// std::fs::write("output.v", rocq_code)?;
 /// ```
 ///
@@ -143,6 +147,7 @@ use crate::translator::WasmParseData;
 /// ```ignore
 /// use inference::{parse, type_check, codegen};
 /// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+/// use rustc_hash::FxHashMap;
 ///
 /// let source = std::fs::read_to_string("program.inf")?;
 /// let arena = parse(&source)?;
@@ -150,16 +155,25 @@ use crate::translator::WasmParseData;
 /// let codegen_output = codegen(&typed_context)?;
 ///
 /// // Translate to Rocq
-/// let rocq_code = translate_bytes("Program", codegen_output.wasm())?;
+/// let rocq_code = translate_bytes("Program", codegen_output.wasm(), &FxHashMap::default())?;
 /// std::fs::write("program.v", rocq_code)?;
 /// ```
-pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
-    let mut data = Vec::new();
-    let mut reader = std::io::Cursor::new(bytes);
-    reader.read_to_end(&mut data).unwrap();
-    match parse(mod_name.to_string(), &data) {
+pub fn translate_bytes(
+    mod_name: &str,
+    bytes: &[u8],
+    spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
+) -> anyhow::Result<String> {
+    validate_rocq_identifier(mod_name)?;
+
+    match parse(mod_name.to_string(), bytes, spec_funcs_by_spec.clone()) {
         Ok(mut parse_data) => parse_data.translate(),
-        Err(e) => Err(anyhow::anyhow!(e.to_string())),
+        Err(e) => {
+            if e.downcast_ref::<WasmToVError>().is_some() {
+                Err(e)
+            } else {
+                Err(anyhow::anyhow!(WasmToVError::WasmParse(e.to_string())))
+            }
+        }
     }
 }
 
@@ -201,9 +215,16 @@ pub fn translate_bytes(mod_name: &str, bytes: &[u8]) -> anyhow::Result<String> {
 ///
 /// Returns an error if WASM bytecode is malformed or contains invalid section data.
 #[allow(clippy::match_same_arms)]
-fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> {
+fn parse(
+    mod_name: String,
+    data: &'_ [u8],
+    spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
+) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
-    let mut wasm_parse_data = WasmParseData::new(mod_name);
+    let explicit_non_empty = !spec_funcs_by_spec.is_empty();
+    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec);
+    let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
+    let mut seen_name_section = false;
 
     for payload in parser.parse_all(data) {
         match payload? {
@@ -287,12 +308,33 @@ fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> 
             ComponentExportSection(_) => { /* ... */ }
 
             CustomSection(custom_section) => {
-                if let inf_wasmparser::KnownCustom::Name(name_section) = custom_section.as_known() {
+                if custom_section.name() == crate::SPEC_FUNCS_SECTION_NAME {
+                    if embedded_spec_funcs.is_some() {
+                        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                            "duplicate `{}` custom section",
+                            crate::SPEC_FUNCS_SECTION_NAME
+                        ))));
+                    }
+                    embedded_spec_funcs = Some(decode_spec_funcs_section(custom_section.data())?);
+                } else if let inf_wasmparser::KnownCustom::Name(name_section) =
+                    custom_section.as_known()
+                {
+                    if seen_name_section {
+                        return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                            "duplicate WASM `name` custom section".into(),
+                        )));
+                    }
+                    seen_name_section = true;
                     for name in name_section {
                         let name = name?;
                         match name {
                             inf_wasmparser::Name::Module { name, .. } => {
                                 wasm_parse_data.mod_name = name.to_string();
+                                // The embedded `name` section bypasses the
+                                // CLI-side validation. Re-run validation so
+                                // a hand-crafted binary cannot smuggle an
+                                // invalid identifier into Rocq emission.
+                                validate_rocq_identifier(&wasm_parse_data.mod_name)?;
                             }
                             inf_wasmparser::Name::Function(func_names) => {
                                 let mut func_names_map = HashMap::new();
@@ -338,8 +380,150 @@ fn parse(mod_name: String, data: &'_ [u8]) -> anyhow::Result<WasmParseData<'_>> 
             // at the parent parser or the payload iterator is at its
             // end and we're done.
             End(_) => {}
-            _ => todo!(),
+            _ => {
+                return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                    "unexpected WASM payload variant in module".into(),
+                )));
+            }
         }
     }
+
+    if let Some(embedded) = embedded_spec_funcs {
+        if explicit_non_empty {
+            if wasm_parse_data.spec_funcs_by_spec != embedded {
+                return Err(anyhow::anyhow!(WasmToVError::EmbeddedSpecMismatch {
+                    explicit: wasm_parse_data.spec_funcs_by_spec.clone(),
+                    embedded,
+                }));
+            }
+        } else {
+            wasm_parse_data.spec_funcs_by_spec = embedded;
+        }
+    }
+
     Ok(wasm_parse_data)
 }
+
+/// Decodes the `inference.spec_funcs` custom section payload.
+///
+/// Schema (LEB128 u32 throughout):
+/// ```text
+/// version
+/// count
+/// repeat count times:
+///   spec_name_len   spec_name_bytes (utf-8)
+///   indices_count   repeat indices_count times: func_idx
+/// ```
+///
+/// LEB128 reads and the length-prefixed UTF-8 spec-name read are delegated to
+/// `inf_wasmparser::BinaryReader`, which already enforces canonical LEB128
+/// encoding (overlong rejection, integer-too-large rejection) and UTF-8
+/// validation. Errors are mapped to `WasmToVError::WasmParse` so the existing
+/// downcast points in the CLI keep working.
+fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Vec<u32>>> {
+    use inf_wasmparser::BinaryReader;
+
+    let mut reader = BinaryReader::new(data, 0);
+
+    let version = reader
+        .read_var_u32()
+        .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: truncated LEB128 in version: {e}"
+        ))))?;
+    if version != crate::SPEC_FUNCS_SECTION_VERSION {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "unsupported inference.spec_funcs version {version} (expected {})",
+            crate::SPEC_FUNCS_SECTION_VERSION
+        ))));
+    }
+
+    let count = reader
+        .read_var_u32()
+        .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: truncated LEB128 in count: {e}"
+        ))))?;
+    // A malformed binary advertising `count = 0xFFFFFFFF` could trigger a
+    // multi-gigabyte allocation if we trusted it. Each pair consumes at least
+    // two bytes (one for the name-length LEB128, one for the indices-count
+    // LEB128); bound the count by half the remaining payload size before
+    // allocating.
+    if count as usize > reader.bytes_remaining() / 2 {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+            "spec_funcs section: declared pair count exceeds remaining payload".into(),
+        )));
+    }
+
+    let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    for _ in 0..count {
+        let name = reader
+            .read_string()
+            .map_err(|e| {
+                // `read_string` reports "malformed UTF-8 encoding" for bad UTF-8
+                // and "unexpected end-of-file" for truncation. Surface a stable
+                // prefix that the existing downcast tests grep on.
+                let msg = e.to_string();
+                let prefix = if msg.contains("UTF-8") {
+                    "spec_funcs section: invalid UTF-8 in spec name"
+                } else {
+                    "spec_funcs section: truncated LEB128 or name body"
+                };
+                anyhow::anyhow!(WasmToVError::WasmParse(format!("{prefix}: {msg}")))
+            })?
+            .to_string();
+        // Cap individual spec names defensively. The encoder side enforces a
+        // 255-character limit via `validate_rocq_identifier`'s `TooLong` rule,
+        // but a hand-crafted payload could advertise a much longer name; cap
+        // here so the per-name allocation stays bounded regardless of payload.
+        if name.len() > MAX_SPEC_NAME_LEN {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "spec_funcs section: spec name length {} exceeds cap {MAX_SPEC_NAME_LEN}",
+                name.len()
+            ))));
+        }
+        // Validate at the decode boundary so a hand-crafted binary cannot
+        // smuggle an invalid Rocq identifier (empty name, `__`, reserved
+        // keyword, stdlib shadow) past `translate()`'s per-spec check.
+        validate_rocq_identifier(&name)?;
+
+        let idx_count = reader
+            .read_var_u32()
+            .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "spec_funcs section: truncated LEB128 in indices count: {e}"
+            ))))?;
+        // Same defense as for `count` above: each index consumes at least one
+        // payload byte, so `idx_count` cannot legitimately exceed what's left.
+        if idx_count as usize > reader.bytes_remaining() {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "spec_funcs section: declared index count exceeds remaining payload".into(),
+            )));
+        }
+        let mut indices = Vec::with_capacity(idx_count as usize);
+        for _ in 0..idx_count {
+            indices.push(
+                reader
+                    .read_var_u32()
+                    .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                        "spec_funcs section: truncated LEB128 in func index: {e}"
+                    ))))?,
+            );
+        }
+        out.insert(name, indices);
+    }
+    // Reject trailing bytes: every byte of the payload must be accounted for
+    // by the (version, count, repeated (name, indices)) schema. A malformed
+    // binary with extra bytes after the last entry is silently accepted
+    // otherwise, weakening the canonical-encoding guarantee.
+    if reader.bytes_remaining() != 0 {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: {} trailing byte(s) after last entry",
+            reader.bytes_remaining()
+        ))));
+    }
+    Ok(out)
+}
+
+/// Cap on the declared length of any single spec name embedded in the
+/// `inference.spec_funcs` custom section. Matches the
+/// [`crate::rocq_names::validate_rocq_identifier`] `TooLong` threshold so the
+/// decode-time and encode-time limits are aligned.
+const MAX_SPEC_NAME_LEN: usize = 255;

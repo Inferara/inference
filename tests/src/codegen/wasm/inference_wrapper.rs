@@ -12,7 +12,7 @@ mod inference_codegen_wrapper_tests {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let arena = inference::parse(source).unwrap();
         let typed_context = inference::type_check(arena).unwrap();
-        let output = inference::codegen(&typed_context).unwrap();
+        let output = inference::codegen(&typed_context, "output").unwrap();
 
         assert!(!output.wasm().is_empty());
     }
@@ -22,7 +22,7 @@ mod inference_codegen_wrapper_tests {
         let source = "pub fn hello_world() -> i32 { return 42; }";
         let arena = inference::parse(source).unwrap();
         let typed_context = inference::type_check(arena).unwrap();
-        let output = inference::codegen(&typed_context).unwrap();
+        let output = inference::codegen(&typed_context, "output").unwrap();
 
         assert_eq!(output.target(), Target::Wasm32);
         assert_eq!(output.mode(), CompilationMode::Compile);

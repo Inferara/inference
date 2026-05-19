@@ -346,6 +346,21 @@ pub enum TypeCheckError {
         location: Location,
     },
 
+    /// A function defined inside a `spec` block shadows a top-level function
+    /// of the same name. Shadowing across the spec/top-level boundary is
+    /// rejected because codegen prefers the spec-mangled lookup but the
+    /// type-checker types call sites against the closest binding, so the two
+    /// layers would silently disagree on which callee is invoked. Rename one
+    /// side to disambiguate.
+    #[error(
+        "{location}: function `{function_name}` inside spec `{spec_name}` shadows a top-level function of the same name; rename one to disambiguate"
+    )]
+    SpecFunctionShadowsTopLevel {
+        spec_name: String,
+        function_name: String,
+        location: Location,
+    },
+
     #[error("{location}: expected an array type, found `{found}`")]
     ExpectedArrayType { found: TypeInfo, location: Location },
 
@@ -578,7 +593,8 @@ impl TypeCheckError {
             | TypeCheckError::InvalidAssignmentTarget { location, .. }
             | TypeCheckError::ArrayLiteralSizeMismatch { location, .. }
             | TypeCheckError::DivisionByZero { location, .. }
-            | TypeCheckError::DuplicateEnumVariant { location, .. } => location,
+            | TypeCheckError::DuplicateEnumVariant { location, .. }
+            | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
         }
     }
 }

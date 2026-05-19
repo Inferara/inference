@@ -166,7 +166,11 @@ use inf_wasmparser::{
     FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
     RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
+
+use crate::errors::WasmToVError;
+use crate::rocq_names::validate_rocq_identifier;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
@@ -226,13 +230,17 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_types: Vec<RecGroup>,
     pub(crate) function_type_indexes: Vec<u32>,
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
+    /// WASM function indices that originated from `spec` blocks, keyed by
+    /// spec name. Each entry materializes as a `<mod>__<SpecName>_specs : list N`
+    /// Rocq definition consumed by the corresponding `ValidSpec` theorem.
+    pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
 
     translated_function_names: Vec<String>,
     translated_functions_string: String,
 }
 
 impl WasmParseData<'_> {
-    /// Creates a new empty [`WasmParseData`] with the given module name.
+    /// Creates a new empty [`WasmParseData`] with the given module name and spec indices.
     ///
     /// All section vectors are initialized as empty. This is called by the parser
     /// before streaming through WASM sections.
@@ -240,7 +248,11 @@ impl WasmParseData<'_> {
     /// # Parameters
     ///
     /// - `mod_name`: Default Rocq module name (may be overridden by custom name section)
-    pub(crate) fn new<'a>(mod_name: String) -> WasmParseData<'a> {
+    /// - `spec_funcs_by_spec`: WASM function indices grouped by spec name
+    pub(crate) fn new<'a>(
+        mod_name: String,
+        spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
+    ) -> WasmParseData<'a> {
         WasmParseData {
             mod_name,
             func_names_map: None,
@@ -256,6 +268,7 @@ impl WasmParseData<'_> {
             function_types: Vec::new(),
             function_type_indexes: Vec::new(),
             function_bodies: Vec::new(),
+            spec_funcs_by_spec,
 
             translated_function_names: Vec::new(),
             translated_functions_string: String::new(),
@@ -301,6 +314,13 @@ impl WasmParseData<'_> {
     /// - Unimplemented instruction opcodes
     #[allow(clippy::too_many_lines)]
     pub(crate) fn translate(&mut self) -> anyhow::Result<String /* WasmModuleParseError*/> {
+        // Validate every spec name up-front so we fail fast instead of
+        // building ~200 lines of `.v` output and then discarding them when
+        // the per-spec emission loop later rejects an identifier.
+        for spec_name in self.spec_funcs_by_spec.keys() {
+            validate_rocq_identifier(spec_name)?;
+        }
+
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");
@@ -501,16 +521,65 @@ impl WasmParseData<'_> {
         res.push_str(format!("  mod_exports :=\n{created_exports};\n").as_str());
         res.push_str(RCB_DOT);
 
+        // Emit per-spec lists of WASM function indices, sorted by spec name
+        // for deterministic output. Spec names were validated against the
+        // Rocq identifier rules at the top of `translate()` so that
+        // `<mod>__<SpecName>_specs` is always a syntactically legal Rocq
+        // identifier.
+        let mut spec_entries: Vec<(&String, &Vec<u32>)> =
+            self.spec_funcs_by_spec.iter().collect();
+        spec_entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (spec_name, indices) in &spec_entries {
+            res.push('\n');
+            if indices.is_empty() {
+                // (@nil N): no literals to disambiguate, and works regardless
+                // of scope state at the Require site.
+                res.push_str(
+                    format!(
+                        "Definition {module_name}__{spec_name}_specs : list N := (@nil N).\n"
+                    )
+                    .as_str(),
+                );
+            } else {
+                let indices_str = indices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                res.push_str(
+                    format!(
+                        "Definition {module_name}__{spec_name}_specs : list N := [{indices_str}]%N.\n"
+                    )
+                    .as_str(),
+                );
+            }
+        }
+
         // Generate Theorems
         res.push('\n');
         res.push_str("Section Host.\n");
         res.push_str("Context `{ho: host}.\n");
         res.push('\n');
         res.push_str("(* Theorems *)\n");
-        res.push_str(format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str());
+        res.push_str(
+            format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str(),
+        );
         res.push_str("Proof.\n");
         res.push_str("  (* TODO: fill the proof *)\n");
         res.push_str("Qed.\n");
+        for (spec_name, _) in &spec_entries {
+            res.push('\n');
+            res.push_str(
+                format!(
+                    "Theorem valid_{module_name}__{spec_name} : ValidSpec {module_name} {module_name}__{spec_name}_specs.\n"
+                )
+                .as_str(),
+            );
+            res.push_str("Proof.\n");
+            res.push_str("  (* TODO: fill the proof *)\n");
+            res.push_str("Qed.\n");
+        }
         res.push('\n');
         res.push_str("End Host.\n");
         Ok(res)
@@ -573,7 +642,9 @@ fn translate_ref_type(ref_type: &RefType) -> anyhow::Result<String> {
     } else if *ref_type == RefType::EXTERNREF {
         Ok(String::from("T_externref"))
     } else {
-        Err(anyhow::anyhow!("Unsupported reference type {ref_type:?}"))
+        Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: format!("reference type {ref_type:?}"),
+        }))
     }
 }
 
@@ -620,7 +691,11 @@ fn translate_module_import_desc(import: &Import) -> anyhow::Result<String> {
             let table_type_translated = translate_table_type_limits(&table_type)?;
             format!("MID_table {table_type_translated}")
         }
-        TypeRef::Tag(_) => return Err(anyhow::anyhow!("Tag is not supported in import")),
+        TypeRef::Tag(_) => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "tag import (exception-handling proposal)".into(),
+            }));
+        }
     };
     Ok(res)
 }
@@ -668,7 +743,11 @@ fn translate_module_export_desc(export: &Export) -> anyhow::Result<String> {
         inf_wasmparser::ExternalKind::Table => format!("MED_table {}%N", export.index),
         inf_wasmparser::ExternalKind::Memory => format!("MED_mem {}%N", export.index),
         inf_wasmparser::ExternalKind::Global => format!("MED_global {}%N", export.index),
-        inf_wasmparser::ExternalKind::Tag => return Err(anyhow::anyhow!("Tag is not supported")),
+        inf_wasmparser::ExternalKind::Tag => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "tag export (exception-handling proposal)".into(),
+            }));
+        }
     };
     Ok(res)
 }
@@ -1187,13 +1266,17 @@ fn translate_basic_operator(
         }
         Operator::MemorySize { mem } => {
             if *mem > 0 {
-                return Err(anyhow::anyhow!("Memory index is not supported"));
+                return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                    description: "multi-memory (memory index > 0 on memory.size)".into(),
+                }));
             }
             "BI_memory_size".to_string()
         }
         Operator::MemoryGrow { mem } => {
             if *mem > 0 {
-                return Err(anyhow::anyhow!("Memory index is not supported"));
+                return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                    description: "multi-memory (memory index > 0 on memory.grow)".into(),
+                }));
             }
             "BI_memory_grow".to_string()
         }
@@ -1464,9 +1547,9 @@ fn translate_basic_operator(
         | Operator::I64AtomicRmw8CmpxchgU { memarg: _ }
         | Operator::I64AtomicRmw16CmpxchgU { memarg: _ }
         | Operator::I64AtomicRmw32CmpxchgU { memarg: _ } => {
-            return Err(anyhow::anyhow!(
-                "Atomic instruction {operator:?} are not supported",
-            ));
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!("atomic instruction {operator:?} (threads proposal)"),
+            }));
         }
         Operator::V128Load { memarg } => {
             let memarg = translate_memarg(memarg)?;
@@ -1981,9 +2064,9 @@ fn translate_basic_operator(
             ordering: _,
             array_type_index: _,
         } => {
-            return Err(anyhow::anyhow!(
-                "Atomic instruction {operator:?} are not supported",
-            ));
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!("atomic GC instruction {operator:?} (GC + threads proposals)"),
+            }));
         }
         Operator::RefI31Shared => todo!(),
         Operator::CallRef { .. } => todo!(),
@@ -2001,7 +2084,11 @@ fn translate_basic_operator(
         Operator::I64Sub128 { .. } => todo!(),
         Operator::I64MulWideS => todo!(),
         Operator::I64MulWideU => todo!(),
-        _ => return Err(anyhow::anyhow!("Operator {operator:?} not recognized",)),
+        _ => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: format!("operator {operator:?} not recognized"),
+            }));
+        }
     };
     Ok(operator.to_string())
 }

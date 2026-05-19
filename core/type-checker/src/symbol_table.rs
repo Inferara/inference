@@ -428,6 +428,7 @@ impl Scope {
 pub(crate) struct SymbolTable {
     scopes: FxHashMap<u32, ScopeRef>,
     mod_scopes: FxHashMap<String, ScopeRef>,
+    spec_scopes: FxHashMap<String, ScopeRef>,
     root_scope: Option<ScopeRef>,
     current_scope: Option<ScopeRef>,
     next_scope_id: u32,
@@ -438,6 +439,7 @@ impl Default for SymbolTable {
         let mut table = SymbolTable {
             scopes: FxHashMap::default(),
             mod_scopes: FxHashMap::default(),
+            spec_scopes: FxHashMap::default(),
             root_scope: None,
             current_scope: None,
             next_scope_id: 0,
@@ -744,6 +746,16 @@ impl SymbolTable {
             .and_then(|symbol| symbol.as_function().cloned())
     }
 
+    /// Looks up a function by name in the root scope only, without walking
+    /// the parent chain. Used to detect spec-inner / top-level shadowing
+    /// independently of the current scope cursor.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_function_in_root(&self, name: &str) -> Option<FuncInfo> {
+        let root = self.scopes.get(&0)?;
+        let symbol = root.borrow().lookup_symbol_local(name).cloned()?;
+        symbol.as_function().cloned()
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
         self.current_scope
@@ -758,6 +770,47 @@ impl SymbolTable {
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
             .and_then(|symbol| symbol.as_enum().cloned())
+    }
+
+    /// Looks up a struct by name across **all** registered scopes.
+    ///
+    /// Used by post-type-check phases (analysis, codegen) that walk the AST
+    /// into spec/module scopes and need to resolve struct metadata regardless
+    /// of where the struct was defined. Bare-name resolution from the type
+    /// checker stays scope-local; this helper is the explicit escape hatch.
+    ///
+    /// Iteration is in ascending scope-id order so the result is deterministic
+    /// (root scope wins when the same name exists in multiple scopes).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_struct_anywhere(&self, name: &str) -> Option<StructInfo> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(scope) = self.scopes.get(&id)
+                && let Some(symbol) = scope.borrow().lookup_symbol_local(name)
+                && let Some(info) = symbol.as_struct()
+            {
+                return Some(info.clone());
+            }
+        }
+        None
+    }
+
+    /// Looks up an enum by name across **all** registered scopes. Mirrors
+    /// [`Self::lookup_struct_anywhere`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_enum_anywhere(&self, name: &str) -> Option<EnumInfo> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(scope) = self.scopes.get(&id)
+                && let Some(symbol) = scope.borrow().lookup_symbol_local(name)
+                && let Some(info) = symbol.as_enum()
+            {
+                return Some(info.clone());
+            }
+        }
+        None
     }
 
     pub(crate) fn register_method(
@@ -795,6 +848,25 @@ impl SymbolTable {
         if let Some(scope) = self.scopes.get(&scope_id) {
             let full_path = scope.borrow().full_path.clone();
             self.mod_scopes.insert(full_path, Arc::clone(scope));
+        }
+        scope_id
+    }
+
+    /// Enters the scope for spec `name`, creating it on first entry and
+    /// re-entering the same scope on subsequent calls. Re-entry preserves
+    /// the original scope id so symbols registered across the type checker's
+    /// three phases (`register_types`, `collect_function_and_constant_definitions`,
+    /// `infer_def`) all land in the same logical scope and are mutually visible.
+    pub(crate) fn enter_spec(&mut self, name: &str) -> u32 {
+        if let Some(existing) = self.spec_scopes.get(name) {
+            let scope_id = existing.borrow().id;
+            self.current_scope = Some(Arc::clone(existing));
+            return scope_id;
+        }
+        let scope_id = self.push_scope_with_name(name, Visibility::Public);
+        if let Some(scope) = self.scopes.get(&scope_id) {
+            self.spec_scopes
+                .insert(name.to_string(), Arc::clone(scope));
         }
         scope_id
     }
