@@ -259,7 +259,7 @@ mod scenario_3_custom_section_round_trip {
             "in-memory spec map should be non-empty in proof mode"
         );
 
-        let needle = inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME.as_bytes();
+        let needle = inference::SPEC_FUNCS_SECTION_NAME.as_bytes();
         assert!(
             wasm_contains(output.wasm(), needle),
             "proof-mode WASM must embed the spec section name"
@@ -793,7 +793,7 @@ mod scenario_6b_embedded_data_validation {
     /// without it the decoder rejects the section before any per-entry parsing.
     fn spec_funcs_payload_with_name(name: &str) -> Vec<u8> {
         let mut p = Vec::new();
-        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut p);
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut p);
         encode_leb128_u32(1, &mut p); // count = 1
         let name_bytes = name.as_bytes();
         #[allow(clippy::cast_possible_truncation)]
@@ -881,7 +881,7 @@ mod scenario_6b_embedded_data_validation {
     fn embedded_spec_funcs_section_with_invalid_name_is_rejected() {
         let mut wasm = baseline_wasm();
         let payload = spec_funcs_payload_with_name("foo__bar");
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let err = inference::wasm_to_v("Mod", &wasm, &empty)
@@ -940,9 +940,9 @@ mod scenario_6b_embedded_data_validation {
         let mut wasm = baseline_wasm();
         // Payload: version=1, then a single continuation byte for count.
         let mut payload = Vec::new();
-        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut payload);
         payload.push(0x80u8);
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let err = inference::wasm_to_v("Mod", &wasm, &empty)
@@ -968,9 +968,9 @@ mod scenario_6b_embedded_data_validation {
         let mut wasm = baseline_wasm();
         // Payload: version=1, count = 100 (single-byte LEB128), then nothing else.
         let mut payload = Vec::new();
-        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut payload);
         payload.push(100u8);
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let err = inference::wasm_to_v("Mod", &wasm, &empty)
@@ -995,9 +995,9 @@ mod scenario_6b_embedded_data_validation {
         let mut wasm = baseline_wasm();
         // Payload: version=1, count=1, name_len=2, bytes=0xff 0xfe, idx_count=0.
         let mut payload = Vec::new();
-        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut payload);
         payload.extend_from_slice(&[0x01u8, 0x02u8, 0xffu8, 0xfeu8, 0x00u8]);
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let err = inference::wasm_to_v("Mod", &wasm, &empty)
@@ -1030,7 +1030,7 @@ mod scenario_6b_embedded_data_validation {
         let mut payload = Vec::new();
         encode_leb128_u32(0x99, &mut payload);
         encode_leb128_u32(0, &mut payload);
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let err = inference::wasm_to_v("Mod", &wasm, &empty)
@@ -1059,8 +1059,8 @@ mod scenario_6b_embedded_data_validation {
         // be "the same section appearing twice".
         let payload_a = spec_funcs_payload_with_name("MySpecA");
         let payload_b = spec_funcs_payload_with_name("MySpecB");
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload_a);
-        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload_b);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload_a);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload_b);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let result = inference::wasm_to_v("Mod", &wasm, &empty);
@@ -1163,7 +1163,7 @@ mod scenario_7_empty_spec {
     fn empty_spec_proof_mode_embeds_section_with_zero_indices() {
         let source = r#"pub fn main() -> i32 { return 0; } spec MySpec { }"#;
         let output = compile(source, CompilationMode::Proof);
-        let needle = inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME.as_bytes();
+        let needle = inference::SPEC_FUNCS_SECTION_NAME.as_bytes();
         assert!(
             wasm_contains(output.wasm(), needle),
             "proof-mode WASM with an empty spec must still embed the spec section"
@@ -1230,7 +1230,7 @@ mod scenario_8_compile_mode_no_section {
     fn compile_mode_wasm_omits_spec_section_name() {
         let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
         let output = compile(source, CompilationMode::Compile);
-        let needle = inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME.as_bytes();
+        let needle = inference::SPEC_FUNCS_SECTION_NAME.as_bytes();
         assert!(
             !wasm_contains(output.wasm(), needle),
             "compile-mode WASM must not contain the spec section name"
@@ -1259,7 +1259,7 @@ mod scenario_8_compile_mode_no_section {
 
         let source = r#"spec A { fn p() -> i32 { return 1; } } spec B { fn q() -> i32 { return 2; } }"#;
         let output = compile(source, CompilationMode::Compile);
-        let needle = inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME.as_bytes();
+        let needle = inference::SPEC_FUNCS_SECTION_NAME.as_bytes();
         assert!(
             !wasm_contains(output.wasm(), needle),
             "compile-mode WASM must not embed the spec section"

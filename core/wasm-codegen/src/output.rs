@@ -27,8 +27,9 @@ use crate::target::{CompilationMode, OptLevel, Target};
 /// use inference_wasm_codegen::{CodegenOutput, Target, CompilationMode, OptLevel};
 /// use rustc_hash::FxHashMap;
 ///
-/// // `FxHashMap` is also re-exported as `inference::FxHashMap` for library
-/// // consumers that don't want a direct `rustc-hash` dependency.
+/// // The top-level `inference` orchestrator crate also re-exports
+/// // `FxHashMap` for consumers that want to avoid a direct `rustc-hash`
+/// // dependency; from this crate, use `rustc_hash::FxHashMap` directly.
 /// let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d]; // WASM magic number
 /// let output = CodegenOutput::new(
 ///     wasm_bytes,

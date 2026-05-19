@@ -27,7 +27,13 @@ pub enum InvalidIdentifierReason {
 }
 
 /// Error variants surfaced by the WASM-to-Rocq translator.
+///
+/// Public type; marked `#[non_exhaustive]` so adding a new variant in a future
+/// release is not a breaking change for downstream consumers that match on it.
+/// Downcast via `anyhow::Error::downcast_ref::<WasmToVError>()` is unaffected
+/// (downcasting matches type identity, not pattern-completeness).
 #[derive(Debug, Clone, Error)]
+#[non_exhaustive]
 pub enum WasmToVError {
     /// The candidate Rocq identifier (module or spec name) does not satisfy
     /// the validator's syntactic rules.
@@ -45,9 +51,14 @@ pub enum WasmToVError {
     /// `translate_bytes` was called with an explicit non-empty spec map and the
     /// WASM binary also embeds an `inference.spec_funcs` section, but the two
     /// disagree. We refuse to silently override either side.
+    ///
+    /// * `explicit` — map passed by the caller (CLI argument, tooling input).
+    /// * `embedded` — map decoded from the WASM custom section.
     #[error("explicit spec map disagrees with the embedded `inference.spec_funcs` section")]
     EmbeddedSpecMismatch {
+        /// Spec map supplied by the caller of `translate_bytes`.
         explicit: rustc_hash::FxHashMap<String, Vec<u32>>,
+        /// Spec map decoded from the WASM `inference.spec_funcs` section.
         embedded: rustc_hash::FxHashMap<String, Vec<u32>>,
     },
 

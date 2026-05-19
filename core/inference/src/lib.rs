@@ -275,6 +275,11 @@ pub use rustc_hash::FxHashMap;
 /// dependency on `inference-wasm-to-v-translator`.
 pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
 
+/// Re-export of the `inference.spec_funcs` custom-section identifiers so
+/// downstream consumers (CLI tools, integration tests) share a single source
+/// of truth with the codegen and translator crates.
+pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VERSION};
+
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
 /// This function orchestrates the parsing pipeline:
