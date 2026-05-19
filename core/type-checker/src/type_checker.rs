@@ -78,33 +78,13 @@ impl TypeChecker {
         self.collect_function_and_constant_definitions(ctx);
         // Continue to inference phase even if registration had errors
         // to collect all errors before returning
-        let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
-            arena,
-            &arena
-                .source_files()
-                .flat_map(|sf| sf.defs.iter().copied())
-                .collect::<Vec<_>>(),
-        );
-        for def_id in all_def_ids {
-            let kind = ctx.arena()[def_id].kind.clone();
-            match &kind {
-                Def::Function { .. } => {
-                    self.infer_variables(def_id, ctx);
-                }
-                Def::Struct { name, methods, .. } => {
-                    let struct_name = ctx.arena()[*name].name.clone();
-                    let struct_type = TypeInfo {
-                        kind: TypeInfoKind::Struct(struct_name.clone()),
-                        type_params: vec![],
-                    };
-                    let method_ids: Vec<DefId> = methods.clone();
-                    for method_id in method_ids {
-                        self.infer_method_variables(method_id, struct_type.clone(), ctx);
-                    }
-                }
-                _ => {}
-            }
+        let top_level_defs: Vec<DefId> = ctx
+            .arena()
+            .source_files()
+            .flat_map(|sf| sf.defs.iter().copied())
+            .collect();
+        for def_id in top_level_defs {
+            self.infer_def(def_id, ctx);
         }
         if !self.errors.is_empty() {
             let error_messages: Vec<String> = std::mem::take(&mut self.errors)
@@ -116,204 +96,244 @@ impl TypeChecker {
         Ok(self.symbol_table.clone())
     }
 
+    fn infer_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
+        let kind = ctx.arena()[def_id].kind.clone();
+        match &kind {
+            Def::Function { .. } => {
+                self.infer_variables(def_id, ctx);
+            }
+            Def::Struct { name, methods, .. } => {
+                let struct_name = ctx.arena()[*name].name.clone();
+                let struct_type = TypeInfo {
+                    kind: TypeInfoKind::Struct(struct_name.clone()),
+                    type_params: vec![],
+                };
+                let method_ids: Vec<DefId> = methods.clone();
+                for method_id in method_ids {
+                    self.infer_method_variables(method_id, struct_type.clone(), ctx);
+                }
+            }
+            Def::Spec { name, defs, .. } => {
+                let spec_name = ctx.arena()[*name].name.clone();
+                let _ = self.symbol_table.enter_spec(&spec_name);
+                let inner: Vec<DefId> = defs.clone();
+                for inner_id in inner {
+                    self.infer_def(inner_id, ctx);
+                }
+                self.symbol_table.pop_scope();
+            }
+            _ => {}
+        }
+    }
+
     /// Registers `Def::TypeAlias`, `Def::Struct`, `Def::Enum`, and `Def::Spec`
     fn register_types(&mut self, ctx: &mut TypedContext) {
-        let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
-            arena,
-            &arena
-                .source_files()
-                .flat_map(|sf| sf.defs.iter().copied())
-                .collect::<Vec<_>>(),
-        );
-        for def_id in all_def_ids {
-            let arena = ctx.arena();
-            let def_data = &arena[def_id];
-            let location = def_data.location;
-            match &def_data.kind {
-                Def::TypeAlias { name, ty, .. } => {
-                    let type_name = arena[*name].name.clone();
-                    let type_info = TypeInfo::from_type_id(arena, *ty);
-                    self.symbol_table
-                        .register_type(&type_name, Some(type_info))
-                        .unwrap_or_else(|_| {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Type,
-                                name: type_name,
-                                reason: None,
-                                location,
-                            });
-                        });
-                }
-                Def::Struct {
-                    name,
-                    vis,
-                    fields,
-                    methods,
-                } => {
-                    let struct_name = arena[*name].name.clone();
-                    let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
-                        .iter()
-                        .map(|f| {
-                            (
-                                arena[f.name].name.clone(),
-                                TypeInfo::from_type_id(arena, f.ty),
-                                Visibility::Private,
-                            )
-                        })
-                        .collect();
-                    {
-                        let mut seen_fields = FxHashSet::default();
-                        for field in fields {
-                            let field_name = arena[field.name].name.clone();
-                            if !seen_fields.insert(field_name.clone()) {
-                                self.errors.push(
-                                    TypeCheckError::DuplicateStructFieldDefinition {
-                                        struct_name: struct_name.clone(),
-                                        field_name,
-                                        location: arena[field.name].location,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    let method_ids: Vec<DefId> = methods.clone();
-                    self.symbol_table
-                        .register_struct(&struct_name, &field_infos, vec![], vis.clone())
-                        .unwrap_or_else(|_| {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Struct,
-                                name: struct_name.clone(),
-                                reason: None,
-                                location,
-                            });
-                        });
-
-                    for method_id in method_ids {
-                        let arena = ctx.arena();
-                        let method_data = &arena[method_id];
-                        let method_location = method_data.location;
-                        if let Def::Function {
-                            name: method_name,
-                            vis: method_vis,
-                            type_params,
-                            args,
-                            returns,
-                            ..
-                        } = &method_data.kind
-                        {
-                            let has_self = args
-                                .iter()
-                                .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
-
-                            let tp_names: Vec<String> =
-                                type_params.iter().map(|p| arena[*p].name.clone()).collect();
-                            let param_types: Vec<TypeInfo> = args
-                                .iter()
-                                .filter_map(|a| match &a.kind {
-                                    ArgKind::SelfRef { .. } => None,
-                                    ArgKind::Named { ty, .. }
-                                    | ArgKind::Ignored { ty }
-                                    | ArgKind::TypeOnly(ty) => {
-                                        Some(self.symbol_table.resolve_custom_type(
-                                            TypeInfo::from_type_id_with_type_params(
-                                                arena, *ty, &tp_names,
-                                            ),
-                                        ))
-                                    }
-                                })
-                                .collect();
-
-                            let return_type = returns
-                                .map(|r| {
-                                    TypeInfo::from_type_id_with_type_params(arena, r, &tp_names)
-                                })
-                                .map(|ti| self.symbol_table.resolve_custom_type(ti))
-                                .unwrap_or_default();
-
-                            let definition_scope_id =
-                                self.symbol_table.current_scope_id().unwrap_or(0);
-                            let m_name = arena[*method_name].name.clone();
-                            let signature = FuncInfo {
-                                name: m_name.clone(),
-                                type_params: tp_names,
-                                param_types,
-                                return_type,
-                                visibility: method_vis.clone(),
-                                definition_scope_id,
-                            };
-
-                            self.symbol_table
-                                .register_method(
-                                    &struct_name,
-                                    signature,
-                                    method_vis.clone(),
-                                    has_self,
-                                )
-                                .unwrap_or_else(|err| {
-                                    self.errors.push(TypeCheckError::RegistrationFailed {
-                                        kind: RegistrationKind::Method,
-                                        name: format!("{struct_name}::{m_name}"),
-                                        reason: Some(err.to_string()),
-                                        location: method_location,
-                                    });
-                                });
-                        }
-                    }
-                }
-                Def::Enum {
-                    name,
-                    vis,
-                    variants,
-                } => {
-                    let enum_name = arena[*name].name.clone();
-                    let variant_names: Vec<&str> =
-                        variants.iter().map(|v| arena[*v].name.as_str()).collect();
-                    {
-                        let mut seen_variants = FxHashSet::default();
-                        for variant_id in variants {
-                            let variant_name = arena[*variant_id].name.as_str();
-                            if !seen_variants.insert(variant_name) {
-                                self.errors.push(TypeCheckError::DuplicateEnumVariant {
-                                    enum_name: enum_name.clone(),
-                                    variant_name: variant_name.to_string(),
-                                    location: arena[*variant_id].location,
-                                });
-                            }
-                        }
-                    }
-                    self.symbol_table
-                        .register_enum(&enum_name, &variant_names, vis.clone())
-                        .unwrap_or_else(|_| {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Enum,
-                                name: enum_name,
-                                reason: None,
-                                location,
-                            });
-                        });
-                }
-                Def::Spec { name, .. } => {
-                    let spec_name = arena[*name].name.clone();
-                    self.symbol_table
-                        .register_spec(&spec_name)
-                        .unwrap_or_else(|_| {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Spec,
-                                name: spec_name,
-                                reason: None,
-                                location,
-                            });
-                        });
-                }
-                Def::Constant { .. }
-                | Def::Function { .. }
-                | Def::ExternFunction { .. }
-                | Def::Module { .. } => {}
-            }
+        let top_level_defs: Vec<DefId> = ctx
+            .arena()
+            .source_files()
+            .flat_map(|sf| sf.defs.iter().copied())
+            .collect();
+        for def_id in top_level_defs {
+            self.register_type_for_def(def_id, ctx);
         }
 
         self.check_recursive_struct_definitions(ctx);
+    }
+
+    fn register_type_for_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
+        let arena = ctx.arena();
+        let def_data = &arena[def_id];
+        let location = def_data.location;
+        match &def_data.kind {
+            Def::TypeAlias { name, ty, .. } => {
+                let type_name = arena[*name].name.clone();
+                let type_info = TypeInfo::from_type_id(arena, *ty);
+                self.symbol_table
+                    .register_type(&type_name, Some(type_info))
+                    .unwrap_or_else(|_| {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Type,
+                            name: type_name,
+                            reason: None,
+                            location,
+                        });
+                    });
+            }
+            Def::Struct {
+                name,
+                vis,
+                fields,
+                methods,
+            } => {
+                let struct_name = arena[*name].name.clone();
+                let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            arena[f.name].name.clone(),
+                            TypeInfo::from_type_id(arena, f.ty),
+                            Visibility::Private,
+                        )
+                    })
+                    .collect();
+                {
+                    let mut seen_fields = FxHashSet::default();
+                    for field in fields {
+                        let field_name = arena[field.name].name.clone();
+                        if !seen_fields.insert(field_name.clone()) {
+                            self.errors.push(
+                                TypeCheckError::DuplicateStructFieldDefinition {
+                                    struct_name: struct_name.clone(),
+                                    field_name,
+                                    location: arena[field.name].location,
+                                },
+                            );
+                        }
+                    }
+                }
+                let method_ids: Vec<DefId> = methods.clone();
+                let vis_clone = vis.clone();
+                self.symbol_table
+                    .register_struct(&struct_name, &field_infos, vec![], vis_clone)
+                    .unwrap_or_else(|_| {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Struct,
+                            name: struct_name.clone(),
+                            reason: None,
+                            location,
+                        });
+                    });
+
+                for method_id in method_ids {
+                    let arena = ctx.arena();
+                    let method_data = &arena[method_id];
+                    let method_location = method_data.location;
+                    if let Def::Function {
+                        name: method_name,
+                        vis: method_vis,
+                        type_params,
+                        args,
+                        returns,
+                        ..
+                    } = &method_data.kind
+                    {
+                        let has_self = args
+                            .iter()
+                            .any(|a| matches!(a.kind, ArgKind::SelfRef { .. }));
+
+                        let tp_names: Vec<String> =
+                            type_params.iter().map(|p| arena[*p].name.clone()).collect();
+                        let param_types: Vec<TypeInfo> = args
+                            .iter()
+                            .filter_map(|a| match &a.kind {
+                                ArgKind::SelfRef { .. } => None,
+                                ArgKind::Named { ty, .. }
+                                | ArgKind::Ignored { ty }
+                                | ArgKind::TypeOnly(ty) => {
+                                    Some(self.symbol_table.resolve_custom_type(
+                                        TypeInfo::from_type_id_with_type_params(
+                                            arena, *ty, &tp_names,
+                                        ),
+                                    ))
+                                }
+                            })
+                            .collect();
+
+                        let return_type = returns
+                            .map(|r| {
+                                TypeInfo::from_type_id_with_type_params(arena, r, &tp_names)
+                            })
+                            .map(|ti| self.symbol_table.resolve_custom_type(ti))
+                            .unwrap_or_default();
+
+                        let definition_scope_id =
+                            self.symbol_table.current_scope_id().unwrap_or(0);
+                        let m_name = arena[*method_name].name.clone();
+                        let signature = FuncInfo {
+                            name: m_name.clone(),
+                            type_params: tp_names,
+                            param_types,
+                            return_type,
+                            visibility: method_vis.clone(),
+                            definition_scope_id,
+                        };
+
+                        self.symbol_table
+                            .register_method(
+                                &struct_name,
+                                signature,
+                                method_vis.clone(),
+                                has_self,
+                            )
+                            .unwrap_or_else(|err| {
+                                self.errors.push(TypeCheckError::RegistrationFailed {
+                                    kind: RegistrationKind::Method,
+                                    name: format!("{struct_name}::{m_name}"),
+                                    reason: Some(err.to_string()),
+                                    location: method_location,
+                                });
+                            });
+                    }
+                }
+            }
+            Def::Enum {
+                name,
+                vis,
+                variants,
+            } => {
+                let enum_name = arena[*name].name.clone();
+                let variant_names: Vec<&str> =
+                    variants.iter().map(|v| arena[*v].name.as_str()).collect();
+                {
+                    let mut seen_variants = FxHashSet::default();
+                    for variant_id in variants {
+                        let variant_name = arena[*variant_id].name.as_str();
+                        if !seen_variants.insert(variant_name) {
+                            self.errors.push(TypeCheckError::DuplicateEnumVariant {
+                                enum_name: enum_name.clone(),
+                                variant_name: variant_name.to_string(),
+                                location: arena[*variant_id].location,
+                            });
+                        }
+                    }
+                }
+                self.symbol_table
+                    .register_enum(&enum_name, &variant_names, vis.clone())
+                    .unwrap_or_else(|_| {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Enum,
+                            name: enum_name,
+                            reason: None,
+                            location,
+                        });
+                    });
+            }
+            Def::Spec { name, defs, .. } => {
+                let spec_name = arena[*name].name.clone();
+                // Register the spec name in the parent scope BEFORE entering the
+                // spec scope, so bare references to the spec resolve via the parent.
+                self.symbol_table
+                    .register_spec(&spec_name)
+                    .unwrap_or_else(|_| {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Spec,
+                            name: spec_name.clone(),
+                            reason: None,
+                            location,
+                        });
+                    });
+                let inner: Vec<DefId> = defs.clone();
+                let _ = self.symbol_table.enter_spec(&spec_name);
+                for inner_id in inner {
+                    self.register_type_for_def(inner_id, ctx);
+                }
+                self.symbol_table.pop_scope();
+            }
+            Def::Constant { .. }
+            | Def::Function { .. }
+            | Def::ExternFunction { .. }
+            | Def::Module { .. } => {}
+        }
     }
 
     /// Detects recursive struct definitions (direct or transitive cycles).
@@ -400,176 +420,185 @@ impl TypeChecker {
     }
 
     /// Registers `Def::Function`, `Def::ExternFunction`, and `Def::Constant`
-    #[allow(clippy::too_many_lines)]
     fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
-        let arena = ctx.arena();
-        let all_def_ids: Vec<DefId> = flatten_defs_with_spec_inner(
-            arena,
-            &arena
-                .source_files()
-                .flat_map(|sf| sf.defs.iter().copied())
-                .collect::<Vec<_>>(),
-        );
-        for def_id in all_def_ids {
-            let (location, kind) = {
-                let arena = ctx.arena();
-                let def_data = &arena[def_id];
-                (def_data.location, def_data.kind.clone())
-            };
-            match &kind {
-                Def::Constant {
-                    name, ty, value, ..
-                } => {
-                    let const_name = ctx.arena()[*name].name.clone();
-                    let const_type = self
-                        .symbol_table
-                        .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
-                    let value_id = *value;
-                    if let Err(err) = self.symbol_table.push_variable_to_scope(
-                        &const_name,
-                        const_type.clone(),
-                        false,
-                    ) {
-                        self.errors.push(TypeCheckError::RegistrationFailed {
-                            kind: RegistrationKind::Variable,
-                            name: const_name,
-                            reason: Some(err.to_string()),
-                            location,
-                        });
-                    }
-                    self.check_const_initializer(value_id, &const_type, location, ctx);
-                }
-                Def::Function {
-                    name,
-                    type_params,
-                    args,
-                    returns,
-                    ..
-                } => {
-                    let func_name = ctx.arena()[*name].name.clone();
-                    let name_ident_id = *name;
-                    let tp_names: Vec<String> = type_params
-                        .iter()
-                        .map(|p| ctx.arena()[*p].name.clone())
-                        .collect();
+        let top_level_defs: Vec<DefId> = ctx
+            .arena()
+            .source_files()
+            .flat_map(|sf| sf.defs.iter().copied())
+            .collect();
+        for def_id in top_level_defs {
+            self.collect_for_def(def_id, ctx);
+        }
+    }
 
-                    for arg in args {
-                        match &arg.kind {
-                            ArgKind::SelfRef { .. } => {
-                                self.errors.push(TypeCheckError::SelfReferenceInFunction {
-                                    function_name: func_name.clone(),
-                                    location: arg.location,
-                                });
-                            }
-                            ArgKind::Ignored { ty } => {
-                                self.validate_type(ctx.arena(), *ty, &tp_names);
-                            }
-                            ArgKind::Named {
-                                name: arg_name, ty, ..
-                            } => {
-                                self.validate_type(ctx.arena(), *ty, &tp_names);
-                                let type_info = TypeInfo::from_type_id_with_type_params(
-                                    ctx.arena(),
-                                    *ty,
-                                    &tp_names,
-                                );
-                                ctx.set_node_typeinfo(NodeId::Ident(*arg_name), type_info);
-                            }
-                            ArgKind::TypeOnly(ty) => {
-                                self.validate_type(ctx.arena(), *ty, &tp_names);
-                            }
+    #[allow(clippy::too_many_lines)]
+    fn collect_for_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
+        let (location, kind) = {
+            let arena = ctx.arena();
+            let def_data = &arena[def_id];
+            (def_data.location, def_data.kind.clone())
+        };
+        match &kind {
+            Def::Constant {
+                name, ty, value, ..
+            } => {
+                let const_name = ctx.arena()[*name].name.clone();
+                let const_type = self
+                    .symbol_table
+                    .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
+                let value_id = *value;
+                if let Err(err) = self.symbol_table.push_variable_to_scope(
+                    &const_name,
+                    const_type.clone(),
+                    false,
+                ) {
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Variable,
+                        name: const_name,
+                        reason: Some(err.to_string()),
+                        location,
+                    });
+                }
+                self.check_const_initializer(value_id, &const_type, location, ctx);
+            }
+            Def::Function {
+                name,
+                type_params,
+                args,
+                returns,
+                ..
+            } => {
+                let func_name = ctx.arena()[*name].name.clone();
+                let name_ident_id = *name;
+                let tp_names: Vec<String> = type_params
+                    .iter()
+                    .map(|p| ctx.arena()[*p].name.clone())
+                    .collect();
+
+                for arg in args {
+                    match &arg.kind {
+                        ArgKind::SelfRef { .. } => {
+                            self.errors.push(TypeCheckError::SelfReferenceInFunction {
+                                function_name: func_name.clone(),
+                                location: arg.location,
+                            });
+                        }
+                        ArgKind::Ignored { ty } => {
+                            self.validate_type(ctx.arena(), *ty, &tp_names);
+                        }
+                        ArgKind::Named {
+                            name: arg_name, ty, ..
+                        } => {
+                            self.validate_type(ctx.arena(), *ty, &tp_names);
+                            let type_info = TypeInfo::from_type_id_with_type_params(
+                                ctx.arena(),
+                                *ty,
+                                &tp_names,
+                            );
+                            ctx.set_node_typeinfo(NodeId::Ident(*arg_name), type_info);
+                        }
+                        ArgKind::TypeOnly(ty) => {
+                            self.validate_type(ctx.arena(), *ty, &tp_names);
                         }
                     }
-                    ctx.set_node_typeinfo(
-                        NodeId::Ident(name_ident_id),
-                        TypeInfo {
-                            kind: TypeInfoKind::Function(func_name.clone()),
-                            type_params: tp_names.clone(),
-                        },
+                }
+                ctx.set_node_typeinfo(
+                    NodeId::Ident(name_ident_id),
+                    TypeInfo {
+                        kind: TypeInfoKind::Function(func_name.clone()),
+                        type_params: tp_names.clone(),
+                    },
+                );
+                if let Some(return_type_id) = returns {
+                    self.validate_type(ctx.arena(), *return_type_id, &tp_names);
+                    let return_type_info = TypeInfo::from_type_id_with_type_params(
+                        ctx.arena(),
+                        *return_type_id,
+                        &tp_names,
                     );
-                    if let Some(return_type_id) = returns {
-                        self.validate_type(ctx.arena(), *return_type_id, &tp_names);
-                        let return_type_info = TypeInfo::from_type_id_with_type_params(
-                            ctx.arena(),
-                            *return_type_id,
-                            &tp_names,
-                        );
-                        ctx.set_node_typeinfo(NodeId::Type(*return_type_id), return_type_info);
-                    }
-                    // Register function even if parameter validation had errors
-                    let param_types: Vec<TypeInfo> = args
-                        .iter()
-                        .filter_map(|a| match &a.kind {
-                            ArgKind::SelfRef { .. } => None,
-                            ArgKind::Named { ty, .. }
-                            | ArgKind::Ignored { ty }
-                            | ArgKind::TypeOnly(ty) => {
-                                Some(TypeInfo::from_type_id_with_type_params(
-                                    ctx.arena(),
-                                    *ty,
-                                    &tp_names,
-                                ))
-                            }
-                        })
-                        .collect();
-                    let return_type = returns
-                        .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
-                        .unwrap_or_default();
-                    if let Err(err) = self.symbol_table.register_function(
-                        &func_name,
-                        tp_names,
-                        param_types,
-                        return_type,
-                    ) {
-                        self.errors.push(TypeCheckError::RegistrationFailed {
-                            kind: RegistrationKind::Function,
-                            name: func_name,
-                            reason: Some(err),
-                            location,
-                        });
-                    }
+                    ctx.set_node_typeinfo(NodeId::Type(*return_type_id), return_type_info);
                 }
-                Def::ExternFunction {
-                    name,
-                    args,
-                    returns,
-                    ..
-                } => {
-                    let func_name = ctx.arena()[*name].name.clone();
-                    let param_types: Vec<TypeInfo> = args
-                        .iter()
-                        .filter_map(|a| match &a.kind {
-                            ArgKind::SelfRef { .. } => None,
-                            ArgKind::Named { ty, .. }
-                            | ArgKind::Ignored { ty }
-                            | ArgKind::TypeOnly(ty) => {
-                                Some(TypeInfo::from_type_id(ctx.arena(), *ty))
-                            }
-                        })
-                        .collect();
-                    let return_type = returns
-                        .map(|r| TypeInfo::from_type_id(ctx.arena(), r))
-                        .unwrap_or_default();
-                    if let Err(err) = self.symbol_table.register_function(
-                        &func_name,
-                        vec![],
-                        param_types,
-                        return_type,
-                    ) {
-                        self.errors.push(TypeCheckError::RegistrationFailed {
-                            kind: RegistrationKind::Function,
-                            name: func_name,
-                            reason: Some(err),
-                            location,
-                        });
-                    }
+                // Register function even if parameter validation had errors
+                let param_types: Vec<TypeInfo> = args
+                    .iter()
+                    .filter_map(|a| match &a.kind {
+                        ArgKind::SelfRef { .. } => None,
+                        ArgKind::Named { ty, .. }
+                        | ArgKind::Ignored { ty }
+                        | ArgKind::TypeOnly(ty) => {
+                            Some(TypeInfo::from_type_id_with_type_params(
+                                ctx.arena(),
+                                *ty,
+                                &tp_names,
+                            ))
+                        }
+                    })
+                    .collect();
+                let return_type = returns
+                    .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
+                    .unwrap_or_default();
+                if let Err(err) = self.symbol_table.register_function(
+                    &func_name,
+                    tp_names,
+                    param_types,
+                    return_type,
+                ) {
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Function,
+                        name: func_name,
+                        reason: Some(err),
+                        location,
+                    });
                 }
-                Def::Spec { .. }
-                | Def::Struct { .. }
-                | Def::Enum { .. }
-                | Def::TypeAlias { .. }
-                | Def::Module { .. } => {}
             }
+            Def::ExternFunction {
+                name,
+                args,
+                returns,
+                ..
+            } => {
+                let func_name = ctx.arena()[*name].name.clone();
+                let param_types: Vec<TypeInfo> = args
+                    .iter()
+                    .filter_map(|a| match &a.kind {
+                        ArgKind::SelfRef { .. } => None,
+                        ArgKind::Named { ty, .. }
+                        | ArgKind::Ignored { ty }
+                        | ArgKind::TypeOnly(ty) => {
+                            Some(TypeInfo::from_type_id(ctx.arena(), *ty))
+                        }
+                    })
+                    .collect();
+                let return_type = returns
+                    .map(|r| TypeInfo::from_type_id(ctx.arena(), r))
+                    .unwrap_or_default();
+                if let Err(err) = self.symbol_table.register_function(
+                    &func_name,
+                    vec![],
+                    param_types,
+                    return_type,
+                ) {
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Function,
+                        name: func_name,
+                        reason: Some(err),
+                        location,
+                    });
+                }
+            }
+            Def::Spec { name, defs, .. } => {
+                let spec_name = ctx.arena()[*name].name.clone();
+                let inner: Vec<DefId> = defs.clone();
+                let _ = self.symbol_table.enter_spec(&spec_name);
+                for inner_id in inner {
+                    self.collect_for_def(inner_id, ctx);
+                }
+                self.symbol_table.pop_scope();
+            }
+            Def::Struct { .. }
+            | Def::Enum { .. }
+            | Def::TypeAlias { .. }
+            | Def::Module { .. } => {}
         }
     }
 
@@ -2603,23 +2632,4 @@ impl TypeChecker {
         self.errors.push(error);
     }
 
-}
-
-/// Flatten a top-level def list to include inner defs of every `Def::Spec`.
-///
-/// The spec itself is preserved in the output (its match arm registers the spec scope);
-/// then its inner defs follow, so they go through the same per-def processing as
-/// top-level defs. Nested specs are intentionally not flattened: handle them when
-/// the language permits the construct.
-fn flatten_defs_with_spec_inner(arena: &AstArena, defs: &[DefId]) -> Vec<DefId> {
-    let mut out = Vec::with_capacity(defs.len());
-    for &def_id in defs {
-        out.push(def_id);
-        if let Def::Spec { defs: inner, .. } = &arena[def_id].kind {
-            for &inner_id in inner {
-                out.push(inner_id);
-            }
-        }
-    }
-    out
 }

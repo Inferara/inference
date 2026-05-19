@@ -122,7 +122,7 @@
 //! let typed_context = type_check(arena)?;
 //! let codegen_output = codegen(&typed_context)?;
 //! // WASM bytes are directly available from codegen output:
-//! // wasm_to_v("MyModule", codegen_output.wasm(), codegen_output.spec_func_indices())
+//! // wasm_to_v("MyModule", codegen_output.wasm(), codegen_output.spec_func_indices_by_spec())
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -197,7 +197,7 @@
 //!     let rocq_code = wasm_to_v(
 //!         module_name,
 //!         codegen_output.wasm(),
-//!         codegen_output.spec_func_indices(),
+//!         codegen_output.spec_func_indices_by_spec(),
 //!     )?;
 //!     Ok(rocq_code)
 //! }
@@ -264,6 +264,16 @@
 use inference_ast::{arena::AstArena, builder::Builder};
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_type_checker::typed_context::TypedContext;
+
+/// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
+/// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
+/// direct dependency on `rustc-hash`.
+pub use rustc_hash::FxHashMap;
+
+/// Re-export of the [`wasm_to_v`] error types so downstream consumers (CLI,
+/// LSP, tools) can match on translation failures without taking a direct
+/// dependency on `inference-wasm-to-v-translator`.
+pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
@@ -604,7 +614,7 @@ pub fn codegen(
 /// let rocq_code = wasm_to_v(
 ///     "EvenChecker",
 ///     codegen_output.wasm(),
-///     codegen_output.spec_func_indices(),
+///     codegen_output.spec_func_indices_by_spec(),
 /// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -630,7 +640,7 @@ pub fn codegen(
 /// let rocq_code = wasm_to_v(
 ///     "CommutativityProof",
 ///     codegen_output.wasm(),
-///     codegen_output.spec_func_indices(),
+///     codegen_output.spec_func_indices_by_spec(),
 /// )?;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
@@ -666,21 +676,26 @@ pub fn codegen(
 /// - `mod_name`: The name of the Rocq module to generate. Should be a valid
 ///   Rocq identifier (alphanumeric, starting with an uppercase letter).
 /// - `wasm`: The WebAssembly binary to translate, as produced by [`codegen`].
-/// - `spec_func_indices`: WASM function indices that originated from `spec`
-///   blocks (typically obtained from [`CodegenOutput::spec_func_indices`]).
-///   Emitted as a `Definition <mod_name>_specs : list N` consumed by the
-///   generated `ValidModule` theorem. Pass `&[]` when no spec marker is needed.
+/// - `spec_funcs_by_spec`: WASM function indices that originated from `spec`
+///   blocks, grouped by spec name (typically obtained from
+///   [`CodegenOutput::spec_func_indices_by_spec`]). Emitted as per-spec
+///   `Definition <mod_name>__<SpecName>_specs : list N` definitions consumed
+///   by the corresponding `ValidSpec` theorems. Pass an empty `FxHashMap`
+///   when no spec marker is needed.
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The WebAssembly binary is malformed or cannot be parsed
-/// - The WASM structure contains unsupported features
-/// - Translation of a specific instruction or construct fails
-/// - The module name is invalid for Rocq
+/// Returns an `anyhow::Result` whose underlying error is typically a
+/// downcastable `inference_wasm_to_v_translator::errors::WasmToVError`:
 ///
-/// Error messages will indicate "Error translating WebAssembly to V" with
-/// details from the underlying parser.
+/// - `WasmToVError::InvalidRocqIdentifier` — the module or a spec name does
+///   not satisfy the Rocq identifier rules
+/// - `WasmToVError::RocqStdlibShadow` — the module or a spec name would
+///   shadow a Rocq stdlib type
+/// - `WasmToVError::EmbeddedSpecMismatch` — the caller passed a non-empty
+///   explicit spec map that disagrees with the binary's embedded section
+/// - `WasmToVError::WasmParse` — the WASM binary is malformed or contains
+///   unsupported features
 ///
 /// # Use Cases
 ///
@@ -705,15 +720,16 @@ pub fn codegen(
 /// - [WebAssembly Specification](https://webassembly.github.io/spec/)
 /// - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 /// - [`inference_wasm_to_v_translator`] for implementation details
+// FxHashMap is part of the public contract for spec maps — don't generalize to a BuildHasher bound.
+#[allow(clippy::implicit_hasher)]
 pub fn wasm_to_v(
     mod_name: &str,
     wasm: &[u8],
-    spec_func_indices: &[u32],
+    spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
 ) -> anyhow::Result<String> {
     inference_wasm_to_v_translator::wasm_parser::translate_bytes(
         mod_name,
         wasm,
-        spec_func_indices,
+        spec_funcs_by_spec,
     )
-    .map_err(|e| anyhow::anyhow!("Error translating WebAssembly to V: {e}"))
 }

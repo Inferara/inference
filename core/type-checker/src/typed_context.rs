@@ -96,23 +96,32 @@ impl TypedContext {
         self.node_types.get(&node_id).cloned()
     }
 
-    /// Looks up a struct by name and returns its type information.
+    /// Looks up a struct by name across the root scope and every spec scope.
     ///
-    /// Returns `None` if no struct with the given name exists in the current scope.
-    /// Fields in the returned [`StructInfo`] are in declaration order.
+    /// Returns `None` if no struct with the given name exists. Fields in the
+    /// returned [`StructInfo`] are in declaration order.
+    ///
+    /// Post-type-check consumers (analysis, codegen) walk the AST into spec
+    /// bodies independently of the symbol table's scope cursor, so this
+    /// lookup is scope-agnostic. `register_types` does not currently recurse
+    /// into `Def::Module.defs`, so module-nested definitions are absent from
+    /// the symbol table; this helper sees only root-scope and spec-scope items.
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
-        self.symbol_table.lookup_struct(name)
+        self.symbol_table.lookup_struct_anywhere(name)
     }
 
-    /// Looks up an enum by name and returns its type information.
+    /// Looks up an enum by name across the root scope and every spec scope.
     ///
-    /// Returns `None` if no enum with the given name exists in the current scope.
-    /// Variants in the returned [`EnumInfo`] are in declaration order, which
-    /// determines their zero-based integer tag for WASM codegen.
+    /// Returns `None` if no enum with the given name exists. Variants in the
+    /// returned [`EnumInfo`] are in declaration order, which determines their
+    /// zero-based integer tag for WASM codegen. `register_types` does not
+    /// currently recurse into `Def::Module.defs`, so module-nested definitions
+    /// are absent from the symbol table; this helper sees only root-scope and
+    /// spec-scope items.
     #[must_use = "this is a pure lookup with no side effects"]
     pub fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
-        self.symbol_table.lookup_enum(name)
+        self.symbol_table.lookup_enum_anywhere(name)
     }
 
     /// Registers a struct definition in the type context for testing.

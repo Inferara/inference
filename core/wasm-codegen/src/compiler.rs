@@ -83,6 +83,20 @@ use crate::memory::{
     emit_stack_prologue, emit_struct_param_copy, natural_alignment_for_type, type_byte_size,
 };
 
+/// Origin of a function definition being lowered.
+///
+/// Distinguishes top-level definitions from those nested inside a `spec`
+/// block. Used to gate WASM `export` emission so that `pub fn` inside a spec
+/// does not become an exported entry point (no spec-inner export site is
+/// reachable from outside the module). `SpecInner` carries the owning spec
+/// name so call lowering can prefer the mangled `"<spec>.<callee>"` key for
+/// intra-spec resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FunctionOrigin {
+    TopLevel,
+    SpecInner(String),
+}
+
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
 const OPCODE_PREFIX: u8 = 0xfc;
@@ -158,6 +172,10 @@ struct ArrayReturnInfo {
 struct StructReturnInfo {
     total_size: u32,
     field_slots: Vec<memory::StructFieldSlot>,
+    /// Name of the struct type being returned. Carried purely for diagnostic
+    /// messages (e.g., field-not-found panics) so we don't misattribute the
+    /// failure to the enclosing function name.
+    struct_name: String,
 }
 
 /// Result of resolving a struct field's offset and type during member access.
@@ -234,10 +252,18 @@ pub(crate) struct Compiler {
     func_array_returns: FxHashMap<String, ArrayReturnInfo>,
     /// Maps function names to their struct return type metadata.
     func_struct_returns: FxHashMap<String, StructReturnInfo>,
-    /// Maps `(type_name, method_name)` to the mangled WASM function name.
-    method_mangled_names: FxHashMap<(String, String), String>,
+    /// Maps `(spec_name, type_name, method_name)` to the mangled WASM function
+    /// name. `spec_name` is `None` for top-level methods. Keying by spec scope
+    /// lets two specs each declare a struct with same-named methods without
+    /// the inner table overwriting each other.
+    method_mangled_names: FxHashMap<(Option<String>, String, String), String>,
     /// Name of the function currently being compiled.
     current_fn_name: String,
+    /// Name of the spec that owns the function currently being compiled, if
+    /// any. Set by `visit_function_definition` for spec-inner functions and
+    /// methods so that intra-spec call resolution can prefer the mangled
+    /// `"<spec>.<callee>"` key before falling back to the bare name.
+    current_spec: Option<String>,
     // Per-function state (set in visit_function_definition, used by lowering methods)
     func: Option<Function>,
     locals_map: FxHashMap<String, (u32, ValType)>,
@@ -249,10 +275,11 @@ pub(crate) struct Compiler {
     /// zero. Set only during variable initialization (`Stmt::VarDef`), never
     /// during assignment where slots may hold non-zero data.
     init_zero_elision: bool,
-    /// WASM function indices for functions that originated in `spec` blocks.
-    /// Populated during Stage 1 registration in proof mode; consumed by `CodegenOutput`
-    /// so the Rocq translator can emit them as the `_specs` list argument to `ValidModule`.
-    spec_func_indices: Vec<u32>,
+    /// WASM function indices for functions that originated in `spec` blocks,
+    /// keyed by spec name. Populated during Stage 1 registration in proof mode;
+    /// consumed by `CodegenOutput` so the Rocq translator can emit per-spec
+    /// `Definition <mod>__<SpecName>_specs : list N` definitions.
+    spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
 }
 
 impl Compiler {
@@ -274,30 +301,44 @@ impl Compiler {
             func_struct_returns: FxHashMap::default(),
             method_mangled_names: FxHashMap::default(),
             current_fn_name: String::new(),
+            current_spec: None,
             func: None,
             locals_map: FxHashMap::default(),
             frame_layout: None,
             loop_ctx: LoopContext::default(),
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
-            spec_func_indices: Vec::new(),
+            spec_func_indices_by_spec: FxHashMap::default(),
         }
     }
 
-    /// Removes and returns the recorded spec function indices.
+    /// Removes and returns the recorded spec function indices grouped by spec name.
     ///
     /// Called once after all function registration/lowering is complete so that
     /// downstream consumers (currently `CodegenOutput`) can store them.
-    pub(crate) fn take_spec_func_indices(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.spec_func_indices)
+    pub(crate) fn take_spec_func_indices_by_spec(
+        &mut self,
+    ) -> FxHashMap<String, Vec<u32>> {
+        std::mem::take(&mut self.spec_func_indices_by_spec)
     }
 
-    /// Records `[base, base + count)` as spec-originated WASM function indices.
-    pub(crate) fn record_spec_indices(&mut self, base: u32, count: u32) {
-        let end = base
-            .checked_add(count)
-            .expect("spec function index range overflows u32");
-        self.spec_func_indices.extend(base..end);
+    /// Records a single WASM function index as belonging to `spec_name`.
+    pub(crate) fn record_spec_index(&mut self, spec_name: &str, idx: u32) {
+        self.spec_func_indices_by_spec
+            .entry(spec_name.to_string())
+            .or_default()
+            .push(idx);
+    }
+
+    /// Ensures `spec_name` has an entry in `spec_func_indices_by_spec`,
+    /// inserting an empty index list if absent. Called for every visited
+    /// `spec` block in proof mode so user-authored `spec MySpec { }` (with
+    /// zero inner emittable defs) still produces a per-spec `.v` definition
+    /// and theorem downstream.
+    pub(crate) fn ensure_spec_registered(&mut self, spec_name: &str) {
+        self.spec_func_indices_by_spec
+            .entry(spec_name.to_string())
+            .or_default();
     }
 
     fn func(&mut self) -> &mut Function {
@@ -354,6 +395,7 @@ impl Compiler {
                         StructReturnInfo {
                             total_size,
                             field_slots,
+                            struct_name: custom_name.clone(),
                         },
                     );
                 }
@@ -366,8 +408,8 @@ impl Compiler {
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
     ///
     /// `base_idx` is the WASM function index assigned to `func_def_ids[0]`. Top-level
-    /// functions pass 0; spec-originated functions pass the count of previously
-    /// registered functions/methods.
+    /// functions pass 0; spec-originated functions are routed through
+    /// [`Self::build_func_name_to_idx_with_spec_names`] instead.
     ///
     /// Must be called before `visit_function_definition` so that forward references
     /// resolve correctly during call lowering.
@@ -384,8 +426,10 @@ impl Compiler {
             assert!(
                 !self.func_name_to_idx.contains_key(&fn_name),
                 "Function name '{fn_name}' collides with an existing definition; \
-                 a top-level function and a spec-inner function share this name. \
-                 The type-checker should have rejected the duplicate at the source level."
+                 two top-level functions share this name (spec-inner functions \
+                 register under the mangled `<SpecName>.<fn>` key so they cannot \
+                 collide here). The type-checker should have rejected the \
+                 duplicate at the source level."
             );
             self.func_name_to_idx
                 .insert(fn_name.clone(), idx as u32 + base_idx);
@@ -397,6 +441,47 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Variant of [`Self::build_func_name_to_idx`] for spec-inner functions that
+    /// carries the per-function spec name. Each `(spec_name, def_id)` entry is
+    /// registered under the mangled internal key `"{spec_name}.{fn_name}"`.
+    ///
+    /// Returns the WASM function index assigned to each entry, parallel to the
+    /// input slice. The caller threads these indices into [`Self::record_spec_index`]
+    /// so the recorded per-spec list stays in lockstep with registration.
+    pub(crate) fn build_func_name_to_idx_with_spec_names(
+        &mut self,
+        arena: &AstArena,
+        spec_func_defs: &[(String, DefId)],
+        ctx: &TypedContext,
+        base_idx: u32,
+    ) -> Result<Vec<u32>, CodegenError> {
+        let mut assigned = Vec::with_capacity(spec_func_defs.len());
+        #[allow(clippy::cast_possible_truncation)]
+        for (idx, (spec_name, def_id)) in spec_func_defs.iter().enumerate() {
+            let fn_name = arena.def_name(*def_id).to_string();
+            let key = format!("{spec_name}.{fn_name}");
+            assert!(
+                !self.func_name_to_idx.contains_key(&key),
+                "Function name '{key}' collides with an existing definition; \
+                 two spec-inner functions share this name. The type-checker \
+                 should have rejected the duplicate at the source level."
+            );
+            let assigned_idx = idx as u32 + base_idx;
+            self.func_name_to_idx.insert(key.clone(), assigned_idx);
+            assigned.push(assigned_idx);
+
+            if let Def::Function { returns, .. } = &arena[*def_id].kind
+                && let Some(return_ty_id) = returns
+            {
+                // sret metadata is keyed by the same mangled name we use for
+                // call-site lookup, so spec-inner and top-level functions with
+                // identical bare names do not overwrite each other.
+                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+            }
+        }
+        Ok(assigned)
     }
 
     /// Builds the method name-to-WASM-index map from struct definitions.
@@ -429,8 +514,10 @@ impl Compiler {
             );
             self.func_name_to_idx
                 .insert(mangled_name.clone(), base_idx + i as u32);
-            self.method_mangled_names
-                .insert((struct_name.clone(), method_name), mangled_name.clone());
+            self.method_mangled_names.insert(
+                (None, struct_name.clone(), method_name),
+                mangled_name.clone(),
+            );
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
@@ -439,6 +526,50 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Variant of [`Self::build_method_name_to_idx`] for spec-inner struct
+    /// methods. Each `(spec_name, struct_name, def_id)` entry registers under
+    /// the mangled internal key `"{spec_name}.{StructName}.{method_name}"`.
+    ///
+    /// Returns the WASM function index assigned to each entry, parallel to the
+    /// input slice (mirrors [`Self::build_func_name_to_idx_with_spec_names`]).
+    pub(crate) fn build_method_name_to_idx_with_spec_names(
+        &mut self,
+        arena: &AstArena,
+        spec_method_defs: &[(String, String, DefId)],
+        ctx: &TypedContext,
+        base_idx: u32,
+    ) -> Result<Vec<u32>, CodegenError> {
+        let mut assigned = Vec::with_capacity(spec_method_defs.len());
+        #[allow(clippy::cast_possible_truncation)]
+        for (i, (spec_name, struct_name, def_id)) in spec_method_defs.iter().enumerate() {
+            let method_name = arena.def_name(*def_id).to_string();
+            let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
+            let key = format!("{spec_name}.{mangled_name}");
+
+            assert!(
+                !self.func_name_to_idx.contains_key(&key),
+                "Mangled method name '{key}' collides with an existing function; \
+                 top-level functions must not use the `SpecName.TypeName.method_name` naming pattern"
+            );
+            let assigned_idx = base_idx + i as u32;
+            self.func_name_to_idx.insert(key.clone(), assigned_idx);
+            assigned.push(assigned_idx);
+            self.method_mangled_names.insert(
+                (Some(spec_name.clone()), struct_name.clone(), method_name),
+                mangled_name.clone(),
+            );
+
+            if let Def::Function { returns, .. } = &arena[*def_id].kind
+                && let Some(return_ty_id) = returns
+            {
+                // sret metadata uses the spec-mangled key so two specs with
+                // same-named struct methods do not stomp on each other.
+                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+            }
+        }
+        Ok(assigned)
     }
 
     /// Maps an Inference type to the corresponding WASM `ValType`.
@@ -487,6 +618,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
+        origin: &FunctionOrigin,
     ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
             Def::Function {
@@ -510,8 +642,22 @@ impl Compiler {
         };
         self.current_fn_name.clone_from(&fn_name);
 
-        let is_array_return = self.func_array_returns.contains_key(&fn_name);
-        let is_struct_return = self.func_struct_returns.contains_key(&fn_name);
+        // Track which spec owns the function being compiled so call-site
+        // resolution can prefer mangled keys. Cleared on the way out.
+        self.current_spec = match origin {
+            FunctionOrigin::SpecInner(name) => Some(name.clone()),
+            FunctionOrigin::TopLevel => None,
+        };
+
+        // sret metadata for spec-inner functions/methods lives under the
+        // mangled key `"<spec>.<fn>"` / `"<spec>.<Struct>.<method>"`.
+        let sret_lookup_name: String = if let Some(spec) = self.current_spec.as_deref() {
+            format!("{spec}.{fn_name}")
+        } else {
+            fn_name.clone()
+        };
+        let is_array_return = self.func_array_returns.contains_key(&sret_lookup_name);
+        let is_struct_return = self.func_struct_returns.contains_key(&sret_lookup_name);
         let is_sret = is_array_return || is_struct_return;
 
         let results: Vec<ValType> = if is_sret {
@@ -590,15 +736,18 @@ impl Compiler {
 
         let is_method = method_struct_name.is_some();
         let is_main = fn_name == "main";
-        // Methods are not exported as WASM exports. A future `export` keyword will
-        // control which functions are exported. For now, only top-level `pub` functions
-        // (except `main`, which gets special handling) become WASM exports.
-        let should_export = vis == Visibility::Public && !is_main && !is_method;
+        let is_top_level = matches!(*origin, FunctionOrigin::TopLevel);
+        // Methods are not exported as WASM exports. Spec-inner functions are
+        // implementation-level only and must never be exported. A future
+        // `export` keyword will control which functions are exported. For now,
+        // only top-level `pub` functions (except `main`, which gets special
+        // handling) become WASM exports.
+        let should_export = vis == Visibility::Public && !is_main && !is_method && is_top_level;
         if should_export {
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if is_main && vis == Visibility::Public && !is_method {
+        if is_main && vis == Visibility::Public && !is_method && is_top_level {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
@@ -734,6 +883,7 @@ impl Compiler {
         self.locals_map.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
+        self.current_spec = None;
         self.func_idx += 1;
         Ok(())
     }
@@ -1119,8 +1269,7 @@ impl Compiler {
                 {
                     let name = resolved.callee_name();
                     assert!(
-                        !self.func_array_returns.contains_key(name)
-                            && !self.func_struct_returns.contains_key(name),
+                        !self.callee_is_sret(name),
                         "standalone call to compound-returning function/method '{name}' \
                          should have been rejected by the type checker",
                     );
@@ -1272,9 +1421,7 @@ impl Compiler {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
             && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
         {
-            let name = resolved.callee_name();
-            return self.func_array_returns.contains_key(name)
-                || self.func_struct_returns.contains_key(name);
+            return self.callee_is_sret(resolved.callee_name());
         }
         false
     }
@@ -1341,9 +1488,7 @@ impl Compiler {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
             let func_idx = self
-                .func_name_to_idx
-                .get(&callee_name)
-                .copied()
+                .resolve_callee_idx(&callee_name)
                 .expect("sret callee must be in func_name_to_idx");
             self.func().instruction(&Instruction::Call(func_idx));
         } else {
@@ -1733,6 +1878,11 @@ impl Compiler {
     }
 
     /// Lowers a plain function call to a WASM `call` instruction.
+    ///
+    /// When called from within a spec-inner function the lookup tries the
+    /// mangled `"<spec>.<callee>"` key first so sibling calls resolve to the
+    /// spec's own definition before falling back to a top-level fn of the
+    /// same bare name.
     fn lower_function_call(
         &mut self,
         arena: &AstArena,
@@ -1747,20 +1897,51 @@ impl Compiler {
         }
 
         let func_idx = self
-            .func_name_to_idx
-            .get(callee_name)
-            .copied()
+            .resolve_callee_idx(callee_name)
             .ok_or_else(|| CodegenError::UnknownFunction(callee_name.to_owned()))?;
 
         self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
     }
 
+    /// Resolves a callee bare or mangled name to its WASM function index,
+    /// preferring the spec-mangled `"<current_spec>.<name>"` key when the
+    /// compiler is inside a spec scope.
+    fn resolve_callee_idx(&self, callee_name: &str) -> Option<u32> {
+        if let Some(spec) = self.current_spec.as_deref()
+            && let Some(idx) = self
+                .func_name_to_idx
+                .get(&format!("{spec}.{callee_name}"))
+                .copied()
+        {
+            return Some(idx);
+        }
+        self.func_name_to_idx.get(callee_name).copied()
+    }
+
+    /// Returns `true` if `callee_name` resolves to a function with sret
+    /// (array or struct) return, accounting for the current spec scope.
+    fn callee_is_sret(&self, callee_name: &str) -> bool {
+        if let Some(spec) = self.current_spec.as_deref() {
+            let key = format!("{spec}.{callee_name}");
+            if self.func_array_returns.contains_key(&key)
+                || self.func_struct_returns.contains_key(&key)
+            {
+                return true;
+            }
+        }
+        self.func_array_returns.contains_key(callee_name)
+            || self.func_struct_returns.contains_key(callee_name)
+    }
+
     /// Resolves the mangled WASM function name for an instance method call.
     ///
     /// Given the receiver expression and method name, determines the receiver's struct type
     /// from the type context and looks up the corresponding mangled name in `method_mangled_names`.
-    /// Returns `None` if the receiver has no type info or the method is not registered.
+    /// When the call site lives inside a spec scope, the spec-scoped key
+    /// `(Some(spec), struct, method)` is tried first; otherwise the top-level
+    /// `(None, struct, method)` key is used. Returns `None` if the receiver has
+    /// no type info or the method is not registered.
     fn resolve_method_mangled_name(
         &self,
         arena: &AstArena,
@@ -1775,8 +1956,26 @@ impl Compiler {
         else {
             return None;
         };
+        self.lookup_method_mangled_name(struct_name, method_name)
+    }
+
+    /// Performs the spec-aware lookup against `method_mangled_names`,
+    /// preferring the current spec scope when one is active.
+    fn lookup_method_mangled_name(&self, struct_name: &str, method_name: &str) -> Option<String> {
+        if let Some(spec) = self.current_spec.as_deref()
+            && let Some(name) = self
+                .method_mangled_names
+                .get(&(
+                    Some(spec.to_string()),
+                    struct_name.to_string(),
+                    method_name.to_string(),
+                ))
+                .cloned()
+        {
+            return Some(name);
+        }
         self.method_mangled_names
-            .get(&(struct_name.clone(), method_name.clone()))
+            .get(&(None, struct_name.to_string(), method_name.to_string()))
             .cloned()
     }
 
@@ -1813,16 +2012,11 @@ impl Compiler {
                 )
             });
 
-        let is_sret = self.func_array_returns.contains_key(&mangled_name)
-            || self.func_struct_returns.contains_key(&mangled_name);
+        let is_sret = self.callee_is_sret(&mangled_name);
 
-        let func_idx = self
-            .func_name_to_idx
-            .get(&mangled_name)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
-            });
+        let func_idx = self.resolve_callee_idx(&mangled_name).unwrap_or_else(|| {
+            panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+        });
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_instance_method_sret);
@@ -1865,9 +2059,10 @@ impl Compiler {
 
     /// Resolves the mangled WASM function name for an associated function call (`Type::method()`).
     ///
-    /// Extracts the type name from the expression, then looks up the mangled name
-    /// in `method_mangled_names`. Returns `None` if the type name cannot be extracted
-    /// or the method is not registered.
+    /// Extracts the type name from the expression, then performs the same
+    /// spec-aware lookup against `method_mangled_names` as
+    /// [`Self::resolve_method_mangled_name`]. Returns `None` if the type name
+    /// cannot be extracted or the method is not registered in either scope.
     fn resolve_associated_mangled_name(
         &self,
         arena: &AstArena,
@@ -1876,9 +2071,7 @@ impl Compiler {
     ) -> Option<String> {
         let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
         let method_name = &arena[method_name_id].name;
-        self.method_mangled_names
-            .get(&(type_name, method_name.clone()))
-            .cloned()
+        self.lookup_method_mangled_name(&type_name, method_name)
     }
 
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
@@ -1914,16 +2107,11 @@ impl Compiler {
                 )
             });
 
-        let is_sret = self.func_array_returns.contains_key(&mangled_name)
-            || self.func_struct_returns.contains_key(&mangled_name);
+        let is_sret = self.callee_is_sret(&mangled_name);
 
-        let func_idx = self
-            .func_name_to_idx
-            .get(&mangled_name)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
-            });
+        let func_idx = self.resolve_callee_idx(&mangled_name).unwrap_or_else(|| {
+            panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+        });
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_associated_function_sret);
@@ -2026,11 +2214,17 @@ impl Compiler {
         sret_idx: u32,
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
-        if let Some(return_info) = self.func_array_returns.get(&self.current_fn_name).cloned() {
+        // sret metadata for spec-inner functions/methods is keyed by the
+        // mangled `"<spec>.<fn>"` form, so prefer that when we're inside a
+        // spec scope.
+        let self_key: String = if let Some(spec) = self.current_spec.as_deref() {
+            format!("{spec}.{}", self.current_fn_name)
+        } else {
+            self.current_fn_name.clone()
+        };
+        if let Some(return_info) = self.func_array_returns.get(&self_key).cloned() {
             self.lower_array_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
-        } else if let Some(return_info) =
-            self.func_struct_returns.get(&self.current_fn_name).cloned()
-        {
+        } else if let Some(return_info) = self.func_struct_returns.get(&self_key).cloned() {
             self.lower_struct_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
         } else {
             panic!(
@@ -2145,7 +2339,7 @@ impl Compiler {
                     sret_idx,
                     0,
                     ctx,
-                    &self.current_fn_name.clone(),
+                    &return_info.struct_name,
                     0,
                     false,
                 );
@@ -2189,9 +2383,7 @@ impl Compiler {
             _ => None,
         };
 
-        if self.func_array_returns.contains_key(&callee_name)
-            || self.func_struct_returns.contains_key(&callee_name)
-        {
+        if self.callee_is_sret(&callee_name) {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
 
             if let Some(receiver) = receiver_expr {
@@ -2202,9 +2394,7 @@ impl Compiler {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
             let func_idx = self
-                .func_name_to_idx
-                .get(&callee_name)
-                .copied()
+                .resolve_callee_idx(&callee_name)
                 .expect("Forwarded sret callee must be in func_name_to_idx");
             self.func().instruction(&Instruction::Call(func_idx));
         } else {
@@ -3638,6 +3828,12 @@ impl Compiler {
         }
 
         module.section(&name_section);
+
+        if !self.spec_func_indices_by_spec.is_empty() {
+            let spec_section =
+                crate::spec_section::SpecFuncSection::new(&self.spec_func_indices_by_spec);
+            module.section(&spec_section);
+        }
 
         module.finish()
     }

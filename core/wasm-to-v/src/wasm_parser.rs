@@ -92,8 +92,11 @@ use inf_wasmparser::{
         TableSection, TagSection, TypeSection, UnknownSection, Version,
     },
 };
-use std::{collections::HashMap, io::Read};
+use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
+use crate::errors::WasmToVError;
+use crate::rocq_names::validate_rocq_identifier;
 use crate::translator::WasmParseData;
 
 /// Translates WebAssembly bytecode into Rocq (Coq) formal verification code.
@@ -132,9 +135,10 @@ use crate::translator::WasmParseData;
 ///
 /// ```ignore
 /// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+/// use rustc_hash::FxHashMap;
 ///
 /// let wasm_bytes = std::fs::read("output.wasm")?;
-/// let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+/// let rocq_code = translate_bytes("my_module", &wasm_bytes, &FxHashMap::default())?;
 /// std::fs::write("output.v", rocq_code)?;
 /// ```
 ///
@@ -143,6 +147,7 @@ use crate::translator::WasmParseData;
 /// ```ignore
 /// use inference::{parse, type_check, codegen};
 /// use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+/// use rustc_hash::FxHashMap;
 ///
 /// let source = std::fs::read_to_string("program.inf")?;
 /// let arena = parse(&source)?;
@@ -150,20 +155,25 @@ use crate::translator::WasmParseData;
 /// let codegen_output = codegen(&typed_context)?;
 ///
 /// // Translate to Rocq
-/// let rocq_code = translate_bytes("Program", codegen_output.wasm())?;
+/// let rocq_code = translate_bytes("Program", codegen_output.wasm(), &FxHashMap::default())?;
 /// std::fs::write("program.v", rocq_code)?;
 /// ```
 pub fn translate_bytes(
     mod_name: &str,
     bytes: &[u8],
-    spec_func_indices: &[u32],
+    spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
 ) -> anyhow::Result<String> {
-    let mut data = Vec::new();
-    let mut reader = std::io::Cursor::new(bytes);
-    reader.read_to_end(&mut data).unwrap();
-    match parse(mod_name.to_string(), &data, spec_func_indices.to_vec()) {
+    validate_rocq_identifier(mod_name)?;
+
+    match parse(mod_name.to_string(), bytes, spec_funcs_by_spec.clone()) {
         Ok(mut parse_data) => parse_data.translate(),
-        Err(e) => Err(anyhow::anyhow!(e.to_string())),
+        Err(e) => {
+            if e.downcast_ref::<WasmToVError>().is_some() {
+                Err(e)
+            } else {
+                Err(anyhow::anyhow!(WasmToVError::WasmParse(e.to_string())))
+            }
+        }
     }
 }
 
@@ -208,10 +218,12 @@ pub fn translate_bytes(
 fn parse(
     mod_name: String,
     data: &'_ [u8],
-    spec_func_indices: Vec<u32>,
+    spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
 ) -> anyhow::Result<WasmParseData<'_>> {
     let parser = Parser::new(0);
-    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_func_indices);
+    let explicit_non_empty = !spec_funcs_by_spec.is_empty();
+    let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec);
+    let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
 
     for payload in parser.parse_all(data) {
         match payload? {
@@ -295,12 +307,27 @@ fn parse(
             ComponentExportSection(_) => { /* ... */ }
 
             CustomSection(custom_section) => {
-                if let inf_wasmparser::KnownCustom::Name(name_section) = custom_section.as_known() {
+                if custom_section.name() == crate::SPEC_FUNCS_SECTION_NAME {
+                    if embedded_spec_funcs.is_some() {
+                        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                            "duplicate `{}` custom section",
+                            crate::SPEC_FUNCS_SECTION_NAME
+                        ))));
+                    }
+                    embedded_spec_funcs = Some(decode_spec_funcs_section(custom_section.data())?);
+                } else if let inf_wasmparser::KnownCustom::Name(name_section) =
+                    custom_section.as_known()
+                {
                     for name in name_section {
                         let name = name?;
                         match name {
                             inf_wasmparser::Name::Module { name, .. } => {
                                 wasm_parse_data.mod_name = name.to_string();
+                                // The embedded `name` section bypasses the
+                                // CLI-side validation. Re-run validation so
+                                // a hand-crafted binary cannot smuggle an
+                                // invalid identifier into Rocq emission.
+                                validate_rocq_identifier(&wasm_parse_data.mod_name)?;
                             }
                             inf_wasmparser::Name::Function(func_names) => {
                                 let mut func_names_map = HashMap::new();
@@ -349,5 +376,115 @@ fn parse(
             _ => todo!(),
         }
     }
+
+    if let Some(embedded) = embedded_spec_funcs {
+        if explicit_non_empty {
+            if wasm_parse_data.spec_funcs_by_spec != embedded {
+                return Err(anyhow::anyhow!(WasmToVError::EmbeddedSpecMismatch {
+                    explicit: wasm_parse_data.spec_funcs_by_spec.clone(),
+                    embedded,
+                }));
+            }
+        } else {
+            wasm_parse_data.spec_funcs_by_spec = embedded;
+        }
+    }
+
     Ok(wasm_parse_data)
+}
+
+/// Decodes the `inference.spec_funcs` custom section payload.
+///
+/// Schema (LEB128 u32 throughout):
+/// ```text
+/// count
+/// repeat count times:
+///   spec_name_len   spec_name_bytes (utf-8)
+///   indices_count   repeat indices_count times: func_idx
+/// ```
+fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Vec<u32>>> {
+    let mut cursor = 0usize;
+    let count = read_leb128_u32(data, &mut cursor)?;
+    // A malformed binary advertising `count = 0xFFFFFFFF` could trigger a
+    // multi-gigabyte allocation if we trusted it. Each pair consumes at least
+    // two bytes (one for the name-length LEB128, one for the indices-count
+    // LEB128); bound the count by half the remaining payload size before
+    // allocating.
+    let remaining = data.len().saturating_sub(cursor);
+    if count as usize > remaining / 2 {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+            "spec_funcs section: declared pair count exceeds remaining payload".into(),
+        )));
+    }
+    let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+    for _ in 0..count {
+        let name_len = read_leb128_u32(data, &mut cursor)? as usize;
+        if cursor.checked_add(name_len).is_none_or(|end| end > data.len()) {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "spec_funcs section: name length exceeds remaining payload".into(),
+            )));
+        }
+        let name = std::str::from_utf8(&data[cursor..cursor + name_len])
+            .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "spec_funcs section: invalid UTF-8 in spec name: {e}"
+            ))))?
+            .to_string();
+        cursor += name_len;
+        // Validate at the decode boundary so a hand-crafted binary cannot
+        // smuggle an invalid Rocq identifier (empty name, `__`, reserved
+        // keyword, stdlib shadow) past `translate()`'s per-spec check.
+        validate_rocq_identifier(&name)?;
+
+        let idx_count = read_leb128_u32(data, &mut cursor)?;
+        // Same defense as for `count` above: each index consumes at least one
+        // payload byte, so `idx_count` cannot legitimately exceed what's left.
+        let remaining = data.len().saturating_sub(cursor);
+        if idx_count as usize > remaining {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "spec_funcs section: declared index count exceeds remaining payload".into(),
+            )));
+        }
+        let mut indices = Vec::with_capacity(idx_count as usize);
+        for _ in 0..idx_count {
+            indices.push(read_leb128_u32(data, &mut cursor)?);
+        }
+        out.insert(name, indices);
+    }
+    Ok(out)
+}
+
+/// Reads a canonical LEB128-encoded `u32`. The WebAssembly binary spec
+/// requires shortest-form encoding: a `u32` uses ≤ 5 bytes, the 5th byte (if
+/// present) must clear the continuation bit, and the 5th byte's high four
+/// bits must be zero (since 7×4 + 4 = 32 bits already consumed). Overlong
+/// encodings are rejected with the same error taxonomy as `wasmparser`.
+fn read_leb128_u32(data: &[u8], cursor: &mut usize) -> anyhow::Result<u32> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    for byte_idx in 0..5 {
+        if *cursor >= data.len() {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "spec_funcs section: truncated LEB128".into(),
+            )));
+        }
+        let byte = data[*cursor];
+        *cursor += 1;
+        let chunk = u32::from(byte & 0x7f);
+        // The 5th byte (byte_idx == 4) caps `shift` at 28 and provides at most
+        // 4 useful bits. The top 4 bits must be zero, else the encoded value
+        // would overflow u32.
+        if byte_idx == 4 && byte & 0xf0 != 0 {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                "spec_funcs section: integer too large".into(),
+            )));
+        }
+        result |= chunk << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+    Err(anyhow::anyhow!(WasmToVError::WasmParse(
+        "spec_funcs section: integer representation too long".into(),
+    )))
 }

@@ -13,6 +13,8 @@
 use std::io;
 use std::path::Path;
 
+use rustc_hash::FxHashMap;
+
 use crate::target::{CompilationMode, OptLevel, Target};
 
 /// Output of the WebAssembly code generation phase.
@@ -23,7 +25,10 @@ use crate::target::{CompilationMode, OptLevel, Target};
 ///
 /// ```
 /// use inference_wasm_codegen::{CodegenOutput, Target, CompilationMode, OptLevel};
+/// use rustc_hash::FxHashMap;
 ///
+/// // `FxHashMap` is also re-exported as `inference::FxHashMap` for library
+/// // consumers that don't want a direct `rustc-hash` dependency.
 /// let wasm_bytes = vec![0x00, 0x61, 0x73, 0x6d]; // WASM magic number
 /// let output = CodegenOutput::new(
 ///     wasm_bytes,
@@ -32,7 +37,7 @@ use crate::target::{CompilationMode, OptLevel, Target};
 ///     OptLevel::O3,
 ///     "output".to_string(),
 ///     false,
-///     Vec::new(),
+///     FxHashMap::default(),
 /// );
 ///
 /// assert!(!output.wasm().is_empty());
@@ -41,7 +46,7 @@ use crate::target::{CompilationMode, OptLevel, Target};
 /// assert_eq!(output.opt_level(), OptLevel::O3);
 /// assert_eq!(output.module_name(), "output");
 /// assert!(!output.has_main());
-/// assert!(output.spec_func_indices().is_empty());
+/// assert!(output.spec_func_indices_by_spec().is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct CodegenOutput {
@@ -71,12 +76,14 @@ pub struct CodegenOutput {
     /// discovers this during code generation when it encounters a `pub fn main()`.
     has_main: bool,
 
-    /// WASM function indices of functions that originated in `spec` blocks.
+    /// WASM function indices of functions that originated in `spec` blocks,
+    /// keyed by spec name.
     ///
-    /// Empty in `compile` mode. In `proof` mode, contains the indices in registration
-    /// order (spec functions first, then spec-nested methods). The Rocq translator
-    /// uses this to emit the `<module>_specs` list consumed by the `ValidModule` theorem.
-    spec_func_indices: Vec<u32>,
+    /// Empty in `compile` mode. In `proof` mode, contains per-spec function
+    /// indices in registration order. The Rocq translator uses this to emit
+    /// per-spec `Definition <mod>__<SpecName>_specs : list N` lists consumed
+    /// by the corresponding `ValidSpec` theorems.
+    spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
 }
 
 impl CodegenOutput {
@@ -89,7 +96,7 @@ impl CodegenOutput {
         opt_level: OptLevel,
         module_name: String,
         has_main: bool,
-        spec_func_indices: Vec<u32>,
+        spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
     ) -> Self {
         Self {
             wasm,
@@ -98,14 +105,15 @@ impl CodegenOutput {
             opt_level,
             module_name,
             has_main,
-            spec_func_indices,
+            spec_func_indices_by_spec,
         }
     }
 
-    /// Returns the WASM function indices for functions originating in `spec` blocks.
+    /// Returns the WASM function indices for functions originating in `spec`
+    /// blocks, grouped by spec name.
     #[must_use]
-    pub fn spec_func_indices(&self) -> &[u32] {
-        &self.spec_func_indices
+    pub fn spec_func_indices_by_spec(&self) -> &FxHashMap<String, Vec<u32>> {
+        &self.spec_func_indices_by_spec
     }
 
     /// Returns the WASM binary bytes.
@@ -166,7 +174,7 @@ mod tests {
             OptLevel::O3,
             "output".to_string(),
             false,
-            Vec::new(),
+            FxHashMap::default(),
         )
     }
 
@@ -178,7 +186,7 @@ mod tests {
             OptLevel::O3,
             "output".to_string(),
             true,
-            Vec::new(),
+            FxHashMap::default(),
         )
     }
 
@@ -236,13 +244,15 @@ mod tests {
             OptLevel::Oz,
             "soroban_module".to_string(),
             false,
-            Vec::new(),
+            FxHashMap::default(),
         );
         assert_eq!(output.target(), Target::Soroban);
     }
 
     #[test]
-    fn spec_func_indices_round_trip() {
+    fn spec_func_indices_getter_preserves_single_spec() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("S".to_string(), vec![3, 4, 7]);
         let output = CodegenOutput::new(
             Vec::new(),
             Target::Wasm32,
@@ -250,9 +260,55 @@ mod tests {
             OptLevel::O3,
             "output".to_string(),
             false,
-            vec![3, 4, 7],
+            map,
         );
-        assert_eq!(output.spec_func_indices(), &[3, 4, 7]);
+        let by_spec = output.spec_func_indices_by_spec();
+        assert_eq!(by_spec.len(), 1);
+        assert_eq!(by_spec.get("S"), Some(&vec![3, 4, 7]));
+    }
+
+    /// Two specs with different index-list lengths round-trip distinctly.
+    /// Guards against accidental field aliasing or shared-state bugs in the
+    /// `CodegenOutput` constructor / getter pair.
+    #[test]
+    fn spec_func_indices_getter_preserves_multi_spec() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("A".to_string(), vec![1]);
+        map.insert("B".to_string(), vec![5, 6, 7, 8]);
+        let output = CodegenOutput::new(
+            Vec::new(),
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "output".to_string(),
+            false,
+            map,
+        );
+        let by_spec = output.spec_func_indices_by_spec();
+        assert_eq!(by_spec.len(), 2);
+        assert_eq!(by_spec.get("A"), Some(&vec![1]));
+        assert_eq!(by_spec.get("B"), Some(&vec![5, 6, 7, 8]));
+    }
+
+    /// A spec with an empty indices list is a legitimate state (e.g. a spec
+    /// block whose inner functions were all stripped). The accessor must
+    /// preserve the empty `Vec` rather than coalescing it to `None`.
+    #[test]
+    fn spec_func_indices_getter_preserves_empty_indices() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("Empty".to_string(), Vec::new());
+        let output = CodegenOutput::new(
+            Vec::new(),
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "output".to_string(),
+            false,
+            map,
+        );
+        let by_spec = output.spec_func_indices_by_spec();
+        assert_eq!(by_spec.len(), 1);
+        assert_eq!(by_spec.get("Empty"), Some(&Vec::<u32>::new()));
     }
 
     #[test]

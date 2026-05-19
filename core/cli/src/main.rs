@@ -165,6 +165,80 @@ pub(crate) fn normalize_args(args: &mut Cli) {
     }
 }
 
+/// Renders a `wasm_to_v` failure with the user-facing diagnostic shape
+/// described in plan §6: a dedicated message for Rocq-stdlib shadowing,
+/// dedicated guidance for the `__` collision, and a generic invalid-Rocq-identifier
+/// fallthrough for the remaining reasons.
+///
+/// The rejected name can be either the source-derived module name OR a spec
+/// name declared in the source (since `translate()` now validates each spec
+/// name up-front). The diagnostic uses neutral phrasing because the CLI does
+/// not currently have a way to tell which source the name came from —
+/// labelling it "source filename" when the offender was a spec name was a
+/// wrong guess.
+fn eprint_translation_error(e: &anyhow::Error) {
+    use inference::{InvalidIdentifierReason, WasmToVError};
+    if let Some(wte) = e.downcast_ref::<WasmToVError>() {
+        match wte {
+            WasmToVError::RocqStdlibShadow { name } => {
+                eprintln!(
+                    "error: '{name}' would shadow the Rocq stdlib type '{name}'. \
+                     Rename the source file or spec to avoid the collision (e.g. \
+                     'list_ops', 'my_list')."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier {
+                name,
+                reason: InvalidIdentifierReason::ContainsDoubleUnderscore,
+            } => {
+                eprintln!(
+                    "error: '{name}' contains '__' which is reserved as the \
+                     module/spec name separator in the emitted Rocq output. \
+                     Use a single underscore or a different name."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier {
+                reason: InvalidIdentifierReason::EmptyName,
+                ..
+            } => {
+                eprintln!(
+                    "error: empty Rocq identifier — the source filename has no \
+                     usable stem (e.g. \".inf\" with no name), or a spec block has \
+                     no name.\n\n  Rename the source file."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier { name, reason } => {
+                eprintln!(
+                    "error: '{name}' is not a valid Rocq identifier.\n\n  \
+                     A Rocq identifier (used for both module names and spec \
+                     names) must:\n    \
+                     - start with a letter (A-Z or a-z)\n    \
+                     - contain only letters, digits, and underscores\n    \
+                     - not contain '__' (reserved as the module/spec name separator)\n    \
+                     - not collide with Rocq stdlib types or reserved keywords\n\n  \
+                     Rename the source file or the spec block (e.g. 'list_utils') \
+                     and re-run.\n  (specifically: {reason})"
+                );
+                return;
+            }
+            WasmToVError::EmbeddedSpecMismatch { .. } => {
+                eprintln!(
+                    "error: internal inconsistency — the codegen-emitted spec map \
+                     and the embedded `inference.spec_funcs` section disagree.\n\n  \
+                     This is a compiler bug; please file an issue with the .inf \
+                     source attached."
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+    eprintln!("WASM->V translation failed: {e}");
+}
+
 /// Entry point for the Inference compiler CLI.
 ///
 /// ## Execution Flow
@@ -339,7 +413,7 @@ fn main() {
             match wasm_to_v(
                 source_fname,
                 wasm_bytes,
-                codegen_output.spec_func_indices(),
+                codegen_output.spec_func_indices_by_spec(),
             ) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
@@ -354,7 +428,7 @@ fn main() {
                     println!("V generated at: {}", v_file_path.to_string_lossy());
                 }
                 Err(e) => {
-                    eprintln!("WASM->V translation failed: {e}");
+                    eprint_translation_error(&e);
                     process::exit(1);
                 }
             }

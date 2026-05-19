@@ -31,9 +31,9 @@
 //! For integration with the Inference compiler, use the higher-level API:
 //!
 //! ```ignore
-//! use inference::wasm_to_v;
+//! use inference::{wasm_to_v, FxHashMap};
 //!
-//! let rocq_code = wasm_to_v("module_name", &wasm_bytes, &[])?;
+//! let rocq_code = wasm_to_v("module_name", &wasm_bytes, &FxHashMap::default())?;
 //! ```
 //!
 //! ## Architecture
@@ -160,12 +160,23 @@
 //! - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant
 //! - [WebAssembly Specification](https://webassembly.github.io/spec/) - WASM standard
 
+pub mod errors;
+pub mod rocq_names;
 pub mod translator;
 pub mod wasm_parser;
+
+/// Name of the WASM custom section that carries spec-originated function
+/// indices grouped by spec name. Authoritative for standalone-binary
+/// translation when callers pass an empty explicit spec map.
+///
+/// Re-exported from `inference_wasm_codegen` so the encoder and decoder
+/// share a single source of truth for the wire-format constant.
+pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME;
 
 #[cfg(test)]
 mod tests {
     use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
     use std::fs;
     use std::panic;
     use std::path::PathBuf;
@@ -221,7 +232,8 @@ mod tests {
 
             // Catch panics from unimplemented features
             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                translate_bytes(module_name, &bytes, &[])
+                let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+                translate_bytes(module_name, &bytes, &empty)
             }));
 
             match result {
@@ -261,33 +273,47 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn translate_bytes_emits_specs_definition_and_theorem_args() {
+    fn translate_bytes_emits_per_spec_definition_and_theorem() {
         let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
         let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
 
-        let output = translate_bytes("Fac", &bytes, &[3, 4, 7]).expect("translate succeeds");
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        // Spec name `Spec1` avoids shadowing the Peano successor `S` (newly
+        // added to the prelude rejection list) while still exercising the
+        // per-spec emission path.
+        map.insert("Spec1".to_string(), vec![3, 4, 7]);
+        let output = translate_bytes("Fac", &bytes, &map).expect("translate succeeds");
 
         assert!(
-            output.contains("Definition Fac_specs : list N := [3; 4; 7]%N."),
-            "output should contain Fac_specs definition; got:\n{output}",
+            output.contains("Definition Fac__Spec1_specs : list N := [3; 4; 7]%N."),
+            "output should contain Fac__Spec1_specs definition; got:\n{output}",
         );
         assert!(
-            output.contains("Theorem valid_Fac : ValidModule Fac Fac_specs."),
-            "output should reference Fac_specs in the theorem; got:\n{output}",
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should contain 1-arg valid_Fac theorem; got:\n{output}",
+        );
+        assert!(
+            output.contains("Theorem valid_Fac__Spec1 : ValidSpec Fac Fac__Spec1_specs."),
+            "output should contain per-spec ValidSpec theorem; got:\n{output}",
         );
     }
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn translate_bytes_emits_empty_specs_when_no_indices() {
+    fn translate_bytes_emits_no_spec_lines_when_empty() {
         let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_data");
         let bytes = fs::read(test_data_dir.join("fac.0.wasm")).expect("read fac.0.wasm");
 
-        let output = translate_bytes("Fac", &bytes, &[]).expect("translate succeeds");
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let output = translate_bytes("Fac", &bytes, &empty).expect("translate succeeds");
 
         assert!(
-            output.contains("Definition Fac_specs : list N := []%N."),
-            "output should contain empty Fac_specs definition; got:\n{output}",
+            !output.contains("_specs : list N"),
+            "output should contain no per-spec definitions when the map is empty; got:\n{output}",
+        );
+        assert!(
+            output.contains("Theorem valid_Fac : ValidModule Fac."),
+            "output should still contain the structural valid_Fac theorem; got:\n{output}",
         );
     }
 }

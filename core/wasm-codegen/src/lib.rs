@@ -51,17 +51,24 @@ use inference_ast::ids::DefId;
 use inference_ast::nodes::Def;
 use inference_type_checker::typed_context::TypedContext;
 
-use crate::compiler::Compiler;
+use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
 
 mod compiler;
 mod errors;
 mod memory;
 pub mod output;
+mod spec_section;
 pub mod target;
 
 pub use output::CodegenOutput;
 pub use target::{CompilationMode, OptLevel, Target};
+
+/// Single source of truth for the custom WASM section name that carries
+/// per-spec function indices. Consumed by both `core/wasm-codegen` (encoder)
+/// and `core/wasm-to-v` (decoder) so the wire-format constant lives in one
+/// place.
+pub use crate::spec_section::SECTION_NAME as SPEC_FUNCS_SECTION_NAME;
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
@@ -116,8 +123,12 @@ pub fn codegen(
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
-    let spec_func_indices = compiler.take_spec_func_indices();
+    // Order is load-bearing. `finish()` borrows `spec_func_indices_by_spec`
+    // (it takes `&self`) to emit the `inference.spec_funcs` custom section;
+    // `take_spec_func_indices_by_spec()` then drains the map for
+    // `CodegenOutput`. Swapping the order would emit a missing/empty section.
     let wasm = compiler.finish();
+    let spec_func_indices_by_spec = compiler.take_spec_func_indices_by_spec();
     let has_main = compiler.has_main();
 
     Ok(CodegenOutput::new(
@@ -127,7 +138,7 @@ pub fn codegen(
         opt_level,
         module_name.to_string(),
         has_main,
-        spec_func_indices,
+        spec_func_indices_by_spec,
     ))
 }
 
@@ -151,65 +162,25 @@ fn traverse_t_ast_with_compiler(
     for source_file in typed_context.source_files() {
         let buckets = collect_emittable_functions(arena, &source_file.defs, mode);
 
-        #[allow(clippy::cast_possible_truncation)]
-        let toplevel_count = buckets.funcs.len() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let method_count = buckets.methods.len() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let spec_func_count = buckets.spec_funcs.len() as u32;
-        #[allow(clippy::cast_possible_truncation)]
-        let spec_method_count = buckets.spec_methods.len() as u32;
-
-        // Stage 1: Register all indices before any body compilation. Order:
-        //   regular fns (base 0) → regular methods → spec fns → spec methods.
-        compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, 0)?;
-        let method_base_idx = compiler.func_idx_after_toplevel(toplevel_count);
-        compiler.build_method_name_to_idx(
-            arena,
-            &buckets.methods,
-            typed_context,
-            method_base_idx,
-        )?;
-
-        let spec_func_base = toplevel_count + method_count;
-        let spec_method_base = spec_func_base + spec_func_count;
-        compiler.build_func_name_to_idx(
-            arena,
-            &buckets.spec_funcs,
-            typed_context,
-            spec_func_base,
-        )?;
-        compiler.build_method_name_to_idx(
-            arena,
-            &buckets.spec_methods,
-            typed_context,
-            spec_method_base,
-        )?;
-        let spec_total = spec_func_count + spec_method_count;
-        if spec_total > 0 {
-            compiler.record_spec_indices(spec_func_base, spec_total);
+        // Register every visited spec (even with zero emittable inner defs) so
+        // user-authored `spec MySpec { }` still surfaces a per-spec entry that
+        // the Rocq translator turns into `Definition output__MySpec_specs` and
+        // `Theorem valid_output__MySpec`.
+        for spec_name in &buckets.visited_spec_names {
+            compiler.ensure_spec_registered(spec_name);
         }
 
-        // Verify Stage 1 produced the expected number of index entries.
-        // Catches index calculation bugs before they manifest as wrong `call` targets.
-        debug_assert_eq!(
-            compiler.registered_function_count(),
-            buckets.funcs.len()
-                + buckets.methods.len()
-                + buckets.spec_funcs.len()
-                + buckets.spec_methods.len(),
-            "func_name_to_idx entry count after Stage 1 registration does not match \
-             expected count (top-level functions: {}, methods: {}, spec functions: {}, \
-             spec methods: {})",
-            buckets.funcs.len(),
-            buckets.methods.len(),
-            buckets.spec_funcs.len(),
-            buckets.spec_methods.len(),
-        );
+        register_function_indices(arena, compiler, typed_context, &buckets)?;
 
         // Stage 2: Compile bodies in the same order as registration.
         for &def_id in &buckets.funcs {
-            compiler.visit_function_definition(def_id, arena, typed_context, None)?;
+            compiler.visit_function_definition(
+                def_id,
+                arena,
+                typed_context,
+                None,
+                &FunctionOrigin::TopLevel,
+            )?;
         }
         for (struct_name, method_def_id) in &buckets.methods {
             compiler.visit_function_definition(
@@ -217,28 +188,126 @@ fn traverse_t_ast_with_compiler(
                 arena,
                 typed_context,
                 Some(struct_name),
+                &FunctionOrigin::TopLevel,
             )?;
         }
-        for &def_id in &buckets.spec_funcs {
-            compiler.visit_function_definition(def_id, arena, typed_context, None)?;
+        for (spec_name, def_id) in &buckets.spec_funcs {
+            compiler.visit_function_definition(
+                *def_id,
+                arena,
+                typed_context,
+                None,
+                &FunctionOrigin::SpecInner(spec_name.clone()),
+            )?;
         }
-        for (struct_name, method_def_id) in &buckets.spec_methods {
+        for (spec_name, struct_name, method_def_id) in &buckets.spec_methods {
             compiler.visit_function_definition(
                 *method_def_id,
                 arena,
                 typed_context,
                 Some(struct_name),
+                &FunctionOrigin::SpecInner(spec_name.clone()),
             )?;
         }
     }
     Ok(())
 }
 
+/// Stage 1: register every WASM function index up front so forward references
+/// resolve correctly during body compilation. Index order:
+///   regular fns (base 0) → regular methods → spec fns → spec methods.
+fn register_function_indices(
+    arena: &AstArena,
+    compiler: &mut Compiler,
+    typed_context: &TypedContext,
+    buckets: &EmittableFunctions,
+) -> Result<(), CodegenError> {
+    #[allow(clippy::cast_possible_truncation)]
+    let toplevel_count = buckets.funcs.len() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let method_count = buckets.methods.len() as u32;
+
+    compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, 0)?;
+    let method_base_idx = compiler.func_idx_after_toplevel(toplevel_count);
+    compiler.build_method_name_to_idx(
+        arena,
+        &buckets.methods,
+        typed_context,
+        method_base_idx,
+    )?;
+
+    let spec_func_base = toplevel_count + method_count;
+    let spec_func_indices = compiler.build_func_name_to_idx_with_spec_names(
+        arena,
+        &buckets.spec_funcs,
+        typed_context,
+        spec_func_base,
+    )?;
+    assert_eq!(
+        buckets.spec_funcs.len(),
+        spec_func_indices.len(),
+        "spec-funcs zip length mismatch: bucket has {} entries, registration returned {} indices",
+        buckets.spec_funcs.len(),
+        spec_func_indices.len(),
+    );
+    for ((spec_name, _), assigned_idx) in
+        buckets.spec_funcs.iter().zip(spec_func_indices.iter())
+    {
+        compiler.record_spec_index(spec_name, *assigned_idx);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let spec_method_base = spec_func_base + spec_func_indices.len() as u32;
+    let spec_method_indices = compiler.build_method_name_to_idx_with_spec_names(
+        arena,
+        &buckets.spec_methods,
+        typed_context,
+        spec_method_base,
+    )?;
+    assert_eq!(
+        buckets.spec_methods.len(),
+        spec_method_indices.len(),
+        "spec-methods zip length mismatch: bucket has {} entries, registration returned {} indices",
+        buckets.spec_methods.len(),
+        spec_method_indices.len(),
+    );
+    for ((spec_name, _, _), assigned_idx) in
+        buckets.spec_methods.iter().zip(spec_method_indices.iter())
+    {
+        compiler.record_spec_index(spec_name, *assigned_idx);
+    }
+
+    // Verify Stage 1 produced the expected number of index entries.
+    // Catches index calculation bugs before they manifest as wrong `call` targets.
+    debug_assert_eq!(
+        compiler.registered_function_count(),
+        buckets.funcs.len()
+            + buckets.methods.len()
+            + buckets.spec_funcs.len()
+            + buckets.spec_methods.len(),
+        "func_name_to_idx entry count after Stage 1 registration does not match \
+         expected count (top-level functions: {}, methods: {}, spec functions: {}, \
+         spec methods: {})",
+        buckets.funcs.len(),
+        buckets.methods.len(),
+        buckets.spec_funcs.len(),
+        buckets.spec_methods.len(),
+    );
+    Ok(())
+}
+
 struct EmittableFunctions {
     funcs: Vec<DefId>,
     methods: Vec<(String, DefId)>,
-    spec_funcs: Vec<DefId>,
-    spec_methods: Vec<(String, DefId)>,
+    /// Each entry: `(spec_name, def_id)`.
+    spec_funcs: Vec<(String, DefId)>,
+    /// Each entry: `(spec_name, struct_name, method_def_id)`.
+    spec_methods: Vec<(String, String, DefId)>,
+    /// Every spec block visited in proof mode, even if it contributes no
+    /// `spec_funcs` / `spec_methods` entries. Drives `ensure_spec_registered`
+    /// so an empty user `spec MySpec { }` still surfaces a per-spec
+    /// `Definition` and `Theorem` in the Rocq output.
+    visited_spec_names: Vec<String>,
 }
 
 /// Sorts top-level defs into the four buckets used by Stage 1 registration.
@@ -262,6 +331,7 @@ fn collect_emittable_functions(
         methods: Vec::new(),
         spec_funcs: Vec::new(),
         spec_methods: Vec::new(),
+        visited_spec_names: Vec::new(),
     };
 
     for &def_id in defs {
@@ -273,16 +343,26 @@ fn collect_emittable_functions(
                     buckets.methods.push((struct_name.clone(), method_def_id));
                 }
             }
-            Def::Spec { defs: inner, .. } if mode == CompilationMode::Proof => {
+            Def::Spec {
+                name,
+                defs: inner,
+                ..
+            } if mode == CompilationMode::Proof => {
+                let spec_name = arena[*name].name.clone();
+                buckets.visited_spec_names.push(spec_name.clone());
                 for &inner_id in inner {
                     match &arena[inner_id].kind {
-                        Def::Function { .. } => buckets.spec_funcs.push(inner_id),
+                        Def::Function { .. } => {
+                            buckets.spec_funcs.push((spec_name.clone(), inner_id));
+                        }
                         Def::Struct { name, methods, .. } => {
                             let struct_name = arena[*name].name.clone();
                             for &method_def_id in methods {
-                                buckets
-                                    .spec_methods
-                                    .push((struct_name.clone(), method_def_id));
+                                buckets.spec_methods.push((
+                                    spec_name.clone(),
+                                    struct_name.clone(),
+                                    method_def_id,
+                                ));
                             }
                         }
                         _ => {}
