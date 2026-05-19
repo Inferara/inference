@@ -8,21 +8,36 @@
 //!
 //! `infs build` always performs full compilation (parse, analyze, codegen)
 //! and writes the WASM binary to disk. The `-v` flag additionally generates
-//! a Rocq (.v) translation file.
+//! a Rocq (.v) translation file. `--mode proof` selects proof mode (specs
+//! preserved unoptimized for Rocq translation) and implicitly enables `-v`
+//! since the `.v` artifact is the proof-mode deliverable.
 //!
 //! ```bash
-//! infs build example.inf       # parse -> codegen -> write out/example.wasm
-//! infs build example.inf -v    # parse -> codegen -> write out/example.wasm + out/example.v
+//! infs build example.inf              # parse -> codegen -> write out/example.wasm
+//! infs build example.inf -v           # also writes out/example.v
+//! infs build example.inf --mode proof # proof mode; writes both .wasm and .v
 //! ```
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::errors::InfsError;
 use crate::toolchain::find_infc;
 use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
+
+/// Compilation mode forwarded to `infc --mode <…>`.
+///
+/// Mirrors `inference_wasm_codegen::CompilationMode` locally so the `infs`
+/// binary does not need to depend on the codegen crate just to parse a CLI
+/// flag it only forwards as a string.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BuildMode {
+    #[default]
+    Compile,
+    Proof,
+}
 
 /// Arguments for the build command.
 ///
@@ -36,6 +51,12 @@ pub struct BuildArgs {
     /// Generate Rocq (.v) translation file in addition to the WASM binary.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub generate_v_output: bool,
+
+    /// Compilation mode (`compile` or `proof`). Defaults to `compile`.
+    /// `proof` preserves spec functions unoptimized for Rocq translation
+    /// and implies `-v`.
+    #[clap(long = "mode", value_enum, default_value_t = BuildMode::Compile)]
+    pub mode: BuildMode,
 }
 
 /// Executes the build command with the given arguments.
@@ -68,6 +89,10 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 
     if args.generate_v_output {
         cmd.arg("-v");
+    }
+
+    if matches!(args.mode, BuildMode::Proof) {
+        cmd.arg("--mode").arg("proof");
     }
 
     let status = cmd

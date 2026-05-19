@@ -46,8 +46,9 @@
 //! conventional compiler UX (e.g. `gcc foo.c`).
 //!
 //! ```bash
-//! infc example.inf        # parse → codegen → write out/example.wasm
-//! infc example.inf -v     # parse → codegen → write out/example.wasm + out/example.v
+//! infc example.inf              # parse → codegen → write out/example.wasm
+//! infc example.inf -v           # parse → codegen → write out/example.wasm + out/example.v
+//! infc example.inf --mode proof # proof mode (keeps specs); implies -v → writes both files
 //! ```
 //!
 //! Supplying any explicit phase flag overrides the default:
@@ -146,7 +147,7 @@ mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
 use inference::{analyze, parse, type_check, wasm_to_v};
-use parser::Cli;
+use parser::{Cli, CliMode};
 use std::{
     fs,
     path::PathBuf,
@@ -158,10 +159,17 @@ use toolchain::BuildProfile;
 ///
 /// When no phase flag (`--parse`, `--analyze`, `--codegen`) is given, defaults
 /// to full pipeline + WASM output — equivalent to `--codegen -o`.
+///
+/// `--mode proof` additionally implies `-v` (Rocq translation output), because
+/// the `.v` artifact is what proof mode is for; emitting only `.wasm` in proof
+/// mode would silently waste the unoptimized spec preservation work.
 pub(crate) fn normalize_args(args: &mut Cli) {
     if !args.parse && !args.analyze && !args.codegen {
         args.codegen = true;
         args.generate_wasm_output = true;
+    }
+    if matches!(args.mode, CliMode::Proof) {
+        args.generate_v_output = true;
     }
 }
 
@@ -379,7 +387,7 @@ fn main() {
         };
         let profile = BuildProfile::default();
         let target = inference_wasm_codegen::Target::default();
-        let mode = inference_wasm_codegen::CompilationMode::default();
+        let mode: inference_wasm_codegen::CompilationMode = args.mode.into();
         let opt_level = profile.resolve_opt_level(target, mode);
         let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
             Ok(o) => o,
@@ -391,9 +399,8 @@ fn main() {
         println!("Codegen complete");
         let source_fname = path
             .file_stem()
-            .unwrap_or_else(|| std::ffi::OsStr::new("module"))
-            .to_str()
-            .unwrap();
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("module");
 
         let wasm_bytes = codegen_output.wasm();
 
@@ -450,6 +457,7 @@ mod tests {
             codegen,
             generate_wasm_output: false,
             generate_v_output: false,
+            mode: CliMode::Compile,
             commit_hash: false,
             abi_version: false,
         }
@@ -485,6 +493,19 @@ mod tests {
         normalize_args(&mut args);
         assert!(args.codegen);
         assert!(!args.generate_wasm_output);
+    }
+
+    #[test]
+    fn normalize_proof_mode_implies_v_output() {
+        let mut args = make_args(false, false, false);
+        args.mode = CliMode::Proof;
+        normalize_args(&mut args);
+        assert!(args.codegen, "proof mode should still trigger default codegen");
+        assert!(args.generate_wasm_output, "proof mode should still emit wasm");
+        assert!(
+            args.generate_v_output,
+            "proof mode must imply -v so the .v artifact is written"
+        );
     }
 
     /// Returns the path to the test data directory.

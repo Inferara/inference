@@ -253,6 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
+- `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([#22])
 - `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([#20])
 - Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])
   - `infc example.inf` equivalent to `infc example.inf --codegen -o`
@@ -673,6 +674,7 @@ Initial tagged release.
 [pr#178]: https://github.com/Inferara/inference/pull/178
 [pr#187]: https://github.com/Inferara/inference/pull/187
 [#188]: https://github.com/Inferara/inference/pull/188
+[#195]: https://github.com/Inferara/inference/pull/195
 [#16]: https://github.com/Inferara/inference/issues/16
 [#17]: https://github.com/Inferara/inference/issues/17
 [#18]: https://github.com/Inferara/inference/issues/18

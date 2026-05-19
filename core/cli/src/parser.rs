@@ -5,7 +5,33 @@
 //!
 //! For comprehensive usage documentation, see `README.md` in this crate.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Compilation mode selected via the `--mode` flag.
+///
+/// Mirrors [`inference_wasm_codegen::CompilationMode`] so the CLI surface can derive
+/// `clap::ValueEnum` without forcing that trait onto the codegen crate's type.
+///
+/// - `Compile` (default): strips spec functions, applies release optimizations to
+///   produce a production-style WASM binary. Existing behavior.
+/// - `Proof`: keeps spec functions unoptimized so the Rocq translation preserves
+///   structural correspondence with the source. Implies `-v` after normalization,
+///   because the `.v` artifact is the proof-mode deliverable.
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CliMode {
+    #[default]
+    Compile,
+    Proof,
+}
+
+impl From<CliMode> for inference_wasm_codegen::CompilationMode {
+    fn from(mode: CliMode) -> Self {
+        match mode {
+            CliMode::Compile => inference_wasm_codegen::CompilationMode::Compile,
+            CliMode::Proof => inference_wasm_codegen::CompilationMode::Proof,
+        }
+    }
+}
 
 /// Command line interface definition for the Inference compiler.
 ///
@@ -40,6 +66,11 @@ use clap::Parser;
 /// Full compilation with Rocq translation:
 /// ```bash
 /// infc example.inf -v
+/// ```
+///
+/// Proof-mode compilation (keeps spec functions, implies `-v`):
+/// ```bash
+/// infc example.inf --mode proof
 /// ```
 ///
 /// Parse only (overrides default):
@@ -134,6 +165,16 @@ pub(crate) struct Cli {
     /// Rocq proof assistant.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub(crate) generate_v_output: bool,
+
+    /// Compilation mode.
+    ///
+    /// - `compile` (default): production WASM with specs stripped and release
+    ///   optimizations applied.
+    /// - `proof`: preserves spec functions unoptimized so the Rocq translation
+    ///   maintains 1:1 structural correspondence with the source. Implies `-v`
+    ///   because the `.v` artifact is the proof-mode deliverable.
+    #[clap(long = "mode", value_enum, default_value_t = CliMode::Compile)]
+    pub(crate) mode: CliMode,
 
     /// Print the git commit hash embedded at build time and exit 0.
     ///

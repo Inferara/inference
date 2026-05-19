@@ -171,6 +171,55 @@ fn v_flag_alone_produces_wasm_and_v() {
     assert!(temp.child("out").child("trivial.v").path().exists());
 }
 
+/// Verifies that `--mode proof` produces both `.wasm` and `.v` outputs.
+///
+/// Proof mode implies `-v` because the Rocq translation IS the proof-mode
+/// deliverable; emitting only `.wasm` in proof mode would silently waste the
+/// unoptimized spec preservation work.
+#[test]
+fn mode_proof_produces_v_alongside_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--mode")
+        .arg("proof");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+    assert!(temp.child("out").child("trivial.v").path().exists());
+}
+
+/// Regression guard: without `--mode proof` and without `-v`, the default
+/// (compile) mode must not emit a `.v` file. Existing behavior must be
+/// preserved.
+#[test]
+fn mode_compile_default_does_not_emit_v_without_v_flag() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+
+    cmd.assert().success();
+
+    assert!(temp.child("out").child("trivial.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("trivial.v").path().exists(),
+        "default compile mode without -v must not emit .v"
+    );
+}
+
 /// Verifies that the `--version` flag displays the correct version information.
 ///
 /// **Expected behavior**: Exit with code 0 and print the version string to stdout.
