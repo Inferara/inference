@@ -46,24 +46,28 @@ pub const SECTION_VERSION: u32 = 1;
 
 /// Encodes the spec map into the canonical payload bytes.
 pub(crate) fn encode_payload(map: &FxHashMap<String, Vec<u32>>) -> Vec<u8> {
-    let mut entries: Vec<(&String, &Vec<u32>)> = map.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut entries: Vec<(&str, &[u32])> = map
+        .iter()
+        .map(|(name, indices)| (name.as_str(), indices.as_slice()))
+        .collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+    let count = u32::try_from(entries.len())
+        .expect("more than u32::MAX specs cannot fit in a WASM custom section");
 
     let mut payload = Vec::new();
     SECTION_VERSION.encode(&mut payload);
-    #[allow(clippy::cast_possible_truncation)]
-    let count = entries.len() as u32;
     count.encode(&mut payload);
 
     for (spec_name, indices) in entries {
         let name_bytes = spec_name.as_bytes();
-        #[allow(clippy::cast_possible_truncation)]
-        let name_len = name_bytes.len() as u32;
+        let name_len = u32::try_from(name_bytes.len())
+            .expect("spec name longer than u32::MAX bytes");
+        let idx_count = u32::try_from(indices.len())
+            .expect("more than u32::MAX function indices per spec");
+
         name_len.encode(&mut payload);
         payload.extend_from_slice(name_bytes);
-
-        #[allow(clippy::cast_possible_truncation)]
-        let idx_count = indices.len() as u32;
         idx_count.encode(&mut payload);
         for idx in indices {
             idx.encode(&mut payload);
@@ -137,9 +141,10 @@ mod tests {
     fn payload_starts_with_version_byte() {
         let map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let payload = encode_payload(&map);
+        let expected = u8::try_from(SECTION_VERSION).expect("version fits in a byte");
         assert_eq!(
             payload.first().copied(),
-            Some(SECTION_VERSION as u8),
+            Some(expected),
             "payload must lead with the version byte"
         );
     }

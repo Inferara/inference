@@ -24,7 +24,7 @@
 //! fn compile(source_code: &str) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let codegen_output = codegen(&typed_context)?;
+//!     let codegen_output = codegen(&typed_context, "module")?;
 //!     Ok(codegen_output)
 //! }
 //! ```
@@ -98,7 +98,7 @@
 //! let source = "fn factorial(n: i32) -> i32 { if n <= 1 { return 1; } else { return n * factorial(n - 1); } }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let codegen_output = codegen(&typed_context)?;
+//! let codegen_output = codegen(&typed_context, "module")?;
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
@@ -120,7 +120,7 @@
 //! let source = "fn is_even(n: i32) -> bool { return n % 2 == 0; }";
 //! let arena = parse(source)?;
 //! let typed_context = type_check(arena)?;
-//! let codegen_output = codegen(&typed_context)?;
+//! let codegen_output = codegen(&typed_context, "module")?;
 //! // WASM bytes are directly available from codegen output:
 //! // wasm_to_v("MyModule", codegen_output.wasm(), codegen_output.spec_func_indices_by_spec())
 //! # Ok::<(), anyhow::Error>(())
@@ -181,7 +181,7 @@
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
 //!     let _analysis_result = analyze(&typed_context)?;
-//!     codegen(&typed_context)
+//!     codegen(&typed_context, "module")
 //! }
 //! ```
 //!
@@ -193,7 +193,7 @@
 //! fn compile_to_rocq(source_code: &str, module_name: &str) -> anyhow::Result<String> {
 //!     let arena = parse(source_code)?;
 //!     let typed_context = type_check(arena)?;
-//!     let codegen_output = codegen(&typed_context)?;
+//!     let codegen_output = codegen(&typed_context, "module")?;
 //!     let rocq_code = wasm_to_v(
 //!         module_name,
 //!         codegen_output.wasm(),
@@ -224,7 +224,7 @@
 //!
 //!     let arena = parse(source)?;
 //!     let typed_context = type_check(arena)?;
-//!     codegen(&typed_context)
+//!     codegen(&typed_context, "module")
 //! }
 //! ```
 //!
@@ -550,6 +550,10 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// uses default settings. The returned [`CodegenOutput`] contains the WASM binary
 /// bytes and compilation metadata.
 ///
+/// `module_name` is written into the WASM module-name subsection and flows
+/// downstream into the Rocq translator. The CLI passes the input file stem;
+/// library callers can pass any Rocq-identifier-compatible name.
+///
 /// For target-specific or proof-mode compilation, call
 /// `inference_wasm_codegen::codegen()` directly with explicit `Target` and
 /// `CompilationMode` parameters.
@@ -565,10 +569,17 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// [`CodegenOutput`]: inference_wasm_codegen::CodegenOutput
 pub fn codegen(
     typed_context: &TypedContext,
+    module_name: &str,
 ) -> anyhow::Result<inference_wasm_codegen::CodegenOutput> {
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    inference_wasm_codegen::codegen(typed_context, target, mode, target.default_opt_level())
+    inference_wasm_codegen::codegen(
+        typed_context,
+        target,
+        mode,
+        target.default_opt_level(),
+        module_name,
+    )
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.
@@ -610,7 +621,7 @@ pub fn codegen(
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let codegen_output = codegen(&typed_context)?;
+/// let codegen_output = codegen(&typed_context, "module")?;
 /// let rocq_code = wasm_to_v(
 ///     "EvenChecker",
 ///     codegen_output.wasm(),
@@ -636,7 +647,7 @@ pub fn codegen(
 ///
 /// let arena = parse(source)?;
 /// let typed_context = type_check(arena)?;
-/// let codegen_output = codegen(&typed_context)?;
+/// let codegen_output = codegen(&typed_context, "module")?;
 /// let rocq_code = wasm_to_v(
 ///     "CommutativityProof",
 ///     codegen_output.wasm(),

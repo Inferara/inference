@@ -24,12 +24,29 @@ mod helpers {
     /// Compiles `source` end-to-end with the given mode and returns the codegen output.
     /// Panics on type-check or codegen failure (intended for tests asserting success).
     pub(super) fn compile(source: &str, mode: CompilationMode) -> CodegenOutput {
+        compile_with_module(source, mode, "output")
+    }
+
+    /// Variant of [`compile`] that takes an explicit module name, exposed so
+    /// scenarios exercising the module-name-flow-through-API path can pin a
+    /// non-default value.
+    pub(super) fn compile_with_module(
+        source: &str,
+        mode: CompilationMode,
+        module_name: &str,
+    ) -> CodegenOutput {
         let arena = build_ast(source.to_string());
         let typed_context = TypeCheckerBuilder::build_typed_context(arena)
             .expect("type check should succeed")
             .typed_context();
-        inference_wasm_codegen::codegen(&typed_context, Target::Wasm32, mode, OptLevel::O3)
-            .expect("codegen should succeed")
+        inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            mode,
+            OptLevel::O3,
+            module_name,
+        )
+        .expect("codegen should succeed")
     }
 
     /// Returns true if `wasm` contains the byte slice `needle`.

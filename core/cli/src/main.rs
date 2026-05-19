@@ -404,18 +404,19 @@ fn main() {
         let mode: inference_wasm_codegen::CompilationMode =
             args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
-        let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("Codegen failed: {e}");
-                process::exit(1);
-            }
-        };
-        println!("Codegen complete");
         let source_fname = path
             .file_stem()
             .and_then(std::ffi::OsStr::to_str)
             .unwrap_or("module");
+        let codegen_output =
+            match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level, source_fname) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Codegen failed: {e}");
+                    process::exit(1);
+                }
+            };
+        println!("Codegen complete");
 
         let wasm_bytes = codegen_output.wasm();
 

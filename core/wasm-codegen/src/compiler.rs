@@ -97,13 +97,79 @@ pub(crate) enum FunctionOrigin {
     SpecInner(String),
 }
 
-/// RAII guard that resets `Compiler::current_spec` to `None` on drop.
+/// Structured key for `func_name_to_idx`, `func_array_returns`,
+/// `func_struct_returns`, and `method_mangled_names` values.
 ///
-/// Wraps a `&mut Compiler` so that even when the function visit returns
-/// early via `?` (e.g. `compute_frame_layout` failing), the spec context
-/// cannot leak past the function boundary. The compiler is discarded on
-/// codegen error today, but the guard makes the invariant local rather
-/// than relying on every fallible call site to mirror the trailing reset.
+/// The four variants partition the WASM function namespace so that
+/// `Method { struct_name: "Foo", name: "bar" }` cannot textually collide
+/// with `SpecFree { spec: "Foo", name: "bar" }` even though both would
+/// share the `"Foo.bar"` string under the old `FxHashMap<String, ..>`
+/// scheme. The collision class is eliminated by construction; the
+/// per-registration `assert!(!contains_key)` guards that previously
+/// caught it no longer have anything to detect.
+///
+/// `Display` reproduces the historical mangled-string form for use in
+/// diagnostic messages, `.wat` output, and panic descriptions.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub(crate) enum FnKey {
+    Free { name: String },
+    Method { struct_name: String, name: String },
+    SpecFree { spec: String, name: String },
+    SpecMethod { spec: String, struct_name: String, name: String },
+}
+
+impl FnKey {
+    fn free(name: impl Into<String>) -> Self {
+        Self::Free { name: name.into() }
+    }
+    fn method(struct_name: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::Method {
+            struct_name: struct_name.into(),
+            name: name.into(),
+        }
+    }
+    fn spec_free(spec: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::SpecFree {
+            spec: spec.into(),
+            name: name.into(),
+        }
+    }
+    fn spec_method(
+        spec: impl Into<String>,
+        struct_name: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self::SpecMethod {
+            spec: spec.into(),
+            struct_name: struct_name.into(),
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FnKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Free { name } => write!(f, "{name}"),
+            Self::Method { struct_name, name } => {
+                write!(f, "{struct_name}{METHOD_SEPARATOR}{name}")
+            }
+            Self::SpecFree { spec, name } => write!(f, "{spec}.{name}"),
+            Self::SpecMethod {
+                spec,
+                struct_name,
+                name,
+            } => write!(f, "{spec}.{struct_name}{METHOD_SEPARATOR}{name}"),
+        }
+    }
+}
+
+/// RAII guard that saves and restores `Compiler::current_spec`.
+///
+/// `enter` swaps in a new value and stashes the prior one; `Drop` writes
+/// the prior value back. This is the canonical save/restore RAII pattern
+/// (same shape as `MutexGuard`), so nested guards compose correctly: an
+/// inner guard's drop restores the outer's spec rather than clearing it.
 ///
 /// `Deref`/`DerefMut` forward to the wrapped compiler so the guard is used
 /// in place of `&mut self` for the duration of the visit. This avoids the
@@ -111,12 +177,13 @@ pub(crate) enum FunctionOrigin {
 /// (`&mut self.current_spec`) coexisting with `self.<method>()` calls.
 struct SpecScopeGuard<'a> {
     compiler: &'a mut Compiler,
+    previous: Option<String>,
 }
 
 impl<'a> SpecScopeGuard<'a> {
     fn enter(compiler: &'a mut Compiler, spec: Option<String>) -> Self {
-        compiler.current_spec = spec;
-        Self { compiler }
+        let previous = std::mem::replace(&mut compiler.current_spec, spec);
+        Self { compiler, previous }
     }
 }
 
@@ -135,7 +202,7 @@ impl std::ops::DerefMut for SpecScopeGuard<'_> {
 
 impl Drop for SpecScopeGuard<'_> {
     fn drop(&mut self) {
-        self.compiler.current_spec = None;
+        self.compiler.current_spec = self.previous.take();
     }
 }
 
@@ -235,30 +302,38 @@ struct ResolvedField {
 /// Produced by [`Compiler::resolve_function_callee`] to consolidate the
 /// three-way callee pattern (`Identifier`, `TypeMemberAccess`, `MemberAccess`)
 /// that appears across multiple codegen methods.
+///
+/// For `Function`, the callee is a bare free-function name; the compiler
+/// applies spec-aware preference (try `SpecFree` then `Free`) at the lookup
+/// site. For the method variants, the [`FnKey`] is already resolved by the
+/// method-name lookup helpers, which encode the spec-vs-top-level decision.
 enum ResolvedCallee {
     /// Plain function call via `Expr::Identifier`.
     Function(String),
     /// Associated function call via `Expr::TypeMemberAccess` (e.g., `Point::new()`).
     AssociatedFunction {
-        mangled_name: String,
+        key: FnKey,
         type_expr_id: ExprId,
         method_name_id: IdentId,
     },
     /// Instance method call via `Expr::MemberAccess` (e.g., `p.translate()`).
     InstanceMethod {
-        mangled_name: String,
+        key: FnKey,
         receiver_expr_id: ExprId,
         method_name_id: IdentId,
     },
 }
 
 impl ResolvedCallee {
-    /// Returns the resolved WASM function name regardless of variant.
-    fn callee_name(&self) -> &str {
+    /// Display form of the resolved callee for use in diagnostic messages
+    /// and panic descriptions. Returns the bare name for free functions and
+    /// the mangled display of the [`FnKey`] for methods.
+    fn display_name(&self) -> String {
         match self {
-            Self::Function(name) => name,
-            Self::AssociatedFunction { mangled_name, .. }
-            | Self::InstanceMethod { mangled_name, .. } => mangled_name,
+            Self::Function(name) => name.clone(),
+            Self::AssociatedFunction { key, .. } | Self::InstanceMethod { key, .. } => {
+                key.to_string()
+            }
         }
     }
 }
@@ -276,6 +351,7 @@ impl ResolvedCallee {
 /// locals follow at `param_count`.. Function bodies pre-scan for local declarations before
 /// emitting instructions, since WASM requires all locals to be declared at the start of a
 /// function body.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Compiler {
     types: Vec<(Vec<ValType>, Vec<ValType>)>,
     functions: Vec<u32>,
@@ -286,21 +362,26 @@ pub(crate) struct Compiler {
     func_idx: u32,
     has_main: bool,
     module_name: String,
-    /// Maps function names to their WASM function section indices.
-    func_name_to_idx: FxHashMap<String, u32>,
+    /// Maps function keys to their WASM function section indices.
+    func_name_to_idx: FxHashMap<FnKey, u32>,
     /// Sticky flag: set to `true` when any function requires linear memory.
     has_memory: bool,
-    /// Maps function names to their array return type metadata.
-    func_array_returns: FxHashMap<String, ArrayReturnInfo>,
-    /// Maps function names to their struct return type metadata.
-    func_struct_returns: FxHashMap<String, StructReturnInfo>,
-    /// Maps `(spec_name, type_name, method_name)` to the mangled WASM function
-    /// name. `spec_name` is `None` for top-level methods. Keying by spec scope
-    /// lets two specs each declare a struct with same-named methods without
-    /// the inner table overwriting each other.
-    method_mangled_names: FxHashMap<(Option<String>, String, String), String>,
-    /// Name of the function currently being compiled.
+    /// Maps function keys to their array return type metadata.
+    func_array_returns: FxHashMap<FnKey, ArrayReturnInfo>,
+    /// Maps function keys to their struct return type metadata.
+    func_struct_returns: FxHashMap<FnKey, StructReturnInfo>,
+    /// Maps `(spec_name, type_name, method_name)` to the registered `FnKey`.
+    /// `spec_name` is `None` for top-level methods. The value is the exact key
+    /// used in [`Self::func_name_to_idx`] so call-site resolution is a single
+    /// hash lookup with no string re-mangling.
+    method_mangled_names: FxHashMap<(Option<String>, String, String), FnKey>,
+    /// Name of the function currently being compiled (display form, used for
+    /// diagnostics). The lookup-shaped companion is [`Self::current_fn_key`].
     current_fn_name: String,
+    /// Structured key for the function currently being compiled. Used as the
+    /// lookup key for sret return-emission so we don't have to recompute the
+    /// variant from `current_spec` + `current_fn_name` at every call site.
+    current_fn_key: FnKey,
     /// Name of the spec that owns the function currently being compiled, if
     /// any. Set by `visit_function_definition` for spec-inner functions and
     /// methods so that intra-spec call resolution can prefer the mangled
@@ -322,6 +403,9 @@ pub(crate) struct Compiler {
     /// consumed by `CodegenOutput` so the Rocq translator can emit per-spec
     /// `Definition <mod>__<SpecName>_specs : list N` definitions.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
+    /// Set when [`Self::take_spec_func_indices_by_spec`] has been called.
+    /// Guards against drainage-then-second-call returning silently empty.
+    spec_indices_taken: bool,
 }
 
 impl Compiler {
@@ -343,6 +427,7 @@ impl Compiler {
             func_struct_returns: FxHashMap::default(),
             method_mangled_names: FxHashMap::default(),
             current_fn_name: String::new(),
+            current_fn_key: FnKey::free(""),
             current_spec: None,
             func: None,
             locals_map: FxHashMap::default(),
@@ -351,16 +436,32 @@ impl Compiler {
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
+            spec_indices_taken: false,
         }
+    }
+
+    /// Defensive accessor: returns `true` if no spec function indices have
+    /// been recorded. Used by the codegen entry to debug-assert compile-mode
+    /// byte identity without committing to any specific drainage order.
+    pub(crate) fn spec_func_indices_by_spec_is_empty(&self) -> bool {
+        self.spec_func_indices_by_spec.is_empty()
     }
 
     /// Removes and returns the recorded spec function indices grouped by spec name.
     ///
     /// Called once after all function registration/lowering is complete so that
-    /// downstream consumers (currently `CodegenOutput`) can store them.
+    /// downstream consumers (currently `CodegenOutput`) can store them. A
+    /// second call in the same compile is a programming error: the underlying
+    /// `mem::take` would silently return an empty map. The debug-assert traps
+    /// the misuse in tests; release builds still return the empty map.
     pub(crate) fn take_spec_func_indices_by_spec(
         &mut self,
     ) -> FxHashMap<String, Vec<u32>> {
+        debug_assert!(
+            !self.spec_indices_taken,
+            "take_spec_func_indices_by_spec called more than once"
+        );
+        self.spec_indices_taken = true;
         std::mem::take(&mut self.spec_func_indices_by_spec)
     }
 
@@ -411,7 +512,7 @@ impl Compiler {
     /// into `func_struct_returns`. Otherwise does nothing.
     fn register_sret_if_compound(
         &mut self,
-        name: String,
+        key: FnKey,
         return_ty_id: TypeId,
         arena: &AstArena,
         ctx: &TypedContext,
@@ -421,7 +522,7 @@ impl Compiler {
             TypeInfoKind::Array(elem_type, length) => {
                 let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
                 self.func_array_returns.insert(
-                    name,
+                    key,
                     ArrayReturnInfo {
                         elem_kind: elem_type.kind.clone(),
                         elem_size: elem_sz,
@@ -433,7 +534,7 @@ impl Compiler {
                 if let Some(struct_info) = ctx.lookup_struct(custom_name) {
                     let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
                     self.func_struct_returns.insert(
-                        name,
+                        key,
                         StructReturnInfo {
                             total_size,
                             field_slots,
@@ -464,22 +565,21 @@ impl Compiler {
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, &def_id) in func_def_ids.iter().enumerate() {
-            let fn_name = arena.def_name(def_id).to_string();
+            let fn_name = arena.def_name(def_id);
+            let key = FnKey::free(fn_name);
             assert!(
-                !self.func_name_to_idx.contains_key(&fn_name),
-                "Function name '{fn_name}' collides with an existing definition; \
-                 two top-level functions share this name (spec-inner functions \
-                 register under the mangled `<SpecName>.<fn>` key so they cannot \
-                 collide here). The type-checker should have rejected the \
-                 duplicate at the source level."
+                !self.func_name_to_idx.contains_key(&key),
+                "Top-level function '{fn_name}' collides with an existing \
+                 top-level function. The type-checker should have rejected \
+                 the duplicate at the source level."
             );
             self.func_name_to_idx
-                .insert(fn_name.clone(), idx as u32 + base_idx);
+                .insert(key.clone(), idx as u32 + base_idx);
 
             if let Def::Function { returns, .. } = &arena[def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(fn_name, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
             }
         }
         Ok(())
@@ -502,13 +602,13 @@ impl Compiler {
         let mut assigned = Vec::with_capacity(spec_func_defs.len());
         #[allow(clippy::cast_possible_truncation)]
         for (idx, (spec_name, def_id)) in spec_func_defs.iter().enumerate() {
-            let fn_name = arena.def_name(*def_id).to_string();
-            let key = format!("{spec_name}.{fn_name}");
+            let fn_name = arena.def_name(*def_id);
+            let key = FnKey::spec_free(spec_name, fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Function name '{key}' collides with an existing definition; \
-                 two spec-inner functions share this name. The type-checker \
-                 should have rejected the duplicate at the source level."
+                "Spec-inner function '{spec_name}::{fn_name}' collides with an \
+                 existing spec-inner function. The type-checker should have \
+                 rejected the duplicate at the source level."
             );
             let assigned_idx = idx as u32 + base_idx;
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
@@ -517,9 +617,6 @@ impl Compiler {
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                // sret metadata is keyed by the same mangled name we use for
-                // call-site lookup, so spec-inner and top-level functions with
-                // identical bare names do not overwrite each other.
                 self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
             }
         }
@@ -547,24 +644,22 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
             let method_name = arena.def_name(*def_id).to_string();
-            let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
+            let key = FnKey::method(struct_name, &method_name);
 
             assert!(
-                !self.func_name_to_idx.contains_key(&mangled_name),
-                "Mangled method name '{mangled_name}' collides with an existing function; \
-                 top-level functions must not use the `TypeName.method_name` naming pattern"
+                !self.func_name_to_idx.contains_key(&key),
+                "Method '{struct_name}::{method_name}' collides with an \
+                 existing top-level method on the same struct."
             );
             self.func_name_to_idx
-                .insert(mangled_name.clone(), base_idx + i as u32);
-            self.method_mangled_names.insert(
-                (None, struct_name.clone(), method_name),
-                mangled_name.clone(),
-            );
+                .insert(key.clone(), base_idx + i as u32);
+            self.method_mangled_names
+                .insert((None, struct_name.clone(), method_name), key.clone());
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(mangled_name, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
             }
         }
         Ok(())
@@ -587,27 +682,24 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         for (i, (spec_name, struct_name, def_id)) in spec_method_defs.iter().enumerate() {
             let method_name = arena.def_name(*def_id).to_string();
-            let mangled_name = format!("{struct_name}{METHOD_SEPARATOR}{method_name}");
-            let key = format!("{spec_name}.{mangled_name}");
+            let key = FnKey::spec_method(spec_name, struct_name, &method_name);
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Mangled method name '{key}' collides with an existing function; \
-                 top-level functions must not use the `SpecName.TypeName.method_name` naming pattern"
+                "Spec-inner method '{spec_name}::{struct_name}::{method_name}' \
+                 collides with an existing spec-inner method on the same struct."
             );
             let assigned_idx = base_idx + i as u32;
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
             self.method_mangled_names.insert(
                 (Some(spec_name.clone()), struct_name.clone(), method_name),
-                mangled_name.clone(),
+                key.clone(),
             );
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                // sret metadata uses the spec-mangled key so two specs with
-                // same-named struct methods do not stomp on each other.
                 self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
             }
         }
@@ -698,24 +790,29 @@ impl Compiler {
         };
 
         let raw_name = arena[fn_name_id].name.clone();
-        // For methods, use the mangled name for sret lookups, debug names, and current_fn_name.
-        // For top-level functions, fn_name == raw_name.
+        // Compute the structured key for this function so sret lookups
+        // and call-site resolution stay in lockstep with the registration
+        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`.
+        let current_spec = self.current_spec.clone();
+        let current_fn_key = match (current_spec.as_deref(), method_struct_name) {
+            (Some(spec), Some(struct_name)) => FnKey::spec_method(spec, struct_name, &raw_name),
+            (Some(spec), None) => FnKey::spec_free(spec, &raw_name),
+            (None, Some(struct_name)) => FnKey::method(struct_name, &raw_name),
+            (None, None) => FnKey::free(&raw_name),
+        };
+        // For diagnostics and debug names we keep the mangled-string form
+        // (`Struct.method` / bare name); spec-inner-ness is implicit via
+        // `current_spec` for any consumer that needs it.
         let fn_name = if let Some(struct_name) = method_struct_name {
             format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
         } else {
             raw_name
         };
         self.current_fn_name.clone_from(&fn_name);
+        self.current_fn_key = current_fn_key.clone();
 
-        // sret metadata for spec-inner functions/methods lives under the
-        // mangled key `"<spec>.<fn>"` / `"<spec>.<Struct>.<method>"`.
-        let sret_lookup_name: String = if let Some(spec) = self.current_spec.as_deref() {
-            format!("{spec}.{fn_name}")
-        } else {
-            fn_name.clone()
-        };
-        let is_array_return = self.func_array_returns.contains_key(&sret_lookup_name);
-        let is_struct_return = self.func_struct_returns.contains_key(&sret_lookup_name);
+        let is_array_return = self.func_array_returns.contains_key(&current_fn_key);
+        let is_struct_return = self.func_struct_returns.contains_key(&current_fn_key);
         let is_sret = is_array_return || is_struct_return;
 
         let results: Vec<ValType> = if is_sret {
@@ -1325,9 +1422,9 @@ impl Compiler {
                 if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
                     && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
                 {
-                    let name = resolved.callee_name();
+                    let name = resolved.display_name();
                     assert!(
-                        !self.callee_is_sret(name),
+                        !self.callee_is_sret(&resolved),
                         "standalone call to compound-returning function/method '{name}' \
                          should have been rejected by the type checker",
                     );
@@ -1479,7 +1576,7 @@ impl Compiler {
         if let Expr::FunctionCall { function, .. } = &arena[expr_id].kind
             && let Some(resolved) = self.resolve_function_callee(arena, *function, ctx)
         {
-            return self.callee_is_sret(resolved.callee_name());
+            return self.callee_is_sret(&resolved);
         }
         false
     }
@@ -1529,7 +1626,6 @@ impl Compiler {
                 .resolve_function_callee(arena, function, ctx)
                 .expect("sret callee must be an identifier, TypeMemberAccess, or MemberAccess");
 
-            let callee_name = resolved.callee_name().to_owned();
             let receiver_expr = match &resolved {
                 ResolvedCallee::InstanceMethod {
                     receiver_expr_id, ..
@@ -1546,7 +1642,7 @@ impl Compiler {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
             let func_idx = self
-                .resolve_callee_idx(&callee_name)
+                .resolve_callee(&resolved)
                 .expect("sret callee must be in func_name_to_idx");
             self.func().instruction(&Instruction::Call(func_idx));
         } else {
@@ -1911,10 +2007,9 @@ impl Compiler {
                 expr: type_expr,
                 name: method_name,
             } => {
-                let mangled =
-                    self.resolve_associated_mangled_name(arena, *type_expr, *method_name)?;
+                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name)?;
                 Some(ResolvedCallee::AssociatedFunction {
-                    mangled_name: mangled,
+                    key,
                     type_expr_id: *type_expr,
                     method_name_id: *method_name,
                 })
@@ -1923,10 +2018,10 @@ impl Compiler {
                 expr: receiver,
                 name: method_name,
             } => {
-                let mangled =
-                    self.resolve_method_mangled_name(arena, *receiver, *method_name, ctx)?;
+                let key =
+                    self.resolve_method_fn_key(arena, *receiver, *method_name, ctx)?;
                 Some(ResolvedCallee::InstanceMethod {
-                    mangled_name: mangled,
+                    key,
                     receiver_expr_id: *receiver,
                     method_name_id: *method_name,
                 })
@@ -1955,41 +2050,73 @@ impl Compiler {
         }
 
         let func_idx = self
-            .resolve_callee_idx(callee_name)
+            .resolve_free_callee_idx(callee_name)
             .ok_or_else(|| CodegenError::UnknownFunction(callee_name.to_owned()))?;
 
         self.func().instruction(&Instruction::Call(func_idx));
         Ok(())
     }
 
-    /// Resolves a callee bare or mangled name to its WASM function index,
-    /// preferring the spec-mangled `"<current_spec>.<name>"` key when the
-    /// compiler is inside a spec scope.
-    fn resolve_callee_idx(&self, callee_name: &str) -> Option<u32> {
-        if let Some(spec) = self.current_spec.as_deref()
-            && let Some(idx) = self
-                .func_name_to_idx
-                .get(&format!("{spec}.{callee_name}"))
-                .copied()
-        {
-            return Some(idx);
+    /// Resolves a free-function bare name to its WASM function index,
+    /// preferring the spec-mangled key when inside a spec scope.
+    fn resolve_free_callee_idx(&self, callee_name: &str) -> Option<u32> {
+        if let Some(spec) = self.current_spec.as_deref() {
+            let key = FnKey::spec_free(spec, callee_name);
+            if let Some(idx) = self.func_name_to_idx.get(&key).copied() {
+                return Some(idx);
+            }
         }
-        self.func_name_to_idx.get(callee_name).copied()
+        self.func_name_to_idx.get(&FnKey::free(callee_name)).copied()
     }
 
-    /// Returns `true` if `callee_name` resolves to a function with sret
-    /// (array or struct) return, accounting for the current spec scope.
-    fn callee_is_sret(&self, callee_name: &str) -> bool {
+    /// Resolves a callee `FnKey` directly to its WASM function index. Used
+    /// when the key has already been determined (method calls).
+    fn resolve_idx_by_key(&self, key: &FnKey) -> Option<u32> {
+        self.func_name_to_idx.get(key).copied()
+    }
+
+    /// Returns `true` if a free-function bare name resolves to a function
+    /// with sret (array or struct) return, accounting for the current spec
+    /// scope.
+    fn is_sret_free(&self, callee_name: &str) -> bool {
         if let Some(spec) = self.current_spec.as_deref() {
-            let key = format!("{spec}.{callee_name}");
+            let key = FnKey::spec_free(spec, callee_name);
             if self.func_array_returns.contains_key(&key)
                 || self.func_struct_returns.contains_key(&key)
             {
                 return true;
             }
         }
-        self.func_array_returns.contains_key(callee_name)
-            || self.func_struct_returns.contains_key(callee_name)
+        let bare = FnKey::free(callee_name);
+        self.func_array_returns.contains_key(&bare)
+            || self.func_struct_returns.contains_key(&bare)
+    }
+
+    /// Returns `true` if a [`FnKey`] resolves to a function with sret
+    /// (array or struct) return.
+    fn is_sret_by_key(&self, key: &FnKey) -> bool {
+        self.func_array_returns.contains_key(key)
+            || self.func_struct_returns.contains_key(key)
+    }
+
+    /// Resolves a callee for either case in [`ResolvedCallee`]: free
+    /// functions take the spec-aware free-name path, methods look up by
+    /// the already-determined [`FnKey`].
+    fn resolve_callee(&self, resolved: &ResolvedCallee) -> Option<u32> {
+        match resolved {
+            ResolvedCallee::Function(name) => self.resolve_free_callee_idx(name),
+            ResolvedCallee::AssociatedFunction { key, .. }
+            | ResolvedCallee::InstanceMethod { key, .. } => self.resolve_idx_by_key(key),
+        }
+    }
+
+    /// Returns `true` if a [`ResolvedCallee`] resolves to an sret function.
+    fn callee_is_sret(&self, resolved: &ResolvedCallee) -> bool {
+        match resolved {
+            ResolvedCallee::Function(name) => self.is_sret_free(name),
+            ResolvedCallee::AssociatedFunction { key, .. }
+            | ResolvedCallee::InstanceMethod { key, .. } => self.is_sret_by_key(key),
+        }
     }
 
     /// Resolves the mangled WASM function name for an instance method call.
@@ -2000,13 +2127,13 @@ impl Compiler {
     /// `(Some(spec), struct, method)` is tried first; otherwise the top-level
     /// `(None, struct, method)` key is used. Returns `None` if the receiver has
     /// no type info or the method is not registered.
-    fn resolve_method_mangled_name(
+    fn resolve_method_fn_key(
         &self,
         arena: &AstArena,
         receiver_expr_id: ExprId,
         method_name_id: IdentId,
         ctx: &TypedContext,
-    ) -> Option<String> {
+    ) -> Option<FnKey> {
         let method_name = &arena[method_name_id].name;
         let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
         let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
@@ -2014,14 +2141,15 @@ impl Compiler {
         else {
             return None;
         };
-        self.lookup_method_mangled_name(struct_name, method_name)
+        self.lookup_method_fn_key(struct_name, method_name)
     }
 
     /// Performs the spec-aware lookup against `method_mangled_names`,
-    /// preferring the current spec scope when one is active.
-    fn lookup_method_mangled_name(&self, struct_name: &str, method_name: &str) -> Option<String> {
+    /// preferring the current spec scope when one is active. Returns the
+    /// [`FnKey`] under which the method was registered.
+    fn lookup_method_fn_key(&self, struct_name: &str, method_name: &str) -> Option<FnKey> {
         if let Some(spec) = self.current_spec.as_deref()
-            && let Some(name) = self
+            && let Some(key) = self
                 .method_mangled_names
                 .get(&(
                     Some(spec.to_string()),
@@ -2030,7 +2158,7 @@ impl Compiler {
                 ))
                 .cloned()
         {
-            return Some(name);
+            return Some(key);
         }
         self.method_mangled_names
             .get(&(None, struct_name.to_string(), method_name.to_string()))
@@ -2060,8 +2188,8 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_instance_method_call);
 
-        let mangled_name = self
-            .resolve_method_mangled_name(arena, receiver_expr_id, method_name_id, ctx)
+        let fn_key = self
+            .resolve_method_fn_key(arena, receiver_expr_id, method_name_id, ctx)
             .unwrap_or_else(|| {
                 let method_name = &arena[method_name_id].name;
                 panic!(
@@ -2070,17 +2198,17 @@ impl Compiler {
                 )
             });
 
-        let is_sret = self.callee_is_sret(&mangled_name);
+        let is_sret = self.is_sret_by_key(&fn_key);
 
-        let func_idx = self.resolve_callee_idx(&mangled_name).unwrap_or_else(|| {
-            panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+        let func_idx = self.resolve_idx_by_key(&fn_key).unwrap_or_else(|| {
+            panic!("Method '{fn_key}' not found in func_name_to_idx")
         });
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_instance_method_sret);
             let sret_idx = sret_local.unwrap_or_else(|| {
                 panic!(
-                    "Instance method call to compound-returning method '{mangled_name}' \
+                    "Instance method call to compound-returning method '{fn_key}' \
                      in expression position without sret destination. \
                      Compound-returning calls are only supported in variable initialization \
                      and return positions."
@@ -2121,15 +2249,15 @@ impl Compiler {
     /// spec-aware lookup against `method_mangled_names` as
     /// [`Self::resolve_method_mangled_name`]. Returns `None` if the type name
     /// cannot be extracted or the method is not registered in either scope.
-    fn resolve_associated_mangled_name(
+    fn resolve_associated_fn_key(
         &self,
         arena: &AstArena,
         type_expr_id: ExprId,
         method_name_id: IdentId,
-    ) -> Option<String> {
+    ) -> Option<FnKey> {
         let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
         let method_name = &arena[method_name_id].name;
-        self.lookup_method_mangled_name(&type_name, method_name)
+        self.lookup_method_fn_key(&type_name, method_name)
     }
 
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
@@ -2155,8 +2283,8 @@ impl Compiler {
     ) {
         cov_mark::hit!(wasm_codegen_emit_associated_function_call);
 
-        let mangled_name = self
-            .resolve_associated_mangled_name(arena, type_expr_id, method_name_id)
+        let fn_key = self
+            .resolve_associated_fn_key(arena, type_expr_id, method_name_id)
             .unwrap_or_else(|| {
                 let method_name = &arena[method_name_id].name;
                 panic!(
@@ -2165,17 +2293,17 @@ impl Compiler {
                 )
             });
 
-        let is_sret = self.callee_is_sret(&mangled_name);
+        let is_sret = self.is_sret_by_key(&fn_key);
 
-        let func_idx = self.resolve_callee_idx(&mangled_name).unwrap_or_else(|| {
-            panic!("Mangled method name '{mangled_name}' not found in func_name_to_idx")
+        let func_idx = self.resolve_idx_by_key(&fn_key).unwrap_or_else(|| {
+            panic!("Method '{fn_key}' not found in func_name_to_idx")
         });
 
         if is_sret {
             cov_mark::hit!(wasm_codegen_emit_associated_function_sret);
             let sret_idx = sret_local.unwrap_or_else(|| {
                 panic!(
-                    "Associated function call to compound-returning method '{mangled_name}' \
+                    "Associated function call to compound-returning method '{fn_key}' \
                      in expression position without sret destination. \
                      Compound-returning calls are only supported in variable initialization \
                      and return positions."
@@ -2272,14 +2400,10 @@ impl Compiler {
         sret_idx: u32,
         ctx: &TypedContext,
     ) -> Result<(), CodegenError> {
-        // sret metadata for spec-inner functions/methods is keyed by the
-        // mangled `"<spec>.<fn>"` form, so prefer that when we're inside a
-        // spec scope.
-        let self_key: String = if let Some(spec) = self.current_spec.as_deref() {
-            format!("{spec}.{}", self.current_fn_name)
-        } else {
-            self.current_fn_name.clone()
-        };
+        // sret metadata uses the structured `current_fn_key` so spec-inner
+        // and top-level functions / methods with identical bare names look
+        // up to the right metadata without any per-call string rebuilding.
+        let self_key = self.current_fn_key.clone();
         if let Some(return_info) = self.func_array_returns.get(&self_key).cloned() {
             self.lower_array_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
         } else if let Some(return_info) = self.func_struct_returns.get(&self_key).cloned() {
@@ -2433,7 +2557,6 @@ impl Compiler {
             .resolve_function_callee(arena, function, ctx)
             .ok_or(CodegenError::UnsupportedSretReturnExpression)?;
 
-        let callee_name = resolved.callee_name().to_owned();
         let receiver_expr = match &resolved {
             ResolvedCallee::InstanceMethod {
                 receiver_expr_id, ..
@@ -2441,7 +2564,7 @@ impl Compiler {
             _ => None,
         };
 
-        if self.callee_is_sret(&callee_name) {
+        if self.callee_is_sret(&resolved) {
             self.func().instruction(&Instruction::LocalGet(sret_idx));
 
             if let Some(receiver) = receiver_expr {
@@ -2452,7 +2575,7 @@ impl Compiler {
                 self.lower_expression(arena, *arg_expr_id, ctx, None);
             }
             let func_idx = self
-                .resolve_callee_idx(&callee_name)
+                .resolve_callee(&resolved)
                 .expect("Forwarded sret callee must be in func_name_to_idx");
             self.func().instruction(&Instruction::Call(func_idx));
         } else {
@@ -4043,48 +4166,74 @@ mod tests {
         (result, bytes.len())
     }
 
-    /// On normal exit, the guard resets `current_spec` to `None`.
+    /// On normal exit, the guard restores the previous `current_spec`.
     #[test]
-    fn spec_scope_guard_resets_on_normal_exit() {
+    fn spec_scope_guard_restores_on_normal_exit() {
         let mut compiler = Compiler::new("test");
-        compiler.current_spec = Some("Stale".to_string());
+        compiler.current_spec = Some("Outer".to_string());
         {
             let _guard = SpecScopeGuard::enter(&mut compiler, Some("Active".to_string()));
         }
-        assert!(
-            compiler.current_spec.is_none(),
-            "guard must reset current_spec on drop; got {:?}",
+        assert_eq!(
+            compiler.current_spec.as_deref(),
+            Some("Outer"),
+            "guard must restore previous current_spec on drop; got {:?}",
             compiler.current_spec
         );
     }
 
-    /// On panic-induced unwind, the guard's `Drop` still fires and resets
+    /// On panic-induced unwind, the guard's `Drop` still fires and restores
     /// `current_spec`. This is the load-bearing case: it proves the field
     /// can't leak past the function boundary even on early `?` propagation
     /// (the drop semantics are identical).
     #[test]
-    fn spec_scope_guard_resets_on_unwind() {
+    fn spec_scope_guard_restores_on_unwind() {
         let mut compiler = Compiler::new("test");
+        compiler.current_spec = Some("Outer".to_string());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = SpecScopeGuard::enter(&mut compiler, Some("Active".to_string()));
             panic!("simulated failure inside guarded scope");
         }));
         assert!(result.is_err(), "panic must propagate out of catch_unwind");
-        assert!(
-            compiler.current_spec.is_none(),
-            "guard must reset current_spec on unwind; got {:?}",
+        assert_eq!(
+            compiler.current_spec.as_deref(),
+            Some("Outer"),
+            "guard must restore previous current_spec on unwind; got {:?}",
             compiler.current_spec
         );
     }
 
     /// The guard sets `current_spec` to the spec passed at entry, so the
-    /// body of a guarded scope observes the new value before drop.
+    /// body of a guarded scope observes the new value before drop. If the
+    /// pre-entry value was `None`, drop restores `None`.
     #[test]
     fn spec_scope_guard_sets_field_on_entry() {
         let mut compiler = Compiler::new("test");
         let mut guard = SpecScopeGuard::enter(&mut compiler, Some("MySpec".to_string()));
         assert_eq!(guard.current_spec.as_deref(), Some("MySpec"));
         drop(guard);
+        assert!(compiler.current_spec.is_none());
+    }
+
+    /// Nested guards must compose: the inner guard's drop restores the
+    /// outer guard's spec, not `None`. Without save/restore semantics this
+    /// test fails (the inner drop would clear the outer's value).
+    #[test]
+    fn spec_scope_guard_nested_restores_outer() {
+        let mut compiler = Compiler::new("test");
+        {
+            let mut outer = SpecScopeGuard::enter(&mut compiler, Some("Outer".to_string()));
+            assert_eq!(outer.current_spec.as_deref(), Some("Outer"));
+            {
+                let inner = SpecScopeGuard::enter(&mut outer, Some("Inner".to_string()));
+                assert_eq!(inner.current_spec.as_deref(), Some("Inner"));
+            }
+            assert_eq!(
+                outer.current_spec.as_deref(),
+                Some("Outer"),
+                "inner guard drop must restore outer's spec"
+            );
+        }
         assert!(compiler.current_spec.is_none());
     }
 }

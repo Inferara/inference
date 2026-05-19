@@ -77,6 +77,13 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
+/// `module_name` is written into the WASM module-name subsection and flows
+/// downstream to the Rocq translator, which uses it as the top-level module
+/// identifier. The CLI derives this from the input file stem; library
+/// callers can pass any [`validate_rocq_identifier`]-compatible name.
+///
+/// [`validate_rocq_identifier`]: inference_wasm_to_v_translator::validate_rocq_identifier
+///
 /// # Errors
 ///
 /// Returns an error if:
@@ -88,6 +95,7 @@ pub fn codegen(
     target: Target,
     mode: CompilationMode,
     opt_level: OptLevel,
+    module_name: &str,
 ) -> anyhow::Result<CodegenOutput> {
     if mode == CompilationMode::Proof && !target.supports_proof_mode() {
         cov_mark::hit!(wasm_codegen_proof_mode_rejected_non_wasm32);
@@ -117,14 +125,13 @@ pub fn codegen(
         }
     }
 
-    let module_name = "output";
     let mut compiler = Compiler::new(module_name);
 
     if typed_context.source_files().len() > 1 {
         todo!("Multi-file support not yet implemented");
     }
 
-    if typed_context.source_files().len() != 0 {
+    if typed_context.source_files().len() > 0 {
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
@@ -133,6 +140,11 @@ pub fn codegen(
     // `take_spec_func_indices_by_spec()` then drains the map for
     // `CodegenOutput`. Swapping the order would emit a missing/empty section.
     let wasm = compiler.finish();
+    debug_assert!(
+        mode != CompilationMode::Compile
+            || compiler.spec_func_indices_by_spec_is_empty(),
+        "compile mode must not record any spec function indices"
+    );
     let spec_func_indices_by_spec = compiler.take_spec_func_indices_by_spec();
     let has_main = compiler.has_main();
 
@@ -165,7 +177,7 @@ fn traverse_t_ast_with_compiler(
 ) -> Result<(), CodegenError> {
     let arena = typed_context.arena();
     for source_file in typed_context.source_files() {
-        let buckets = collect_emittable_functions(arena, &source_file.defs, mode);
+        let buckets = collect_emittable_functions(arena, &source_file.defs, mode)?;
 
         // Register every visited spec (even with zero emittable inner defs) so
         // user-authored `spec MySpec { }` still surfaces a per-spec entry that
@@ -227,10 +239,10 @@ fn register_function_indices(
     typed_context: &TypedContext,
     buckets: &EmittableFunctions,
 ) -> Result<(), CodegenError> {
-    #[allow(clippy::cast_possible_truncation)]
-    let toplevel_count = buckets.funcs.len() as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let method_count = buckets.methods.len() as u32;
+    let toplevel_count =
+        u32::try_from(buckets.funcs.len()).expect("more than u32::MAX top-level functions");
+    let method_count =
+        u32::try_from(buckets.methods.len()).expect("more than u32::MAX top-level methods");
 
     compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, 0)?;
     let method_base_idx = compiler.func_idx_after_toplevel(toplevel_count);
@@ -261,8 +273,9 @@ fn register_function_indices(
         compiler.record_spec_index(spec_name, *assigned_idx);
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    let spec_method_base = spec_func_base + spec_func_indices.len() as u32;
+    let spec_func_indices_len = u32::try_from(spec_func_indices.len())
+        .expect("more than u32::MAX spec-inner functions");
+    let spec_method_base = spec_func_base + spec_func_indices_len;
     let spec_method_indices = compiler.build_method_name_to_idx_with_spec_names(
         arena,
         &buckets.spec_methods,
@@ -330,7 +343,7 @@ fn collect_emittable_functions(
     arena: &AstArena,
     defs: &[DefId],
     mode: CompilationMode,
-) -> EmittableFunctions {
+) -> Result<EmittableFunctions, CodegenError> {
     let mut buckets = EmittableFunctions {
         funcs: Vec::new(),
         methods: Vec::new(),
@@ -370,6 +383,12 @@ fn collect_emittable_functions(
                                 ));
                             }
                         }
+                        Def::Spec { name: inner_name, .. } => {
+                            return Err(CodegenError::NestedSpecsNotSupported {
+                                outer_spec: spec_name,
+                                inner_spec: arena[*inner_name].name.clone(),
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -378,5 +397,5 @@ fn collect_emittable_functions(
         }
     }
 
-    buckets
+    Ok(buckets)
 }
