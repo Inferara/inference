@@ -21,6 +21,10 @@
 
 The contract between the generated `.wasm` binary, the per-spec function index map carried alongside (or embedded as the `inference.spec_funcs` custom section), and the Rocq predicates the generated `.v` file depends on is documented in [`core/wasm-to-v/ROCQ_CONTRACT.md`](../core/wasm-to-v/ROCQ_CONTRACT.md).
 
+### Selecting a mode at the CLI
+
+Pass `--mode {compile,proof}` to either CLI: `infs build path/to/file.inf --mode proof` or `infc path/to/file.inf --mode proof`. Equivalently, `infc -v` (emit Rocq) implies `--mode proof` unless `--mode compile` is also passed; mirror-rule: `--mode proof` implies `-v`. Without either flag, the default is compile mode.
+
 | Property | Value | Rationale |
 |----------|-------|-----------|
 | Spec function optimization | `-O0` + `optnone` + `noinline` | 1:1 structural correspondence for Rocq translation |

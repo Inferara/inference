@@ -14,27 +14,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `spec_func_indices_by_spec()`. Library embedders of `core/inference` must
   update both the constructor argument and the getter call site. Migration:
   replace `Vec::new()` with `FxHashMap::default()` and
-  `.spec_func_indices()` with `.spec_func_indices_by_spec()` ([#21])
+  `.spec_func_indices()` with `.spec_func_indices_by_spec()` ([issue#21])
 - `inference::wasm_to_v` / `inference_wasm_to_v_translator::wasm_parser::translate_bytes`:
   third parameter changed from `spec_func_indices: &[u32]` to
   `spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>`. Callers must pass an
   `FxHashMap` (use `FxHashMap::default()` for the empty case). Same `_by_spec`
   rename rationale: symmetric with the `CodegenOutput` getter shape and avoids
-  an extra transformation at the API boundary ([#21])
+  an extra transformation at the API boundary ([issue#21])
 - Rocq output: `ValidModule` arity changed from 2 → 1 (no longer takes a specs
   list); the new `ValidSpec : module -> list N -> Prop` predicate carries the
   per-spec proof obligation. Downstream Rocq libraries must define `ValidSpec`
   and update existing `ValidModule` consumers. Theorem names also changed:
   `valid_<mod>` is now 1-arg, and per-spec theorems take the form
   `valid_<mod>__<SpecName>` (double underscore, with explicit collision
-  rationale documented in `core/wasm-to-v/ROCQ_CONTRACT.md`) ([#17], [#21])
+  rationale documented in `core/wasm-to-v/ROCQ_CONTRACT.md`) ([issue#17], [issue#21])
 - Lower `assert(<bool>)` to a WASM trap-on-false (previously panicked codegen) ([#195])
   - Emits `<cond>; i32.eqz; if (empty); unreachable; end` — the smallest correct shape, and one that `wasm-to-v` already maps to `BI_unreachable` for proof-mode translation
   - Asserts are emitted in both `Compile` and `Proof` modes (Stmt-level, not Def-level); no `CompilationMode` branching
   - Soroban target accepts asserts — `Unreachable` is baseline WASM, not a 0xfc non-det opcode
   - New golden fixture `tests/test_data/codegen/wasm/base/assert/` exercises literal, variable, nested-in-if, loop+break, double-assert, bool param, unary `!`, `&&`, `||`, `==`, compound `(a > 0) && ((b < 10) || (c == 0))`, and bool-local scenarios, with wasmtime execution coverage that distinguishes pass paths from `Trap::UnreachableCodeReached` paths
-- WASM custom section name for the per-spec function index map is now `inference.spec_funcs` (vendor-prefixed namespace). External tools previously looking for `metadata.code.inference.spec_funcs` must update. The latter was a misuse of the WebAssembly tool-conventions reserved namespace ([CodeMetadata.md](https://github.com/WebAssembly/tool-conventions/blob/main/CodeMetadata.md)) ([#16])
-- `inference.spec_funcs` custom section payload now starts with a `varuint32` version byte (`1` for current format). Consumers should reject unsupported versions. This is a wire-format change — anyone parsing the section directly must update; the in-tree parser handles it transparently. ([#16])
+- WASM custom section name for the per-spec function index map is now `inference.spec_funcs` (vendor-prefixed namespace). External tools previously looking for `metadata.code.inference.spec_funcs` must update. The latter was a misuse of the WebAssembly tool-conventions reserved namespace ([CodeMetadata.md](https://github.com/WebAssembly/tool-conventions/blob/main/CodeMetadata.md)) ([issue#16])
+- `inference.spec_funcs` custom section payload now starts with a `varuint32` version byte (`1` for current format). Consumers should reject unsupported versions. This is a wire-format change — anyone parsing the section directly must update; the in-tree parser handles it transparently. ([issue#16])
 
 ### Language
 
@@ -66,27 +66,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Codegen
 
-- `FunctionOrigin { TopLevel, SpecInner }` enum threaded through `visit_function_definition`. Spec-inner functions can no longer be WASM-exported even when `pub`, closing a latent footgun for the upcoming `export` keyword ([#19])
-- Per-spec function-index map (`spec_func_indices_by_spec : FxHashMap<String, Vec<u32>>`) replaces the prior single union list. Internal `build_func_name_to_idx` keys spec-inner functions as `"<SpecName>.<fn>"` so two specs may share function names; WASM `name` section emission stays unmangled ([#21])
-- Emit `inference.spec_funcs` WASM custom section in `proof` mode carrying the per-spec index map. Bare `.wasm` binaries are now self-describing; the Rocq translator can recover the map without an out-of-band `CodegenOutput`. The section name uses the vendor-prefixed `inference.*` namespace rather than the `metadata.code.*` namespace reserved by the WebAssembly tool-conventions repo. Section is omitted in `compile` mode so binaries stay byte-identical ([#16])
-- `wasm-to-v` crate: new `errors.rs` with `WasmToVError` thiserror enum (`InvalidRocqIdentifier`, `RocqStdlibShadow`, `EmbeddedSpecMismatch`, `WasmParse`) and `InvalidIdentifierReason` sub-enum, closing the CLAUDE.md compliance gap that left this crate without an `errors.rs` ([#20])
-- `wasm-to-v` crate: `validate_rocq_identifier` helper rejects Rocq-illegal module/spec names (non-alphabetic leading char, invalid chars, length > 255, stdlib shadow, reserved vernacular/Gallina keyword) before they reach `Definition <name>` emission. Called at the top of `translate_bytes` and again per spec name in `translate()` ([#20])
-- `wasm-to-v` translator: per-spec Rocq emission. Each entry in `spec_funcs_by_spec` produces one `Definition <mod>__<SpecName>_specs : list N` and one `Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs.`. Empty per-spec lists render as `(@nil N)` so they type-check regardless of scope state at the consumer site ([#21], [#22])
+- `FunctionOrigin { TopLevel, SpecInner }` enum threaded through `visit_function_definition`. Spec-inner functions can no longer be WASM-exported even when `pub`, closing a latent footgun for the upcoming `export` keyword ([issue#19])
+- Per-spec function-index map (`spec_func_indices_by_spec : FxHashMap<String, Vec<u32>>`) replaces the prior single union list. Internal `build_func_name_to_idx` keys spec-inner functions as `"<SpecName>.<fn>"` so two specs may share function names; WASM `name` section emission stays unmangled ([issue#21])
+- Emit `inference.spec_funcs` WASM custom section in `proof` mode carrying the per-spec index map. Bare `.wasm` binaries are now self-describing; the Rocq translator can recover the map without an out-of-band `CodegenOutput`. The section name uses the vendor-prefixed `inference.*` namespace rather than the `metadata.code.*` namespace reserved by the WebAssembly tool-conventions repo. Section is omitted in `compile` mode so binaries stay byte-identical ([issue#16])
+- `wasm-to-v` crate: new `errors.rs` with `WasmToVError` thiserror enum (`InvalidRocqIdentifier`, `RocqStdlibShadow`, `EmbeddedSpecMismatch`, `WasmParse`) and `InvalidIdentifierReason` sub-enum, closing the CLAUDE.md compliance gap that left this crate without an `errors.rs` ([issue#20])
+- `wasm-to-v` crate: `validate_rocq_identifier` helper rejects Rocq-illegal module/spec names (non-alphabetic leading char, invalid chars, length > 255, stdlib shadow, reserved vernacular/Gallina keyword) before they reach `Definition <name>` emission. Called at the top of `translate_bytes` and again per spec name in `translate()` ([issue#20])
+- `wasm-to-v` translator: per-spec Rocq emission. Each entry in `spec_funcs_by_spec` produces one `Definition <mod>__<SpecName>_specs : list N` and one `Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs.`. Empty per-spec lists render as `(@nil N)` so they type-check regardless of scope state at the consumer site ([issue#21], [issue#22])
 - Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
   - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
   - Rewrite `compiler.rs` to generate WASM binary directly in-process
   - Non-deterministic instructions emitted as custom opcodes via `Function::raw()` byte sequences
   - Custom opcodes in 0xfc prefix space: uzumaki (0x31/0x32), forall (0x3a), exists (0x3b), assume (0x3c), unique (0x3d)
   - Reactor model: all `pub` functions exported individually, no `_start` entry point
-- Add compilation architecture with `CodegenOutput` boundary ([#97], [#125])
+- Add compilation architecture with `CodegenOutput` boundary ([issue#97], [#125])
   - `codegen()` returns `CodegenOutput` (WASM bytes + metadata)
   - `CodegenOutput` carries WASM binary, target, mode, opt level, module name, and `has_main` flag
   - New `Target` (Wasm32/Soroban), `CompilationMode` (Compile/Proof), and `OptLevel` (O0–O3/Os/Oz) enums
-- Add per-function optimization strategy for proof mode (Decision #32) ([#97])
+- Add per-function optimization strategy for proof mode (Decision #32) ([issue#97])
   - Spec functions compiled unoptimized to preserve structural correspondence with source for Rocq translation
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
-- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([issue#97])
 - Upgrade shadowing detection from `debug_assert!` to `assert!` in `pre_scan_locals` — fires in release builds for parameter, constant, and variable name collisions in `locals_map`
 - Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies are pre-registered before instruction emission
 - Add loop and break statement lowering to WebAssembly codegen ([#152])
@@ -210,7 +210,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Type-checker propagates declared type into numeric literal initializers for sub-i32 types
   - Refactor `ConstantDefinition` lowering to share `lower_literal` helper with `VariableDefinition` (~130 lines removed)
   - Remove dead `is_uzumaki: bool` field from `VariableDefinitionStatement` AST node
-- Empty per-spec lists now emit `(@nil N)` instead of `[]%N` so the generated `Definition` type-checks regardless of whether `Open Scope N_scope` is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` literally must update ([#21], [#22])
 - Add LLVM-based WASM code generation using `inf-llc` ([#44])
 - Add custom LLVM intrinsics for non-deterministic instructions ([#44])
 - Implement `forall`, `exists`, `uzumaki`, `assume`, `unique` block codegen ([#44])
@@ -254,28 +253,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
-- `infc -v` (and `infs build -v`) now implies `--mode proof` when no explicit `--mode` is passed. Users wanting the prior behavior (V output from compile-mode WASM, stripped specs) can pass `--mode compile -v` explicitly. Closes a UX trap where `-v` alone produced a near-useless empty-specs `.v` file.
-- `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([#22])
-- `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([#20])
+- `infc -v` (and `infs build -v`) now implies `--mode proof` when no explicit `--mode` is passed. Users wanting the prior behavior (V output from compile-mode WASM, stripped specs) can pass `--mode compile -v` explicitly. Closes a UX trap where `-v` alone produced a near-useless empty-specs `.v` file. ([issue#22])
+- `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([issue#22])
+- `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([issue#20])
 - Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])
   - `infc example.inf` equivalent to `infc example.inf --codegen -o`
   - `infc example.inf -v` produces both `out/example.wasm` and `out/example.v`
   - Supplying `--parse`, `--analyze`, or `--codegen` still overrides the default
   - Matches conventional compiler UX (e.g. `gcc foo.c`)
-- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([#97])
+- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([issue#97])
 - Remove external toolchain dependencies: no `inf-llc`, `rust-lld`, or platform-specific library paths required ([#125])
-- Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([#97])
+- Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([issue#97])
 - Refactor CLI architecture with improved argument handling ([#28])
 
 ### Rocq Translation
 
+- WASM module-name subsection now reflects the CLI-supplied input file stem instead of the hardcoded `"output"`. The Rocq translator reads this back, so the emitted `Definition <mod>__<Spec>_specs` and `Theorem valid_<mod>` identifiers now use the source filename. Multi-module workflows that previously collided on a single `output` identifier now produce distinct ones
+- Empty per-spec lists now emit `(@nil N)` instead of `[]%N` so the generated `Definition` type-checks regardless of whether `Open Scope N_scope` is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` literally must update ([issue#21], [issue#22])
 - Rewrite WASM-to-V translator for WasmCertCoq theory syntax ([#23])
 - Add function name propagation to V output ([#24])
 
 ### Documentation
 
-- New `core/wasm-to-v/ROCQ_CONTRACT.md` documenting the external Rocq predicates the generator depends on (`ValidModule` 1-arg, new `ValidSpec`), the emitted proof-skeleton shape, and the spec-map precedence rules (explicit vs embedded) ([#17])
-- Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
+- New `core/wasm-to-v/ROCQ_CONTRACT.md` documenting the external Rocq predicates the generator depends on (`ValidModule` 1-arg, new `ValidSpec`), the emitted proof-skeleton shape, and the spec-map precedence rules (explicit vs embedded) ([issue#17])
+- Add compilation targets matrix documentation (`book/compilation_targets.md`) ([issue#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
 - Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
 - Add arithmetic overflow in WASM codegen deep-dive (`book/arithmetic-overflow-in-wasm-codegen.md`) ([#146])
@@ -286,10 +287,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Type Checker
 
+- Spec-inner functions whose bare name shadows a top-level function are now rejected (`SpecFunctionShadowsTopLevel`). Codegen's spec-aware call resolution and the type checker's nearest-binding rule disagreed silently on which callee was invoked from inside a spec; the rejection forces the user to rename one side
 - Same-named structs or enums across spec blocks are now rejected at registration time (previously silently used the first-registered layout). Cross-spec mangling of struct/enum identity would require carrying spec context through every type access (field projection, sret layouts, method dispatch); rejecting at registration avoids that blast radius and surfaces a clear `RegistrationFailed` diagnostic. Functions remain mangleable across specs (`"<Spec>.<fn>"`) as before
-- Spec blocks now open a real symbol-table scope via `enter_spec`, parallel to `enter_module`. Spec-inner functions, structs, enums, type aliases, and constants live in a dedicated scope keyed by spec name, so two specs may declare same-named members without colliding ([#18])
-- `flatten_defs_with_spec_inner` removed. The three phases that used it (`register_types`, `collect_function_and_constant_definitions`, and the body-inference loop) recurse into `Def::Spec` inline, opening the spec scope around the inner work ([#18])
-- `TypedContext::lookup_struct` and `lookup_enum` now search across **all** scopes (`lookup_struct_anywhere` / `lookup_enum_anywhere`) so post-type-check phases (analysis, codegen) can resolve spec-inner types they walk into. Internal scope-local lookups inside the type checker are unchanged ([#18])
+- Spec blocks now open a real symbol-table scope via `enter_spec`, parallel to `enter_module`. Spec-inner functions, structs, enums, type aliases, and constants live in a dedicated scope keyed by spec name, so two specs may declare same-named members without colliding ([issue#18])
+- `flatten_defs_with_spec_inner` removed. The three phases that used it (`register_types`, `collect_function_and_constant_definitions`, and the body-inference loop) recurse into `Def::Spec` inline, opening the spec scope around the inner work ([issue#18])
+- `TypedContext::lookup_struct` and `lookup_enum` now search across **all** scopes (`lookup_struct_anywhere` / `lookup_enum_anywhere`) so post-type-check phases (analysis, codegen) can resolve spec-inner types they walk into. Internal scope-local lookups inside the type checker are unchanged ([issue#18])
 - Add `resolve_custom_type()` to `SymbolTable` to fix `Custom` vs `Struct`/`Enum` type resolution mismatch ([#148])
   - Resolves `TypeInfoKind::Custom(name)` to `Struct(name)` or `Enum(name)` at function registration time
   - Recurses into array element types (handles `[MyStruct; 3]`)
@@ -457,12 +459,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Migrate codegen test data to per-test subdirectory layout ([pr#135])
   - `tests/test_data/codegen/wasm/base/{name}/{name}.{inf,wasm}` replaces flat `base/{name}.{inf,wasm}`
   - `get_test_file_path` / `get_test_wasm_path` helpers updated to resolve through subdirectory
-- Add 28 codegen tests with three-tier verification architecture ([#97], [#125])
+- Add 28 codegen tests with three-tier verification architecture ([issue#97], [#125])
   - Byte comparison tests against committed `.wasm` reference files
   - `inf_wasmparser::validate()` validation on all generated output
   - 2 Wasmtime execution tests verifying runtime behavior
   - Validation tests for metadata, target/mode combinations, non-det opcode presence
-- Add codegen test helpers ([#97], [#125])
+- Add codegen test helpers ([issue#97], [#125])
   - `codegen_output()`, `codegen_output_with_mode()`, `codegen_with_target_mode()`, `codegen_with_full_config()`
   - `wasm_codegen()`, `wasm_codegen_with_target()`, `assert_wasms_modules_equivalence()`
 - Expand `infs` test coverage from 282 to 429 tests (360 unit + 69 integration) ([#96])
@@ -657,7 +659,7 @@ Initial tagged release.
 [#86]: https://github.com/Inferara/inference/pull/86
 [#94]: https://github.com/Inferara/inference/pull/94
 [#96]: https://github.com/Inferara/inference/pull/96
-[#97]: https://github.com/Inferara/inference/issues/97
+[issue#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
 [#126]: https://github.com/Inferara/inference/pull/126
@@ -678,10 +680,10 @@ Initial tagged release.
 [pr#187]: https://github.com/Inferara/inference/pull/187
 [#188]: https://github.com/Inferara/inference/pull/188
 [#195]: https://github.com/Inferara/inference/pull/195
-[#16]: https://github.com/Inferara/inference/issues/16
-[#17]: https://github.com/Inferara/inference/issues/17
-[#18]: https://github.com/Inferara/inference/issues/18
-[#19]: https://github.com/Inferara/inference/issues/19
-[#20]: https://github.com/Inferara/inference/issues/20
-[#21]: https://github.com/Inferara/inference/issues/21
-[#22]: https://github.com/Inferara/inference/issues/22
+[issue#16]: https://github.com/Inferara/inference/issues/16
+[issue#17]: https://github.com/Inferara/inference/issues/17
+[issue#18]: https://github.com/Inferara/inference/issues/18
+[issue#19]: https://github.com/Inferara/inference/issues/19
+[issue#20]: https://github.com/Inferara/inference/issues/20
+[issue#21]: https://github.com/Inferara/inference/issues/21
+[issue#22]: https://github.com/Inferara/inference/issues/22

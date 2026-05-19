@@ -410,7 +410,7 @@ This crate has minimal dependencies to keep the build fast and secure:
 
 - **anyhow** (`workspace`): Error handling with context propagation
 - **inf-wasmparser** (`workspace`): Fork of `wasmparser` with Inference non-deterministic instruction support
-- **inference-wasm-codegen** (`workspace`): Re-exports the `SPEC_FUNCS_SECTION_NAME` wire-format constant so the encoder (this crate's sibling) and the decoder (here) share one source of truth
+- **inference-wasm-codegen** (`workspace`): Source of the `SPEC_FUNCS_SECTION_NAME` and `SPEC_FUNCS_SECTION_VERSION` wire-format constants; this crate consumes them at the decode boundary so encoder and decoder share one source of truth
 - **rustc-hash** (`workspace`): `FxHashMap` for the `spec_funcs_by_spec` API type
 - **thiserror** (`workspace`): Derive macro for the `WasmToVError` enum in `errors.rs`
 - **uuid** (`1.10.0`): Unique identifier generation for Rocq definitions (features: `v4`, `fast-rng`, `macro-diagnostics`)
