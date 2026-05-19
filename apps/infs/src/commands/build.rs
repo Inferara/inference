@@ -102,19 +102,15 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
         cmd.arg("-v");
     }
 
-    // Mirror the infc rule: an explicit `--mode` is forwarded as-is; otherwise
-    // `-v` alone forwards `--mode proof` so specs survive into the `.v`.
-    match args.mode {
-        Some(BuildMode::Proof) => {
-            cmd.arg("--mode").arg("proof");
-        }
-        Some(BuildMode::Compile) => {
-            cmd.arg("--mode").arg("compile");
-        }
-        None if args.generate_v_output => {
-            cmd.arg("--mode").arg("proof");
-        }
-        None => {}
+    // Forward only what the user explicitly passed. `infc::normalize_args`
+    // owns the `-v` ↔ `--mode proof` implication; mirroring it here would
+    // create a second source of truth that could silently drift.
+    if let Some(mode) = args.mode {
+        let flag = match mode {
+            BuildMode::Proof => "proof",
+            BuildMode::Compile => "compile",
+        };
+        cmd.arg("--mode").arg(flag);
     }
 
     let status = cmd

@@ -172,6 +172,18 @@ use toolchain::BuildProfile;
 ///
 /// After this function, `args.mode` is always `Some(..)`.
 pub(crate) fn normalize_args(args: &mut Cli) {
+    // Detect explicit proof-mode combined with a non-codegen phase BEFORE the
+    // default-normalization runs, so we can warn that the .v output will not
+    // be produced. The warning is purely informational; exit code is unchanged.
+    if matches!(args.mode, Some(CliMode::Proof))
+        && (args.parse || args.analyze)
+        && !args.codegen
+    {
+        let flag = if args.parse { "--parse" } else { "--analyze" };
+        eprintln!(
+            "warning: --mode proof is ignored when {flag} is set; no .v will be written"
+        );
+    }
     if !args.parse && !args.analyze && !args.codegen {
         args.codegen = true;
         args.generate_wasm_output = true;
@@ -255,6 +267,28 @@ fn eprint_translation_error(e: &anyhow::Error) {
                 );
                 return;
             }
+            WasmToVError::WasmParse(msg) => {
+                eprintln!(
+                    "error: malformed WebAssembly binary: {msg}\n\n  \
+                     The WASM input could not be parsed. If this binary was \
+                     produced by `infc`, please file a bug. If it came from \
+                     another source, the file may be corrupted or use an \
+                     unsupported extension."
+                );
+                return;
+            }
+            WasmToVError::UnsupportedFeature { description } => {
+                eprintln!(
+                    "error: this WebAssembly module uses a feature not yet \
+                     supported by the Rocq translator: {description}\n\n  \
+                     The codegen pipeline emits a subset of WASM that the \
+                     translator recognises today; binaries from other toolchains \
+                     may include features that have not yet been wired through."
+                );
+                return;
+            }
+            // WasmToVError is #[non_exhaustive]; the wildcard handles future
+            // variants by falling through to the generic message below.
             _ => {}
         }
     }
