@@ -135,18 +135,15 @@ pub fn codegen(
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
-    // Order is load-bearing. `finish()` borrows `spec_func_indices_by_spec`
-    // (it takes `&self`) to emit the `inference.spec_funcs` custom section;
-    // `take_spec_func_indices_by_spec()` then drains the map for
-    // `CodegenOutput`. Swapping the order would emit a missing/empty section.
-    let wasm = compiler.finish();
+    // Snapshot `has_main` before `finish_and_take` consumes the compiler:
+    // the section is emitted in a single pass that moves out the recorded
+    // spec map alongside the WASM bytes.
+    let has_main = compiler.has_main();
+    let (wasm, spec_func_indices_by_spec) = compiler.finish_and_take();
     debug_assert!(
-        mode != CompilationMode::Compile
-            || compiler.spec_func_indices_by_spec_is_empty(),
+        mode != CompilationMode::Compile || spec_func_indices_by_spec.is_empty(),
         "compile mode must not record any spec function indices"
     );
-    let spec_func_indices_by_spec = compiler.take_spec_func_indices_by_spec();
-    let has_main = compiler.has_main();
 
     Ok(CodegenOutput::new(
         wasm,

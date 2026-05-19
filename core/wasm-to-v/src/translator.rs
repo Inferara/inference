@@ -170,7 +170,6 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::errors::WasmToVError;
-use crate::rocq_names::validate_rocq_identifier;
 
 const LCB: &str = "{|\n";
 const RCB_DOT: &str = "|}.\n";
@@ -314,13 +313,11 @@ impl WasmParseData<'_> {
     /// - Unimplemented instruction opcodes
     #[allow(clippy::too_many_lines)]
     pub(crate) fn translate(&mut self) -> anyhow::Result<String /* WasmModuleParseError*/> {
-        // Validate every spec name up-front so we fail fast instead of
-        // building ~200 lines of `.v` output and then discarding them when
-        // the per-spec emission loop later rejects an identifier.
-        for spec_name in self.spec_funcs_by_spec.keys() {
-            validate_rocq_identifier(spec_name)?;
-        }
-
+        // Spec names reaching this point have already been validated either at
+        // the public-API boundary (`wasm_parser::translate_bytes` validates the
+        // caller-supplied map) or at the decode boundary
+        // (`wasm_parser::decode_spec_funcs_section` validates embedded names).
+        // No third re-validation here.
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");

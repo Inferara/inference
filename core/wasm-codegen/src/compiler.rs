@@ -97,8 +97,8 @@ pub(crate) enum FunctionOrigin {
     SpecInner(String),
 }
 
-/// Structured key for `func_name_to_idx`, `func_array_returns`,
-/// `func_struct_returns`, and `method_mangled_names` values.
+/// Structured key for `func_name_to_idx`, `func_array_returns`, and
+/// `func_struct_returns` values.
 ///
 /// The four variants partition the WASM function namespace so that
 /// `Method { struct_name: "Foo", name: "bar" }` cannot textually collide
@@ -370,18 +370,15 @@ pub(crate) struct Compiler {
     func_array_returns: FxHashMap<FnKey, ArrayReturnInfo>,
     /// Maps function keys to their struct return type metadata.
     func_struct_returns: FxHashMap<FnKey, StructReturnInfo>,
-    /// Maps `(spec_name, type_name, method_name)` to the registered `FnKey`.
-    /// `spec_name` is `None` for top-level methods. The value is the exact key
-    /// used in [`Self::func_name_to_idx`] so call-site resolution is a single
-    /// hash lookup with no string re-mangling.
-    method_mangled_names: FxHashMap<(Option<String>, String, String), FnKey>,
     /// Name of the function currently being compiled (display form, used for
     /// diagnostics). The lookup-shaped companion is [`Self::current_fn_key`].
     current_fn_name: String,
-    /// Structured key for the function currently being compiled. Used as the
-    /// lookup key for sret return-emission so we don't have to recompute the
-    /// variant from `current_spec` + `current_fn_name` at every call site.
-    current_fn_key: FnKey,
+    /// Structured key for the function currently being compiled. Set to
+    /// `Some(_)` while entering [`Self::visit_function_definition`] and used
+    /// as the lookup key for sret return-emission so we don't have to
+    /// recompute the variant from `current_spec` + `current_fn_name` at every
+    /// call site.
+    current_fn_key: Option<FnKey>,
     /// Name of the spec that owns the function currently being compiled, if
     /// any. Set by `visit_function_definition` for spec-inner functions and
     /// methods so that intra-spec call resolution can prefer the mangled
@@ -400,12 +397,10 @@ pub(crate) struct Compiler {
     init_zero_elision: bool,
     /// WASM function indices for functions that originated in `spec` blocks,
     /// keyed by spec name. Populated during Stage 1 registration in proof mode;
-    /// consumed by `CodegenOutput` so the Rocq translator can emit per-spec
-    /// `Definition <mod>__<SpecName>_specs : list N` definitions.
+    /// consumed (moved out) by [`Self::finish_and_take`] so the Rocq translator
+    /// can emit per-spec `Definition <mod>__<SpecName>_specs : list N`
+    /// definitions.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
-    /// Set when [`Self::take_spec_func_indices_by_spec`] has been called.
-    /// Guards against drainage-then-second-call returning silently empty.
-    spec_indices_taken: bool,
 }
 
 impl Compiler {
@@ -425,9 +420,8 @@ impl Compiler {
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
-            method_mangled_names: FxHashMap::default(),
             current_fn_name: String::new(),
-            current_fn_key: FnKey::free(""),
+            current_fn_key: None,
             current_spec: None,
             func: None,
             locals_map: FxHashMap::default(),
@@ -436,33 +430,7 @@ impl Compiler {
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
-            spec_indices_taken: false,
         }
-    }
-
-    /// Defensive accessor: returns `true` if no spec function indices have
-    /// been recorded. Used by the codegen entry to debug-assert compile-mode
-    /// byte identity without committing to any specific drainage order.
-    pub(crate) fn spec_func_indices_by_spec_is_empty(&self) -> bool {
-        self.spec_func_indices_by_spec.is_empty()
-    }
-
-    /// Removes and returns the recorded spec function indices grouped by spec name.
-    ///
-    /// Called once after all function registration/lowering is complete so that
-    /// downstream consumers (currently `CodegenOutput`) can store them. A
-    /// second call in the same compile is a programming error: the underlying
-    /// `mem::take` would silently return an empty map. The debug-assert traps
-    /// the misuse in tests; release builds still return the empty map.
-    pub(crate) fn take_spec_func_indices_by_spec(
-        &mut self,
-    ) -> FxHashMap<String, Vec<u32>> {
-        debug_assert!(
-            !self.spec_indices_taken,
-            "take_spec_func_indices_by_spec called more than once"
-        );
-        self.spec_indices_taken = true;
-        std::mem::take(&mut self.spec_func_indices_by_spec)
     }
 
     /// Records a single WASM function index as belonging to `spec_name`.
@@ -653,8 +621,6 @@ impl Compiler {
             );
             self.func_name_to_idx
                 .insert(key.clone(), base_idx + i as u32);
-            self.method_mangled_names
-                .insert((None, struct_name.clone(), method_name), key.clone());
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
@@ -692,10 +658,6 @@ impl Compiler {
             let assigned_idx = base_idx + i as u32;
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
-            self.method_mangled_names.insert(
-                (Some(spec_name.clone()), struct_name.clone(), method_name),
-                key.clone(),
-            );
 
             if let Def::Function { returns, .. } = &arena[*def_id].kind
                 && let Some(return_ty_id) = returns
@@ -809,7 +771,7 @@ impl Compiler {
             raw_name
         };
         self.current_fn_name.clone_from(&fn_name);
-        self.current_fn_key = current_fn_key.clone();
+        self.current_fn_key = Some(current_fn_key.clone());
 
         let is_array_return = self.func_array_returns.contains_key(&current_fn_key);
         let is_struct_return = self.func_struct_returns.contains_key(&current_fn_key);
@@ -2119,14 +2081,14 @@ impl Compiler {
         }
     }
 
-    /// Resolves the mangled WASM function name for an instance method call.
+    /// Resolves the registered [`FnKey`] for an instance method call.
     ///
     /// Given the receiver expression and method name, determines the receiver's struct type
-    /// from the type context and looks up the corresponding mangled name in `method_mangled_names`.
-    /// When the call site lives inside a spec scope, the spec-scoped key
-    /// `(Some(spec), struct, method)` is tried first; otherwise the top-level
-    /// `(None, struct, method)` key is used. Returns `None` if the receiver has
-    /// no type info or the method is not registered.
+    /// from the type context and probes [`Self::func_name_to_idx`] via
+    /// [`Self::lookup_method_fn_key`]. When the call site lives inside a spec
+    /// scope, the `FnKey::SpecMethod` candidate is tried first; otherwise the
+    /// top-level `FnKey::Method` candidate is used. Returns `None` if the
+    /// receiver has no type info or the method is not registered.
     fn resolve_method_fn_key(
         &self,
         arena: &AstArena,
@@ -2144,25 +2106,31 @@ impl Compiler {
         self.lookup_method_fn_key(struct_name, method_name)
     }
 
-    /// Performs the spec-aware lookup against `method_mangled_names`,
-    /// preferring the current spec scope when one is active. Returns the
-    /// [`FnKey`] under which the method was registered.
+    /// Spec-aware method lookup. Constructs the candidate [`FnKey`] directly
+    /// (the value `FnKey` already encodes the (spec, struct, method) triple
+    /// that used to live in a separate `method_mangled_names` lookup map) and
+    /// probes [`Self::func_name_to_idx`] for it. When a spec is active, the
+    /// `SpecMethod` candidate is tried first so an intra-spec method call
+    /// resolves to the spec-inner registration; otherwise — or on miss — the
+    /// top-level `Method` candidate is tried.
     fn lookup_method_fn_key(&self, struct_name: &str, method_name: &str) -> Option<FnKey> {
-        if let Some(spec) = self.current_spec.as_deref()
-            && let Some(key) = self
-                .method_mangled_names
-                .get(&(
-                    Some(spec.to_string()),
-                    struct_name.to_string(),
-                    method_name.to_string(),
-                ))
-                .cloned()
-        {
-            return Some(key);
+        if let Some(spec) = self.current_spec.as_deref() {
+            let candidate = FnKey::SpecMethod {
+                spec: spec.to_string(),
+                struct_name: struct_name.to_string(),
+                name: method_name.to_string(),
+            };
+            if self.func_name_to_idx.contains_key(&candidate) {
+                return Some(candidate);
+            }
         }
-        self.method_mangled_names
-            .get(&(None, struct_name.to_string(), method_name.to_string()))
-            .cloned()
+        let candidate = FnKey::Method {
+            struct_name: struct_name.to_string(),
+            name: method_name.to_string(),
+        };
+        self.func_name_to_idx
+            .contains_key(&candidate)
+            .then_some(candidate)
     }
 
     /// Lowers an instance method call (`receiver.method(args)`) to WASM instructions.
@@ -2243,12 +2211,12 @@ impl Compiler {
         }
     }
 
-    /// Resolves the mangled WASM function name for an associated function call (`Type::method()`).
+    /// Resolves the registered [`FnKey`] for an associated function call (`Type::method()`).
     ///
     /// Extracts the type name from the expression, then performs the same
-    /// spec-aware lookup against `method_mangled_names` as
-    /// [`Self::resolve_method_mangled_name`]. Returns `None` if the type name
-    /// cannot be extracted or the method is not registered in either scope.
+    /// spec-aware [`FnKey`] candidate probe as [`Self::lookup_method_fn_key`].
+    /// Returns `None` if the type name cannot be extracted or the method is
+    /// not registered in either scope.
     fn resolve_associated_fn_key(
         &self,
         arena: &AstArena,
@@ -2263,8 +2231,8 @@ impl Compiler {
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
     ///
     /// Associated functions have no `self` parameter. The callee is resolved via
-    /// the type name and method name, looked up in `method_mangled_names`, and
-    /// called with only the user-provided arguments.
+    /// the type name and method name, probed against [`Self::func_name_to_idx`],
+    /// and called with only the user-provided arguments.
     ///
     /// When the method returns a compound type (struct or array), the sret calling
     /// convention is used. If `sret_local` is `Some(local_idx)`, the local at that
@@ -2403,7 +2371,13 @@ impl Compiler {
         // sret metadata uses the structured `current_fn_key` so spec-inner
         // and top-level functions / methods with identical bare names look
         // up to the right metadata without any per-call string rebuilding.
-        let self_key = self.current_fn_key.clone();
+        // `current_fn_key` is set at the top of `visit_function_definition`
+        // and this method is only reachable from inside that body — so
+        // `Option::expect` here documents the invariant without runtime cost.
+        let self_key = self
+            .current_fn_key
+            .clone()
+            .expect("lower_sret_return called outside `visit_function_definition`");
         if let Some(return_info) = self.func_array_returns.get(&self_key).cloned() {
             self.lower_array_sret_return(arena, return_expr_id, sret_idx, ctx, &return_info)
         } else if let Some(return_info) = self.func_struct_returns.get(&self_key).cloned() {
@@ -3922,8 +3896,14 @@ impl Compiler {
         self.has_memory = true;
     }
 
-    /// Assembles the complete WASM binary from accumulated sections.
-    pub(crate) fn finish(&self) -> Vec<u8> {
+    /// Assembles the complete WASM binary from accumulated sections AND
+    /// returns the recorded spec function indices alongside it.
+    ///
+    /// Consumes `self` so the recorded spec map is moved out exactly once;
+    /// there is no separate drain step and no flag to track. The custom
+    /// `inference.spec_funcs` section is emitted from `self.spec_func_indices_by_spec`
+    /// before the move.
+    pub(crate) fn finish_and_take(self) -> (Vec<u8>, FxHashMap<String, Vec<u32>>) {
         let mut module = Module::new();
 
         let mut type_section = TypeSection::new();
@@ -4016,7 +3996,7 @@ impl Compiler {
             module.section(&spec_section);
         }
 
-        module.finish()
+        (module.finish(), self.spec_func_indices_by_spec)
     }
 }
 
@@ -4064,7 +4044,7 @@ mod tests {
     #[test]
     fn finish_without_memory_omits_memory_section() {
         let compiler = Compiler::new("test");
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         assert!(!wasm.is_empty());
         assert!(!has_memory_section(&wasm));
     }
@@ -4074,7 +4054,7 @@ mod tests {
         cov_mark::check!(wasm_codegen_emit_memory_section);
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         assert!(has_memory_section(&wasm));
     }
 
@@ -4082,7 +4062,7 @@ mod tests {
     fn finish_with_memory_validates_via_wasmparser() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("Generated WASM with memory is invalid: {e}"));
     }
@@ -4091,7 +4071,7 @@ mod tests {
     fn finish_with_memory_exports_memory_and_stack_pointer() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -4108,7 +4088,7 @@ mod tests {
     fn finish_with_memory_has_correct_stack_pointer_init() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -4121,7 +4101,7 @@ mod tests {
     fn finish_with_memory_has_mutable_global() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let wasm = compiler.finish();
+        let (wasm, _spec_map) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -4209,7 +4189,7 @@ mod tests {
     #[test]
     fn spec_scope_guard_sets_field_on_entry() {
         let mut compiler = Compiler::new("test");
-        let mut guard = SpecScopeGuard::enter(&mut compiler, Some("MySpec".to_string()));
+        let guard = SpecScopeGuard::enter(&mut compiler, Some("MySpec".to_string()));
         assert_eq!(guard.current_spec.as_deref(), Some("MySpec"));
         drop(guard);
         assert!(compiler.current_spec.is_none());

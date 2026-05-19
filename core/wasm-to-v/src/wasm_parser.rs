@@ -163,7 +163,15 @@ pub fn translate_bytes(
     bytes: &[u8],
     spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
 ) -> anyhow::Result<String> {
+    // API-boundary validation: every name we accept here is checked once,
+    // up front. Names that come from the embedded `inference.spec_funcs`
+    // section are validated separately at the decode boundary
+    // (`decode_spec_funcs_section`), so the per-spec loop inside
+    // `WasmParseData::translate` is no longer needed.
     validate_rocq_identifier(mod_name)?;
+    for spec_name in spec_funcs_by_spec.keys() {
+        validate_rocq_identifier(spec_name)?;
+    }
 
     match parse(mod_name.to_string(), bytes, spec_funcs_by_spec.clone()) {
         Ok(mut parse_data) => parse_data.translate(),
