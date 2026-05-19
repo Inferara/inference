@@ -107,6 +107,75 @@ mod scenario_1_type_checker_scoping {
             result.err()
         );
     }
+
+    /// Two specs declaring a struct with the same bare name must be rejected
+    /// at type-check time. Cross-spec type mangling is not implemented: every
+    /// struct access (field projection, sret layout, method dispatch) would
+    /// have to carry spec context, a much wider change than the function-name
+    /// mangling. Rejecting at registration surfaces a clear diagnostic
+    /// (`error registering struct \`Foo\``) instead of the previous silent
+    /// behavior where the first-registered spec's struct layout was
+    /// transparently substituted for the second.
+    #[test]
+    fn same_named_struct_across_two_specs_is_rejected() {
+        let source = r#"spec A { struct Foo { x: i32; } } spec B { struct Foo { y: i32; } }"#;
+        let arena = build_ast(source.to_string());
+        let result = TypeCheckerBuilder::build_typed_context(arena);
+        assert!(
+            result.is_err(),
+            "same-named struct across specs must be rejected"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("error registering struct `Foo`"),
+            "error must identify the colliding struct: {msg}"
+        );
+        assert!(
+            msg.contains("duplicate definition across spec scopes is not supported"),
+            "error must cite the cross-spec collision reason: {msg}"
+        );
+    }
+
+    /// Same-named enums across two specs are rejected for the same reason as
+    /// structs: the codegen layout (tag indices, variant ordering) would have
+    /// to be disambiguated by spec context, which is not implemented.
+    #[test]
+    fn same_named_enum_across_two_specs_is_rejected() {
+        let source = r#"spec A { enum E { V } } spec B { enum E { W } }"#;
+        let arena = build_ast(source.to_string());
+        let result = TypeCheckerBuilder::build_typed_context(arena);
+        assert!(
+            result.is_err(),
+            "same-named enum across specs must be rejected"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("error registering enum `E`"),
+            "error must identify the colliding enum: {msg}"
+        );
+    }
+
+    /// A top-level struct and a spec-inner struct with the same name are
+    /// rejected: the top-level struct sits in the root scope, which is the
+    /// parent of every spec scope, so a bare-name reference inside the spec
+    /// would resolve to the top-level layout. Allowing both registrations
+    /// would let later phases (codegen, analysis) pick whichever happens to
+    /// be looked up first via `lookup_struct_anywhere`.
+    #[test]
+    fn same_named_struct_top_level_and_spec_is_rejected() {
+        let source = r#"struct Foo { x: i32; } spec A { struct Foo { y: i32; } }"#;
+        let arena = build_ast(source.to_string());
+        let result = TypeCheckerBuilder::build_typed_context(arena);
+        assert!(
+            result.is_err(),
+            "same-named struct top-level + spec must be rejected"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("error registering struct `Foo`"),
+            "error must identify the colliding struct: {msg}"
+        );
+    }
 }
 
 // ============================================================================

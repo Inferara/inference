@@ -325,6 +325,9 @@ impl TypeChecker {
                 let inner: Vec<DefId> = defs.clone();
                 let _ = self.symbol_table.enter_spec(&spec_name);
                 for inner_id in inner {
+                    if self.reject_duplicate_spec_struct_or_enum(inner_id, ctx) {
+                        continue;
+                    }
                     self.register_type_for_def(inner_id, ctx);
                 }
                 self.symbol_table.pop_scope();
@@ -333,6 +336,61 @@ impl TypeChecker {
             | Def::Function { .. }
             | Def::ExternFunction { .. }
             | Def::Module { .. } => {}
+        }
+    }
+
+    /// Rejects a spec-inner `struct` or `enum` whose name collides with one
+    /// already registered in any other scope (the top-level/root scope, or a
+    /// previously-registered spec scope). Returns `true` when the def was
+    /// rejected so the caller skips the recursive registration.
+    ///
+    /// Cross-spec mangling of structs/enums would require carrying spec
+    /// context through every type access (field projection, sret layouts,
+    /// method dispatch). Rejecting at registration time avoids that blast
+    /// radius and surfaces a clear diagnostic instead of the previous silent
+    /// behavior where the first-registered layout was used for both specs.
+    fn reject_duplicate_spec_struct_or_enum(
+        &mut self,
+        def_id: DefId,
+        ctx: &TypedContext,
+    ) -> bool {
+        let arena = ctx.arena();
+        let def_data = &arena[def_id];
+        let location = def_data.location;
+        match &def_data.kind {
+            Def::Struct { name, .. } => {
+                let struct_name = arena[*name].name.clone();
+                if self.symbol_table.lookup_struct_anywhere(&struct_name).is_some() {
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Struct,
+                        name: struct_name,
+                        reason: Some(
+                            "duplicate definition across spec scopes is not supported"
+                                .to_string(),
+                        ),
+                        location,
+                    });
+                    return true;
+                }
+                false
+            }
+            Def::Enum { name, .. } => {
+                let enum_name = arena[*name].name.clone();
+                if self.symbol_table.lookup_enum_anywhere(&enum_name).is_some() {
+                    self.errors.push(TypeCheckError::RegistrationFailed {
+                        kind: RegistrationKind::Enum,
+                        name: enum_name,
+                        reason: Some(
+                            "duplicate definition across spec scopes is not supported"
+                                .to_string(),
+                        ),
+                        location,
+                    });
+                    return true;
+                }
+                false
+            }
+            _ => false,
         }
     }
 

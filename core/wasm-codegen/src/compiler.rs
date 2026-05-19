@@ -97,6 +97,48 @@ pub(crate) enum FunctionOrigin {
     SpecInner(String),
 }
 
+/// RAII guard that resets `Compiler::current_spec` to `None` on drop.
+///
+/// Wraps a `&mut Compiler` so that even when the function visit returns
+/// early via `?` (e.g. `compute_frame_layout` failing), the spec context
+/// cannot leak past the function boundary. The compiler is discarded on
+/// codegen error today, but the guard makes the invariant local rather
+/// than relying on every fallible call site to mirror the trailing reset.
+///
+/// `Deref`/`DerefMut` forward to the wrapped compiler so the guard is used
+/// in place of `&mut self` for the duration of the visit. This avoids the
+/// borrow conflict that arises from a slot-shaped guard
+/// (`&mut self.current_spec`) coexisting with `self.<method>()` calls.
+struct SpecScopeGuard<'a> {
+    compiler: &'a mut Compiler,
+}
+
+impl<'a> SpecScopeGuard<'a> {
+    fn enter(compiler: &'a mut Compiler, spec: Option<String>) -> Self {
+        compiler.current_spec = spec;
+        Self { compiler }
+    }
+}
+
+impl std::ops::Deref for SpecScopeGuard<'_> {
+    type Target = Compiler;
+    fn deref(&self) -> &Compiler {
+        self.compiler
+    }
+}
+
+impl std::ops::DerefMut for SpecScopeGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Compiler {
+        self.compiler
+    }
+}
+
+impl Drop for SpecScopeGuard<'_> {
+    fn drop(&mut self) {
+        self.compiler.current_spec = None;
+    }
+}
+
 // Custom opcode constants for non-deterministic operations.
 // Ground truth: tools/inf-wasmparser/src/binary_reader.rs lines 1372-1388.
 const OPCODE_PREFIX: u8 = 0xfc;
@@ -611,8 +653,31 @@ impl Compiler {
     }
 
     /// Translates an AST function definition to a WASM function body.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Wraps [`Self::visit_function_definition_body`] in a [`SpecScopeGuard`]
+    /// so that `current_spec` resets to `None` on every exit path, including
+    /// the `?` early return from `compute_frame_layout`. The guard wraps
+    /// `&mut self` and forwards via `Deref`/`DerefMut`, which avoids the
+    /// partial-borrow conflict that a `&mut self.current_spec` slot guard
+    /// would have with `self.<method>(...)` calls inside the body.
     pub(crate) fn visit_function_definition(
+        &mut self,
+        def_id: DefId,
+        arena: &AstArena,
+        ctx: &TypedContext,
+        method_struct_name: Option<&str>,
+        origin: &FunctionOrigin,
+    ) -> Result<(), CodegenError> {
+        let spec = match origin {
+            FunctionOrigin::SpecInner(name) => Some(name.clone()),
+            FunctionOrigin::TopLevel => None,
+        };
+        let mut guard = SpecScopeGuard::enter(self, spec);
+        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, origin)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn visit_function_definition_body(
         &mut self,
         def_id: DefId,
         arena: &AstArena,
@@ -641,13 +706,6 @@ impl Compiler {
             raw_name
         };
         self.current_fn_name.clone_from(&fn_name);
-
-        // Track which spec owns the function being compiled so call-site
-        // resolution can prefer mangled keys. Cleared on the way out.
-        self.current_spec = match origin {
-            FunctionOrigin::SpecInner(name) => Some(name.clone()),
-            FunctionOrigin::TopLevel => None,
-        };
 
         // sret metadata for spec-inner functions/methods lives under the
         // mangled key `"<spec>.<fn>"` / `"<spec>.<Struct>.<method>"`.
@@ -883,7 +941,7 @@ impl Compiler {
         self.locals_map.clear();
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
-        self.current_spec = None;
+        // `current_spec` is reset by `SpecScopeGuard` in the caller.
         self.func_idx += 1;
         Ok(())
     }
@@ -3983,5 +4041,50 @@ mod tests {
             shift += 7;
         }
         (result, bytes.len())
+    }
+
+    /// On normal exit, the guard resets `current_spec` to `None`.
+    #[test]
+    fn spec_scope_guard_resets_on_normal_exit() {
+        let mut compiler = Compiler::new("test");
+        compiler.current_spec = Some("Stale".to_string());
+        {
+            let _guard = SpecScopeGuard::enter(&mut compiler, Some("Active".to_string()));
+        }
+        assert!(
+            compiler.current_spec.is_none(),
+            "guard must reset current_spec on drop; got {:?}",
+            compiler.current_spec
+        );
+    }
+
+    /// On panic-induced unwind, the guard's `Drop` still fires and resets
+    /// `current_spec`. This is the load-bearing case: it proves the field
+    /// can't leak past the function boundary even on early `?` propagation
+    /// (the drop semantics are identical).
+    #[test]
+    fn spec_scope_guard_resets_on_unwind() {
+        let mut compiler = Compiler::new("test");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SpecScopeGuard::enter(&mut compiler, Some("Active".to_string()));
+            panic!("simulated failure inside guarded scope");
+        }));
+        assert!(result.is_err(), "panic must propagate out of catch_unwind");
+        assert!(
+            compiler.current_spec.is_none(),
+            "guard must reset current_spec on unwind; got {:?}",
+            compiler.current_spec
+        );
+    }
+
+    /// The guard sets `current_spec` to the spec passed at entry, so the
+    /// body of a guarded scope observes the new value before drop.
+    #[test]
+    fn spec_scope_guard_sets_field_on_entry() {
+        let mut compiler = Compiler::new("test");
+        let mut guard = SpecScopeGuard::enter(&mut compiler, Some("MySpec".to_string()));
+        assert_eq!(guard.current_spec.as_deref(), Some("MySpec"));
+        drop(guard);
+        assert!(compiler.current_spec.is_none());
     }
 }
