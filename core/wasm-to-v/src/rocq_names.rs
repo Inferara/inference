@@ -14,6 +14,11 @@ pub(crate) const REJECTED_ROCQ_STDLIB_NAMES: &[&str] = &[
     // Type-level
     "list", "option", "nat", "bool", "unit", "pair", "True", "False", "Prop", "Type", "Set", "eq",
     "not", "and", "or", "iff", "sum", "prod", "id",
+    // `Nat` is the auto-opened `Coq.Init.Nat` module providing `Nat.add`,
+    // `Nat.eqb`, etc. Emitting `Module Nat. ... End Nat.` from a source file
+    // named `nat.inf` or `Nat.inf` would shadow these across the whole
+    // generated proof, so we reject the capitalized form too.
+    "Nat",
     // Boolean and unit constructors
     "true", "false", "tt",
     // Peano nat constructors and basic arithmetic
@@ -95,9 +100,8 @@ pub(crate) const REJECTED_ROCQ_KEYWORDS: &[&str] = &[
 /// - Remaining characters are `[A-Za-z0-9_]`. Primes (`'`) are rejected.
 /// - Length ≤ 255.
 /// - Case-sensitive denylist against Rocq stdlib types and reserved
-///   vernacular/Gallina keywords. `Nat` (capitalized) is allowed even though
-///   the stdlib has both `Nat` and `nat`, because user code conventionally
-///   uses the capitalized form for module names.
+///   vernacular/Gallina keywords. Both `nat` (the type) and `Nat` (the
+///   auto-opened module providing `Nat.add`, `Nat.eqb`, etc.) are rejected.
 pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
     if name.is_empty() {
         return Err(WasmToVError::InvalidRocqIdentifier {
