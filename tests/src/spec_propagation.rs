@@ -63,34 +63,36 @@ mod scenario_1_type_checker_scoping {
     use crate::utils::build_ast;
     use inference_type_checker::TypeCheckerBuilder;
 
-    /// Top-level `fn foo()` and `spec S { fn foo() }` must compile without
-    /// `RegistrationFailed` — the spec scope must isolate same-named members.
+    /// A spec-inner function whose bare name matches a top-level function
+    /// is rejected: the codegen layer would prefer the spec-mangled lookup
+    /// while the type-checker would type the call against the closest
+    /// binding, so allowing the collision risks silent miscompilation.
+    /// Both sides must rename to disambiguate.
     #[test]
-    fn top_level_and_spec_inner_same_name_no_collision() {
+    fn spec_inner_function_shadowing_top_level_is_rejected() {
         let source =
             r#"fn foo() -> i32 { return 1; } spec S { fn foo() -> i32 { return 2; } }"#;
         let arena = build_ast(source.to_string());
         let result = TypeCheckerBuilder::build_typed_context(arena);
+        let err = result.err().expect("shadowing must be rejected");
+        let msg = err.to_string();
         assert!(
-            result.is_ok(),
-            "spec scoping should permit same-named top-level and spec-inner: {:?}",
-            result.err()
+            msg.contains("shadows a top-level function"),
+            "diagnostic should name the shadow rule: {msg}"
         );
     }
 
-    /// Bare-name call to `foo()` from a top-level function must resolve to the
-    /// top-level `foo`, not the spec-inner `foo`. (Cross-checked indirectly:
-    /// type-check succeeds because the top-level `foo` returns `i32` matching
-    /// the caller's return type, and the call site lookup walks the root scope
-    /// chain.)
+    /// Renaming one side of the collision removes the shadow and the source
+    /// type-checks. Documents the suggested remediation path from the
+    /// diagnostic produced by `spec_inner_function_shadowing_top_level_is_rejected`.
     #[test]
-    fn top_level_call_resolves_to_top_level_def() {
-        let source = r#"fn foo() -> i32 { return 1; } fn caller() -> i32 { return foo(); } spec S { fn foo() -> i32 { return 2; } }"#;
+    fn renaming_resolves_the_shadow() {
+        let source = r#"fn foo() -> i32 { return 1; } fn caller() -> i32 { return foo(); } spec S { fn spec_foo() -> i32 { return 2; } }"#;
         let arena = build_ast(source.to_string());
         let result = TypeCheckerBuilder::build_typed_context(arena);
         assert!(
             result.is_ok(),
-            "top-level caller should resolve `foo` to the top-level def: {:?}",
+            "renamed spec-inner fn must type-check: {:?}",
             result.err()
         );
     }
@@ -415,20 +417,19 @@ mod scenario_4_per_spec_emission {
     /// Intra-spec call resolution must also work when a top-level function of
     /// the same name exists. The call must resolve to the spec's own `helper`,
     /// not the top-level one. We can verify this by giving the two definitions
-    /// observably different return values and confirming that the wasmtime
-    /// export `top` (which calls the top-level `helper`) returns the top-level
-    /// value, while the spec's `caller` (whose index we read from the per-spec
-    /// map) calls the spec-inner `helper`. We can't invoke the spec-inner
-    /// `caller` from outside, but we can confirm codegen completed and the
-    /// module validates, which is the smoke that the previous bug burned on.
+    /// Spec-inner calls resolve via the spec-mangled key, and after H3 the
+    /// distinct names (`helper` / `inner`) eliminate the prior ambiguity. The
+    /// test confirms that codegen emits the call operand at the spec-inner
+    /// function's index, not the top-level function's index — a regression
+    /// in spec-aware lookup that pointed the operand at index 0 would not
+    /// surface in `top()` runtime checking.
     #[test]
-    fn intra_spec_call_does_not_shadow_top_level_same_name() {
+    fn intra_spec_call_resolves_to_spec_inner_definition() {
         // Spec is named `Sp` (not `S`) because the per-spec index map is
         // embedded into the WASM `inference.spec_funcs` section keyed by spec
         // name; `S` would collide with the Peano successor constructor that
-        // `validate_rocq_identifier` rejects. No `wasm_to_v` consumer reads
-        // this binary today, but renaming up-front removes a latent footgun.
-        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn helper() -> i32 { return 99; } fn caller() -> i32 { return helper(); } }"#;
+        // `validate_rocq_identifier` rejects.
+        let source = r#"fn helper() -> i32 { return 1; } pub fn top() -> i32 { return helper(); } spec Sp { fn inner() -> i32 { return 99; } fn caller() -> i32 { return inner(); } }"#;
         let output = compile(source, CompilationMode::Proof);
         let wasm = output.wasm();
         inf_wasmparser::validate(wasm).expect("WASM must validate");
@@ -443,9 +444,8 @@ mod scenario_4_per_spec_emission {
             "spec Sp should expose two inner-function indices; got {s_indices:?}"
         );
 
-        // Confirm at runtime that the top-level export `top` still resolves
-        // its bare `helper()` call to the top-level definition (returns 1),
-        // not the spec-inner one (returns 99).
+        // Confirm at runtime that the top-level export `top` returns the
+        // top-level `helper`'s value.
         use wasmtime::{Engine, Module, Store, TypedFunc};
         let engine = Engine::default();
         let module = Module::new(&engine, wasm).expect("module must instantiate");
@@ -456,24 +456,19 @@ mod scenario_4_per_spec_emission {
             .get_typed_func(&mut store, "top")
             .expect("top should be exported");
         let v = top.call(&mut store, ()).expect("top() call should succeed");
-        assert_eq!(
-            v, 1,
-            "top() must call the top-level `helper` (returns 1), not the spec-inner one (returns 99)"
-        );
+        assert_eq!(v, 1, "top() must call the top-level `helper` (returns 1)");
 
-        // Strengthen: the spec-inner `caller`'s body must contain a `Call`
-        // instruction whose operand is the spec-inner `helper`'s WASM index
-        // (the first of the two indices recorded for spec `Sp`). A regression
-        // in spec-aware lookup that mis-emitted the call operand to the
-        // top-level `helper` (index 0) would not surface in `top()` above.
-        let spec_helper_idx = s_indices[0];
+        // The spec-inner `caller`'s body must contain a `Call` instruction
+        // whose operand is the spec-inner `inner`'s WASM index (the first of
+        // the two indices recorded for spec `Sp`).
+        let spec_inner_idx = s_indices[0];
         let spec_caller_idx = s_indices[1];
         let call_target = read_first_call_operand_for_func(wasm, spec_caller_idx)
             .expect("spec-inner `caller` should contain a Call instruction");
         assert_eq!(
-            call_target, spec_helper_idx,
-            "spec-inner `caller` must call the spec-inner `helper` at idx {spec_helper_idx}, \
-             not the top-level `helper`; observed call operand: {call_target}"
+            call_target, spec_inner_idx,
+            "spec-inner `caller` must call the spec-inner `inner` at idx {spec_inner_idx}; \
+             observed call operand: {call_target}"
         );
     }
 

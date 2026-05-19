@@ -746,6 +746,16 @@ impl SymbolTable {
             .and_then(|symbol| symbol.as_function().cloned())
     }
 
+    /// Looks up a function by name in the root scope only, without walking
+    /// the parent chain. Used to detect spec-inner / top-level shadowing
+    /// independently of the current scope cursor.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_function_in_root(&self, name: &str) -> Option<FuncInfo> {
+        let root = self.scopes.get(&0)?;
+        let symbol = root.borrow().lookup_symbol_local(name).cloned()?;
+        symbol.as_function().cloned()
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
         self.current_scope

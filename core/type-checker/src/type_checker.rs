@@ -41,6 +41,43 @@ pub(crate) struct TypeChecker {
     current_type_params: Vec<String>,
 }
 
+/// RAII guard that enters a spec scope on construction and pops it on drop.
+///
+/// Wraps `&mut TypeChecker` and forwards `Deref`/`DerefMut` so the guard
+/// substitutes for `&mut self` throughout a spec-body recursive walk.
+/// Pop happens on every exit path, including panic unwind, removing the
+/// previous open-coded `enter_spec` / `pop_scope` pairs that had to be
+/// kept in lockstep at three call sites.
+struct SpecScopeGuard<'a> {
+    tc: &'a mut TypeChecker,
+}
+
+impl<'a> SpecScopeGuard<'a> {
+    fn enter(tc: &'a mut TypeChecker, spec_name: &str) -> Self {
+        let _ = tc.symbol_table.enter_spec(spec_name);
+        Self { tc }
+    }
+}
+
+impl std::ops::Deref for SpecScopeGuard<'_> {
+    type Target = TypeChecker;
+    fn deref(&self) -> &TypeChecker {
+        self.tc
+    }
+}
+
+impl std::ops::DerefMut for SpecScopeGuard<'_> {
+    fn deref_mut(&mut self) -> &mut TypeChecker {
+        self.tc
+    }
+}
+
+impl Drop for SpecScopeGuard<'_> {
+    fn drop(&mut self) {
+        self.tc.symbol_table.pop_scope();
+    }
+}
+
 impl TypeChecker {
     /// Load external modules from prelude before import resolution.
     ///
@@ -76,6 +113,7 @@ impl TypeChecker {
         self.register_types(ctx);
         self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
+        self.check_spec_function_shadows_top_level(ctx);
         // Continue to inference phase even if registration had errors
         // to collect all errors before returning
         let top_level_defs: Vec<DefId> = ctx
@@ -115,12 +153,11 @@ impl TypeChecker {
             }
             Def::Spec { name, defs, .. } => {
                 let spec_name = ctx.arena()[*name].name.clone();
-                let _ = self.symbol_table.enter_spec(&spec_name);
                 let inner: Vec<DefId> = defs.clone();
+                let mut guard = SpecScopeGuard::enter(self, &spec_name);
                 for inner_id in inner {
-                    self.infer_def(inner_id, ctx);
+                    guard.infer_def(inner_id, ctx);
                 }
-                self.symbol_table.pop_scope();
             }
             _ => {}
         }
@@ -323,14 +360,13 @@ impl TypeChecker {
                         });
                     });
                 let inner: Vec<DefId> = defs.clone();
-                let _ = self.symbol_table.enter_spec(&spec_name);
+                let mut guard = SpecScopeGuard::enter(self, &spec_name);
                 for inner_id in inner {
-                    if self.reject_duplicate_spec_struct_or_enum(inner_id, ctx) {
+                    if guard.reject_duplicate_spec_struct_or_enum(inner_id, ctx) {
                         continue;
                     }
-                    self.register_type_for_def(inner_id, ctx);
+                    guard.register_type_for_def(inner_id, ctx);
                 }
-                self.symbol_table.pop_scope();
             }
             Def::Constant { .. }
             | Def::Function { .. }
@@ -391,6 +427,55 @@ impl TypeChecker {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Rejects spec-inner functions whose bare name shadows a top-level
+    /// function of the same name. Runs after both phases have populated
+    /// the symbol table so the check is independent of source order.
+    ///
+    /// Without this check, codegen and the type-checker silently disagree on
+    /// which `foo` is invoked from inside a spec: the type checker types the
+    /// call against the closest binding while codegen prefers the spec-mangled
+    /// key. Banning the collision keeps both layers consistent.
+    fn check_spec_function_shadows_top_level(&mut self, ctx: &TypedContext) {
+        let arena = ctx.arena();
+        let source_files: Vec<_> = arena
+            .source_files()
+            .flat_map(|sf| sf.defs.iter().copied())
+            .collect();
+        for def_id in source_files {
+            let Def::Spec {
+                name: spec_name_id,
+                defs: inner_defs,
+                ..
+            } = &arena[def_id].kind
+            else {
+                continue;
+            };
+            let spec_name = arena[*spec_name_id].name.clone();
+            for &inner_id in inner_defs {
+                if let Def::Function {
+                    name: fn_name_id, ..
+                } = &arena[inner_id].kind
+                {
+                    let fn_name = arena[*fn_name_id].name.clone();
+                    if self
+                        .symbol_table
+                        .lookup_function_in_root(&fn_name)
+                        .is_some()
+                    {
+                        let key = format!("SpecFunctionShadowsTopLevel:{spec_name}:{fn_name}");
+                        if self.reported_error_keys.insert(key) {
+                            self.errors.push(TypeCheckError::SpecFunctionShadowsTopLevel {
+                                spec_name: spec_name.clone(),
+                                function_name: fn_name,
+                                location: arena[inner_id].location,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -647,11 +732,10 @@ impl TypeChecker {
             Def::Spec { name, defs, .. } => {
                 let spec_name = ctx.arena()[*name].name.clone();
                 let inner: Vec<DefId> = defs.clone();
-                let _ = self.symbol_table.enter_spec(&spec_name);
+                let mut guard = SpecScopeGuard::enter(self, &spec_name);
                 for inner_id in inner {
-                    self.collect_for_def(inner_id, ctx);
+                    guard.collect_for_def(inner_id, ctx);
                 }
-                self.symbol_table.pop_scope();
             }
             Def::Struct { .. }
             | Def::Enum { .. }
