@@ -1,0 +1,13 @@
+fn helper() -> i32 {
+  return 7;
+}
+
+pub fn main() -> i32 {
+  return helper();
+}
+
+spec Caller {
+  fn caller() -> i32 {
+    return helper();
+  }
+}

@@ -1,0 +1,16 @@
+pub fn main() -> i32 {
+  return 0;
+}
+
+spec Geometry {
+  struct Point {
+    x: i32;
+    y: i32;
+    fn sum_coords(self) -> i32 {
+      return self.x + self.y;
+    }
+    fn doubled_x(self) -> i32 {
+      return self.x + self.x;
+    }
+  }
+}
