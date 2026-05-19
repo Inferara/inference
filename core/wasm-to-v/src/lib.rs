@@ -173,6 +173,11 @@ pub mod wasm_parser;
 /// share a single source of truth for the wire-format constant.
 pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME;
 
+/// Wire-format version of the `inference.spec_funcs` payload. Re-exported
+/// from `inference_wasm_codegen` so the decoder and encoder agree on the
+/// expected leading varuint32.
+pub use inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION;
+
 #[cfg(test)]
 mod tests {
     use super::wasm_parser::translate_bytes;

@@ -708,8 +708,11 @@ mod scenario_6b_embedded_data_validation {
     }
 
     /// Builds a `inference.spec_funcs` payload with a single (name, []) entry.
+    /// The payload begins with the wire-format version varuint32 (currently 1);
+    /// without it the decoder rejects the section before any per-entry parsing.
     fn spec_funcs_payload_with_name(name: &str) -> Vec<u8> {
         let mut p = Vec::new();
+        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut p);
         encode_leb128_u32(1, &mut p); // count = 1
         let name_bytes = name.as_bytes();
         #[allow(clippy::cast_possible_truncation)]
@@ -796,14 +799,18 @@ mod scenario_6b_embedded_data_validation {
         );
     }
 
-    /// T3.a: a truncated LEB128 (single `0x80` byte for count) — continuation
-    /// bit set but no following byte — must surface as `WasmParse` with the
-    /// "truncated LEB128" defense string.
+    /// T3.a: a truncated LEB128 (single `0x80` byte for count following the
+    /// version varuint32) — continuation bit set but no following byte — must
+    /// surface as `WasmParse` with the "truncated LEB128" defense string. The
+    /// truncation is in the `count` varuint32, not in `version`, so the
+    /// version check passes first and the count read trips the EOF.
     #[test]
     fn embedded_spec_funcs_truncated_leb128_is_rejected() {
         let mut wasm = baseline_wasm();
-        // Payload is exactly one continuation byte.
-        let payload = vec![0x80u8];
+        // Payload: version=1, then a single continuation byte for count.
+        let mut payload = Vec::new();
+        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        payload.push(0x80u8);
         append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
@@ -828,8 +835,10 @@ mod scenario_6b_embedded_data_validation {
     #[test]
     fn embedded_spec_funcs_count_exceeds_payload_is_rejected() {
         let mut wasm = baseline_wasm();
-        // Payload: count = 100 (single-byte LEB128), then nothing else.
-        let payload = vec![100u8];
+        // Payload: version=1, count = 100 (single-byte LEB128), then nothing else.
+        let mut payload = Vec::new();
+        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        payload.push(100u8);
         append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
@@ -853,8 +862,10 @@ mod scenario_6b_embedded_data_validation {
     #[test]
     fn embedded_spec_funcs_invalid_utf8_in_name_is_rejected() {
         let mut wasm = baseline_wasm();
-        // Payload: count=1, name_len=2, bytes=0xff 0xfe, idx_count=0.
-        let payload = vec![0x01u8, 0x02u8, 0xffu8, 0xfeu8, 0x00u8];
+        // Payload: version=1, count=1, name_len=2, bytes=0xff 0xfe, idx_count=0.
+        let mut payload = Vec::new();
+        encode_leb128_u32(inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        payload.extend_from_slice(&[0x01u8, 0x02u8, 0xffu8, 0xfeu8, 0x00u8]);
         append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
@@ -867,6 +878,39 @@ mod scenario_6b_embedded_data_validation {
                 assert!(
                     s.contains("invalid UTF-8"),
                     "WasmParse must mention the UTF-8 defense; got: {s}"
+                );
+            }
+            other => panic!("expected WasmParse, got {other:?}"),
+        }
+    }
+
+    /// A `inference.spec_funcs` payload whose leading version varuint32 is
+    /// not the constant `SPEC_FUNCS_SECTION_VERSION` (currently 1) must be
+    /// rejected at the decode boundary, surfacing as `WasmToVError::WasmParse`
+    /// with a "version" defense string in the message. This is the bump-loud
+    /// guarantee: a future format revision will hit this exact branch on
+    /// today's parsers, rather than treating the next varuint32 as a count
+    /// and silently misparsing the rest of the payload.
+    #[test]
+    fn decode_spec_funcs_unsupported_version_is_rejected() {
+        let mut wasm = baseline_wasm();
+        // Payload: version=0x99 (unsupported), then a well-formed count=0.
+        // The version branch must trip before count is even read.
+        let mut payload = Vec::new();
+        encode_leb128_u32(0x99, &mut payload);
+        encode_leb128_u32(0, &mut payload);
+        append_custom_section(&mut wasm, inference_wasm_codegen::SPEC_FUNCS_SECTION_NAME, &payload);
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+            .expect_err("unsupported spec_funcs version must be rejected");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
+            err.downcast_ref();
+        match typed {
+            Some(inference_wasm_to_v_translator::errors::WasmToVError::WasmParse(s)) => {
+                assert!(
+                    s.contains("version"),
+                    "WasmParse must mention the version mismatch; got: {s}"
                 );
             }
             other => panic!("expected WasmParse, got {other:?}"),

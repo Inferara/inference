@@ -397,94 +397,96 @@ fn parse(
 ///
 /// Schema (LEB128 u32 throughout):
 /// ```text
+/// version
 /// count
 /// repeat count times:
 ///   spec_name_len   spec_name_bytes (utf-8)
 ///   indices_count   repeat indices_count times: func_idx
 /// ```
+///
+/// LEB128 reads and the length-prefixed UTF-8 spec-name read are delegated to
+/// `inf_wasmparser::BinaryReader`, which already enforces canonical LEB128
+/// encoding (overlong rejection, integer-too-large rejection) and UTF-8
+/// validation. Errors are mapped to `WasmToVError::WasmParse` so the existing
+/// downcast points in the CLI keep working.
 fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Vec<u32>>> {
-    let mut cursor = 0usize;
-    let count = read_leb128_u32(data, &mut cursor)?;
+    use inf_wasmparser::BinaryReader;
+
+    let mut reader = BinaryReader::new(data, 0);
+
+    let version = reader
+        .read_var_u32()
+        .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: truncated LEB128 in version: {e}"
+        ))))?;
+    if version != crate::SPEC_FUNCS_SECTION_VERSION {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "unsupported inference.spec_funcs version {version} (expected {})",
+            crate::SPEC_FUNCS_SECTION_VERSION
+        ))));
+    }
+
+    let count = reader
+        .read_var_u32()
+        .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: truncated LEB128 in count: {e}"
+        ))))?;
     // A malformed binary advertising `count = 0xFFFFFFFF` could trigger a
     // multi-gigabyte allocation if we trusted it. Each pair consumes at least
     // two bytes (one for the name-length LEB128, one for the indices-count
     // LEB128); bound the count by half the remaining payload size before
     // allocating.
-    let remaining = data.len().saturating_sub(cursor);
-    if count as usize > remaining / 2 {
+    if count as usize > reader.bytes_remaining() / 2 {
         return Err(anyhow::anyhow!(WasmToVError::WasmParse(
             "spec_funcs section: declared pair count exceeds remaining payload".into(),
         )));
     }
+
     let mut out: FxHashMap<String, Vec<u32>> = FxHashMap::default();
     for _ in 0..count {
-        let name_len = read_leb128_u32(data, &mut cursor)? as usize;
-        if cursor.checked_add(name_len).is_none_or(|end| end > data.len()) {
-            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
-                "spec_funcs section: name length exceeds remaining payload".into(),
-            )));
-        }
-        let name = std::str::from_utf8(&data[cursor..cursor + name_len])
-            .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
-                "spec_funcs section: invalid UTF-8 in spec name: {e}"
-            ))))?
+        let name = reader
+            .read_string()
+            .map_err(|e| {
+                // `read_string` reports "malformed UTF-8 encoding" for bad UTF-8
+                // and "unexpected end-of-file" for truncation. Surface a stable
+                // prefix that the existing downcast tests grep on.
+                let msg = e.to_string();
+                let prefix = if msg.contains("UTF-8") {
+                    "spec_funcs section: invalid UTF-8 in spec name"
+                } else {
+                    "spec_funcs section: truncated LEB128 or name body"
+                };
+                anyhow::anyhow!(WasmToVError::WasmParse(format!("{prefix}: {msg}")))
+            })?
             .to_string();
-        cursor += name_len;
         // Validate at the decode boundary so a hand-crafted binary cannot
         // smuggle an invalid Rocq identifier (empty name, `__`, reserved
         // keyword, stdlib shadow) past `translate()`'s per-spec check.
         validate_rocq_identifier(&name)?;
 
-        let idx_count = read_leb128_u32(data, &mut cursor)?;
+        let idx_count = reader
+            .read_var_u32()
+            .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "spec_funcs section: truncated LEB128 in indices count: {e}"
+            ))))?;
         // Same defense as for `count` above: each index consumes at least one
         // payload byte, so `idx_count` cannot legitimately exceed what's left.
-        let remaining = data.len().saturating_sub(cursor);
-        if idx_count as usize > remaining {
+        if idx_count as usize > reader.bytes_remaining() {
             return Err(anyhow::anyhow!(WasmToVError::WasmParse(
                 "spec_funcs section: declared index count exceeds remaining payload".into(),
             )));
         }
         let mut indices = Vec::with_capacity(idx_count as usize);
         for _ in 0..idx_count {
-            indices.push(read_leb128_u32(data, &mut cursor)?);
+            indices.push(
+                reader
+                    .read_var_u32()
+                    .map_err(|e| anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                        "spec_funcs section: truncated LEB128 in func index: {e}"
+                    ))))?,
+            );
         }
         out.insert(name, indices);
     }
     Ok(out)
-}
-
-/// Reads a canonical LEB128-encoded `u32`. The WebAssembly binary spec
-/// requires shortest-form encoding: a `u32` uses ≤ 5 bytes, the 5th byte (if
-/// present) must clear the continuation bit, and the 5th byte's high four
-/// bits must be zero (since 7×4 + 4 = 32 bits already consumed). Overlong
-/// encodings are rejected with the same error taxonomy as `wasmparser`.
-fn read_leb128_u32(data: &[u8], cursor: &mut usize) -> anyhow::Result<u32> {
-    let mut result: u32 = 0;
-    let mut shift: u32 = 0;
-    for byte_idx in 0..5 {
-        if *cursor >= data.len() {
-            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
-                "spec_funcs section: truncated LEB128".into(),
-            )));
-        }
-        let byte = data[*cursor];
-        *cursor += 1;
-        let chunk = u32::from(byte & 0x7f);
-        // The 5th byte (byte_idx == 4) caps `shift` at 28 and provides at most
-        // 4 useful bits. The top 4 bits must be zero, else the encoded value
-        // would overflow u32.
-        if byte_idx == 4 && byte & 0xf0 != 0 {
-            return Err(anyhow::anyhow!(WasmToVError::WasmParse(
-                "spec_funcs section: integer too large".into(),
-            )));
-        }
-        result |= chunk << shift;
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-    }
-    Err(anyhow::anyhow!(WasmToVError::WasmParse(
-        "spec_funcs section: integer representation too long".into(),
-    )))
 }

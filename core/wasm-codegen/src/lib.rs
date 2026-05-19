@@ -70,6 +70,11 @@ pub use target::{CompilationMode, OptLevel, Target};
 /// place.
 pub use crate::spec_section::SECTION_NAME as SPEC_FUNCS_SECTION_NAME;
 
+/// Wire-format version of the `inference.spec_funcs` custom section payload.
+/// Decoders must reject payloads whose leading varuint32 does not equal this
+/// constant; bumping the value is a breaking change to the section format.
+pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
+
 /// Generates WebAssembly binary from a typed AST for the specified target and compilation mode.
 ///
 /// # Errors

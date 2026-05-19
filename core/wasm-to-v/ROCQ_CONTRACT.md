@@ -118,6 +118,33 @@ the same map in the WASM binary as a custom section named
 `inference.spec_funcs`, so a bare `.wasm` file produced by this compiler in
 `proof` mode contains the per-spec mapping self-describingly.
 
+### Wire format of the `inference.spec_funcs` payload
+
+The payload uses LEB128 unsigned varints throughout:
+
+```text
+version            : varuint32   -- currently 1; bump on breaking change
+count              : varuint32   -- number of (spec_name, indices) pairs
+repeated `count` times:
+  spec_name_len    : varuint32
+  spec_name_bytes  : utf-8       -- not NUL-terminated
+  indices_count    : varuint32
+  repeated `indices_count` times:
+    func_idx       : varuint32
+```
+
+Entries are emitted sorted by spec name for deterministic, byte-stable
+output. The decoder validates each spec name against the Rocq identifier
+rules at the decode boundary, rejecting `WasmToVError::InvalidRocqIdentifier`
+before any Rocq emission runs.
+
+The leading `version` varuint32 is the contract's escape hatch. The current
+decoder rejects unsupported versions with `WasmToVError::WasmParse` carrying
+the literal string "version" — see
+`inference_wasm_codegen::SPEC_FUNCS_SECTION_VERSION` for the constant. A
+future revision that bumps the version will trip this branch on today's
+parsers instead of silently misparsing the rest of the payload.
+
 `wasm_to_v` / `translate_bytes` accept the map as an explicit argument and
 also parse the embedded custom section:
 
