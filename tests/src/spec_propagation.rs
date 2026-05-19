@@ -1063,10 +1063,138 @@ mod scenario_6b_embedded_data_validation {
         append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload_b);
 
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
-        let result = inference::wasm_to_v("Mod", &wasm, &empty);
+        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+            .expect_err("duplicate `inference.spec_funcs` sections must be rejected");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
+            err.downcast_ref();
+        match typed {
+            Some(inference_wasm_to_v_translator::errors::WasmToVError::WasmParse(s)) => {
+                assert!(
+                    s.contains("duplicate"),
+                    "WasmParse must mention `duplicate`; got: {s}"
+                );
+            }
+            other => panic!("expected WasmParse, got {other:?}"),
+        }
+    }
+
+    /// Trailing bytes after the last well-formed entry must be rejected.
+    /// Without this guard a corrupted or hand-crafted payload could carry
+    /// arbitrary tail bytes past the canonical schema and be silently
+    /// accepted (C1, decoder hardening).
+    #[test]
+    fn embedded_spec_funcs_with_trailing_bytes_is_rejected() {
+        let mut wasm = baseline_wasm();
+        // Well-formed payload (version=1, count=1, name_len=1, "a",
+        // idx_count=0) followed by a stray 0xff byte.
+        let mut payload = Vec::new();
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        encode_leb128_u32(1, &mut payload); // count=1
+        encode_leb128_u32(1, &mut payload); // name_len=1
+        payload.push(b'a');
+        encode_leb128_u32(0, &mut payload); // idx_count=0
+        payload.push(0xff); // trailing junk
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+            .expect_err("trailing bytes must be rejected");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
+            err.downcast_ref();
+        match typed {
+            Some(inference_wasm_to_v_translator::errors::WasmToVError::WasmParse(s)) => {
+                assert!(
+                    s.contains("trailing"),
+                    "WasmParse must mention `trailing`; got: {s}"
+                );
+            }
+            other => panic!("expected WasmParse, got {other:?}"),
+        }
+    }
+
+    /// A spec entry whose declared `idx_count` exceeds the remaining payload
+    /// must be rejected up front, before the decoder allocates a Vec sized
+    /// against the bogus count. Without this defense, a malicious binary
+    /// could request a multi-GB allocation.
+    #[test]
+    fn embedded_spec_funcs_idx_count_exceeds_payload_is_rejected() {
+        let mut wasm = baseline_wasm();
+        // version=1, count=1, name_len=1, "a", idx_count=u32::MAX.
+        // No actual index bytes follow.
+        let mut payload = Vec::new();
+        encode_leb128_u32(inference::SPEC_FUNCS_SECTION_VERSION, &mut payload);
+        encode_leb128_u32(1, &mut payload);
+        encode_leb128_u32(1, &mut payload);
+        payload.push(b'a');
+        encode_leb128_u32(u32::MAX, &mut payload);
+        append_custom_section(&mut wasm, inference::SPEC_FUNCS_SECTION_NAME, &payload);
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+            .expect_err("over-large idx_count must be rejected");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
+            err.downcast_ref();
+        match typed {
+            Some(inference_wasm_to_v_translator::errors::WasmToVError::WasmParse(s)) => {
+                assert!(
+                    s.contains("index count exceeds remaining payload"),
+                    "WasmParse must mention the idx_count guard; got: {s}"
+                );
+            }
+            other => panic!("expected WasmParse, got {other:?}"),
+        }
+    }
+
+    /// A second standard WASM `name` section in the same binary must be
+    /// rejected. The original code silently let the second one overwrite
+    /// the first, clobbering func_names_map and locals naming without
+    /// warning (C2, parser hardening).
+    #[test]
+    fn duplicate_wasm_name_section_is_rejected() {
+        let mut wasm = baseline_wasm();
+        // baseline_wasm already contains one `name` section emitted by
+        // codegen; appending a second triggers the duplicate guard.
+        let payload = name_section_payload_with_module("Override");
+        append_custom_section(&mut wasm, "name", &payload);
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let err = inference::wasm_to_v("Mod", &wasm, &empty)
+            .expect_err("duplicate `name` sections must be rejected");
+        let typed: Option<&inference_wasm_to_v_translator::errors::WasmToVError> =
+            err.downcast_ref();
+        match typed {
+            Some(inference_wasm_to_v_translator::errors::WasmToVError::WasmParse(s)) => {
+                assert!(
+                    s.contains("duplicate WASM `name`"),
+                    "WasmParse must mention duplicate name section; got: {s}"
+                );
+            }
+            other => panic!("expected WasmParse, got {other:?}"),
+        }
+    }
+
+    /// Positive test: a single embedded `name` section overrides the
+    /// caller-supplied `mod_name` argument, and that override flows into
+    /// the emitted Rocq output (it determines the `Definition <mod>_*` and
+    /// `Theorem valid_<mod>` identifier prefix).
+    #[test]
+    fn embedded_name_section_overrides_caller_mod_name() {
+        // Strip the codegen-emitted `name` section, then append one whose
+        // module name differs from the caller-supplied `Caller` argument.
+        let mut wasm = baseline_wasm_without_custom_section("name");
+        let payload = name_section_payload_with_module("Embedded");
+        append_custom_section(&mut wasm, "name", &payload);
+
+        let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let v_output = inference::wasm_to_v("Caller", &wasm, &empty)
+            .expect("override-then-validate must succeed for a valid embedded name");
         assert!(
-            result.is_err(),
-            "duplicate `inference.spec_funcs` sections must be rejected"
+            v_output.contains("Theorem valid_Embedded"),
+            "embedded module name should drive the theorem identifier; got:\n{v_output}"
+        );
+        assert!(
+            !v_output.contains("Theorem valid_Caller"),
+            "caller-supplied mod_name should not appear once an embedded name overrides it; got:\n{v_output}"
         );
     }
 }
