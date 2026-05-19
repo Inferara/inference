@@ -373,10 +373,9 @@ pub(crate) struct Compiler {
     /// Name of the function currently being compiled (display form, used for
     /// diagnostics). The lookup-shaped companion is [`Self::current_fn_key`].
     current_fn_name: String,
-    /// Structured key for the function currently being compiled. `None` when
-    /// no function body is being lowered; set to `Some(_)` at the top of
-    /// [`Self::visit_function_definition`] and cleared back to `None` on exit.
-    /// Used as the lookup key for sret return-emission so we don't have to
+    /// Structured key for the function currently being compiled. Set to
+    /// `Some(_)` while entering [`Self::visit_function_definition`] and used
+    /// as the lookup key for sret return-emission so we don't have to
     /// recompute the variant from `current_spec` + `current_fn_name` at every
     /// call site.
     current_fn_key: Option<FnKey>,
