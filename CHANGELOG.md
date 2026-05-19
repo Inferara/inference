@@ -254,6 +254,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
+- `infc -v` (and `infs build -v`) now implies `--mode proof` when no explicit `--mode` is passed. Users wanting the prior behavior (V output from compile-mode WASM, stripped specs) can pass `--mode compile -v` explicitly. Closes a UX trap where `-v` alone produced a near-useless empty-specs `.v` file.
 - `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([#22])
 - `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([#20])
 - Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])

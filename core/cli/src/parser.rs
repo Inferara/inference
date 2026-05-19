@@ -12,14 +12,18 @@ use clap::{Parser, ValueEnum};
 /// Mirrors [`inference_wasm_codegen::CompilationMode`] so the CLI surface can derive
 /// `clap::ValueEnum` without forcing that trait onto the codegen crate's type.
 ///
-/// - `Compile` (default): strips spec functions, applies release optimizations to
-///   produce a production-style WASM binary. Existing behavior.
+/// - `Compile`: strips spec functions, applies release optimizations to produce a
+///   production-style WASM binary. This is the resolved default when neither
+///   `--mode` nor `-v` was passed.
 /// - `Proof`: keeps spec functions unoptimized so the Rocq translation preserves
 ///   structural correspondence with the source. Implies `-v` after normalization,
 ///   because the `.v` artifact is the proof-mode deliverable.
-#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// The `Cli::mode` field is `Option<CliMode>` so the absence of `--mode` is
+/// distinguishable from `--mode compile`; this lets `-v` alone auto-promote to
+/// `Proof` while `--mode compile -v` keeps compile semantics.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CliMode {
-    #[default]
     Compile,
     Proof,
 }
@@ -63,7 +67,7 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// infc example.inf
 /// ```
 ///
-/// Full compilation with Rocq translation:
+/// Full compilation with Rocq translation (implies `--mode proof`):
 /// ```bash
 /// infc example.inf -v
 /// ```
@@ -71,6 +75,11 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 /// Proof-mode compilation (keeps spec functions, implies `-v`):
 /// ```bash
 /// infc example.inf --mode proof
+/// ```
+///
+/// V output from compile-mode WASM (specs stripped — escape hatch):
+/// ```bash
+/// infc example.inf --mode compile -v
 /// ```
 ///
 /// Parse only (overrides default):
@@ -161,6 +170,11 @@ pub(crate) struct Cli {
     /// When used without any explicit phase flag, implies full pipeline + `-o`:
     /// `infc file.inf -v` produces both `out/file.wasm` and `out/file.v`.
     ///
+    /// When used without an explicit `--mode`, implies `--mode proof` — the `.v`
+    /// is only meaningful with spec functions preserved, and `-v` alone against a
+    /// spec-stripped (compile-mode) WASM produces a near-empty `.v`. Pass
+    /// `--mode compile -v` explicitly to opt back into that behavior.
+    ///
     /// This enables formal verification of the compiled program using the
     /// Rocq proof assistant.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
@@ -168,13 +182,16 @@ pub(crate) struct Cli {
 
     /// Compilation mode.
     ///
-    /// - `compile` (default): production WASM with specs stripped and release
-    ///   optimizations applied.
+    /// - `compile`: production WASM with specs stripped and release optimizations
+    ///   applied. The resolved default when neither `--mode` nor `-v` is supplied.
     /// - `proof`: preserves spec functions unoptimized so the Rocq translation
     ///   maintains 1:1 structural correspondence with the source. Implies `-v`
     ///   because the `.v` artifact is the proof-mode deliverable.
-    #[clap(long = "mode", value_enum, default_value_t = CliMode::Compile)]
-    pub(crate) mode: CliMode,
+    ///
+    /// When `--mode` is omitted, `-v` promotes the effective mode to `proof`; if
+    /// `-v` is also absent the effective mode is `compile`.
+    #[clap(long = "mode", value_enum)]
+    pub(crate) mode: Option<CliMode>,
 
     /// Print the git commit hash embedded at build time and exit 0.
     ///

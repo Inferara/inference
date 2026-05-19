@@ -47,8 +47,9 @@
 //!
 //! ```bash
 //! infc example.inf              # parse → codegen → write out/example.wasm
-//! infc example.inf -v           # parse → codegen → write out/example.wasm + out/example.v
+//! infc example.inf -v           # implies --mode proof → both out/example.wasm and out/example.v
 //! infc example.inf --mode proof # proof mode (keeps specs); implies -v → writes both files
+//! infc example.inf --mode compile -v # opt back into stripped-spec V output
 //! ```
 //!
 //! Supplying any explicit phase flag overrides the default:
@@ -160,15 +161,28 @@ use toolchain::BuildProfile;
 /// When no phase flag (`--parse`, `--analyze`, `--codegen`) is given, defaults
 /// to full pipeline + WASM output — equivalent to `--codegen -o`.
 ///
-/// `--mode proof` additionally implies `-v` (Rocq translation output), because
-/// the `.v` artifact is what proof mode is for; emitting only `.wasm` in proof
-/// mode would silently waste the unoptimized spec preservation work.
+/// Mode/`-v` resolution rules (symmetric):
+/// - `--mode proof` implies `-v` because the `.v` artifact is what proof mode
+///   is for; emitting only `.wasm` in proof mode would silently waste the
+///   unoptimized spec preservation work.
+/// - `-v` with no explicit `--mode` implies `--mode proof` because `compile`
+///   mode strips spec functions and would produce a near-empty `.v` (no
+///   per-spec definitions or theorems). Users who legitimately want V output
+///   from a spec-stripped WASM can pass `--mode compile -v` explicitly.
+///
+/// After this function, `args.mode` is always `Some(..)`.
 pub(crate) fn normalize_args(args: &mut Cli) {
     if !args.parse && !args.analyze && !args.codegen {
         args.codegen = true;
         args.generate_wasm_output = true;
     }
-    if matches!(args.mode, CliMode::Proof) {
+    let effective_mode = match (args.mode, args.generate_v_output) {
+        (Some(m), _) => m,
+        (None, true) => CliMode::Proof,
+        (None, false) => CliMode::Compile,
+    };
+    args.mode = Some(effective_mode);
+    if matches!(effective_mode, CliMode::Proof) {
         args.generate_v_output = true;
     }
 }
@@ -387,7 +401,8 @@ fn main() {
         };
         let profile = BuildProfile::default();
         let target = inference_wasm_codegen::Target::default();
-        let mode: inference_wasm_codegen::CompilationMode = args.mode.into();
+        let mode: inference_wasm_codegen::CompilationMode =
+            args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
         let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
             Ok(o) => o,
@@ -457,7 +472,7 @@ mod tests {
             codegen,
             generate_wasm_output: false,
             generate_v_output: false,
-            mode: CliMode::Compile,
+            mode: None,
             commit_hash: false,
             abi_version: false,
         }
@@ -498,7 +513,7 @@ mod tests {
     #[test]
     fn normalize_proof_mode_implies_v_output() {
         let mut args = make_args(false, false, false);
-        args.mode = CliMode::Proof;
+        args.mode = Some(CliMode::Proof);
         normalize_args(&mut args);
         assert!(args.codegen, "proof mode should still trigger default codegen");
         assert!(args.generate_wasm_output, "proof mode should still emit wasm");
@@ -506,6 +521,53 @@ mod tests {
             args.generate_v_output,
             "proof mode must imply -v so the .v artifact is written"
         );
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Proof),
+            "explicit proof mode must be preserved"
+        );
+    }
+
+    #[test]
+    fn normalize_dash_v_implies_proof_mode() {
+        let mut args = make_args(false, false, false);
+        args.generate_v_output = true;
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Proof),
+            "-v alone must promote effective mode to proof so specs survive codegen"
+        );
+        assert!(args.generate_v_output);
+    }
+
+    #[test]
+    fn normalize_explicit_compile_plus_v_keeps_compile() {
+        let mut args = make_args(false, false, false);
+        args.mode = Some(CliMode::Compile);
+        args.generate_v_output = true;
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Compile),
+            "explicit --mode compile must not be overridden by -v"
+        );
+        assert!(
+            args.generate_v_output,
+            "explicit -v must be preserved even in compile mode"
+        );
+    }
+
+    #[test]
+    fn normalize_no_flags_resolves_mode_to_compile() {
+        let mut args = make_args(false, false, false);
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Compile),
+            "absence of --mode and -v must resolve to compile"
+        );
+        assert!(!args.generate_v_output);
     }
 
     /// Returns the path to the test data directory.

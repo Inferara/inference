@@ -1,0 +1,10 @@
+fn foo(x: i32) -> i32 {
+  return x;
+}
+
+spec MySpec {
+  fn prop() forall {
+    let i: i32 = @;
+    assert(foo(i) == i);
+  }
+}
