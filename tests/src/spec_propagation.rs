@@ -827,6 +827,53 @@ mod scenario_6b_embedded_data_validation {
         compile(source, CompilationMode::Compile).wasm().to_vec()
     }
 
+    /// Returns the baseline WASM with any custom section named `target_name`
+    /// removed. Used by tests that append a hand-crafted version of the same
+    /// section; the parser rejects duplicate name / spec_funcs sections, so
+    /// the existing one must be stripped before appending.
+    fn baseline_wasm_without_custom_section(target_name: &str) -> Vec<u8> {
+        let wasm = baseline_wasm();
+        let mut out = Vec::with_capacity(wasm.len());
+        // Copy the 8-byte preamble (magic + version) verbatim.
+        out.extend_from_slice(&wasm[0..8]);
+        let mut i = 8;
+        while i < wasm.len() {
+            let section_id = wasm[i];
+            let (section_len, leb_size) = decode_leb128_u32(&wasm[i + 1..]);
+            let section_start = i;
+            let section_end = i + 1 + leb_size + section_len as usize;
+            if section_id == 0 {
+                // Custom section: name_len LEB128, name bytes, then payload.
+                let body_start = i + 1 + leb_size;
+                let (name_len, name_leb_size) = decode_leb128_u32(&wasm[body_start..]);
+                let name_start = body_start + name_leb_size;
+                let name_end = name_start + name_len as usize;
+                let section_name = std::str::from_utf8(&wasm[name_start..name_end])
+                    .expect("custom section name must be UTF-8");
+                if section_name == target_name {
+                    i = section_end;
+                    continue;
+                }
+            }
+            out.extend_from_slice(&wasm[section_start..section_end]);
+            i = section_end;
+        }
+        out
+    }
+
+    fn decode_leb128_u32(bytes: &[u8]) -> (u32, usize) {
+        let mut result: u32 = 0;
+        let mut shift: u32 = 0;
+        for (i, &byte) in bytes.iter().enumerate() {
+            result |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return (result, i + 1);
+            }
+            shift += 7;
+        }
+        (result, bytes.len())
+    }
+
     /// B2: a hand-crafted binary whose `inference.spec_funcs` section advertises
     /// a spec named `foo__bar` (containing the reserved `__` separator) must be
     /// rejected at the decode boundary, not deferred to `translate()`.
@@ -859,7 +906,10 @@ mod scenario_6b_embedded_data_validation {
     /// embedded name.
     #[test]
     fn embedded_name_section_with_invalid_module_name_is_rejected() {
-        let mut wasm = baseline_wasm();
+        // Strip the codegen-emitted `name` section first; the parser rejects
+        // duplicate `name` custom sections, so appending a second one would
+        // be caught before the override-then-validate path runs.
+        let mut wasm = baseline_wasm_without_custom_section("name");
         let payload = name_section_payload_with_module("bad-name");
         append_custom_section(&mut wasm, "name", &payload);
 

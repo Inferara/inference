@@ -224,6 +224,7 @@ fn parse(
     let explicit_non_empty = !spec_funcs_by_spec.is_empty();
     let mut wasm_parse_data = WasmParseData::new(mod_name, spec_funcs_by_spec);
     let mut embedded_spec_funcs: Option<FxHashMap<String, Vec<u32>>> = None;
+    let mut seen_name_section = false;
 
     for payload in parser.parse_all(data) {
         match payload? {
@@ -318,6 +319,12 @@ fn parse(
                 } else if let inf_wasmparser::KnownCustom::Name(name_section) =
                     custom_section.as_known()
                 {
+                    if seen_name_section {
+                        return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                            "duplicate WASM `name` custom section".into(),
+                        )));
+                    }
+                    seen_name_section = true;
                     for name in name_section {
                         let name = name?;
                         match name {
@@ -373,7 +380,11 @@ fn parse(
             // at the parent parser or the payload iterator is at its
             // end and we're done.
             End(_) => {}
-            _ => todo!(),
+            _ => {
+                return Err(anyhow::anyhow!(WasmToVError::WasmParse(
+                    "unexpected WASM payload variant in module".into(),
+                )));
+            }
         }
     }
 
@@ -459,6 +470,16 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
                 anyhow::anyhow!(WasmToVError::WasmParse(format!("{prefix}: {msg}")))
             })?
             .to_string();
+        // Cap individual spec names defensively. The encoder side enforces a
+        // 255-character limit via `validate_rocq_identifier`'s `TooLong` rule,
+        // but a hand-crafted payload could advertise a much longer name; cap
+        // here so the per-name allocation stays bounded regardless of payload.
+        if name.len() > MAX_SPEC_NAME_LEN {
+            return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+                "spec_funcs section: spec name length {} exceeds cap {MAX_SPEC_NAME_LEN}",
+                name.len()
+            ))));
+        }
         // Validate at the decode boundary so a hand-crafted binary cannot
         // smuggle an invalid Rocq identifier (empty name, `__`, reserved
         // keyword, stdlib shadow) past `translate()`'s per-spec check.
@@ -488,5 +509,21 @@ fn decode_spec_funcs_section(data: &[u8]) -> anyhow::Result<FxHashMap<String, Ve
         }
         out.insert(name, indices);
     }
+    // Reject trailing bytes: every byte of the payload must be accounted for
+    // by the (version, count, repeated (name, indices)) schema. A malformed
+    // binary with extra bytes after the last entry is silently accepted
+    // otherwise, weakening the canonical-encoding guarantee.
+    if reader.bytes_remaining() != 0 {
+        return Err(anyhow::anyhow!(WasmToVError::WasmParse(format!(
+            "spec_funcs section: {} trailing byte(s) after last entry",
+            reader.bytes_remaining()
+        ))));
+    }
     Ok(out)
 }
+
+/// Cap on the declared length of any single spec name embedded in the
+/// `inference.spec_funcs` custom section. Matches the
+/// [`crate::rocq_names::validate_rocq_identifier`] `TooLong` threshold so the
+/// decode-time and encode-time limits are aligned.
+const MAX_SPEC_NAME_LEN: usize = 255;
