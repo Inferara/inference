@@ -468,7 +468,6 @@ impl Compiler {
     ///
     /// Used by traversal code to verify Stage 1 registration produced the expected
     /// number of entries before any body compilation begins.
-    #[cfg(debug_assertions)]
     pub(crate) fn registered_function_count(&self) -> usize {
         self.func_name_to_idx.len()
     }
