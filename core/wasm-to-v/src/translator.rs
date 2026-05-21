@@ -543,10 +543,10 @@ impl WasmParseData<'_> {
                     .iter()
                     .map(u32::to_string)
                     .collect::<Vec<_>>()
-                    .join("; ");
+                    .join(" :: ");
                 res.push_str(
                     format!(
-                        "Definition {module_name}__{spec_name}_specs : list N := [{indices_str}]%N.\n"
+                        "Definition {module_name}__{spec_name}_specs : list N := ({indices_str} :: nil)%N.\n"
                     )
                     .as_str(),
                 );
@@ -558,18 +558,11 @@ impl WasmParseData<'_> {
         res.push_str("Section Host.\n");
         res.push_str("Context `{ho: host}.\n");
         res.push('\n');
-        res.push_str("(* Theorems *)\n");
-        res.push_str(
-            format!("Theorem valid_{module_name} : ValidModule {module_name}.\n").as_str(),
-        );
-        res.push_str("Proof.\n");
-        res.push_str("  (* TODO: fill the proof *)\n");
-        res.push_str("Qed.\n");
         for (spec_name, _) in &spec_entries {
             res.push('\n');
             res.push_str(
                 format!(
-                    "Theorem valid_{module_name}__{spec_name} : ValidSpec {module_name} {module_name}__{spec_name}_specs.\n"
+                    "Theorem valid_{module_name}__{spec_name} : ValidModule {module_name} {module_name}__{spec_name}_specs.\n"
                 )
                 .as_str(),
             );
@@ -1118,7 +1111,7 @@ fn translate_basic_operator(
             }
         }
         Operator::Return => "BI_return".to_string(),
-        Operator::Call { function_index } => format!("BI_call {function_index}"),
+        Operator::Call { function_index } => format!("BI_call {function_index}%N"),
         Operator::CallIndirect {
             type_index,
             table_index,
