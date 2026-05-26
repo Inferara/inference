@@ -733,6 +733,28 @@ mod tests {
     }
 
     #[test]
+    fn display_combined_unary_operators() {
+        let err = AnalysisDiagnostic::CombinedUnaryOperators {
+            op_outer: "-",
+            op_inner: "~",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("combined unary operators are prohibited"),
+            "A033 diagnostic must explain the prohibition, got: {text}"
+        );
+        assert!(
+            text.contains("-~"),
+            "A033 diagnostic must include the combined operator glyphs, got: {text}"
+        );
+        assert!(
+            text.contains("temporary variable"),
+            "A033 diagnostic must suggest using a temporary variable, got: {text}"
+        );
+    }
+
+    #[test]
     fn partial_eq_for_diagnostic() {
         let a = AnalysisDiagnostic::BreakOutsideLoop {
             location: test_location(),

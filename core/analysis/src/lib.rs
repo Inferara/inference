@@ -59,6 +59,10 @@
 //! - A031: Unsupported expression form in compound-returning function return
 //! - A032: Top-level (module-scope) `const` declaration (not yet implemented)
 //!
+//! ### Syntactic Restrictions (A033)
+//!
+//! - A033: Combined/adjacent prefix unary operators (`--x`, `-~x`, `!!x`, including parenthesized variants)
+//!
 //! ## Pipeline Position
 //!
 //! ```text
