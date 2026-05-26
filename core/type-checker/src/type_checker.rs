@@ -19,7 +19,7 @@
 //!
 //! Errors are not fatal: the checker collects them in `self.errors` and
 //! keeps walking the AST so a single run reports as many issues as
-//! possible. Duplicate entries are filtered via `reported_error_keys`.
+//! possible. Duplicate entries are filtered via `reported_errors`.
 //!
 //! ## Generics
 //!
@@ -41,7 +41,7 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
+    errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{FuncInfo, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -52,7 +52,7 @@ pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
-    reported_error_keys: FxHashSet<String>,
+    reported_errors: FxHashSet<(DedupKind, String)>,
     /// Type parameter names for the function/method body currently being inferred.
     /// Set before walking the body, cleared after. Used by `infer_statement` to
     /// pass type param context to `validate_type` and `TypeInfo::from_type_id_with_type_params`.
@@ -483,14 +483,11 @@ impl TypeChecker {
                         .lookup_function_in_root(&fn_name)
                         .is_some()
                     {
-                        let key = format!("SpecFunctionShadowsTopLevel:{spec_name}:{fn_name}");
-                        if self.reported_error_keys.insert(key) {
-                            self.errors.push(TypeCheckError::SpecFunctionShadowsTopLevel {
-                                spec_name: spec_name.clone(),
-                                function_name: fn_name,
-                                location: arena[inner_id].location,
-                            });
-                        }
+                        self.push_error_dedup(TypeCheckError::SpecFunctionShadowsTopLevel {
+                            spec_name: spec_name.clone(),
+                            function_name: fn_name,
+                            location: arena[inner_id].location,
+                        });
                     }
                 }
             }
@@ -2793,28 +2790,19 @@ impl TypeChecker {
 
     // validate_literal_range moved to analysis rule A022 (LiteralOutOfRange).
 
-    /// Push an error, deduplicating errors for the same unknown type/function/identifier.
-    /// This prevents duplicate errors when registration fails but inference continues.
+    /// Push an error, deduplicating per `(DedupKind, name)` so the same
+    /// diagnostic for the same symbol is never recorded twice across the
+    /// registration and inference passes.
+    ///
+    /// Errors whose [`TypeCheckError::dedup_key`] returns `None` are always
+    /// recorded as-is.
     fn push_error_dedup(&mut self, error: TypeCheckError) {
-        let key = match &error {
-            TypeCheckError::UnknownType { name, .. } => Some(format!("UnknownType:{name}")),
-            TypeCheckError::UndefinedFunction { name, .. } => {
-                Some(format!("UndefinedFunction:{name}"))
-            }
-            TypeCheckError::UnknownIdentifier { name, .. } => {
-                Some(format!("UnknownIdentifier:{name}"))
-            }
-            TypeCheckError::UndefinedStruct { name, .. } => Some(format!("UndefinedStruct:{name}")),
-            TypeCheckError::UndefinedEnum { name, .. } => Some(format!("UndefinedEnum:{name}")),
-            _ => None,
-        };
-        if let Some(key) = key {
-            if self.reported_error_keys.contains(&key) {
+        if let Some(key) = error.dedup_key() {
+            if !self.reported_errors.insert(key) {
                 cov_mark::hit!(type_checker_error_dedup_skips_duplicate);
                 return;
             }
             cov_mark::hit!(type_checker_error_dedup_first_occurrence);
-            self.reported_error_keys.insert(key);
         }
         self.errors.push(error);
     }

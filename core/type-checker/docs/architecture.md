@@ -723,8 +723,8 @@ The type checker continues after errors to collect multiple issues:
 ```rust
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
-    errors: Vec<TypeCheckError>,           // Accumulate errors
-    reported_error_keys: FxHashSet<String>,  // Deduplicate errors
+    errors: Vec<TypeCheckError>,                     // Accumulate errors
+    reported_errors: FxHashSet<(DedupKind, String)>, // Deduplicate by (kind, name)
     ...
 }
 
@@ -764,16 +764,21 @@ impl TypeChecker {
 Errors are deduplicated using a key-based system:
 
 ```rust
-fn report_error(&mut self, error: TypeCheckError) {
-    let key = error.deduplication_key();
-    if !self.reported_error_keys.contains(&key) {
-        self.reported_error_keys.insert(key);
-        self.errors.push(error);
+fn push_error_dedup(&mut self, error: TypeCheckError) {
+    if let Some(key) = error.dedup_key() {
+        if !self.reported_errors.insert(key) {
+            return;
+        }
     }
+    self.errors.push(error);
 }
 ```
 
-This prevents reporting the same error multiple times when an incorrect symbol is used in multiple places.
+The key is a `(DedupKind, String)` tuple where `DedupKind` is a small enum
+listing the variants that participate in deduplication and the `String` is
+the offending symbol's name (or a composite key for variants like
+`SpecFunctionShadowsTopLevel`). This prevents reporting the same error
+multiple times when an incorrect symbol is used in multiple places.
 
 ## Performance Considerations
 
