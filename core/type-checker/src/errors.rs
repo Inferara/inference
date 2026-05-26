@@ -210,6 +210,21 @@ impl Display for VisibilityContext {
     }
 }
 
+/// Categorizes errors that participate in node-ID-based deduplication.
+///
+/// Only the variants listed here can produce duplicate diagnostics across
+/// the registration and inference passes; other `TypeCheckError` variants
+/// are always recorded as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ErrorKind {
+    UnknownType,
+    UndefinedFunction,
+    UnknownIdentifier,
+    UndefinedStruct,
+    UndefinedEnum,
+    SpecFunctionShadowsTopLevel,
+}
+
 /// Represents a type checking error with source location.
 /// All type errors are tied to AST nodes and must have a location.
 #[derive(Debug, Clone, Error)]
@@ -595,6 +610,23 @@ impl TypeCheckError {
             | TypeCheckError::DivisionByZero { location, .. }
             | TypeCheckError::DuplicateEnumVariant { location, .. }
             | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
+        }
+    }
+
+    /// Returns the [`ErrorKind`] for variants that participate in
+    /// node-ID-based deduplication, or `None` for variants that are always
+    /// reported as-is.
+    pub(crate) fn kind(&self) -> Option<ErrorKind> {
+        match self {
+            TypeCheckError::UnknownType { .. } => Some(ErrorKind::UnknownType),
+            TypeCheckError::UndefinedFunction { .. } => Some(ErrorKind::UndefinedFunction),
+            TypeCheckError::UnknownIdentifier { .. } => Some(ErrorKind::UnknownIdentifier),
+            TypeCheckError::UndefinedStruct { .. } => Some(ErrorKind::UndefinedStruct),
+            TypeCheckError::UndefinedEnum { .. } => Some(ErrorKind::UndefinedEnum),
+            TypeCheckError::SpecFunctionShadowsTopLevel { .. } => {
+                Some(ErrorKind::SpecFunctionShadowsTopLevel)
+            }
+            _ => None,
         }
     }
 }
