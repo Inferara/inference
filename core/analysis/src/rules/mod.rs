@@ -28,6 +28,7 @@ pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
 pub mod unsupported_compound_return_expr;
 pub mod uzumaki_outside_nondet_block;
+pub mod visibility_inside_spec;
 
 use array_index_64bit::ArrayIndex64Bit;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
@@ -59,6 +60,7 @@ use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
 use unsupported_compound_return_expr::UnsupportedCompoundReturnExpr;
 use uzumaki_outside_nondet_block::UzumakiOutsideNonDetBlock;
+use visibility_inside_spec::VisibilityInsideSpec;
 
 /// Returns all registered analysis rules.
 ///
@@ -99,5 +101,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &UnsupportedCompoundReturnExpr,
         &TopLevelConstNotSupported,
         &CombinedUnaryOperators,
+        &VisibilityInsideSpec,
     ]
 }

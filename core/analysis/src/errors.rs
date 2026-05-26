@@ -174,6 +174,14 @@ pub enum AnalysisDiagnostic {
         op_inner: &'static str,
         location: Location,
     },
+
+    #[error("visibility modifier `pub` on {def_kind} `{def_name}` inside spec `{spec_name}` has no effect; `spec` is the visibility unit, remove `pub`")]
+    VisibilityInsideSpec {
+        spec_name: String,
+        def_name: String,
+        def_kind: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -210,7 +218,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
-            | AnalysisDiagnostic::CombinedUnaryOperators { location, .. } => location,
+            | AnalysisDiagnostic::CombinedUnaryOperators { location, .. }
+            | AnalysisDiagnostic::VisibilityInsideSpec { location, .. } => location,
         }
     }
 
@@ -251,6 +260,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
             AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
             AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
+            AnalysisDiagnostic::VisibilityInsideSpec { .. } => "A034",
         }
     }
 }
@@ -752,6 +762,34 @@ mod tests {
             text.contains("temporary variable"),
             "A033 diagnostic must suggest using a temporary variable, got: {text}"
         );
+    }
+
+    #[test]
+    fn display_visibility_inside_spec() {
+        let err = AnalysisDiagnostic::VisibilityInsideSpec {
+            spec_name: "MySpec".to_string(),
+            def_name: "do_thing".to_string(),
+            def_kind: "fn",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("MySpec"),
+            "A034 diagnostic must include the spec name, got: {text}"
+        );
+        assert!(
+            text.contains("do_thing"),
+            "A034 diagnostic must include the inner definition name, got: {text}"
+        );
+        assert!(
+            text.contains("fn"),
+            "A034 diagnostic must include the definition kind, got: {text}"
+        );
+        assert!(
+            text.contains("`pub`"),
+            "A034 diagnostic must reference the `pub` modifier, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A034");
     }
 
     #[test]

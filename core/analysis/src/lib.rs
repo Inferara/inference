@@ -166,6 +166,7 @@ mod tests {
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location: dummy_location() },
             AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
             AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
+            AnalysisDiagnostic::VisibilityInsideSpec { spec_name: "S".to_string(), def_name: "f".to_string(), def_kind: "fn", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
