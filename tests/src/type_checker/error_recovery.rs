@@ -139,8 +139,8 @@ mod error_recovery_tests {
             let error_msg = error.to_string();
             let unknown_type_count = error_msg.matches("unknown type `UnknownType`").count();
             assert_eq!(
-                unknown_type_count, 2,
-                "UnknownType error should appear once per AST node (2 uses), got: {}",
+                unknown_type_count, 1,
+                "UnknownType error should appear exactly once due to deduplication, got: {}",
                 error_msg
             );
         }
@@ -161,14 +161,17 @@ mod error_recovery_tests {
         );
     }
 
-    /// Structural coverage: verifies that the dedup `skips_duplicate` branch
-    /// fires when the same AST node is visited twice. Two `UnknownType`
-    /// uses at distinct nodes do NOT trigger the skip path under node-ID
-    /// keys; this asserts zero hits to lock in that behavior.
+    /// Structural coverage: verifies that the second occurrence of the same
+    /// deduplicated error type hits the `type_checker_error_dedup_skips_duplicate`
+    /// branch in `push_error_dedup`. Uses a source where `UnknownType` appears
+    /// exactly twice so that the first occurrence hits
+    /// `type_checker_error_dedup_first_occurrence` and the second occurrence
+    /// hits `type_checker_error_dedup_skips_duplicate`; this test specifically
+    /// asserts only on the skips-duplicate path.
     #[test]
     fn test_error_dedup_skips_duplicate() {
         let source = r#"fn test(a: UnknownType, b: UnknownType) -> i32 { return 0; }"#;
-        cov_mark::check_count!(type_checker_error_dedup_skips_duplicate, 0);
+        cov_mark::check_count!(type_checker_error_dedup_skips_duplicate, 1);
         let result = try_type_check(source);
         assert!(
             result.is_err(),
@@ -465,8 +468,8 @@ mod error_recovery_tests {
             let error_msg = error.to_string();
             let count = error_msg.matches("unknown type `UnknownType`").count();
             assert_eq!(
-                count, 4,
-                "UnknownType error should appear once per AST node (4 uses), but appeared {} times in: {}",
+                count, 1,
+                "UnknownType error should appear exactly once due to deduplication, but appeared {} times in: {}",
                 count, error_msg
             );
         }
@@ -486,8 +489,8 @@ mod error_recovery_tests {
                 .matches("undefined function `missing_func`")
                 .count();
             assert_eq!(
-                count, 2,
-                "missing_func error should appear once per call site (2 calls), but appeared {} times in: {}",
+                count, 1,
+                "missing_func error should appear exactly once due to deduplication, but appeared {} times in: {}",
                 count, error_msg
             );
         }
@@ -507,8 +510,8 @@ mod error_recovery_tests {
                 .matches("undeclared variable `unknown_var`")
                 .count();
             assert_eq!(
-                count, 3,
-                "unknown_var error should appear once per use site (3 uses), but appeared {} times in: {}",
+                count, 1,
+                "unknown_var error should appear exactly once due to deduplication, but appeared {} times in: {}",
                 count, error_msg
             );
         }
@@ -529,8 +532,8 @@ mod error_recovery_tests {
                 .count();
             let type_count = error_msg.matches("unknown type `MissingStruct`").count();
             assert!(
-                struct_count <= 1 && type_count <= 3,
-                "MissingStruct error should appear once per AST node (struct: {}, type: {}, expected type <= 3), error: {}",
+                struct_count <= 1 && type_count <= 1,
+                "MissingStruct error should appear at most once due to deduplication (struct: {}, type: {}), error: {}",
                 struct_count,
                 type_count,
                 error_msg
@@ -551,8 +554,8 @@ mod error_recovery_tests {
                 .count();
             let type_count = error_msg.matches("unknown type `MissingEnum`").count();
             assert!(
-                enum_count <= 1 && type_count <= 2,
-                "MissingEnum error should appear once per AST node (enum: {}, type: {}, expected type <= 2), error: {}",
+                enum_count <= 1 && type_count <= 1,
+                "MissingEnum error should appear at most once due to deduplication (enum: {}, type: {}), error: {}",
                 enum_count,
                 type_count,
                 error_msg

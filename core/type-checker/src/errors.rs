@@ -216,7 +216,7 @@ impl Display for VisibilityContext {
 /// the registration and inference passes; other `TypeCheckError` variants
 /// are always recorded as-is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ErrorKind {
+pub(crate) enum DedupKind {
     UnknownType,
     UndefinedFunction,
     UnknownIdentifier,
@@ -613,19 +613,37 @@ impl TypeCheckError {
         }
     }
 
-    /// Returns the [`ErrorKind`] for variants that participate in
-    /// node-ID-based deduplication, or `None` for variants that are always
-    /// reported as-is.
-    pub(crate) fn kind(&self) -> Option<ErrorKind> {
+    /// Returns the deduplication key for variants that participate in
+    /// name-based deduplication, or `None` for variants that are always
+    /// reported as-is. The returned tuple of `(DedupKind, String)` is used
+    /// as a `FxHashSet` key inside the type checker so the same diagnostic
+    /// for the same symbol is recorded only once even when both registration
+    /// and inference visit it.
+    pub(crate) fn dedup_key(&self) -> Option<(DedupKind, String)> {
         match self {
-            TypeCheckError::UnknownType { .. } => Some(ErrorKind::UnknownType),
-            TypeCheckError::UndefinedFunction { .. } => Some(ErrorKind::UndefinedFunction),
-            TypeCheckError::UnknownIdentifier { .. } => Some(ErrorKind::UnknownIdentifier),
-            TypeCheckError::UndefinedStruct { .. } => Some(ErrorKind::UndefinedStruct),
-            TypeCheckError::UndefinedEnum { .. } => Some(ErrorKind::UndefinedEnum),
-            TypeCheckError::SpecFunctionShadowsTopLevel { .. } => {
-                Some(ErrorKind::SpecFunctionShadowsTopLevel)
+            TypeCheckError::UnknownType { name, .. } => {
+                Some((DedupKind::UnknownType, name.clone()))
             }
+            TypeCheckError::UndefinedFunction { name, .. } => {
+                Some((DedupKind::UndefinedFunction, name.clone()))
+            }
+            TypeCheckError::UnknownIdentifier { name, .. } => {
+                Some((DedupKind::UnknownIdentifier, name.clone()))
+            }
+            TypeCheckError::UndefinedStruct { name, .. } => {
+                Some((DedupKind::UndefinedStruct, name.clone()))
+            }
+            TypeCheckError::UndefinedEnum { name, .. } => {
+                Some((DedupKind::UndefinedEnum, name.clone()))
+            }
+            TypeCheckError::SpecFunctionShadowsTopLevel {
+                spec_name,
+                function_name,
+                ..
+            } => Some((
+                DedupKind::SpecFunctionShadowsTopLevel,
+                format!("{spec_name}:{function_name}"),
+            )),
             _ => None,
         }
     }
