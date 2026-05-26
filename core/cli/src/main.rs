@@ -46,8 +46,10 @@
 //! conventional compiler UX (e.g. `gcc foo.c`).
 //!
 //! ```bash
-//! infc example.inf        # parse → codegen → write out/example.wasm
-//! infc example.inf -v     # parse → codegen → write out/example.wasm + out/example.v
+//! infc example.inf              # parse → codegen → write out/example.wasm
+//! infc example.inf -v           # implies --mode proof → both out/example.wasm and out/example.v
+//! infc example.inf --mode proof # proof mode (keeps specs); implies -v → writes both files
+//! infc example.inf --mode compile -v # opt back into stripped-spec V output
 //! ```
 //!
 //! Supplying any explicit phase flag overrides the default:
@@ -146,7 +148,7 @@ mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
 use inference::{analyze, parse, type_check, wasm_to_v};
-use parser::Cli;
+use parser::{Cli, CliMode};
 use std::{
     fs,
     path::PathBuf,
@@ -158,11 +160,139 @@ use toolchain::BuildProfile;
 ///
 /// When no phase flag (`--parse`, `--analyze`, `--codegen`) is given, defaults
 /// to full pipeline + WASM output — equivalent to `--codegen -o`.
+///
+/// Mode/`-v` resolution rules (symmetric):
+/// - `--mode proof` implies `-v` because the `.v` artifact is what proof mode
+///   is for; emitting only `.wasm` in proof mode would silently waste the
+///   unoptimized spec preservation work.
+/// - `-v` with no explicit `--mode` implies `--mode proof` because `compile`
+///   mode strips spec functions and would produce a near-empty `.v` (no
+///   per-spec definitions or theorems). Users who legitimately want V output
+///   from a spec-stripped WASM can pass `--mode compile -v` explicitly.
+///
+/// After this function, `args.mode` is always `Some(..)`.
 pub(crate) fn normalize_args(args: &mut Cli) {
+    // Detect explicit proof-mode combined with a non-codegen phase BEFORE the
+    // default-normalization runs, so we can warn that the .v output will not
+    // be produced. The warning is purely informational; exit code is unchanged.
+    if matches!(args.mode, Some(CliMode::Proof))
+        && (args.parse || args.analyze)
+        && !args.codegen
+    {
+        let flag = if args.parse { "--parse" } else { "--analyze" };
+        eprintln!(
+            "warning: --mode proof is ignored when {flag} is set; no .v will be written"
+        );
+    }
     if !args.parse && !args.analyze && !args.codegen {
         args.codegen = true;
         args.generate_wasm_output = true;
     }
+    let effective_mode = match (args.mode, args.generate_v_output) {
+        (Some(m), _) => m,
+        (None, true) => CliMode::Proof,
+        (None, false) => CliMode::Compile,
+    };
+    args.mode = Some(effective_mode);
+    if matches!(effective_mode, CliMode::Proof) {
+        args.generate_v_output = true;
+    }
+}
+
+/// Renders a `wasm_to_v` failure with the user-facing diagnostic shape
+/// described in plan §6: a dedicated message for Rocq-stdlib shadowing,
+/// dedicated guidance for the `__` collision, and a generic invalid-Rocq-identifier
+/// fallthrough for the remaining reasons.
+///
+/// The rejected name can be either the source-derived module name OR a spec
+/// name declared in the source (since `translate()` now validates each spec
+/// name up-front). The diagnostic uses neutral phrasing because the CLI does
+/// not currently have a way to tell which source the name came from —
+/// labelling it "source filename" when the offender was a spec name was a
+/// wrong guess.
+fn eprint_translation_error(e: &anyhow::Error) {
+    use inference::{InvalidIdentifierReason, WasmToVError};
+    if let Some(wte) = e.downcast_ref::<WasmToVError>() {
+        match wte {
+            WasmToVError::RocqStdlibShadow { name } => {
+                eprintln!(
+                    "error: '{name}' would shadow the Rocq stdlib type '{name}'. \
+                     Rename the source file or spec to avoid the collision (e.g. \
+                     'list_ops', 'my_list')."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier {
+                name,
+                reason: InvalidIdentifierReason::ContainsDoubleUnderscore,
+            } => {
+                eprintln!(
+                    "error: '{name}' contains '__' which is reserved as the \
+                     module/spec name separator in the emitted Rocq output. \
+                     Use a single underscore or a different name."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier {
+                reason: InvalidIdentifierReason::EmptyName,
+                ..
+            } => {
+                eprintln!(
+                    "error: empty Rocq identifier — the source filename has no \
+                     usable stem (e.g. \".inf\" with no name), or a spec block has \
+                     no name.\n\n  Rename the source file."
+                );
+                return;
+            }
+            WasmToVError::InvalidRocqIdentifier { name, reason } => {
+                eprintln!(
+                    "error: '{name}' is not a valid Rocq identifier.\n\n  \
+                     A Rocq identifier (used for both module names and spec \
+                     names) must:\n    \
+                     - start with a letter (A-Z or a-z)\n    \
+                     - contain only letters, digits, and underscores\n    \
+                     - not contain '__' (reserved as the module/spec name separator)\n    \
+                     - not collide with Rocq stdlib types or reserved keywords\n\n  \
+                     Rename the source file or the spec block (e.g. 'list_utils') \
+                     and re-run.\n  (specifically: {reason})"
+                );
+                return;
+            }
+            WasmToVError::EmbeddedSpecMismatch { .. } => {
+                eprintln!(
+                    "error: internal inconsistency — the codegen-emitted spec map \
+                     and the embedded `inference.spec_funcs` section disagree.\n\n  \
+                     This is a compiler bug; please file an issue with the .inf \
+                     source attached."
+                );
+                return;
+            }
+            WasmToVError::WasmParse(msg) => {
+                eprintln!(
+                    "error: malformed WebAssembly binary: {msg}\n\n  \
+                     The WASM input could not be parsed. If this binary was \
+                     produced by `infc`, please file a bug. If it came from \
+                     another source, the file may be corrupted or use an \
+                     unsupported extension."
+                );
+                return;
+            }
+            WasmToVError::UnsupportedFeature { description } => {
+                eprintln!(
+                    "error: this WebAssembly module uses a feature not yet \
+                     supported by the Rocq translator: {description}\n\n  \
+                     The codegen pipeline emits a subset of WASM that the \
+                     translator recognises today; binaries from other toolchains \
+                     may include features that have not yet been wired through."
+                );
+                return;
+            }
+            // WasmToVError is #[non_exhaustive]; the wildcard handles future
+            // variants by falling through to the generic message below.
+            _ => {}
+        }
+    }
+    eprintln!("WASM->V translation failed: {e}");
 }
 
 /// Entry point for the Inference compiler CLI.
@@ -305,21 +435,22 @@ fn main() {
         };
         let profile = BuildProfile::default();
         let target = inference_wasm_codegen::Target::default();
-        let mode = inference_wasm_codegen::CompilationMode::default();
+        let mode: inference_wasm_codegen::CompilationMode =
+            args.mode.unwrap_or(CliMode::Compile).into();
         let opt_level = profile.resolve_opt_level(target, mode);
-        let codegen_output = match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level) {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("Codegen failed: {e}");
-                process::exit(1);
-            }
-        };
-        println!("Codegen complete");
         let source_fname = path
             .file_stem()
-            .unwrap_or_else(|| std::ffi::OsStr::new("module"))
-            .to_str()
-            .unwrap();
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("module");
+        let codegen_output =
+            match inference_wasm_codegen::codegen(&tctx, target, mode, opt_level, source_fname) {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Codegen failed: {e}");
+                    process::exit(1);
+                }
+            };
+        println!("Codegen complete");
 
         let wasm_bytes = codegen_output.wasm();
 
@@ -336,7 +467,11 @@ fn main() {
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            match wasm_to_v(source_fname, wasm_bytes) {
+            match wasm_to_v(
+                source_fname,
+                wasm_bytes,
+                codegen_output.spec_func_indices_by_spec(),
+            ) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {
@@ -350,7 +485,7 @@ fn main() {
                     println!("V generated at: {}", v_file_path.to_string_lossy());
                 }
                 Err(e) => {
-                    eprintln!("WASM->V translation failed: {e}");
+                    eprint_translation_error(&e);
                     process::exit(1);
                 }
             }
@@ -372,6 +507,7 @@ mod tests {
             codegen,
             generate_wasm_output: false,
             generate_v_output: false,
+            mode: None,
             commit_hash: false,
             abi_version: false,
         }
@@ -407,6 +543,66 @@ mod tests {
         normalize_args(&mut args);
         assert!(args.codegen);
         assert!(!args.generate_wasm_output);
+    }
+
+    #[test]
+    fn normalize_proof_mode_implies_v_output() {
+        let mut args = make_args(false, false, false);
+        args.mode = Some(CliMode::Proof);
+        normalize_args(&mut args);
+        assert!(args.codegen, "proof mode should still trigger default codegen");
+        assert!(args.generate_wasm_output, "proof mode should still emit wasm");
+        assert!(
+            args.generate_v_output,
+            "proof mode must imply -v so the .v artifact is written"
+        );
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Proof),
+            "explicit proof mode must be preserved"
+        );
+    }
+
+    #[test]
+    fn normalize_dash_v_implies_proof_mode() {
+        let mut args = make_args(false, false, false);
+        args.generate_v_output = true;
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Proof),
+            "-v alone must promote effective mode to proof so specs survive codegen"
+        );
+        assert!(args.generate_v_output);
+    }
+
+    #[test]
+    fn normalize_explicit_compile_plus_v_keeps_compile() {
+        let mut args = make_args(false, false, false);
+        args.mode = Some(CliMode::Compile);
+        args.generate_v_output = true;
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Compile),
+            "explicit --mode compile must not be overridden by -v"
+        );
+        assert!(
+            args.generate_v_output,
+            "explicit -v must be preserved even in compile mode"
+        );
+    }
+
+    #[test]
+    fn normalize_no_flags_resolves_mode_to_compile() {
+        let mut args = make_args(false, false, false);
+        normalize_args(&mut args);
+        assert_eq!(
+            args.mode,
+            Some(CliMode::Compile),
+            "absence of --mode and -v must resolve to compile"
+        );
+        assert!(!args.generate_v_output);
     }
 
     /// Returns the path to the test data directory.

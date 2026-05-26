@@ -1,0 +1,12 @@
+pub fn main() -> i32 {
+  return 0;
+}
+
+spec Witness {
+  fn witness_one() -> i32 {
+    return 1;
+  }
+  fn witness_two() -> i32 {
+    return 2;
+  }
+}

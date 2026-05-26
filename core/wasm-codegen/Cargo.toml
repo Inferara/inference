@@ -7,7 +7,7 @@ homepage = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-wasm-encoder = "0.245.1"
+wasm-encoder = "0.249.0"
 inference-ast.workspace = true
 inference-type-checker.workspace = true
 anyhow.workspace = true
@@ -18,5 +18,5 @@ thiserror.workspace = true
 [dev-dependencies]
 inf-wasmparser.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
-wasmprinter = "0.245.1"
+wasmprinter = "0.249.0"
 cov-mark = { workspace = true, features = ["enable"] }

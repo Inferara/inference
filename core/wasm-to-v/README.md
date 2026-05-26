@@ -23,20 +23,36 @@ The translator converts WASM binary format into equivalent Rocq definitions that
 
 ```rust
 use inference_wasm_to_v_translator::wasm_parser::translate_bytes;
+use rustc_hash::FxHashMap;
 
 let wasm_bytes = std::fs::read("output.wasm")?;
-let rocq_code = translate_bytes("my_module", &wasm_bytes)?;
+let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+let rocq_code = translate_bytes("my_module", &wasm_bytes, &empty)?;
 std::fs::write("output.v", rocq_code)?;
 ```
 
+Pass an empty map to source the per-spec indices from the WASM custom
+section (`inference.spec_funcs`) that `wasm-codegen` embeds in `proof`
+mode. Pass a populated `FxHashMap<String, Vec<u32>>` to override or
+supplement the embedded section; the translator surfaces
+`WasmToVError::EmbeddedSpecMismatch` if both are present and disagree.
+
 ### Integration with Inference Compiler
 
-The translator is invoked as the final phase of the Inference compilation pipeline:
+The translator is invoked as the final phase of the Inference compilation pipeline. The full multi-phase pipeline (source → AST → typed AST → WASM → Rocq) lives in the `inference` orchestrator crate; this snippet picks up after `inference::codegen` has produced a `CodegenOutput`:
 
 ```rust
-use inference::wasm_to_v;
+use inference::{codegen, parse, type_check, wasm_to_v};
 
-let rocq_output = wasm_to_v("module_name", &wasm_bytes)?;
+let source = std::fs::read_to_string("input.inf")?;
+let arena = parse(&source)?;
+let typed_context = type_check(arena)?;
+let codegen_output = codegen(&typed_context)?;
+let rocq_output = wasm_to_v(
+    "module_name",
+    codegen_output.wasm(),
+    codegen_output.spec_func_indices_by_spec(),
+)?;
 ```
 
 See the [`inference`](../inference/README.md) crate for complete pipeline documentation.
@@ -394,6 +410,9 @@ This crate has minimal dependencies to keep the build fast and secure:
 
 - **anyhow** (`workspace`): Error handling with context propagation
 - **inf-wasmparser** (`workspace`): Fork of `wasmparser` with Inference non-deterministic instruction support
+- **inference-wasm-codegen** (`workspace`): Source of the `SPEC_FUNCS_SECTION_NAME` and `SPEC_FUNCS_SECTION_VERSION` wire-format constants; this crate consumes them at the decode boundary so encoder and decoder share one source of truth
+- **rustc-hash** (`workspace`): `FxHashMap` for the `spec_funcs_by_spec` API type
+- **thiserror** (`workspace`): Derive macro for the `WasmToVError` enum in `errors.rs`
 - **uuid** (`1.10.0`): Unique identifier generation for Rocq definitions (features: `v4`, `fast-rng`, `macro-diagnostics`)
 
 The `inf-wasmparser` fork is critical for parsing Inference's custom WASM instruction extensions. See [`tools/inf-wasmparser/`](../../tools/inf-wasmparser/README.md) for details.
@@ -582,6 +601,7 @@ The if-then-else structure is preserved with proper type annotations for the res
 
 ## Related Documentation
 
+- [Rocq Output Contract](./ROCQ_CONTRACT.md) - The external Rocq predicates the generated `.v` files depend on, and the proof-skeleton shape the translator emits
 - [WASM Codegen Documentation](../wasm-codegen/README.md) - WebAssembly code generation
 - [Language Specification](https://github.com/Inferara/inference-language-spec) - Inference language reference
 - [Rocq Documentation](https://rocq-prover.org/) - Rocq proof assistant

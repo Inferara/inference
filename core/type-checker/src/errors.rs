@@ -120,6 +120,7 @@ pub enum TypeMismatchContext {
     VariableDefinition,
     BinaryOperation(OperatorKind),
     Condition,
+    Assert,
     FunctionArgument {
         function_name: String,
         arg_name: String,
@@ -142,6 +143,7 @@ impl Display for TypeMismatchContext {
             TypeMismatchContext::VariableDefinition => write!(f, "in variable definition"),
             TypeMismatchContext::BinaryOperation(op) => write!(f, "in binary operation `{op:?}`"),
             TypeMismatchContext::Condition => write!(f, "in condition"),
+            TypeMismatchContext::Assert => write!(f, "in assert statement"),
             TypeMismatchContext::FunctionArgument {
                 function_name,
                 arg_name,
@@ -341,6 +343,21 @@ pub enum TypeCheckError {
         kind: RegistrationKind,
         name: String,
         reason: Option<String>,
+        location: Location,
+    },
+
+    /// A function defined inside a `spec` block shadows a top-level function
+    /// of the same name. Shadowing across the spec/top-level boundary is
+    /// rejected because codegen prefers the spec-mangled lookup but the
+    /// type-checker types call sites against the closest binding, so the two
+    /// layers would silently disagree on which callee is invoked. Rename one
+    /// side to disambiguate.
+    #[error(
+        "{location}: function `{function_name}` inside spec `{spec_name}` shadows a top-level function of the same name; rename one to disambiguate"
+    )]
+    SpecFunctionShadowsTopLevel {
+        spec_name: String,
+        function_name: String,
         location: Location,
     },
 
@@ -576,7 +593,8 @@ impl TypeCheckError {
             | TypeCheckError::InvalidAssignmentTarget { location, .. }
             | TypeCheckError::ArrayLiteralSizeMismatch { location, .. }
             | TypeCheckError::DivisionByZero { location, .. }
-            | TypeCheckError::DuplicateEnumVariant { location, .. } => location,
+            | TypeCheckError::DuplicateEnumVariant { location, .. }
+            | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
         }
     }
 }
@@ -667,6 +685,11 @@ mod tests {
         assert_eq!(
             TypeMismatchContext::Return.to_string(),
             "in return statement"
+        );
+        assert_eq!(TypeMismatchContext::Condition.to_string(), "in condition");
+        assert_eq!(
+            TypeMismatchContext::Assert.to_string(),
+            "in assert statement"
         );
         assert_eq!(
             TypeMismatchContext::FunctionArgument {

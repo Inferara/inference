@@ -56,7 +56,7 @@ fn codegen_impl(
     if let AnalysisMode::Run = analysis {
         let _analysis_result = inference_analysis::analyze(&typed_context).unwrap();
     }
-    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level)
+    inference_wasm_codegen::codegen(&typed_context, target, mode, opt_level, "output")
 }
 
 /// Generates codegen output from source code using the default target (`Wasm32`) and mode (`Compile`).
@@ -835,7 +835,13 @@ fn try_codegen_impl(
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level())
+        inference_wasm_codegen::codegen(
+            &typed_context,
+            target,
+            mode,
+            target.default_opt_level(),
+            "output",
+        )
     }))
     .map_err(|panic| {
         if let Some(s) = panic.downcast_ref::<&str>() {

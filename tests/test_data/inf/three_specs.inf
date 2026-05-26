@@ -1,0 +1,21 @@
+pub fn main() -> i32 {
+  return 0;
+}
+
+spec Alpha {
+  fn alpha_inner() -> i32 {
+    return 1;
+  }
+}
+
+spec Beta {
+  struct Counter {
+    value: i32;
+    fn next(self) -> i32 {
+      return self.value + 1;
+    }
+  }
+}
+
+spec Gamma {
+}

@@ -7,33 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- `inference_wasm_codegen::CodegenOutput::spec_func_indices: Vec<u32>` →
+  `spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>`. The accessor renames
+  to `spec_func_indices_by_spec()`. Library embedders of `core/inference` must
+  update both the constructor argument and the getter call site. Migration:
+  replace `Vec::new()` with `FxHashMap::default()` and
+  `.spec_func_indices()` with `.spec_func_indices_by_spec()` ([issue#21])
+- `inference::wasm_to_v` / `inference_wasm_to_v_translator::wasm_parser::translate_bytes`:
+  third parameter changed from `spec_func_indices: &[u32]` to
+  `spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>`. Callers must pass an
+  `FxHashMap` (use `FxHashMap::default()` for the empty case). Same `_by_spec`
+  rename rationale: symmetric with the `CodegenOutput` getter shape and avoids
+  an extra transformation at the API boundary ([issue#21])
+- Rocq output: `ValidModule` arity changed from 2 → 1 (no longer takes a specs
+  list); the new `ValidSpec : module -> list N -> Prop` predicate carries the
+  per-spec proof obligation. Downstream Rocq libraries must define `ValidSpec`
+  and update existing `ValidModule` consumers. Theorem names also changed:
+  `valid_<mod>` is now 1-arg, and per-spec theorems take the form
+  `valid_<mod>__<SpecName>` (double underscore, with explicit collision
+  rationale documented in `core/wasm-to-v/ROCQ_CONTRACT.md`) ([issue#17], [issue#21])
+- Lower `assert(<bool>)` to a WASM trap-on-false (previously panicked codegen) ([#195])
+  - Emits `<cond>; i32.eqz; if (empty); unreachable; end` — the smallest correct shape, and one that `wasm-to-v` already maps to `BI_unreachable` for proof-mode translation
+  - Asserts are emitted in both `Compile` and `Proof` modes (Stmt-level, not Def-level); no `CompilationMode` branching
+  - Soroban target accepts asserts — `Unreachable` is baseline WASM, not a 0xfc non-det opcode
+  - New golden fixture `tests/test_data/codegen/wasm/base/assert/` exercises literal, variable, nested-in-if, loop+break, double-assert, bool param, unary `!`, `&&`, `||`, `==`, compound `(a > 0) && ((b < 10) || (c == 0))`, and bool-local scenarios, with wasmtime execution coverage that distinguishes pass paths from `Trap::UnreachableCodeReached` paths
+- WASM custom section name for the per-spec function index map is now `inference.spec_funcs` (vendor-prefixed namespace). External tools previously looking for `metadata.code.inference.spec_funcs` must update. The latter was a misuse of the WebAssembly tool-conventions reserved namespace ([CodeMetadata.md](https://github.com/WebAssembly/tool-conventions/blob/main/CodeMetadata.md)) ([issue#16])
+- `inference.spec_funcs` custom section payload now starts with a `varuint32` version byte (`1` for current format). Consumers should reject unsupported versions. This is a wire-format change — anyone parsing the section directly must update; the in-tree parser handles it transparently. ([issue#16])
+
+### Language
+
+- Add struct definition and parsing support ([#14])
+- Add division operator (`/`) support ([#86])
+- Add unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
+- Parse visibility modifiers (`pub`) for functions, structs, enums, constants, and type aliases ([#86])
+
+### Compiler
+
+- ast: Remove dead `OperatorKind::BitNot` variant — `~x` is always parsed as `UnaryOperatorKind::BitNot` in a `PrefixUnaryExpression`; the binary enum variant was never produced by the AST builder ([#142])
+- ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])
+- ast: Simplify Builder API to return `Arena` directly instead of using state machine pattern ([#50])
+- ast: Add error collection in Builder with `collect_errors()` for better parse error reporting ([#50])
+- ast: Add `@skip` macro annotation for enum variants without stable node IDs ([#50])
+- type-checker: Add `type_kind_from_simple_type_kind()` for type-safe primitive type conversion ([#50])
+- type-checker: Add type checking for unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
+- type-checker: Change expression inference to use immutable references ([#86])
+- ast: Use atomic counter for deterministic node ID generation ([#86])
+- type-checker: Add bidirectional type inference with scope-aware symbol table ([#54])
+- type-checker: Implement import system with registration and resolution phases ([#54])
+- type-checker: Add visibility handling for modules, structs, and enums ([#54])
+- type-checker: Implement enum support with variant access validation ([#54])
+- ast: Add `#[derive(Copy)]` to `Location` for efficient stack copies ([#69])
+- ast: Replace `Vec<NodeRoute>` with `FxHashMap` for O(1) parent/children lookup ([#69])
+- ast: Add `get_node_source()` and `find_source_file_for_node()` convenience API ([#69])
+- ast: Implement arena-based AST with ID-based node references ([#25])
+- ast: Add `NodeKind` support for AST node classification ([#25])
+
 ### Codegen
 
-- Add codegen support for function-scoped compound `const` ([#171])
-  - `const NAME: T = EXPR` inside a function body now lowers identically to immutable `let` for arrays, structs, and any compound copy / sret-call / literal initializer
-  - `collect_compound_slots` allocates `ArraySlot` / `StructSlot` for `Stmt::ConstDef`, and `lower_statement`'s `Stmt::ConstDef` arm dispatches to the same four-way path (`lower_sret_var_init`, `lower_array_copy_var_init`, `lower_struct_copy_var_init`, `lower_expression` with zero-elision) as `Stmt::VarDef`
-  - AD-5: function-scope compound `const` and immutable `let` produce byte-identical WASM (regression-guarded by `const_compound_byte_identical_to_let`, which now covers literal-init, sret-call, compound-copy, and zero-init paths for both arrays and structs); contract holds until CTFE for `const` is introduced
-  - New analysis rule rejects module-scope `Def::Constant` with a clear "not yet supported" diagnostic, replacing the previous silent panic at use sites (AD-6)
-  - `core/ast/src/builder.rs::build_constant_definition` routes the const initializer through `build_expression` so `struct_expression` (and other non-literal initializers) are accepted symmetrically to `let`
-  - New base codegen fixtures: `const_array`, `const_struct`, `const_compound_mixed`, `const_sret_call`, `const_compound_copy`, `const_in_forall`
-  - AD-1 invariant tests pin that `const ARR = ...; ARR = ...;`, `ARR[0] = ...;`, and `P.x = ...;` against compound consts all surface `AssignToImmutable`, since immutability is enforced solely upstream by the type checker
-  - A026 (one-level compound nesting) symmetry test pinned via `a026_depth_2_via_const_initializer_rejected`
-  - AD-1 documents the explicit Zig-alignment of Inference's `const`-allows-runtime-initializer policy (vs Rust's CTFE-only `const`)
+- `FunctionOrigin { TopLevel, SpecInner }` enum threaded through `visit_function_definition`. Spec-inner functions can no longer be WASM-exported even when `pub`, closing a latent footgun for the upcoming `export` keyword ([issue#19])
+- Per-spec function-index map (`spec_func_indices_by_spec : FxHashMap<String, Vec<u32>>`) replaces the prior single union list. Internal `build_func_name_to_idx` keys spec-inner functions as `"<SpecName>.<fn>"` so two specs may share function names; WASM `name` section emission stays unmangled ([issue#21])
+- Emit `inference.spec_funcs` WASM custom section in `proof` mode carrying the per-spec index map. Bare `.wasm` binaries are now self-describing; the Rocq translator can recover the map without an out-of-band `CodegenOutput`. The section name uses the vendor-prefixed `inference.*` namespace rather than the `metadata.code.*` namespace reserved by the WebAssembly tool-conventions repo. Section is omitted in `compile` mode so binaries stay byte-identical ([issue#16])
+- `wasm-to-v` crate: new `errors.rs` with `WasmToVError` thiserror enum (`InvalidRocqIdentifier`, `RocqStdlibShadow`, `EmbeddedSpecMismatch`, `WasmParse`) and `InvalidIdentifierReason` sub-enum, closing the CLAUDE.md compliance gap that left this crate without an `errors.rs` ([issue#20])
+- `wasm-to-v` crate: `validate_rocq_identifier` helper rejects Rocq-illegal module/spec names (non-alphabetic leading char, invalid chars, length > 255, stdlib shadow, reserved vernacular/Gallina keyword) before they reach `Definition <name>` emission. Called at the top of `translate_bytes` and again per spec name in `translate()` ([issue#20])
+- `wasm-to-v` translator: per-spec Rocq emission. Each entry in `spec_funcs_by_spec` produces one `Definition <mod>__<SpecName>_specs : list N` and one `Theorem valid_<mod>__<SpecName> : ValidSpec <mod> <mod>__<SpecName>_specs.`. Empty per-spec lists render as `(@nil N)` so they type-check regardless of scope state at the consumer site ([issue#21], [issue#22])
 - Switch from LLVM to direct WebAssembly emission via `wasm-encoder` ([#125])
   - Remove all LLVM dependencies: `inkwell`, `build.rs`, external binaries (`inf-llc`, `rust-lld`)
   - Rewrite `compiler.rs` to generate WASM binary directly in-process
   - Non-deterministic instructions emitted as custom opcodes via `Function::raw()` byte sequences
   - Custom opcodes in 0xfc prefix space: uzumaki (0x31/0x32), forall (0x3a), exists (0x3b), assume (0x3c), unique (0x3d)
   - Reactor model: all `pub` functions exported individually, no `_start` entry point
-- Add compilation architecture with `CodegenOutput` boundary ([#97], [#125])
+- Add compilation architecture with `CodegenOutput` boundary ([issue#97], [#125])
   - `codegen()` returns `CodegenOutput` (WASM bytes + metadata)
   - `CodegenOutput` carries WASM binary, target, mode, opt level, module name, and `has_main` flag
   - New `Target` (Wasm32/Soroban), `CompilationMode` (Compile/Proof), and `OptLevel` (O0–O3/Os/Oz) enums
-- Add per-function optimization strategy for proof mode (Decision #32) ([#97])
+- Add per-function optimization strategy for proof mode (Decision #32) ([issue#97])
   - Spec functions compiled unoptimized to preserve structural correspondence with source for Rocq translation
   - Execution functions use target's release optimization so proofs cover actual deployed code
   - `OptLevel` is currently metadata only; optimization passes planned for future
-- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([#97])
+- Add validation guards in `codegen()`: reject proof mode with non-Wasm32 targets, reject Soroban with non-det operations ([issue#97])
 - Upgrade shadowing detection from `debug_assert!` to `assert!` in `pre_scan_locals` — fires in release builds for parameter, constant, and variable name collisions in `locals_map`
 - Add `Statement::Loop` body recursion to `pre_scan_locals()` — locals inside loop bodies are pre-registered before instruction emission
 - Add loop and break statement lowering to WebAssembly codegen ([#152])
@@ -63,7 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Array return types via sret (struct-return) calling convention matching Rust/Zig: hidden `$sret` parameter at index 0, void WASM return, caller allocates destination in its own frame
   - Three sret return expression cases: identifier (`return arr` → `memory.copy`), array literal (`return [1,2,3]` → element-wise stores), function call (`return inner()` → zero-copy sret forwarding)
   - Sub-i32 narrowing after arithmetic: signed types use shift-left/arithmetic-shift-right, unsigned types use AND mask; skipped for comparisons, Mod, Shr, bitwise ops
-- Add struct type support with linear memory allocation ([#149])
+- Add struct type support with linear memory allocation ([pr#159])
   - Struct fields laid out in declaration order with C-style natural alignment padding
   - `compute_struct_field_layout()` computes per-field byte offsets and total struct size
   - `StructSlot` and `StructFieldSlot` types in memory.rs for frame layout tracking
@@ -77,7 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Struct literal reassignment: `p = Point { x: 3, y: 4 }` writes fields directly to existing frame slot
   - Uzumaki for all primitive types: bool, i8-u64 emit `i32.uzumaki` or `i64.uzumaki` as appropriate
   - Struct uzumaki (`let p: Point = @;`) now supported: `lower_struct_uzumaki` emits per-field uzumaki opcodes followed by stores (`wasm_codegen_emit_struct_uzumaki`)
-- Add struct method codegen with instance methods, associated functions, and cross-calls ([#162])
+- Add struct method codegen with instance methods, associated functions, and cross-calls ([pr#178])
   - Methods compiled as top-level WASM functions with mangled names (`TypeName.method_name`)
   - Two-phase traversal: register all function + method indices before compiling any bodies (enables forward references)
   - `self` parameter lowered as `ValType::I32` struct pointer at param index 0
@@ -87,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Methods returning compound types (structs, arrays) use sret calling convention
   - `ResolvedCallee` enum consolidates three callee patterns (Function, AssociatedFunction, InstanceMethod) across all call paths
   - `assert!` on mangled name collision: detects `TypeName.method_name` conflicts with top-level functions in release builds
-- Add enum type codegen: unit enum variants lowered as i32 constants with zero-based tags ([#179])
+- Add enum type codegen: unit enum variants lowered as i32 constants with zero-based tags ([pr#187])
   - Enum variant access (`Color::Red`) emits `i32.const <tag>` via `TypeMemberAccess` lowering
   - Enums work in all value positions: locals, parameters, return values, struct fields, arrays, const declarations
   - Equality (`==`) and inequality (`!=`) comparisons use native i32 instructions
@@ -97,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `EnumInfo.variants` changed from `FxHashSet` to `Vec` for deterministic declaration-order tag assignment
   - `TypedContext::lookup_enum()` exposed for cross-crate enum metadata access
   - Analysis `has_compound_fields()` made enum-aware: enum-typed `Custom` fields treated as scalar
-- Add nested compound type codegen: struct-in-struct, array-in-struct, struct-in-array ([#161])
+- Add nested compound type codegen: struct-in-struct, array-in-struct, struct-in-array ([pr#185])
   - Recursive `type_byte_size()` computes byte sizes for nested compound types via `TypedContext` struct lookup
   - `CompoundFieldLayout` enum (`Scalar`, `NestedStruct`, `NestedArray`) caches sub-layout on `StructFieldSlot` for efficient chained access
   - Pointer semantics for compound member/index access: compound fields push i32 pointer, load only at terminal scalar field
@@ -151,12 +204,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Expression::FunctionCall` lowered to `call` instruction with positional arguments
   - Void function calls in expression-statement position correctly omit `Drop`
   - Value-returning function calls in expression-statement position emit `Drop`
-- Add local variable lowering (`let` bindings) to WebAssembly codegen ([#134])
+- Add local variable lowering (`let` bindings) to WebAssembly codegen ([pr#135])
   - Emit `local.set` / `local.get` for variable definitions with literal, identifier, and uzumaki initializers
   - Support all numeric types (i8, i16, i32, i64, u8, u16, u32, u64), bool, and uzumaki
   - Type-checker propagates declared type into numeric literal initializers for sub-i32 types
   - Refactor `ConstantDefinition` lowering to share `lower_literal` helper with `VariableDefinition` (~130 lines removed)
   - Remove dead `is_uzumaki: bool` field from `VariableDefinitionStatement` AST node
+- Add LLVM-based WASM code generation using `inf-llc` ([#44])
+- Add custom LLVM intrinsics for non-deterministic instructions ([#44])
+- Implement `forall`, `exists`, `uzumaki`, `assume`, `unique` block codegen ([#44])
+- Add `rust-lld` linker invocation for WASM linking ([#44])
+- Add mutable globals support in WASM compilation ([#44])
+- Add base WASM code generation from typed AST ([#29])
 
 ### Analysis
 
@@ -174,7 +233,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migrated codegen restriction rules: A012 array-literal-as-argument, A013 struct-literal-as-argument, A014 array-uzumaki-as-argument, A015 compound-literal-in-unsupported-position, A016 compound-return-call-in-expression-position, A017 compound-return-call-in-assignment, A018 method-call-chain-on-compound-return, A019 array-index-64bit, A022 literal-out-of-range
   - New rules: A023 uzumaki-in-reassignment, A024 extern-function-call
   - `AssignToImmutable` and `VariableShadowed` remain in the type checker (require scope state)
-- Add 5 analysis rules for nested compound type constraints ([#161])
+- Add 5 analysis rules for nested compound type constraints ([pr#185])
   - A026 `NestedCompoundDepth`: reject struct field nesting deeper than one level (definition-site check)
   - A027 `UzumakiOnNestedStruct`: reject uzumaki on structs with compound fields
   - A028 `UzumakiOnStructInArray`: reject uzumaki on arrays of structs at any dimension depth
@@ -194,18 +253,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
+- `infc -v` (and `infs build -v`) now implies `--mode proof` when no explicit `--mode` is passed. Users wanting the prior behavior (V output from compile-mode WASM, stripped specs) can pass `--mode compile -v` explicitly. Closes a UX trap where `-v` alone produced a near-useless empty-specs `.v` file. ([issue#22])
+- `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([issue#22])
+- `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([issue#20])
 - Simplify `infc` and `infs build` default behavior: running without phase flags now performs full compilation and writes `out/<name>.wasm` ([#138])
   - `infc example.inf` equivalent to `infc example.inf --codegen -o`
   - `infc example.inf -v` produces both `out/example.wasm` and `out/example.v`
   - Supplying `--parse`, `--analyze`, or `--codegen` still overrides the default
   - Matches conventional compiler UX (e.g. `gcc foo.c`)
-- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([#97])
+- Add `BuildProfile` (Debug/Release) with `resolve_opt_level()` for target-aware optimization ([issue#97])
 - Remove external toolchain dependencies: no `inf-llc`, `rust-lld`, or platform-specific library paths required ([#125])
-- Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([#97])
+- Defer WASM compilation until output files are actually needed (`-o` or `-v` flags) ([issue#97])
+- Refactor CLI architecture with improved argument handling ([#28])
+
+### Rocq Translation
+
+- WASM module-name subsection now reflects the CLI-supplied input file stem instead of the hardcoded `"output"`. The Rocq translator reads this back, so the emitted `Definition <mod>__<Spec>_specs` and `Theorem valid_<mod>` identifiers now use the source filename. Multi-module workflows that previously collided on a single `output` identifier now produce distinct ones
+- Empty per-spec lists now emit `(@nil N)` instead of `[]%N` so the generated `Definition` type-checks regardless of whether `Open Scope N_scope` is active at the consumer's `Require` site. Downstream proof scripts matching `[]%N` literally must update ([issue#21], [issue#22])
+- Rewrite WASM-to-V translator for WasmCertCoq theory syntax ([#23])
+- Add function name propagation to V output ([#24])
 
 ### Documentation
 
-- Add compilation targets matrix documentation (`book/compilation_targets.md`) ([#97])
+- New `core/wasm-to-v/ROCQ_CONTRACT.md` documenting the external Rocq predicates the generator depends on (`ValidModule` 1-arg, new `ValidSpec`), the emitted proof-skeleton shape, and the spec-map precedence rules (explicit vs embedded) ([issue#17])
+- Add compilation targets matrix documentation (`book/compilation_targets.md`) ([issue#97])
   - 6-option matrix: Compile/Proof x Debug/Release x with/without non-det operations
 - Add `unreachable` emission rationale document (`book/unreachable-emission-in-codegen.md`) ([#144])
 - Add arithmetic overflow in WASM codegen deep-dive (`book/arithmetic-overflow-in-wasm-codegen.md`) ([#146])
@@ -216,6 +287,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Type Checker
 
+- Spec-inner functions whose bare name shadows a top-level function are now rejected (`SpecFunctionShadowsTopLevel`). Codegen's spec-aware call resolution and the type checker's nearest-binding rule disagreed silently on which callee was invoked from inside a spec; the rejection forces the user to rename one side
+- Same-named structs or enums across spec blocks are now rejected at registration time (previously silently used the first-registered layout). Cross-spec mangling of struct/enum identity would require carrying spec context through every type access (field projection, sret layouts, method dispatch); rejecting at registration avoids that blast radius and surfaces a clear `RegistrationFailed` diagnostic. Functions remain mangleable across specs (`"<Spec>.<fn>"`) as before
+- Spec blocks now open a real symbol-table scope via `enter_spec`, parallel to `enter_module`. Spec-inner functions, structs, enums, type aliases, and constants live in a dedicated scope keyed by spec name, so two specs may declare same-named members without colliding ([issue#18])
+- `flatten_defs_with_spec_inner` removed. The three phases that used it (`register_types`, `collect_function_and_constant_definitions`, and the body-inference loop) recurse into `Def::Spec` inline, opening the spec scope around the inner work ([issue#18])
+- `TypedContext::lookup_struct` and `lookup_enum` now search across **all** scopes (`lookup_struct_anywhere` / `lookup_enum_anywhere`) so post-type-check phases (analysis, codegen) can resolve spec-inner types they walk into. Internal scope-local lookups inside the type checker are unchanged ([issue#18])
 - Add `resolve_custom_type()` to `SymbolTable` to fix `Custom` vs `Struct`/`Enum` type resolution mismatch ([#148])
   - Resolves `TypeInfoKind::Custom(name)` to `Struct(name)` or `Enum(name)` at function registration time
   - Recurses into array element types (handles `[MyStruct; 3]`)
@@ -227,41 +303,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Propagates element type from `[i64; N]` annotation to number literals in array initializers
 - Add array element assignment mutability check ([#148])
   - `arr[i] = value` requires `arr` to be declared `mut`
-  - `extract_root_variable_name` resolves root identifier from nested index access and member access expressions ([#149])
-  - Struct field assignment (`p.x = 42`) requires the struct variable to be declared `mut` ([#149])
-- Add `VariableShadowed` error: variable declaration that shadows a name from an outer scope is a hard error ([#149])
+  - `extract_root_variable_name` resolves root identifier from nested index access and member access expressions ([pr#159])
+  - Struct field assignment (`p.x = 42`) requires the struct variable to be declared `mut` ([pr#159])
+- Add `VariableShadowed` error: variable declaration that shadows a name from an outer scope is a hard error ([pr#159])
   - Aligns with MISRA C Rule 5.3 and NASA Power of 10
   - `lookup_variable_in_parent_scopes()` added to symbol table to detect shadowing before registration
 - Add `ArrayReturnCallInExpressionPosition` error: rejects array-returning function calls in unsupported positions ([#148])
   - Only `let x = foo()` and `return foo()` are permitted for sret calls
   - Standalone calls, argument positions, index access, and assignment RHS all rejected with clear diagnostic
   - Guards at 6 sites: Statement::Expression, ArrayIndexAccess, 3 argument validation loops, Statement::Assign
-- Add struct literal field validation ([#149])
+- Add struct literal field validation ([pr#159])
   - `MissingStructField`: reject struct literals missing required fields
   - `UnknownStructField`: reject struct literals with fields not in the struct definition
   - `DuplicateStructField`: reject struct literals with repeated field names
   - Field value type mismatch: reject `Point { x: true }` when `x: i32`
-- Add `MethodNeverAccessesSelf` error: methods declaring `self` but never using it ([#149])
-- Add `EmptyStruct` error: reject struct definitions with no fields or methods ([#149])
-- Add `StructLiteralAsArgument` error: reject struct literals as direct function arguments ([#149])
-- Add `CompoundLiteralInUnsupportedPosition` error: reject struct/array literals in arbitrary expression positions ([#149])
+- Add `MethodNeverAccessesSelf` error: methods declaring `self` but never using it ([pr#159])
+- Add `EmptyStruct` error: reject struct definitions with no fields or methods ([pr#159])
+- Add `StructLiteralAsArgument` error: reject struct literals as direct function arguments ([pr#159])
+- Add `CompoundLiteralInUnsupportedPosition` error: reject struct/array literals in arbitrary expression positions ([pr#159])
   - Compound literals allowed only in variable declarations, assignments, return statements, and struct field values
-- Extend `ArrayReturnCallInExpressionPosition` to also reject struct-returning calls in expression positions ([#149])
+- Extend `ArrayReturnCallInExpressionPosition` to also reject struct-returning calls in expression positions ([pr#159])
   - Covers `MemberAccess` on sret-returning calls (e.g., `make_point().x`)
   - Error message updated from "array-returning" to "compound-returning"
-- Add const initializer type validation: `const x: i32 = true;` now rejected ([#149])
-- Add number-to-bool assignment rejection: `let x: bool = 0;` now rejected ([#149])
-- Add ordering comparison validation: `true < false` now rejected; equality (`==`/`!=`) still allowed on all types ([#149])
-- Fix duplicate `BinaryOperandTypeMismatch` error for mixed-type arithmetic ([#149])
+- Add const initializer type validation: `const x: i32 = true;` now rejected ([pr#159])
+- Add number-to-bool assignment rejection: `let x: bool = 0;` now rejected ([pr#159])
+- Add ordering comparison validation: `true < false` now rejected; equality (`==`/`!=`) still allowed on all types ([pr#159])
+- Fix duplicate `BinaryOperandTypeMismatch` error for mixed-type arithmetic ([pr#159])
 - Remove dead code: `types_equal` function, `is_compatible_with` method, `param_names` field from `FuncInfo`
 - Add `find_enclosing_variable_name()` to `TypedContext` for walking AST parent chain to enclosing variable
-- Rename `ArrayReturnCallInExpressionPosition` to `CompoundReturnCallInExpressionPosition` to reflect struct coverage ([#162])
-- Add `CompoundReturnCallInAssignment` error: rejects compound-returning function calls in assignment RHS ([#162])
+- Rename `ArrayReturnCallInExpressionPosition` to `CompoundReturnCallInExpressionPosition` to reflect struct coverage ([pr#178])
+- Add `CompoundReturnCallInAssignment` error: rejects compound-returning function calls in assignment RHS ([pr#178])
   - `p = make_point()` rejected; use `let p = make_point()` instead
-- Add `MethodCallChainOnCompoundReturn` error: rejects method call chains on compound-returning functions ([#162])
+- Add `MethodCallChainOnCompoundReturn` error: rejects method call chains on compound-returning functions ([pr#178])
   - `p.translate(1, 2).get_x()` rejected; assign intermediate result to a variable first
   - Deliberate design choice: implicit temporaries cannot be named in formal proofs
-- Add `MethodMetadata` public struct and `TypedContext::lookup_method()` for cross-crate method metadata access ([#162])
+- Add `MethodMetadata` public struct and `TypedContext::lookup_method()` for cross-crate method metadata access ([pr#178])
 - Migrate 13 codegen restriction checks from type checker to analysis pass
   - Removed from `TypeCheckError`: `LiteralOutOfRange`, `ArrayLiteralAsArgument`, `StructLiteralAsArgument`, `ArrayUzumakiAsArgument`, `CompoundLiteralInUnsupportedPosition`, `CompoundReturnCallInExpressionPosition`, `CompoundReturnCallInAssignment`, `MethodCallChainOnCompoundReturn`, `ArrayIndex64Bit`, `EmptyStruct`, `MethodNeverAccessesSelf`; plus `UzumakiInReassignment` and `ExternFunctionCall` which are new
   - Type checker now produces 46 error variants (down from 50)
@@ -278,14 +354,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix `from_builtin_str` uses exact case-sensitive matching
 - Fix external function parameter parsing corrected in AST builder (previously dropped parameters in some cases)
 - Bump `tree-sitter-inference` grammar from 0.0.39 to 0.0.40 — fixes chained member access parsing
-- Add `compound_literal_allowed` propagation into nested struct literal fields and array literal elements ([#161])
+- Add `compound_literal_allowed` propagation into nested struct literal fields and array literal elements ([pr#185])
   - `Outer { inner: Inner { x: 1 } }` correctly accepted in variable declarations
   - Array literals inside struct fields accepted: `HasArray { arr: [1, 2, 3] }`
-- Add `find_enclosing_variable_name()` to `TypedContext` for analysis rule uzumaki struct name lookup ([#161])
+- Add `find_enclosing_variable_name()` to `TypedContext` for analysis rule uzumaki struct name lookup ([pr#185])
 
 ### Testing
 
-- Add 7 enum codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#179])
+- Add 7 enum codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([pr#187])
   - `enum_variant`: basic variant access, variable declaration, return values
   - `enum_multi`: multiple enum definitions in one module
   - `enum_params`: enum as function parameter with branching on tags
@@ -293,8 +369,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `enum_assign`: mutable reassignment, assignment from parameter
   - `enum_array`: arrays of enum values in linear memory
   - `enum_in_struct`: enum-typed struct fields
-- Add 12 enum execution tests with Wasmtime assertions: variant tags, params, comparisons, reassignment, arrays, struct fields, const declarations, uzumaki ([#179])
-- Add 7 type-checker tests for enum operator constraints: equality/inequality accepted, arithmetic/ordering/negation/boolean-context rejected ([#179])
+- Add 12 enum execution tests with Wasmtime assertions: variant tags, params, comparisons, reassignment, arrays, struct fields, const declarations, uzumaki ([pr#187])
+- Add 7 type-checker tests for enum operator constraints: equality/inequality accepted, arithmetic/ordering/negation/boolean-context rejected ([pr#187])
 - Rewrite all 85 AST builder tests in `tests/src/ast/helpers.rs` with deep structural verification
   - 50+ test helper functions for constructing and asserting on AST nodes
   - Tests now verify node positions, field values, and parent-child relationships
@@ -305,23 +381,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 43 analysis walker tests covering all 5 rules across free functions, struct methods, and spec functions ([#156])
   - Negative tests for valid code, edge cases for nested loops, deeply nested nondet, overlapping rule triggers
   - All four nondet block types (forall, exists, assume, unique) tested for A002
-- Add 5 nested compound codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#161])
+- Add 5 nested compound codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([pr#185])
   - `nested_struct`: struct-in-struct literal, chained access, write, param, return, copy, method
   - `struct_with_array`: array-in-struct literal, index access through struct, write, param, method
   - `array_of_structs`: struct-in-array literal, field access through index, element write, method
   - `nested_struct_with_array`: combined struct nesting with array fields
   - `multidim_array_uzumaki`: multidimensional array uzumaki in non-det block
-- Add `struct_array_field_nondet` test fixture for struct uzumaki with array fields ([#161])
-- Add 3 analysis test modules for nested compound rules ([#161])
+- Add `struct_array_field_nondet` test fixture for struct uzumaki with array fields ([pr#185])
+- Add 3 analysis test modules for nested compound rules ([pr#185])
   - `rules_a026_a028.rs`: nested depth, uzumaki on nested struct, uzumaki on struct-in-array (703 lines)
   - `rules_a029_a030.rs`: compound literal in compound assign, uzumaki on deep array (364 lines)
   - `rules_a031.rs`: unsupported compound return expression (234 lines)
-- Add type checker tests for nested compound literal propagation (`compound_literal_allowed`) ([#161])
-- Add 9 method codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([#162])
+- Add type checker tests for nested compound literal propagation (`compound_literal_allowed`) ([pr#185])
+- Add 9 method codegen test fixtures with four-tier verification (byte, WAT, validation, wasmtime execution) ([pr#178])
   - `method_instance`, `method_assoc`, `method_self_mutate`, `method_return_struct`, `method_cross_call`, `method_multi_struct`, `method_i64_fields`, `method_three_fields`, `method_array_return`
-- Add negative codegen tests for unsupported features: `assert`, `**` operator, standalone `TypeMemberAccess`, recursive compound returns ([#162])
-- Add validation tests for method mangling, immutable self zero-copy, and mutable self frame copy ([#162])
-- Add 12 type checker tests for method chain rejection, compound-return in assignments, and member-access error cases ([#162])
+- Add negative codegen tests for unsupported features: `assert`, `**` operator, standalone `TypeMemberAccess`, recursive compound returns ([pr#178])
+- Add validation tests for method mangling, immutable self zero-copy, and mutable self frame copy ([pr#178])
+- Add 12 type checker tests for method chain rejection, compound-return in assignments, and member-access error cases ([pr#178])
 - Update all AST, type-checker, and codegen tests for typed arena API ([#156])
   - Migrate from `arena.filter_nodes(|node| matches!(node, AstNode::...))` to structured traversal via typed IDs
   - Update test utilities with `find_function_by_name()`, `collect_exprs_matching()`, `collect_all_stmts()`
@@ -340,14 +416,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 7 type-checker tests for `ArrayReturnCallInExpressionPosition`: let binding, return forwarding, standalone, argument, index access, assignment, non-array standalone ([#148])
 - Add 10 inline execution tests for array element types: i8, u8, i16, u16, u32, i64, large array params (N > 16), mixed-type arrays, mutable parameters ([#148])
 - Add runtime stack overflow trap test: two 32KB frames in 64KB stack verified to trap at runtime via Wasmtime ([#148])
-- Add 6 struct codegen test fixtures with 4-tier verification (byte, WAT, validator, execution) ([#149])
+- Add 6 struct codegen test fixtures with 4-tier verification (byte, WAT, validator, execution) ([pr#159])
   - `struct_literal.inf`: two-field, single-field, and mixed-type struct creation
   - `struct_access.inf`: field reads, arithmetic on fields, mixed-type alignment
   - `struct_assign.inf`: field writes, field swaps, bool field modification
   - `struct_params.inf`: copy-on-entry semantics, multiple struct params, mixed types
   - `struct_return.inf`: sret literal return, variable return, call forwarding
   - `struct_copy.inf`: value semantics, independent copies, mixed-type copy
-- Add ~30 type-checker tests for struct validation ([#149])
+- Add ~30 type-checker tests for struct validation ([pr#159])
   - Struct mutability: immutable/mutable variable and parameter field assignment
   - Variable shadowing: inner blocks, if/else, loops, const, parameters, sequential blocks
   - Struct field validation: missing, extra, duplicate fields, type mismatches
@@ -380,15 +456,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `if_nondet.inf`: if-statement inside `forall` non-det block
 - Flatten per-module test directory structure to avoid double-nesting ([#144])
   - `get_test_dir()` helper deduplicates module-name paths
-- Migrate codegen test data to per-test subdirectory layout ([#134])
+- Migrate codegen test data to per-test subdirectory layout ([pr#135])
   - `tests/test_data/codegen/wasm/base/{name}/{name}.{inf,wasm}` replaces flat `base/{name}.{inf,wasm}`
   - `get_test_file_path` / `get_test_wasm_path` helpers updated to resolve through subdirectory
-- Add 28 codegen tests with three-tier verification architecture ([#97], [#125])
+- Add 28 codegen tests with three-tier verification architecture ([issue#97], [#125])
   - Byte comparison tests against committed `.wasm` reference files
   - `inf_wasmparser::validate()` validation on all generated output
   - 2 Wasmtime execution tests verifying runtime behavior
   - Validation tests for metadata, target/mode combinations, non-det opcode presence
-- Add codegen test helpers ([#97], [#125])
+- Add codegen test helpers ([issue#97], [#125])
   - `codegen_output()`, `codegen_output_with_mode()`, `codegen_with_target_mode()`, `codegen_with_full_config()`
   - `wasm_codegen()`, `wasm_codegen_with_target()`, `assert_wasms_modules_equivalence()`
 - Expand `infs` test coverage from 282 to 429 tests (360 unit + 69 integration) ([#96])
@@ -397,6 +473,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Add tests for error handling, environment variables, and edge cases
   - Consolidate test fixtures in `apps/infs/tests/fixtures/`
 - Move QA test suite to `apps/infs/docs/qa-test-suite.md` with 9 truly manual tests ([#96])
+- tests: Consolidate builder tests by removing redundant `builder_extended.rs` module ([#50])
+- tests: Add `builder_features.rs` module with feature-specific AST tests ([#50])
+- tests: Add `primitive_type.rs` module with `SimpleTypeKind` tests ([#50])
+- tests: Add utility assertions: `assert_single_binary_op`, `assert_function_signature`, etc. ([#50])
 
 ### infs CLI
 
@@ -443,6 +523,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `infs` binaries to release artifacts for all platforms (Linux x64, Windows x64, macOS ARM64)
 - Update release manifest to schema version 2 with separate `infc` and `infs` tool entries
+- Add macOS Apple Silicon (M1/M2) support to build workflows ([#55])
+- Add Codecov integration for test coverage reporting ([#57], [#58])
+- Optimize local build time and refactor CI workflows ([#60])
+- Add Windows development setup with cross-platform LLVM binaries
+- Update libLLVM download URL to use consistent filename with `-nightly` suffix ([#56])
+- Remove unused PATH configuration from `.cargo/config.toml` ([#56])
+- Bump CI cache keys to invalidate stale binary caches ([#56])
+- Fix LLVM environment variable reference in Windows installation guide ([#56])
+- Add Linux development setup guide (`book/installation_linux.md`) ([#56])
+- Add macOS development setup guide (`book/installation_macos.md`) ([#56])
+- Add cross-platform dependency check script (`book/check_deps.sh`) ([#56])
+
+### Tooling
+
+- Remove `playground-server` tool (unused, superseded by external playground infrastructure) ([#56])
+- Reorganize project structure: move crates to `core/` and `tools/` directories ([#43])
+- Add `inf-wasmparser` crate (fork with non-det instruction support) ([#43])
+- Add `inf-wat` crate for WAT parsing ([#43])
+- Add `wat-fmt` crate for pretty-formatting WAT files ([pr#21])
+- Improve error handling with `anyhow::Result` for AST parsing ([pr#22])
+
+### Performance
+
+- ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
+
+### Fixed
+
+- Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
+- Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
+- Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
+- Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
 
 ### Project Manifest
 
@@ -483,93 +594,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Update doctor check expectations from 6 to 5 checks (single `infc` check replaces `inf-llc`, `rust-lld`, `libLLVM`)
   - Change "missing lib directory triggers doctor warning" to "missing infc triggers doctor failure"
 
-### Language
-
-- Add struct definition and parsing support ([#14])
-- Add division operator (`/`) support ([#86])
-- Add unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
-- Parse visibility modifiers (`pub`) for functions, structs, enums, constants, and type aliases ([#86])
-
-### Compiler
-
-- ast: Remove dead `OperatorKind::BitNot` variant — `~x` is always parsed as `UnaryOperatorKind::BitNot` in a `PrefixUnaryExpression`; the binary enum variant was never produced by the AST builder ([#142])
-- ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])
-- ast: Simplify Builder API to return `Arena` directly instead of using state machine pattern ([#50])
-- ast: Add error collection in Builder with `collect_errors()` for better parse error reporting ([#50])
-- ast: Add `@skip` macro annotation for enum variants without stable node IDs ([#50])
-- type-checker: Add `type_kind_from_simple_type_kind()` for type-safe primitive type conversion ([#50])
-- type-checker: Add type checking for unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
-- type-checker: Change expression inference to use immutable references ([#86])
-- ast: Use atomic counter for deterministic node ID generation ([#86])
-- type-checker: Add bidirectional type inference with scope-aware symbol table ([#54])
-- type-checker: Implement import system with registration and resolution phases ([#54])
-- type-checker: Add visibility handling for modules, structs, and enums ([#54])
-- type-checker: Implement enum support with variant access validation ([#54])
-- ast: Add `#[derive(Copy)]` to `Location` for efficient stack copies ([#69])
-- ast: Replace `Vec<NodeRoute>` with `FxHashMap` for O(1) parent/children lookup ([#69])
-- ast: Add `get_node_source()` and `find_source_file_for_node()` convenience API ([#69])
-- ast: Implement arena-based AST with ID-based node references ([#25])
-- ast: Add `NodeKind` support for AST node classification ([#25])
-
-### Codegen
-
-- Add LLVM-based WASM code generation using `inf-llc` ([#44])
-- Add custom LLVM intrinsics for non-deterministic instructions ([#44])
-- Implement `forall`, `exists`, `uzumaki`, `assume`, `unique` block codegen ([#44])
-- Add `rust-lld` linker invocation for WASM linking ([#44])
-- Add mutable globals support in WASM compilation ([#44])
-- Add base WASM code generation from typed AST ([#29])
-
-### Rocq Translation
-
-- Rewrite WASM-to-V translator for WasmCertCoq theory syntax ([#23])
-- Add function name propagation to V output ([#24])
-
-### CLI
-
-- Refactor CLI architecture with improved argument handling ([#28])
-
-### Tooling
-
-- Remove `playground-server` tool (unused, superseded by external playground infrastructure) ([#56])
-- Reorganize project structure: move crates to `core/` and `tools/` directories ([#43])
-- Add `inf-wasmparser` crate (fork with non-det instruction support) ([#43])
-- Add `inf-wat` crate for WAT parsing ([#43])
-- Add `wat-fmt` crate for pretty-formatting WAT files ([#21])
-- Improve error handling with `anyhow::Result` for AST parsing ([#22])
-
-### Build
-
-- Add macOS Apple Silicon (M1/M2) support to build workflows ([#55])
-- Add Codecov integration for test coverage reporting ([#57], [#58])
-- Optimize local build time and refactor CI workflows ([#60])
-- Add Windows development setup with cross-platform LLVM binaries
-- Update libLLVM download URL to use consistent filename with `-nightly` suffix ([#56])
-- Remove unused PATH configuration from `.cargo/config.toml` ([#56])
-- Bump CI cache keys to invalidate stale binary caches ([#56])
-- Fix LLVM environment variable reference in Windows installation guide ([#56])
-- Add Linux development setup guide (`book/installation_linux.md`) ([#56])
-- Add macOS development setup guide (`book/installation_macos.md`) ([#56])
-- Add cross-platform dependency check script (`book/check_deps.sh`) ([#56])
-
-### Testing
-
-- tests: Consolidate builder tests by removing redundant `builder_extended.rs` module ([#50])
-- tests: Add `builder_features.rs` module with feature-specific AST tests ([#50])
-- tests: Add `primitive_type.rs` module with `SimpleTypeKind` tests ([#50])
-- tests: Add utility assertions: `assert_single_binary_op`, `assert_function_signature`, etc. ([#50])
-
-### Performance
-
-- ast: 98% memory reduction in `Location` struct by removing unused source field ([#69])
-
-### Fixed
-
-- Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
-- Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
-- Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
-- Fix `wasm_to_v` public API signature — parameter changed from `&Vec<u8>` to idiomatic `&[u8]`
-
 ---
 
 ## [0.0.1-alpha] - 2026-01-03
@@ -607,7 +631,7 @@ Initial tagged release.
 
 ---
 
-[Unreleased]: https://github.com/Inferara/inference/releases/tag/v0.0.1-alpha...HEAD
+[Unreleased]: https://github.com/Inferara/inference/compare/v0.0.1-alpha...HEAD
 [0.0.1-alpha]: https://github.com/Inferara/inference/releases/tag/v0.0.1-alpha
 
 [#1]: https://github.com/Inferara/inference/pull/1
@@ -615,8 +639,8 @@ Initial tagged release.
 [#11]: https://github.com/Inferara/inference/pull/11
 [#12]: https://github.com/Inferara/inference/pull/12
 [#14]: https://github.com/Inferara/inference/pull/14
-[#21]: https://github.com/Inferara/inference/pull/21
-[#22]: https://github.com/Inferara/inference/pull/22
+[pr#21]: https://github.com/Inferara/inference/pull/21
+[pr#22]: https://github.com/Inferara/inference/pull/22
 [#23]: https://github.com/Inferara/inference/pull/23
 [#24]: https://github.com/Inferara/inference/pull/24
 [#25]: https://github.com/Inferara/inference/pull/25
@@ -635,12 +659,12 @@ Initial tagged release.
 [#86]: https://github.com/Inferara/inference/pull/86
 [#94]: https://github.com/Inferara/inference/pull/94
 [#96]: https://github.com/Inferara/inference/pull/96
-[#97]: https://github.com/Inferara/inference/issues/97
+[issue#97]: https://github.com/Inferara/inference/issues/97
 [#116]: https://github.com/Inferara/inference/pull/116
 [#125]: https://github.com/Inferara/inference/pull/125
 [#126]: https://github.com/Inferara/inference/pull/126
 [#127]: https://github.com/Inferara/inference/pull/127
-[#134]: https://github.com/Inferara/inference/pull/135
+[pr#135]: https://github.com/Inferara/inference/pull/135
 [#136]: https://github.com/Inferara/inference/pull/136
 [#138]: https://github.com/Inferara/inference/pull/138
 [#140]: https://github.com/Inferara/inference/pull/140
@@ -649,10 +673,17 @@ Initial tagged release.
 [#146]: https://github.com/Inferara/inference/pull/146
 [#148]: https://github.com/Inferara/inference/pull/148
 [#152]: https://github.com/Inferara/inference/pull/152
-[#149]: https://github.com/Inferara/inference/pull/159
+[pr#159]: https://github.com/Inferara/inference/pull/159
 [#156]: https://github.com/Inferara/inference/pull/156
-[#161]: https://github.com/Inferara/inference/pull/185
-[#162]: https://github.com/Inferara/inference/pull/178
-[#171]: https://github.com/Inferara/inference/issues/171
-[#179]: https://github.com/Inferara/inference/pull/187
+[pr#185]: https://github.com/Inferara/inference/pull/185
+[pr#178]: https://github.com/Inferara/inference/pull/178
+[pr#187]: https://github.com/Inferara/inference/pull/187
 [#188]: https://github.com/Inferara/inference/pull/188
+[#195]: https://github.com/Inferara/inference/pull/195
+[issue#16]: https://github.com/Inferara/inference/issues/16
+[issue#17]: https://github.com/Inferara/inference/issues/17
+[issue#18]: https://github.com/Inferara/inference/issues/18
+[issue#19]: https://github.com/Inferara/inference/issues/19
+[issue#20]: https://github.com/Inferara/inference/issues/20
+[issue#21]: https://github.com/Inferara/inference/issues/21
+[issue#22]: https://github.com/Inferara/inference/issues/22

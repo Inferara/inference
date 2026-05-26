@@ -8,15 +8,21 @@
 //!
 //! `infs build` always performs full compilation (parse, analyze, codegen)
 //! and writes the WASM binary to disk. The `-v` flag additionally generates
-//! a Rocq (.v) translation file.
+//! a Rocq (.v) translation file. `--mode proof` selects proof mode (specs
+//! preserved unoptimized for Rocq translation) and implicitly enables `-v`
+//! since the `.v` artifact is the proof-mode deliverable. Symmetrically, `-v`
+//! with no explicit `--mode` forwards `--mode proof` to `infc` so the emitted
+//! `.v` contains per-spec definitions (`compile` mode strips them).
 //!
 //! ```bash
-//! infs build example.inf       # parse -> codegen -> write out/example.wasm
-//! infs build example.inf -v    # parse -> codegen -> write out/example.wasm + out/example.v
+//! infs build example.inf                 # parse -> codegen -> write out/example.wasm
+//! infs build example.inf -v              # also writes out/example.v (proof mode)
+//! infs build example.inf --mode proof    # proof mode; writes both .wasm and .v
+//! infs build example.inf --mode compile -v   # compile mode + .v (specs stripped)
 //! ```
 
 use anyhow::{Context, Result, bail};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -24,18 +30,44 @@ use crate::errors::InfsError;
 use crate::toolchain::find_infc;
 use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 
+/// Compilation mode forwarded to `infc --mode <…>`.
+///
+/// Mirrors `inference_wasm_codegen::CompilationMode` locally so the `infs`
+/// binary does not need to depend on the codegen crate just to parse a CLI
+/// flag it only forwards as a string.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildMode {
+    Compile,
+    Proof,
+}
+
 /// Arguments for the build command.
 ///
 /// Always performs full compilation (parse, analyze, codegen) and writes
 /// the WASM binary to disk. Use `-v` to also generate a Rocq (.v) file.
+///
+/// `mode` is `Option<BuildMode>` so the absence of `--mode` is distinguishable
+/// from `--mode compile`; this lets `-v` alone forward `--mode proof` to `infc`
+/// while `--mode compile -v` is left untouched.
 #[derive(Args, Clone)]
 pub struct BuildArgs {
     /// Path to the source file to compile.
     pub path: PathBuf,
 
     /// Generate Rocq (.v) translation file in addition to the WASM binary.
+    ///
+    /// When `--mode` is omitted, `-v` also forwards `--mode proof` to `infc`
+    /// (specs are preserved). Pass `--mode compile -v` to opt out.
     #[clap(short = 'v', action = clap::ArgAction::SetTrue)]
     pub generate_v_output: bool,
+
+    /// Compilation mode (`compile` or `proof`). When omitted, defaults to
+    /// `compile` unless `-v` is also passed, in which case it resolves to
+    /// `proof` (the `.v` artifact requires preserved specs to be useful).
+    /// `proof` preserves spec functions unoptimized for Rocq translation
+    /// and implies `-v`.
+    #[clap(long = "mode", value_enum)]
+    pub mode: Option<BuildMode>,
 }
 
 /// Executes the build command with the given arguments.
@@ -68,6 +100,17 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
 
     if args.generate_v_output {
         cmd.arg("-v");
+    }
+
+    // Forward only what the user explicitly passed. `infc::normalize_args`
+    // owns the `-v` ↔ `--mode proof` implication; mirroring it here would
+    // create a second source of truth that could silently drift.
+    if let Some(mode) = args.mode {
+        let flag = match mode {
+            BuildMode::Proof => "proof",
+            BuildMode::Compile => "compile",
+        };
+        cmd.arg("--mode").arg(flag);
     }
 
     let status = cmd

@@ -232,13 +232,11 @@ mod analysis_rules_tests {
         }
     }
 
-    /// Known limitation: A026 does recurse into spec definitions (via
-    /// `Def::Spec` in `check_defs`), but `lookup_struct` does not register
-    /// spec-scoped structs, so the lookup returns `None` and no error is
-    /// emitted. Should be flipped once spec-scoped struct registration is
-    /// implemented.
+    /// A026 fires on structs declared inside `spec` blocks: the type-checker
+    /// flattens spec inner defs into the global registration pass, so
+    /// `lookup_struct` resolves spec-scoped structs and the depth check trips.
     #[test]
-    fn a026_struct_in_spec_not_detected() {
+    fn a026_struct_in_spec_detected() {
         let source = r#"
             struct Inner { x: i32; y: i32; }
             struct Middle { inner: Inner; val: i32; }
@@ -248,17 +246,15 @@ mod analysis_rules_tests {
             }
             fn main() -> i32 { return 0; }
         "#;
-        let result = analyze(source);
-        if let Err(ref e) = result {
-            let has_a026 = e
-                .errors()
-                .iter()
-                .any(|e| matches!(e, AnalysisDiagnostic::NestedCompoundDepthExceeded { .. }));
-            assert!(
-                !has_a026,
-                "spec-scoped structs are not yet detected (known limitation), got: {e}"
-            );
-        }
+        let errors = expect_errors(source);
+        let a026_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, AnalysisDiagnostic::NestedCompoundDepthExceeded { .. }))
+            .collect();
+        assert!(
+            !a026_errors.is_empty(),
+            "depth-2 struct nested inside a spec should be rejected by A026, got: {errors:?}"
+        );
     }
 
     /// AD-1 / AD-5 symmetry: A026 fires on struct *definitions*, not on

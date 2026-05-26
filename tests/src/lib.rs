@@ -5,6 +5,8 @@
 mod analysis;
 mod ast;
 mod codegen;
+mod spec_propagation;
+mod spec_propagation_inf;
 mod type_checker;
 mod utils;
 
