@@ -210,11 +210,13 @@ impl Display for VisibilityContext {
     }
 }
 
-/// Categorizes errors that participate in node-ID-based deduplication.
+/// Categorizes errors that participate in `(DedupKind, name)` deduplication.
 ///
-/// Only the variants listed here can produce duplicate diagnostics across
-/// the registration and inference passes; other `TypeCheckError` variants
-/// are always recorded as-is.
+/// The set is empirical: only variants that the registration and inference
+/// passes have actually been observed to emit for the same symbol twice are
+/// listed here. Other `TypeCheckError` variants are always recorded as-is.
+/// When adding a new diagnostic that the walker can hit from multiple
+/// passes, extend both this enum and `TypeCheckError::dedup_key`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DedupKind {
     UnknownType,
