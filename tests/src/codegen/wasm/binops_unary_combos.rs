@@ -12,9 +12,6 @@
 /// - `bitnot_and(~a & b)`: `local.get $a; i32.const -1; i32.xor; local.get $b; i32.and`
 ///   BitNot lowers as `x ^ -1`, then bitwise AND follows.
 ///
-/// - `double_neg(-(-a))`: `i32.const 0; i32.const 0; local.get $a; i32.sub; i32.sub`
-///   Two nested negations: inner `0 - a`, then outer `0 - (0 - a)`.
-///
 /// - `not_and(!a && b)`: `local.get $a; i32.eqz; local.get $b; i32.and`
 ///   Logical NOT via `i32.eqz`, then non-short-circuit AND via `i32.and`.
 #[cfg(test)]
@@ -27,11 +24,11 @@ mod binops_unary_combos_tests {
     #[test]
     fn binops_unary_combos_test() {
         cov_mark::check_count!(wasm_codegen_emit_binary_expression, 17);
-        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 24);
-        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 9);
-        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 11);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 18);
+        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 6);
+        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 7);
         cov_mark::check_count!(wasm_codegen_emit_unary_not, 5);
-        cov_mark::check_count!(wasm_codegen_emit_unary_bitnot, 8);
+        cov_mark::check_count!(wasm_codegen_emit_unary_bitnot, 6);
         let test_name = "binops_unary_combos";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)
@@ -152,23 +149,6 @@ mod binops_unary_combos_tests {
         call!("bitnot_i64_and", i64, (0xFF_i64, 0x0F_i64), 0_i64);
         call!("bitnot_i64_and", i64, (0_i64, -1_i64), -1_i64);
 
-        // double_neg: -(-a)
-        call!("double_neg", i32, 42_i32, 42_i32);
-        call!("double_neg", i32, -100_i32, -100_i32);
-        call!("double_neg", i32, 0_i32, 0_i32);
-        call!("double_neg", i32, 1_i32, 1_i32);
-        call!("double_neg", i32, -1_i32, -1_i32);
-
-        // neg_bitnot: -(~a)
-        call!("neg_bitnot", i32, 0_i32, 1_i32);
-        call!("neg_bitnot", i32, -1_i32, 0_i32);
-        call!("neg_bitnot", i32, 1_i32, 2_i32);
-
-        // bitnot_neg: ~(-a)
-        call!("bitnot_neg", i32, 1_i32, 0_i32);
-        call!("bitnot_neg", i32, 0_i32, -1_i32);
-        call!("bitnot_neg", i32, -1_i32, -2_i32);
-
         // neg_shift: (-a) << b
         call!("neg_shift", i32, (1_i32, 3_i32), -8_i32);
         call!("neg_shift", i32, (0_i32, 5_i32), 0_i32);
@@ -200,7 +180,6 @@ mod regenerate {
         get_test_data_path()
             .join("codegen")
             .join("wasm")
-            .join("binops_unary_combos")
             .join("binops_unary_combos")
     }
 

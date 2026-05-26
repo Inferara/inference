@@ -3,6 +3,7 @@ pub mod array_uzumaki_as_argument;
 pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
 pub mod break_outside_loop;
+pub mod combined_unary_operators;
 pub mod compound_literal_member_assign;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
@@ -33,6 +34,7 @@ use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
 use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
 use break_outside_loop::BreakOutsideLoop;
+use combined_unary_operators::CombinedUnaryOperators;
 use compound_literal_member_assign::CompoundLiteralMemberAssign;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
@@ -96,5 +98,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &CompoundLiteralMemberAssign,
         &UnsupportedCompoundReturnExpr,
         &TopLevelConstNotSupported,
+        &CombinedUnaryOperators,
     ]
 }

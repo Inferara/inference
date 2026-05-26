@@ -59,6 +59,10 @@
 //! - A031: Unsupported expression form in compound-returning function return
 //! - A032: Top-level (module-scope) `const` declaration (not yet implemented)
 //!
+//! ### Syntactic Restrictions (A033)
+//!
+//! - A033: Combined/adjacent prefix unary operators (`--x`, `-~x`, `!!x`, including parenthesized variants)
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -161,6 +165,7 @@ mod tests {
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location: dummy_location() },
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location: dummy_location() },
             AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

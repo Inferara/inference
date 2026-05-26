@@ -167,6 +167,13 @@ pub enum AnalysisDiagnostic {
 
     #[error("top-level `const` declarations are not yet supported; declare `{name}` inside a function body, or track progress at https://github.com/Inferara/inference/issues/171")]
     TopLevelConstNotSupported { name: String, location: Location },
+
+    #[error("combined unary operators are prohibited: `{op_outer}{op_inner}`; combining unary operators reduces readability and risks misinterpretation, use parentheses with a temporary variable instead")]
+    CombinedUnaryOperators {
+        op_outer: &'static str,
+        op_inner: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -202,7 +209,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
-            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. } => location,
+            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
+            | AnalysisDiagnostic::CombinedUnaryOperators { location, .. } => location,
         }
     }
 
@@ -242,6 +250,7 @@ impl AnalysisDiagnostic {
             // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
             AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
+            AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
         }
     }
 }
@@ -720,6 +729,28 @@ mod tests {
         assert!(
             text.contains("inside a function body"),
             "A032 diagnostic must suggest declaring inside a function body, got: {text}"
+        );
+    }
+
+    #[test]
+    fn display_combined_unary_operators() {
+        let err = AnalysisDiagnostic::CombinedUnaryOperators {
+            op_outer: "-",
+            op_inner: "~",
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("combined unary operators are prohibited"),
+            "A033 diagnostic must explain the prohibition, got: {text}"
+        );
+        assert!(
+            text.contains("-~"),
+            "A033 diagnostic must include the combined operator glyphs, got: {text}"
+        );
+        assert!(
+            text.contains("temporary variable"),
+            "A033 diagnostic must suggest using a temporary variable, got: {text}"
         );
     }
 

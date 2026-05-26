@@ -240,6 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A029 `CompoundLiteralMemberAssign`: reject compound literal assignment directly to compound elements
   - A031 `UnsupportedCompoundReturnExpr`: reject complex return expressions in compound-returning functions
   - Walker helpers: `has_compound_fields()`, `array_nesting_depth()`, `is_compound_return_call()`
+- A033 `CombinedUnaryOperators`: reject adjacent prefix unary operators such as `--x`, `-~x`, `!!x`, and parenthesized variants like `-(~x)` (issue [#82], PR [#111])
 
 ### AST
 
@@ -687,3 +688,5 @@ Initial tagged release.
 [issue#20]: https://github.com/Inferara/inference/issues/20
 [issue#21]: https://github.com/Inferara/inference/issues/21
 [issue#22]: https://github.com/Inferara/inference/issues/22
+[#82]: https://github.com/Inferara/inference/issues/82
+[#111]: https://github.com/Inferara/inference/pull/111
