@@ -9,7 +9,7 @@
   (export "nest_mixed_ops" (func $nest_mixed_ops))
   (export "nest_comparison" (func $nest_comparison))
   (export "nest_call_in_expr" (func $nest_call_in_expr))
-  (export "nest_unary_deep" (func $nest_unary_deep))
+  (export "nest_paren_deep" (func $nest_paren_deep))
   (func $nest_8_add (;0;) (type 0) (result i32)
     i32.const 1
     i32.const 2
@@ -85,14 +85,16 @@
     return
     unreachable
   )
-  (func $nest_unary_deep (;5;) (type 5) (result i32)
-    i32.const 0
-    i32.const 0
-    i32.const 0
-    i32.const -1
-    i32.sub
-    i32.sub
-    i32.sub
+  (func $nest_paren_deep (;5;) (type 5) (result i32)
+    i32.const 1
+    i32.const 2
+    i32.add
+    i32.const 3
+    i32.add
+    i32.const 4
+    i32.add
+    i32.const 5
+    i32.add
     return
     unreachable
   )

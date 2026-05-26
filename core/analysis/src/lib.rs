@@ -161,6 +161,7 @@ mod tests {
             AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location: dummy_location() },
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location: dummy_location() },
             AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

@@ -14,12 +14,9 @@
   (type (;12;) (func (param i32 i32) (result i32)))
   (type (;13;) (func (param i64 i64) (result i64)))
   (type (;14;) (func (param i64 i64) (result i64)))
-  (type (;15;) (func (param i32) (result i32)))
-  (type (;16;) (func (param i32) (result i32)))
-  (type (;17;) (func (param i32) (result i32)))
-  (type (;18;) (func (param i32 i32) (result i32)))
-  (type (;19;) (func (param i32 i32) (result i32)))
-  (type (;20;) (func (param i64) (result i64)))
+  (type (;15;) (func (param i32 i32) (result i32)))
+  (type (;16;) (func (param i32 i32) (result i32)))
+  (type (;17;) (func (param i64) (result i64)))
   (export "neg_add" (func $neg_add))
   (export "neg_sub" (func $neg_sub))
   (export "neg_mul" (func $neg_mul))
@@ -35,9 +32,6 @@
   (export "not_lt" (func $not_lt))
   (export "neg_i64_add" (func $neg_i64_add))
   (export "bitnot_i64_and" (func $bitnot_i64_and))
-  (export "double_neg" (func $double_neg))
-  (export "neg_bitnot" (func $neg_bitnot))
-  (export "bitnot_neg" (func $bitnot_neg))
   (export "neg_shift" (func $neg_shift))
   (export "bitnot_shift" (func $bitnot_shift))
   (export "neg_i64" (func $neg_i64))
@@ -171,34 +165,7 @@
     return
     unreachable
   )
-  (func $double_neg (;15;) (type 15) (param $a i32) (result i32)
-    i32.const 0
-    i32.const 0
-    local.get $a
-    i32.sub
-    i32.sub
-    return
-    unreachable
-  )
-  (func $neg_bitnot (;16;) (type 16) (param $a i32) (result i32)
-    i32.const 0
-    local.get $a
-    i32.const -1
-    i32.xor
-    i32.sub
-    return
-    unreachable
-  )
-  (func $bitnot_neg (;17;) (type 17) (param $a i32) (result i32)
-    i32.const 0
-    local.get $a
-    i32.sub
-    i32.const -1
-    i32.xor
-    return
-    unreachable
-  )
-  (func $neg_shift (;18;) (type 18) (param $a i32) (param $b i32) (result i32)
+  (func $neg_shift (;15;) (type 15) (param $a i32) (param $b i32) (result i32)
     i32.const 0
     local.get $a
     i32.sub
@@ -207,7 +174,7 @@
     return
     unreachable
   )
-  (func $bitnot_shift (;19;) (type 19) (param $a i32) (param $b i32) (result i32)
+  (func $bitnot_shift (;16;) (type 16) (param $a i32) (param $b i32) (result i32)
     local.get $a
     i32.const -1
     i32.xor
@@ -216,7 +183,7 @@
     return
     unreachable
   )
-  (func $neg_i64 (;20;) (type 20) (param $a i64) (result i64)
+  (func $neg_i64 (;17;) (type 17) (param $a i64) (result i64)
     i64.const 0
     local.get $a
     i64.sub

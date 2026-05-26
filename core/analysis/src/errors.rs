@@ -167,6 +167,13 @@ pub enum AnalysisDiagnostic {
 
     #[error("top-level `const` declarations are not yet supported; declare `{name}` inside a function body, or track progress at https://github.com/Inferara/inference/issues/171")]
     TopLevelConstNotSupported { name: String, location: Location },
+
+    #[error("combined unary operators are prohibited: `{op_outer}{op_inner}`; combining unary operators reduces readability and risks misinterpretation, use parentheses with a temporary variable instead")]
+    CombinedUnaryOperators {
+        op_outer: &'static str,
+        op_inner: &'static str,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -202,7 +209,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
-            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. } => location,
+            | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
+            | AnalysisDiagnostic::CombinedUnaryOperators { location, .. } => location,
         }
     }
 
@@ -242,6 +250,7 @@ impl AnalysisDiagnostic {
             // A030: removed (multidimensional scalar array uzumaki is now supported at any depth)
             AnalysisDiagnostic::UnsupportedCompoundReturnExpression { .. } => "A031",
             AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
+            AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
         }
     }
 }
