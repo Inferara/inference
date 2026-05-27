@@ -1,8 +1,8 @@
 /// Integration tests for analysis rule A033.
 ///
 /// - A033: CombinedUnaryOperators -- chained/adjacent prefix unary operators
-///   such as `--x`, `-~x`, `!!x`, and parenthesized variants like `-(~x)`
-///   are rejected.
+///   such as `--x`, `~~x`, `-~x`, `!!x`, and parenthesized variants like
+///   `-(~x)` are rejected.
 #[cfg(test)]
 mod analysis_rules_tests {
     use crate::utils::build_ast;
@@ -89,6 +89,21 @@ mod analysis_rules_tests {
     #[test]
     fn a033_double_negation_rejected() {
         let errors = expect_errors(r#"fn test(x: i32) -> i32 { return --(x); }"#);
+        assert!(has_a033(&errors), "expected A033, got: {errors:?}");
+    }
+
+    #[test]
+    fn a033_double_negation_bare_rejected() {
+        // Issue #81: the bare `--x` form (no parentheses around the operand)
+        // is the literal case the issue names and must be prohibited.
+        let errors = expect_errors(r#"fn test(x: i32) -> i32 { return --x; }"#);
+        assert!(has_a033(&errors), "expected A033, got: {errors:?}");
+    }
+
+    #[test]
+    fn a033_double_bitnot_rejected() {
+        // Issue #81: the `~~x` form (double bitwise NOT) must be prohibited.
+        let errors = expect_errors(r#"fn test(x: i32) -> i32 { return ~~x; }"#);
         assert!(has_a033(&errors), "expected A033, got: {errors:?}");
     }
 
