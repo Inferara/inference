@@ -2,15 +2,15 @@
 //
 // Verifies that the compiler correctly lowers expression trees with deep nesting,
 // including chained arithmetic, mixed operator precedence across nesting levels,
-// nested comparisons with boolean connectives, function calls embedded in nested
-// expressions, and deeply nested unary negation.
+// nested comparisons with boolean connectives, and function calls embedded in
+// nested expressions.
 //
 // Key patterns tested:
 // - 8-level left-associative addition chain: ((((((((1+2)+3)+4)+5)+6)+7)+8)+9) = 45
 // - Mixed arithmetic in nested groups: ((a+b)*(c-d)) + ((a-b)*(c+d))
 // - Boolean connectives over nested comparisons: (a>b) && ((c<d) || (a==c))
 // - Function calls as subexpressions: (f(x) + f(x+1)) * 2
-// - Quadruple negation: -(-(-(-1))) = 1
+// - 4-level left-associative parenthesized addition: ((((1+2)+3)+4)+5) = 15
 
 #[cfg(test)]
 mod expr_deep_nesting_tests {
@@ -21,10 +21,10 @@ mod expr_deep_nesting_tests {
 
     #[test]
     fn expr_deep_nesting_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 24);
-        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 22);
-        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 3);
-        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 3);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 28);
+        cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 23);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 0);
+        cov_mark::check_count!(wasm_codegen_emit_unary_neg, 0);
         cov_mark::check_count!(wasm_codegen_emit_function_call, 2);
         cov_mark::check_count!(wasm_codegen_emit_function_params, 10);
         let test_name = "expr_deep_nesting";
@@ -85,8 +85,8 @@ mod expr_deep_nesting_tests {
         // nest_call_in_expr(3): (9 + 16) * 2 = 50
         call!("nest_call_in_expr", i32, 3_i32, 50_i32);
 
-        // nest_unary_deep: -(-(-(-1))) = 1
-        call!("nest_unary_deep", i32, (), 1_i32);
+        // nest_paren_deep: ((((1+2)+3)+4)+5) = 15
+        call!("nest_paren_deep", i32, (), 15_i32);
     }
 }
 

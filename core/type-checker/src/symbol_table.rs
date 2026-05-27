@@ -1,7 +1,7 @@
 //! Symbol Table
 //!
-//! This module implements a tree-based symbol table for managing scopes and symbols
-//! during type checking. It supports:
+//! Tree-based symbol table for managing scopes and symbols during type
+//! checking. It supports:
 //!
 //! - Hierarchical scopes with parent-child relationships
 //! - Type alias, struct, enum, spec, and function symbol registration
@@ -10,13 +10,25 @@
 //! - Import registration and resolution
 //! - Visibility checking for access control
 //!
-//! Scopes form a tree structure where each scope can have multiple child scopes.
-//! Symbol lookup walks up the tree from current scope to root until a match is found.
+//! Scopes form a tree where each scope can have multiple child scopes. Each
+//! child holds a `Weak` reference to its parent; the [`SymbolTable`] owns the
+//! strong references via its `scopes` map.
+//!
+//! ## Scope Tree Traversal
+//!
+//! `lookup_symbol`, `lookup_variable`, `lookup_variable_is_mut`, and
+//! `lookup_method` first check the current scope locally; on a miss they
+//! upgrade the parent `Weak` and recurse, terminating when either a match is
+//! found or the root scope (which has no parent) is reached. Cross-scope
+//! variable lookup is what lets an inner block read an outer-scope variable;
+//! it does *not* enable shadowing — re-declaring an existing name in an
+//! inner scope is rejected by the type checker as
+//! [`TypeCheckError::VariableShadowed`].
 //!
 //! ## Default Return Types
 //!
-//! Functions without an explicit return type default to the unit type, represented
-//! as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
+//! Functions without an explicit return type default to the unit type,
+//! represented as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
 use std::cell::RefCell;
 use std::sync::Weak;
@@ -495,6 +507,12 @@ impl SymbolTable {
         self.push_scope_with_name(&name, Visibility::Private)
     }
 
+    /// Create a new child scope under `current_scope` and switch into it.
+    ///
+    /// Allocates the next `scope_id`, builds the dotted `full_path` from the
+    /// parent's path (e.g. `"foo::bar"`), inserts the new scope into both
+    /// `scopes` and the parent's `children`, and reassigns `current_scope` to
+    /// the new scope. Returns the new `scope_id`.
     pub(crate) fn push_scope_with_name(&mut self, name: &str, visibility: Visibility) -> u32 {
         let parent = self.current_scope.clone();
         let scope_id = self.next_scope_id;
@@ -529,6 +547,10 @@ impl SymbolTable {
         scope_id
     }
 
+    /// Reassign `current_scope` to the parent of the current scope, if any.
+    ///
+    /// No-op when `current_scope` is `None` or has no parent (i.e. root).
+    /// Counterpart to [`Self::push_scope_with_name`].
     pub(crate) fn pop_scope(&mut self) {
         if let Some(current) = &self.current_scope {
             let parent = current.borrow().parent.as_ref().and_then(|p| p.upgrade());

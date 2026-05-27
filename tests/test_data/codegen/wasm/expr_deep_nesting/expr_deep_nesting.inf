@@ -18,6 +18,6 @@ pub fn nest_call_in_expr(x: i32) -> i32 {
     return (helper_square(x) + helper_square(x + 1)) * 2;
 }
 
-pub fn nest_unary_deep() -> i32 {
-    return -(-(-(-1)));
+pub fn nest_paren_deep() -> i32 {
+    return ((((1 + 2) + 3) + 4) + 5);
 }

@@ -1088,9 +1088,12 @@ fn test() -> i32 {
 
 ## Error Deduplication
 
-Errors are deduplicated by a key derived from the error kind and location. The same error
-(same variant, same source position) will not be reported more than once even if the checker
-encounters the same expression multiple times during analysis.
+Errors that share both an error kind and an offending symbol name are deduplicated using
+a typed `(DedupKind, String)` key. The set of variants that participate is listed in
+`DedupKind` (`UnknownType`, `UndefinedFunction`, `UnknownIdentifier`, `UndefinedStruct`,
+`UndefinedEnum`, `SpecFunctionShadowsTopLevel`); other variants are always recorded as-is.
+This means the same missing symbol is reported once regardless of how many times it is
+referenced, even when registration and inference both visit it.
 
 ## Location Information
 

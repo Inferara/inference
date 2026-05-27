@@ -1,16 +1,34 @@
 //! Type Checker Implementation
 //!
-//! This module contains the core type checking logic that infers and validates
-//! types throughout the AST. The type checker operates in multiple phases:
+//! Core type checking logic that infers and validates types throughout the
+//! AST. The type checker operates in five phases, executed in order:
 //!
-//! 1. **process_directives** - Register raw imports from use statements
-//! 2. **register_types** - Collect type/struct/enum/spec definitions
-//! 3. **resolve_imports** - Bind import paths to symbols
-//! 4. **collect_function_and_constant_definitions** - Register functions
-//! 5. **infer_variables** - Type-check function bodies
+//! 1. **`process_directives`** — register raw imports from `use` statements
+//! 2. **`register_types`** — collect type/struct/enum/spec definitions
+//! 3. **`resolve_imports`** — bind import paths to the symbols they refer to
+//! 4. **`collect_function_and_constant_definitions`** — register function
+//!    signatures and constant declarations
+//! 5. **`infer_variables`** — type-check function bodies and method bodies
 //!
-//! The type checker continues after encountering errors to collect all issues
-//! before returning. Errors are deduplicated to avoid repeated reports.
+//! Phase ordering is load-bearing: type definitions (phase 2) must be in the
+//! symbol table before functions can mention them in signatures (phase 4),
+//! and imports (phase 3) must be resolved before name lookup runs during
+//! body inference (phase 5). This is what lets Inference support forward
+//! references — a function can refer to a type or another function defined
+//! later in the source file.
+//!
+//! Errors are not fatal: the checker collects them in `self.errors` and
+//! keeps walking the AST so a single run reports as many issues as
+//! possible. Duplicate entries are filtered via `reported_errors`.
+//!
+//! ## Generics
+//!
+//! Generic type parameters declared on a function (`fn foo<T>(...)`) are
+//! recorded on the signature in phase 4. At a call site in phase 5,
+//! `infer_type_params_from_args` derives concrete substitutions for each
+//! `T` from the call's argument types and reports
+//! `ConflictingTypeInference` / `CannotInferTypeParameter` when the
+//! substitution can't be determined unambiguously.
 
 use anyhow::bail;
 use inference_ast::arena::AstArena;
@@ -23,7 +41,7 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    errors::{RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
+    errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{FuncInfo, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -34,7 +52,7 @@ pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<TypeCheckError>,
     glob_resolution_in_progress: FxHashSet<u32>,
-    reported_error_keys: FxHashSet<String>,
+    reported_errors: FxHashSet<(DedupKind, String)>,
     /// Type parameter names for the function/method body currently being inferred.
     /// Set before walking the body, cleared after. Used by `infer_statement` to
     /// pass type param context to `validate_type` and `TypeInfo::from_type_id_with_type_params`.
@@ -465,14 +483,11 @@ impl TypeChecker {
                         .lookup_function_in_root(&fn_name)
                         .is_some()
                     {
-                        let key = format!("SpecFunctionShadowsTopLevel:{spec_name}:{fn_name}");
-                        if self.reported_error_keys.insert(key) {
-                            self.errors.push(TypeCheckError::SpecFunctionShadowsTopLevel {
-                                spec_name: spec_name.clone(),
-                                function_name: fn_name,
-                                location: arena[inner_id].location,
-                            });
-                        }
+                        self.push_error_dedup(TypeCheckError::SpecFunctionShadowsTopLevel {
+                            spec_name: spec_name.clone(),
+                            function_name: fn_name,
+                            location: arena[inner_id].location,
+                        });
                     }
                 }
             }
@@ -880,6 +895,19 @@ impl TypeChecker {
         }
     }
 
+    /// Type-check the body of a free function (phase 5, top-level functions).
+    ///
+    /// Pushes a fresh scope, registers each named argument as a local
+    /// variable in that scope, computes the declared return type, then
+    /// walks the body statement-by-statement via `infer_statement`. The
+    /// function's type parameters are passed through `tp_names` so that
+    /// occurrences of those names in argument or return types are treated
+    /// as generic placeholders rather than unresolved `Custom` types.
+    ///
+    /// Example — for `fn id<T>(x: T) -> T { return x; }`, `tp_names`
+    /// contains `["T"]`, so both the parameter `x: T` and the return type
+    /// `T` are recorded as `TypeInfoKind::Generic("T")`; the concrete type
+    /// is substituted at each call site, not here.
     fn infer_variables(&mut self, def_id: DefId, ctx: &mut TypedContext) {
         let arena = ctx.arena();
         let def_data = &arena[def_id];
@@ -2674,12 +2702,29 @@ impl TypeChecker {
         }
     }
 
-    /// Attempt to infer type parameters from argument types.
+    /// Infer concrete substitutions for a generic function's type
+    /// parameters from the types of the actual arguments at a call site.
     ///
-    /// For each parameter that is a type variable (Generic), try to find a
-    /// concrete type from the corresponding argument.
+    /// Walks the parameter list; whenever a parameter type is
+    /// `TypeInfoKind::Generic(T)`, infers the corresponding argument's type
+    /// and binds `T` to it in the returned map. Two edge cases are detected
+    /// and reported:
     ///
-    /// Returns a substitution map if inference succeeds, empty map otherwise.
+    /// 1. **Conflicting inference.** When the same `T` appears in multiple
+    ///    parameters but the corresponding arguments have different types.
+    ///    Example: `fn pair<T>(a: T, b: T)` called as `pair(1, true)` —
+    ///    `T` is inferred as `i32` from `a` and as `bool` from `b`. The
+    ///    first binding wins, and a
+    ///    [`TypeCheckError::ConflictingTypeInference`] is emitted at the
+    ///    call site.
+    /// 2. **Unresolvable parameter.** When a type parameter declared in the
+    ///    signature is not reachable from any argument. Example:
+    ///    `fn make<T>() -> T` — `T` only appears in the return position, so
+    ///    no argument carries information about it. A
+    ///    [`TypeCheckError::CannotInferTypeParameter`] is emitted.
+    ///
+    /// Returns the substitution map (possibly empty). The caller is
+    /// responsible for applying it to the return type before propagating.
     fn infer_type_params_from_args(
         &mut self,
         signature: &FuncInfo,
@@ -2689,13 +2734,11 @@ impl TypeChecker {
     ) -> FxHashMap<String, TypeInfo> {
         let mut substitutions: FxHashMap<String, TypeInfo> = FxHashMap::default();
 
-        // For each parameter, check if it contains a type variable
         for (i, param_type) in signature.param_types.iter().enumerate() {
             if i >= arguments.len() {
                 break;
             }
 
-            // If the parameter type is a type variable, infer from argument
             if let TypeInfoKind::Generic(type_param_name) = &param_type.kind {
                 let arg_type = self.infer_expression(arguments[i].1, ctx);
 
@@ -2716,7 +2759,6 @@ impl TypeChecker {
             }
         }
 
-        // Check if we found substitutions for all type parameters
         for type_param in &signature.type_params {
             if !substitutions.contains_key(type_param) {
                 self.errors.push(TypeCheckError::CannotInferTypeParameter {
@@ -2748,28 +2790,19 @@ impl TypeChecker {
 
     // validate_literal_range moved to analysis rule A022 (LiteralOutOfRange).
 
-    /// Push an error, deduplicating errors for the same unknown type/function/identifier.
-    /// This prevents duplicate errors when registration fails but inference continues.
+    /// Push an error, deduplicating per `(DedupKind, name)` so the same
+    /// diagnostic for the same symbol is never recorded twice across the
+    /// registration and inference passes.
+    ///
+    /// Errors whose [`TypeCheckError::dedup_key`] returns `None` are always
+    /// recorded as-is.
     fn push_error_dedup(&mut self, error: TypeCheckError) {
-        let key = match &error {
-            TypeCheckError::UnknownType { name, .. } => Some(format!("UnknownType:{name}")),
-            TypeCheckError::UndefinedFunction { name, .. } => {
-                Some(format!("UndefinedFunction:{name}"))
-            }
-            TypeCheckError::UnknownIdentifier { name, .. } => {
-                Some(format!("UnknownIdentifier:{name}"))
-            }
-            TypeCheckError::UndefinedStruct { name, .. } => Some(format!("UndefinedStruct:{name}")),
-            TypeCheckError::UndefinedEnum { name, .. } => Some(format!("UndefinedEnum:{name}")),
-            _ => None,
-        };
-        if let Some(key) = key {
-            if self.reported_error_keys.contains(&key) {
+        if let Some(key) = error.dedup_key() {
+            if !self.reported_errors.insert(key) {
                 cov_mark::hit!(type_checker_error_dedup_skips_duplicate);
                 return;
             }
             cov_mark::hit!(type_checker_error_dedup_first_occurrence);
-            self.reported_error_keys.insert(key);
         }
         self.errors.push(error);
     }

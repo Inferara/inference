@@ -3,6 +3,7 @@ pub mod array_uzumaki_as_argument;
 pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
 pub mod break_outside_loop;
+pub mod combined_unary_operators;
 pub mod compound_literal_member_assign;
 pub mod compound_literal_position;
 pub mod compound_return_call_assignment;
@@ -27,12 +28,14 @@ pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
 pub mod unsupported_compound_return_expr;
 pub mod uzumaki_outside_nondet_block;
+pub mod visibility_inside_spec;
 
 use array_index_64bit::ArrayIndex64Bit;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
 use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
 use break_outside_loop::BreakOutsideLoop;
+use combined_unary_operators::CombinedUnaryOperators;
 use compound_literal_member_assign::CompoundLiteralMemberAssign;
 use compound_literal_position::CompoundLiteralPosition;
 use compound_return_call_assignment::CompoundReturnCallAssignment;
@@ -57,6 +60,7 @@ use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
 use unsupported_compound_return_expr::UnsupportedCompoundReturnExpr;
 use uzumaki_outside_nondet_block::UzumakiOutsideNonDetBlock;
+use visibility_inside_spec::VisibilityInsideSpec;
 
 /// Returns all registered analysis rules.
 ///
@@ -96,5 +100,7 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &CompoundLiteralMemberAssign,
         &UnsupportedCompoundReturnExpr,
         &TopLevelConstNotSupported,
+        &CombinedUnaryOperators,
+        &VisibilityInsideSpec,
     ]
 }

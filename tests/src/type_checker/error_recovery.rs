@@ -885,4 +885,82 @@ mod error_recovery_tests {
             }
         }
     }
+
+    /// Locks in `(DedupKind, name)` semantics: the same identifier
+    /// `Foo` used as an unknown type and as an undefined struct produces
+    /// *both* errors. Dedup is per kind, not just per name.
+    #[test]
+    fn test_dedup_distinguishes_different_kinds_with_same_name() {
+        let source = r#"fn test() -> i32 { let x: Foo = Foo { }; return 0; }"#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "Type checker should detect errors");
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            let type_count = error_msg.matches("unknown type `Foo`").count();
+            let struct_count = error_msg.matches("struct `Foo` is not defined").count();
+            assert_eq!(
+                type_count, 1,
+                "UnknownType:Foo should fire exactly once: {}",
+                error_msg
+            );
+            assert_eq!(
+                struct_count, 1,
+                "UndefinedStruct:Foo should fire exactly once: {}",
+                error_msg
+            );
+        }
+    }
+
+    /// Locks in dedup of `SpecFunctionShadowsTopLevel`: a spec that
+    /// shadows a top-level function emits the error exactly once even
+    /// though the walker could plausibly reach the inner def from
+    /// multiple paths.
+    #[test]
+    fn test_spec_function_shadows_top_level_is_deduplicated() {
+        let source = r#"
+            fn shared() -> i32 { return 0; }
+            spec MySpec {
+                fn shared() -> i32 { return 0; }
+            }
+        "#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should reject spec function shadowing a top-level function"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            let count = error_msg
+                .matches("shadows a top-level function")
+                .count();
+            assert_eq!(
+                count, 1,
+                "SpecFunctionShadowsTopLevel error should be deduplicated once per (spec, fn) pair: {}",
+                error_msg
+            );
+        }
+    }
+
+    /// Sanity check that errors *not* listed in `DedupKind` are recorded
+    /// as-is: a type-mismatch in two different statements must surface
+    /// both messages.
+    #[test]
+    fn test_non_deduplicated_errors_are_recorded_per_site() {
+        let source =
+            r#"fn test() -> i32 { let x: i32 = true; let y: i32 = false; return x + y; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "Type checker should detect both type mismatches"
+        );
+        if let Err(error) = result {
+            let error_msg = error.to_string();
+            let mismatch_count = error_msg.matches("type mismatch").count();
+            assert_eq!(
+                mismatch_count, 2,
+                "Each TypeMismatch site should be reported (no dedup): {}",
+                error_msg
+            );
+        }
+    }
 }
