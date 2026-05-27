@@ -231,7 +231,7 @@ pub(crate) struct WasmParseData<'a> {
     pub(crate) function_bodies: Vec<FunctionBody<'a>>,
     /// WASM function indices that originated from `spec` blocks, keyed by
     /// spec name. Each entry materializes as a `<mod>__<SpecName>_specs : list N`
-    /// Rocq definition consumed by the corresponding `ValidSpec` theorem.
+    /// Rocq definition consumed by the corresponding `ValidModule` theorem.
     pub(crate) spec_funcs_by_spec: FxHashMap<String, Vec<u32>>,
 
     translated_function_names: Vec<String>,

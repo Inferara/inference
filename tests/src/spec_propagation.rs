@@ -302,7 +302,8 @@ mod scenario_4_per_spec_emission {
     use rustc_hash::FxHashMap;
 
     /// Two specs `A` and `B` produce per-spec definitions and theorems sorted
-    /// alphabetically. The structural `valid_<mod>` theorem must also be emitted.
+    /// alphabetically. Each spec yields a `ValidModule <mod> <mod>__<Spec>_specs`
+    /// theorem.
     ///
     /// Note: the codegen always embeds module name `"output"` into the WASM
     /// name section, which the translator's custom-name-section handling uses
@@ -326,16 +327,12 @@ mod scenario_4_per_spec_emission {
             "specs should be emitted alphabetically (A before B):\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__A : ValidSpec output output__A_specs."),
+            v.contains("Theorem valid_output__A : ValidModule output output__A_specs."),
             "per-spec theorem for A missing:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__B : ValidSpec output output__B_specs."),
+            v.contains("Theorem valid_output__B : ValidModule output output__B_specs."),
             "per-spec theorem for B missing:\n{v}"
-        );
-        assert!(
-            v.contains("Theorem valid_output : ValidModule output."),
-            "structural valid_output theorem missing:\n{v}"
         );
     }
 
@@ -512,11 +509,11 @@ mod scenario_4_per_spec_emission {
         // mod_name argument is overridden by the embedded "output" module name.
         let v = inference::wasm_to_v("M", output.wasm(), &map).expect("translate ok");
         assert!(
-            v.contains("Definition output__A_specs : list N := [0]%N."),
+            v.contains("Definition output__A_specs : list N := (0 :: nil)%N."),
             "A def:\n{v}"
         );
         assert!(
-            v.contains("Definition output__B_specs : list N := [1]%N."),
+            v.contains("Definition output__B_specs : list N := (1 :: nil)%N."),
             "B def:\n{v}"
         );
     }
@@ -538,8 +535,9 @@ mod scenario_5_empty_list {
     /// is empty.
     ///
     /// The codegen embeds module name `"output"` into the WASM name section,
-    /// so even though we pass `"Empty"`, the structural theorem is named
-    /// `valid_output`.
+    /// so even though we pass `"Empty"`, the module definition is named
+    /// `output`. With no specs, the translator emits no theorems at all
+    /// (each `ValidModule <mod> <mod>__<Spec>_specs` theorem is per-spec).
     #[test]
     fn empty_map_yields_no_spec_definition() {
         let source = r#"pub fn main() -> i32 { return 0; }"#;
@@ -551,8 +549,8 @@ mod scenario_5_empty_list {
             "no per-spec definitions expected when map is empty:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output : ValidModule output."),
-            "structural theorem should still be present:\n{v}"
+            !v.contains("Theorem valid_"),
+            "no theorems expected when the spec map is empty:\n{v}"
         );
     }
 
@@ -1175,8 +1173,8 @@ mod scenario_6b_embedded_data_validation {
 
     /// Positive test: a single embedded `name` section overrides the
     /// caller-supplied `mod_name` argument, and that override flows into
-    /// the emitted Rocq output (it determines the `Definition <mod>_*` and
-    /// `Theorem valid_<mod>` identifier prefix).
+    /// the emitted Rocq output (it determines the `Definition <mod> : module`
+    /// identifier prefix).
     #[test]
     fn embedded_name_section_overrides_caller_mod_name() {
         // Strip the codegen-emitted `name` section, then append one whose
@@ -1189,11 +1187,11 @@ mod scenario_6b_embedded_data_validation {
         let v_output = inference::wasm_to_v("Caller", &wasm, &empty)
             .expect("override-then-validate must succeed for a valid embedded name");
         assert!(
-            v_output.contains("Theorem valid_Embedded"),
-            "embedded module name should drive the theorem identifier; got:\n{v_output}"
+            v_output.contains("Definition Embedded : module"),
+            "embedded module name should drive the module identifier; got:\n{v_output}"
         );
         assert!(
-            !v_output.contains("Theorem valid_Caller"),
+            !v_output.contains("Definition Caller : module"),
             "caller-supplied mod_name should not appear once an embedded name overrides it; got:\n{v_output}"
         );
     }
@@ -1211,7 +1209,7 @@ mod scenario_7_empty_spec {
     /// A user-authored empty `spec MySpec { }` must surface a per-spec entry
     /// with an empty index list, so the Rocq translator still emits both a
     /// `Definition output__MySpec_specs : list N := (@nil N).` line and a
-    /// `Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs.`
+    /// `Theorem valid_output__MySpec : ValidModule output output__MySpec_specs.`
     /// theorem. Without `ensure_spec_registered`, the spec vanished silently
     /// from the proof artifact because the bucket iteration only recorded
     /// entries for non-empty inner defs.
@@ -1238,7 +1236,7 @@ mod scenario_7_empty_spec {
             "empty spec must emit the `(@nil N)` definition line:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_output__MySpec : ValidSpec output output__MySpec_specs."),
+            v.contains("Theorem valid_output__MySpec : ValidModule output output__MySpec_specs."),
             "empty spec must emit the per-spec theorem:\n{v}"
         );
     }
@@ -1246,7 +1244,7 @@ mod scenario_7_empty_spec {
     /// T1: mixing an empty spec with a non-empty one must produce both kinds
     /// of `Definition` line in the generated Rocq output, in alphabetical
     /// order. The empty list renders as `(@nil N)`, the non-empty as
-    /// `[idx]%N`. This guards a regression where empty-spec handling could
+    /// `(idx :: nil)%N`. This guards a regression where empty-spec handling could
     /// short-circuit the per-spec emission loop and drop the non-empty entry
     /// (or vice versa).
     #[test]
@@ -1271,10 +1269,10 @@ mod scenario_7_empty_spec {
             v.contains("Definition output__A_specs : list N := (@nil N)."),
             "empty spec A must render `(@nil N)`:\n{v}"
         );
-        let expected_b = format!("Definition output__B_specs : list N := [{b_idx}]%N.");
+        let expected_b = format!("Definition output__B_specs : list N := ({b_idx} :: nil)%N.");
         assert!(
             v.contains(&expected_b),
-            "non-empty spec B must render `[{b_idx}]%N`:\n{v}"
+            "non-empty spec B must render `({b_idx} :: nil)%N`:\n{v}"
         );
         let pos_a = v.find("Definition output__A_specs").unwrap();
         let pos_b = v.find("Definition output__B_specs").unwrap();
@@ -1471,8 +1469,8 @@ mod scenario_10_wasm_to_v_compile_mode {
 
     /// Compile a spec-bearing source in compile mode and feed the bytes to
     /// `wasm_to_v` with an empty explicit map. Result: NO per-spec definitions
-    /// and NO per-spec theorems, but the structural `valid_<mod>` theorem is
-    /// still emitted.
+    /// and NO theorems at all (the `ValidModule <mod> <mod>__<Spec>_specs`
+    /// theorems are strictly per-spec, so a specless translation emits none).
     ///
     /// The WASM-embedded module name `"output"` overrides `mod_name`.
     #[test]
@@ -1489,15 +1487,9 @@ mod scenario_10_wasm_to_v_compile_mode {
             "no per-spec definitions expected:\n{v}"
         );
         assert_eq!(
-            v.matches("Theorem valid_output__").count(),
+            v.matches("Theorem valid_").count(),
             0,
-            "no per-spec theorems expected:\n{v}"
-        );
-
-        // Structural theorem must remain.
-        assert!(
-            v.contains("Theorem valid_output : ValidModule output."),
-            "structural theorem missing:\n{v}"
+            "no theorems expected for a specless translation:\n{v}"
         );
     }
 }
