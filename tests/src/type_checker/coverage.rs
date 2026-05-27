@@ -1123,13 +1123,16 @@ mod expression_coverage {
         }
     }
 
+    // The type checker itself does not reject double unary operators; `--42`
+    // is a well-typed `i32` at this layer. The prohibition of `--`/`~~` (issue
+    // #81) lives in analysis rule A033, covered by tests/src/analysis/rules_a033.rs.
     #[test]
     fn test_unary_neg_nested() {
         let source = r#"fn test() -> i32 { return --42; }"#;
         let result = try_type_check(source);
         assert!(
             result.is_ok(),
-            "Double unary neg should work, got: {:?}",
+            "Double unary neg should type-check at the type-checker layer, got: {:?}",
             result.err()
         );
     }
