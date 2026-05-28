@@ -83,7 +83,7 @@ pub struct CodegenOutput {
     /// Empty in `compile` mode. In `proof` mode, contains per-spec function
     /// indices in registration order. The Rocq translator uses this to emit
     /// per-spec `Definition <mod>__<SpecName>_specs : list N` lists consumed
-    /// by the corresponding `ValidSpec` theorems.
+    /// by the corresponding `ValidModule` theorems.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
 }
 

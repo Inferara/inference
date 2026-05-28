@@ -696,7 +696,7 @@ pub fn codegen(
 ///   blocks, grouped by spec name (typically obtained from
 ///   [`CodegenOutput::spec_func_indices_by_spec`]). Emitted as per-spec
 ///   `Definition <mod_name>__<SpecName>_specs : list N` definitions consumed
-///   by the corresponding `ValidSpec` theorems. Pass an empty `FxHashMap`
+///   by the corresponding `ValidModule` theorems. Pass an empty `FxHashMap`
 ///   when no spec marker is needed.
 ///
 /// # Errors

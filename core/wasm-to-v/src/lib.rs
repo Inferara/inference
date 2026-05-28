@@ -290,16 +290,12 @@ mod tests {
         let output = translate_bytes("Fac", &bytes, &map).expect("translate succeeds");
 
         assert!(
-            output.contains("Definition Fac__Spec1_specs : list N := [3; 4; 7]%N."),
+            output.contains("Definition Fac__Spec1_specs : list N := (3 :: 4 :: 7 :: nil)%N."),
             "output should contain Fac__Spec1_specs definition; got:\n{output}",
         );
         assert!(
-            output.contains("Theorem valid_Fac : ValidModule Fac."),
-            "output should contain 1-arg valid_Fac theorem; got:\n{output}",
-        );
-        assert!(
-            output.contains("Theorem valid_Fac__Spec1 : ValidSpec Fac Fac__Spec1_specs."),
-            "output should contain per-spec ValidSpec theorem; got:\n{output}",
+            output.contains("Theorem valid_Fac__Spec1 : ValidModule Fac Fac__Spec1_specs."),
+            "output should contain per-spec ValidModule theorem; got:\n{output}",
         );
     }
 
@@ -317,8 +313,8 @@ mod tests {
             "output should contain no per-spec definitions when the map is empty; got:\n{output}",
         );
         assert!(
-            output.contains("Theorem valid_Fac : ValidModule Fac."),
-            "output should still contain the structural valid_Fac theorem; got:\n{output}",
+            !output.contains("Theorem valid_"),
+            "output should contain no theorems when the spec map is empty; got:\n{output}",
         );
     }
 }

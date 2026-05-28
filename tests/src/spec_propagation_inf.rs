@@ -132,8 +132,8 @@ mod fixture_spec_method {
             "per-spec definition for Geometry must be emitted:\n{v}"
         );
         assert!(
-            v.contains("Theorem valid_specmethod__Geometry : ValidSpec specmethod specmethod__Geometry_specs."),
-            "per-spec ValidSpec theorem missing:\n{v}"
+            v.contains("Theorem valid_specmethod__Geometry : ValidModule specmethod specmethod__Geometry_specs."),
+            "per-spec ValidModule theorem missing:\n{v}"
         );
     }
 }
@@ -192,7 +192,7 @@ mod fixture_spec_calls_top {
         let empty: FxHashMap<String, Vec<u32>> = FxHashMap::default();
         let v = inference::wasm_to_v("Ignored", wasm, &empty).expect("translate ok");
         assert!(
-            v.contains("Definition calltop__Caller_specs : list N := [2]%N."),
+            v.contains("Definition calltop__Caller_specs : list N := (2 :: nil)%N."),
             "Caller_specs should list exactly index 2:\n{v}"
         );
     }
@@ -258,7 +258,7 @@ mod fixture_three_specs {
         // Each spec also gets its `valid_<mod>__<Spec>` theorem.
         for spec in &["Alpha", "Beta", "Gamma"] {
             let needle = format!(
-                "Theorem valid_threespecs__{spec} : ValidSpec threespecs threespecs__{spec}_specs."
+                "Theorem valid_threespecs__{spec} : ValidModule threespecs threespecs__{spec}_specs."
             );
             assert!(
                 v.contains(&needle),
