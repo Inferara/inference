@@ -97,6 +97,14 @@ These rules cover constructs that are valid in the type system but cannot yet be
 | A030 | *(removed)* | — | *(uzumaki on scalar arrays now supported at any depth)* |
 | A031 | `UnsupportedCompoundReturnExpr` | error | return expression in a compound-returning function is not a supported form (identifier, literal, call, or field/element access) |
 
+### Recursion (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A035 | `RecursionDetected` | error | direct or indirect (mutual) recursion is forbidden so stack usage stays statically bounded (Power of 10, Rule 1) |
+
+A035 builds a whole-program call graph keyed by the canonical function name (matching the codegen `FnKey` scheme) and reports each call cycle once, pointing at the call site that closes the cycle.
+
 ## Diagnostic Output Format
 
 ```
@@ -191,6 +199,7 @@ Test files are organized by rule group:
 | `rules_a026_a028.rs` | A026–A028 (nested compound depth, uzumaki on nested structs, uzumaki on struct arrays) |
 | `rules_a029_a030.rs` | A029 (compound literal in compound assign), A030 removal acceptance tests |
 | `rules_a031.rs` | A031 (unsupported compound return expression) |
+| `rules_a035.rs` | A035 (direct and mutual/indirect recursion) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

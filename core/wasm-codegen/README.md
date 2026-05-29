@@ -330,14 +330,12 @@ Test data includes:
   wasmtime
 - `assign_nondet.inf` - Assignment statements inside non-deterministic blocks (forall,
   exists, assume, unique)
-- `algo_bitwise.inf` - 12 functions implementing bitwise algorithms (popcount, power-of-2
+- `algo_bitwise.inf` - 10 functions implementing bitwise algorithms (popcount, power-of-2
   checks, bit manipulation, rotation, byte swapping) demonstrating combined use of binary
-  operations, prefix unary expressions, conditionals, and recursive function calls
+  operations, prefix unary expressions, conditionals, and iterative loops
 - `algo_i64_mixed.inf` - Demonstrates i64 operations in context of classic algorithms
-  (factorial, fibonacci, GCD) with variable definitions and recursive calls
-- `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with loops
-  and recursive patterns
-- `algo_recursive_math.inf` - Various mathematical algorithms using recursion and arithmetic
+  (factorial, fibonacci, GCD) with variable definitions and iterative loops
+- `algo_converge.inf` - Convergence algorithms using i32/i64 arithmetic with iterative loops
 - `array_literal.inf` - Fixed-size array literal declarations with i32 and bool element types,
   including single-element and multi-array cases; validated against `inf_wasmparser` and
   executed via wasmtime

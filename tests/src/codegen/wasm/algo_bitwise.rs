@@ -1,6 +1,10 @@
 // Bitwise algorithm tests: bit manipulation algorithms exercising bitwise ops, bitnot,
-// negation, recursion, if/else, let variables, bool return type, parenthesized expressions,
-// masks and constants.
+// negation, if/else, conditional loops, let variables, bool return type, parenthesized
+// expressions, masks and constants.
+//
+// popcount and count_leading_zeros are iterative (conditional `loop` with a `mut`
+// accumulator and a single trailing return) to comply with A035, which forbids the
+// recursion the earlier helper-based versions relied on.
 //
 // WASM bytecode analysis:
 //
@@ -13,14 +17,12 @@
 //   local.get $n, i32.const 0, local.get $n, i32.sub, i32.and, return
 //   (-n generates: [i32.const 0, local.get $n, i32.sub])
 //
-// popcount_helper(n, acc) -> recursive bit counting via n & (n-1)
-//   local.get $n, i32.const 0, i32.eq, if, local.get $acc, return, end,
-//   local.get $n, local.get $n, i32.const 1, i32.sub, i32.and,
-//   local.get $acc, i32.const 1, i32.add, call $popcount_helper, return
+// popcount(n) -> iterative bit counting via Kernighan's x & (x-1) clear loop
+//   let count = 0, let x = n; loop x != 0 { x = x & (x - 1); count = count + 1; }; return count
 //
-// Total across all 12 functions: 35 binary expressions, 17 parenthesized expressions,
-// 5 if statements, 4 function calls, 3 variable definitions, 2 prefix unary expressions
-// (1 neg, 1 bitnot), 20 function params.
+// Total across all 10 functions: 34 binary expressions, 17 parenthesized expressions,
+// 2 if statements, 0 function calls, 7 variable definitions, 2 prefix unary expressions
+// (1 neg, 1 bitnot), 15 function params.
 
 #[cfg(test)]
 mod algo_bitwise_tests {
@@ -31,15 +33,15 @@ mod algo_bitwise_tests {
 
     #[test]
     fn algo_bitwise_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 35);
-        cov_mark::check_count!(wasm_codegen_emit_if_statement, 5);
-        cov_mark::check_count!(wasm_codegen_emit_function_call, 4);
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 3);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 34);
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 2);
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 0);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 7);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 17);
         cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 2);
         cov_mark::check_count!(wasm_codegen_emit_unary_neg, 1);
         cov_mark::check_count!(wasm_codegen_emit_unary_bitnot, 1);
-        cov_mark::check_count!(wasm_codegen_emit_function_params, 20);
+        cov_mark::check_count!(wasm_codegen_emit_function_params, 15);
         let test_name = "algo_bitwise";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

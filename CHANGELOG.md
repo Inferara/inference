@@ -241,6 +241,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A031 `UnsupportedCompoundReturnExpr`: reject complex return expressions in compound-returning functions
   - Walker helpers: `has_compound_fields()`, `array_nesting_depth()`, `is_compound_return_call()`
 - A033 `CombinedUnaryOperators`: reject adjacent prefix unary operators such as `--x`, `~~x`, `-~x`, `!!x`, and parenthesized variants like `-(~x)` (issues [#82], [#81]; PRs [#111], [#117])
+- A035 `RecursionDetected`: reject all direct and mutual/indirect recursion (Power of 10, Rule 1) so stack usage stays statically bounded ([#205])
+  - Builds a whole-program call graph keyed by the canonical function name (matching the codegen `FnKey` scheme); call resolution is conservative, so edges are created only to existing nodes and the rule never produces a false positive
+  - Reports each call cycle once via a white/gray/black DFS, naming the full cycle (e.g. `a -> b -> a`) and pointing the diagnostic at the call site that closes it
+  - Migrated the recursive codegen fixtures to iterative form to comply with the new rule: rewrote `algo_bitwise` (`popcount`, `count_leading_zeros`), `algo_converge` (`slow_div`, `slow_mod`, `peasant_mul`, `is_prime`, `collatz_steps`, `collatz_max`), and `algo_i64_mixed` (`factorial_i64`, `fibonacci_i64`, `gcd_i64`) into conditional loops with `mut` accumulators and a single trailing return; removed the wholly recursive `algo_recursive_math` fixture (its functions already have iterative equivalents in `algo_iter`)
 
 ### AST
 
@@ -692,3 +696,4 @@ Initial tagged release.
 [#82]: https://github.com/Inferara/inference/issues/82
 [#111]: https://github.com/Inferara/inference/pull/111
 [#117]: https://github.com/Inferara/inference/pull/117
+[#205]: https://github.com/Inferara/inference/issues/205

@@ -1,38 +1,32 @@
-// Convergent algorithm tests: recursive functions with accumulator parameters,
-// non-deterministic specification blocks, bitwise operations in arithmetic context,
-// bool return values, private helpers, and complex conditionals.
+// Convergent algorithm tests: iterative functions with `mut` accumulators and
+// conditional loops, non-deterministic specification blocks, bitwise operations in
+// arithmetic context, bool return values, and complex conditionals.
+//
+// All functions are iterative (a leading guard, `mut` accumulators, a conditional
+// `loop` with a single trailing return) to comply with A035, which forbids the
+// recursion the earlier helper-based versions relied on.
 //
 // WASM bytecode analysis (no WAT file due to non-det opcodes):
 //
-// slow_div_helper(a, b, acc) -> i32:
-//   local.get $a, local.get $b, i32.lt_s -> if { local.get $acc, return }
-//   local.get $a, local.get $b, i32.sub,
-//   local.get $b, local.get $acc, i32.const 1, i32.add -> call $slow_div_helper, return
-//   (Recursive subtraction-based division with accumulator)
-//
 // slow_div(a, b) -> i32:
-//   local.get $a, local.get $b, i32.const 0 -> call $slow_div_helper, return
-//   (Public entry point seeding accumulator with 0)
+//   let acc = 0, let x = a; loop x >= b { x = x - b; acc = acc + 1; }; return acc
+//   (Subtraction-based division accumulating the quotient)
 //
-// peasant_mul_helper(a, b, acc) -> i32:
-//   local.get $a, i32.const 0, i32.le_s -> if { local.get $acc, return }
-//   local.get $a, i32.const 1, i32.and -> i32.const 1, i32.eq -> if {
-//     local.get $a, i32.const 1, i32.shr_s,
-//     local.get $b, i32.const 1, i32.shl,
-//     local.get $acc, local.get $b, i32.add -> call $peasant_mul_helper, return }
+// peasant_mul(a, b) -> i32:
+//   let acc = 0, x = a, y = b; loop x > 0 { if (x & 1) == 1 { acc = acc + y; }
+//     x = x >> 1; y = y << 1; }; return acc
 //   (Russian peasant multiplication: shift-and-add with bitwise odd check)
 //
-// is_prime_helper(n, d) -> bool (i32):
-//   local.get $d, local.get $d, i32.mul, local.get $n, i32.gt_s -> if { i32.const 1, return }
-//   local.get $n, local.get $d, i32.rem_s, i32.const 0, i32.eq -> if { i32.const 0, return }
+// is_prime(n) -> bool (i32):
+//   guard n <= 1; let result = true, d = 2; loop d * d <= n {
+//     if (n % d) == 0 { result = false; break; } d = d + 1; }; return result
 //   (Trial division primality check; bool maps to i32: true=1, false=0)
 //
 // collatz_steps(n) -> i32:
-//   Branches on n<=1, even (n&1==0), odd. Recursive: 1 + collatz_steps(n>>1 or 3*n+1)
+//   loop x > 1, branching even (x = x >> 1) / odd (x = 3*x + 1), counting steps
 //
 // collatz_max(n) -> i32:
-//   Tracks maximum value seen along Collatz sequence via recursive descent.
-//   Uses let bindings for intermediate recursive results with conditional returns.
+//   loop x > 1 over the Collatz sequence, tracking the maximum value seen in `best`
 //
 // spec_division():
 //   0xfc 0x3a (forall) + 0x40 (empty block type) +
@@ -53,12 +47,12 @@ mod algo_converge_tests {
 
     #[test]
     fn algo_converge_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 37);
-        cov_mark::check_count!(wasm_codegen_emit_if_statement, 14);
-        cov_mark::check_count!(wasm_codegen_emit_function_call, 13);
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 5);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 34);
+        cov_mark::check_count!(wasm_codegen_emit_if_statement, 8);
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 0);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 15);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 4);
-        cov_mark::check_count!(wasm_codegen_emit_function_params, 19);
+        cov_mark::check_count!(wasm_codegen_emit_function_params, 9);
         cov_mark::check_count!(wasm_codegen_emit_forall_block, 1);
         cov_mark::check_count!(wasm_codegen_emit_assume_block, 1);
         cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 2);

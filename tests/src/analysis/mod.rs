@@ -10,4 +10,5 @@ mod rules_a031;
 mod rules_a032;
 mod rules_a033;
 mod rules_a034;
+mod rules_a035;
 mod walker_tests;

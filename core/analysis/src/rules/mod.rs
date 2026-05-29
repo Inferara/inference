@@ -18,6 +18,7 @@ pub mod method_call_chain_compound;
 pub mod method_never_accesses_self;
 pub mod missing_return;
 pub mod nested_compound_depth;
+pub mod recursion;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod standalone_uzumaki;
@@ -50,6 +51,7 @@ use method_call_chain_compound::MethodCallChainCompound;
 use method_never_accesses_self::MethodNeverAccessesSelf;
 use missing_return::MissingReturn;
 use nested_compound_depth::NestedCompoundDepth;
+use recursion::RecursionDetected;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use standalone_uzumaki::StandaloneUzumaki;
@@ -102,5 +104,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &TopLevelConstNotSupported,
         &CombinedUnaryOperators,
         &VisibilityInsideSpec,
+        &RecursionDetected,
     ]
 }
