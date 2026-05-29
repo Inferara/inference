@@ -139,7 +139,7 @@ pub fn codegen(
     // the section is emitted in a single pass that moves out the recorded
     // spec map alongside the WASM bytes.
     let has_main = compiler.has_main();
-    let (wasm, spec_func_indices_by_spec) = compiler.finish_and_take();
+    let (wasm, spec_func_indices_by_spec, frame_sizes) = compiler.finish_and_take();
     debug_assert!(
         mode != CompilationMode::Compile || spec_func_indices_by_spec.is_empty(),
         "compile mode must not record any spec function indices"
@@ -153,7 +153,8 @@ pub fn codegen(
         module_name.to_string(),
         has_main,
         spec_func_indices_by_spec,
-    ))
+    )
+    .with_frame_sizes(frame_sizes))
 }
 
 /// Traverses the typed AST and compiles all function and method definitions.

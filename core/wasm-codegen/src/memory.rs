@@ -300,6 +300,15 @@ pub(crate) struct FrameLayout {
 /// Returns the byte size of a single element for the given type.
 ///
 /// Used by `compute_frame_layout` and store/load instruction selection.
+///
+/// # Cross-crate invariant
+///
+/// Every supported type's natural alignment is at most 8 bytes. The analysis
+/// crate's A036 (`inference-analysis`, `rules::stack_depth::MAX_SLOT_PADDING`)
+/// relies on this to bound per-slot frame padding at 7 bytes; a wider type
+/// (e.g. i128/v128) would break that soundness invariant. Adding one here must
+/// also update `MAX_SLOT_PADDING` and the guard test
+/// `every_supported_type_aligns_within_max_slot_padding` in this module.
 #[must_use = "returns element size in bytes"]
 pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
     match kind {
@@ -366,6 +375,14 @@ fn type_byte_size_with_visited(
 ///
 /// A visited set guards against cycles as defense-in-depth, matching the
 /// pattern used in [`type_byte_size`] and [`compute_struct_field_layout`].
+///
+/// # Cross-crate invariant
+///
+/// The result is at most 8 bytes for every supported type. A036 in
+/// `inference-analysis` (`rules::stack_depth::MAX_SLOT_PADDING`) depends on this
+/// bound; a type aligned wider than 8 would make A036 under-approximate codegen
+/// frames and become unsound. The guard test
+/// `every_supported_type_aligns_within_max_slot_padding` enforces it here.
 pub(crate) fn natural_alignment_for_type(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
@@ -1527,6 +1544,93 @@ mod tests {
             8,
             "Mixed {{ a: bool, b: i64 }} alignment = max(1, 8) = 8"
         );
+    }
+
+    /// Soundness guard for `inference-analysis`'s A036
+    /// (`rules::stack_depth::MAX_SLOT_PADDING = 7`): every supported type must
+    /// align within 8 bytes, so codegen never inserts more than 7 padding bytes
+    /// per slot. If a wider-aligned type (i128/f128/v128/SIMD) is ever added,
+    /// this test fails — and `MAX_SLOT_PADDING` must be revisited before A036
+    /// silently under-approximates a real frame.
+    ///
+    /// The `NumberType` coverage is a non-wildcard `match`: adding a variant
+    /// breaks compilation here, forcing the new type through this check.
+    #[test]
+    fn every_supported_type_aligns_within_max_slot_padding() {
+        /// Maximum natural alignment A036 assumes for any single slot.
+        const MAX_ALIGN: u32 = 8;
+
+        let mut ctx = TypedContext::default();
+        ctx.register_test_enum("Color", &["Red", "Green", "Blue"])
+            .unwrap();
+        ctx.register_test_struct(
+            "Wide",
+            &[
+                (
+                    "a".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Bool,
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+                (
+                    "b".to_string(),
+                    TypeInfo {
+                        kind: TypeInfoKind::Number(NumberType::I64),
+                        type_params: vec![],
+                    },
+                    Visibility::Public,
+                ),
+            ],
+        )
+        .unwrap();
+
+        let assert_within = |kind: &TypeInfoKind| {
+            let align = natural_alignment_for_type(kind, &ctx)
+                .unwrap_or_else(|e| panic!("alignment lookup failed for {kind:?}: {e:?}"));
+            assert!(
+                align <= MAX_ALIGN,
+                "{kind:?} aligns to {align} bytes, exceeding MAX_SLOT_PADDING's {MAX_ALIGN}-byte assumption",
+            );
+        };
+
+        assert_within(&TypeInfoKind::Bool);
+
+        // Exhaustive over NumberType: a new variant makes this `match`
+        // non-exhaustive and forces the type through the alignment guard.
+        for nt in NumberType::ALL {
+            match nt {
+                NumberType::I8
+                | NumberType::I16
+                | NumberType::I32
+                | NumberType::I64
+                | NumberType::U8
+                | NumberType::U16
+                | NumberType::U32
+                | NumberType::U64 => {
+                    let kind = TypeInfoKind::Number(*nt);
+                    assert!(
+                        element_size(&kind) <= MAX_ALIGN,
+                        "{kind:?} has element size exceeding {MAX_ALIGN} bytes",
+                    );
+                    assert_within(&kind);
+                }
+            }
+        }
+
+        assert_within(&TypeInfoKind::Enum("Color".to_string()));
+
+        let array_of_i64 = TypeInfoKind::Array(
+            Box::new(TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I64),
+                type_params: vec![],
+            }),
+            4,
+        );
+        assert_within(&array_of_i64);
+
+        assert_within(&TypeInfoKind::Struct("Wide".to_string()));
     }
 
     #[test]

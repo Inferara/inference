@@ -245,6 +245,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Builds a whole-program call graph keyed by the canonical function name (matching the codegen `FnKey` scheme); call resolution is conservative, so edges are created only to existing nodes and the rule never produces a false positive
   - Reports each call cycle once via a white/gray/black DFS, naming the full cycle (e.g. `a -> b -> a`) and pointing the diagnostic at the call site that closes it
   - Migrated the recursive codegen fixtures to iterative form to comply with the new rule: rewrote `algo_bitwise` (`popcount`, `count_leading_zeros`), `algo_converge` (`slow_div`, `slow_mod`, `peasant_mul`, `is_prime`, `collatz_steps`, `collatz_max`), and `algo_i64_mixed` (`factorial_i64`, `fibonacci_i64`, `gcd_i64`) into conditional loops with `mut` accumulators and a single trailing return; removed the wholly recursive `algo_recursive_math` fixture (its functions already have iterative equivalents in `algo_iter`)
+- A036 `StackDepthExceeded`: reject programs whose cumulative shadow-stack usage along a call chain exceeds the 64 KB stack budget, turning the previously opaque runtime `memory.fill` out-of-bounds trap into a precise compile-time error ([#166])
+  - Reuses A035's whole-program call graph (now a DAG, since recursion is forbidden) and computes the maximum-weight root-to-leaf path, where each node's weight is a conservative upper bound on that function's compound (array/struct) frame size; scalar locals live in WASM locals and contribute nothing
+  - The frame-size estimator computes each compound type's **exact** codegen size (mirroring `compute_struct_field_layout` field-by-field, including array-of-structs) and adds only a flat worst-case leading-padding margin once per frame slot, then rounds to the 16-byte boundary — so it remains a sound upper bound on codegen's `FrameLayout.total_size` (never accepts a program codegen would overflow) without falsely rejecting valid array-of-structs frames; `if`/`else` branches take the per-branch maximum, mirroring codegen's offset reuse
+  - The longest-path DFS is cycle-safe (white/gray/black coloring); a recursive program is reported by A035 while A036 does not hang
+  - Factored the shared call-graph construction into `core/analysis/src/call_graph.rs`, consumed by both A035 and A036
+  - Diagnostic names the offending chain (e.g. `a -> b -> c`) and reports the computed byte total against the budget
+  - The estimator's soundness (estimate ≥ codegen's real frame) is enforced cross-crate: `inference_analysis::estimate_frame_sizes()` and `CodegenOutput::frame_sizes()` expose per-function sizes (keyed by canonical name), and a parity test asserts estimate ≥ real over a corpus of struct, mixed-alignment, nested, array-of-struct, mutable-self, and if/else cases. A codegen test guards the ≤8-byte max-alignment invariant that `MAX_SLOT_PADDING` relies on
 
 ### AST
 
@@ -697,3 +704,4 @@ Initial tagged release.
 [#111]: https://github.com/Inferara/inference/pull/111
 [#117]: https://github.com/Inferara/inference/pull/117
 [#205]: https://github.com/Inferara/inference/issues/205
+[#166]: https://github.com/Inferara/inference/issues/166

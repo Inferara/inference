@@ -21,6 +21,7 @@ pub mod nested_compound_depth;
 pub mod recursion;
 pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
+pub mod stack_depth;
 pub mod standalone_uzumaki;
 pub mod top_level_const;
 pub mod uninitialized_variable;
@@ -54,6 +55,7 @@ use nested_compound_depth::NestedCompoundDepth;
 use recursion::RecursionDetected;
 use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
+use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
 use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
@@ -105,5 +107,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &CombinedUnaryOperators,
         &VisibilityInsideSpec,
         &RecursionDetected,
+        &StackDepthExceeded,
     ]
 }
