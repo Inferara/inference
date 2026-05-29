@@ -63,6 +63,10 @@
 //!
 //! - A033: Combined/adjacent prefix unary operators (`--x`, `-~x`, `!!x`, including parenthesized variants)
 //!
+//! ### Recursion (A035)
+//!
+//! - A035: Direct or indirect (mutual) recursion is forbidden (Power of 10, Rule 1)
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -167,6 +171,7 @@ mod tests {
             AnalysisDiagnostic::TopLevelConstNotSupported { name: "X".to_string(), location: dummy_location() },
             AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
             AnalysisDiagnostic::VisibilityInsideSpec { spec_name: "S".to_string(), def_name: "f".to_string(), def_kind: "fn", location: dummy_location() },
+            AnalysisDiagnostic::RecursionDetected { cycle: "f -> f".to_string(), location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

@@ -1,10 +1,13 @@
 /// WASM bytecode analysis for mixed-type i64 algorithms.
 ///
+/// The arithmetic functions are iterative (a leading guard, `mut` accumulators, a
+/// conditional `loop`, and a single trailing return) to comply with A035, which
+/// forbids the recursion the earlier versions relied on.
+///
 /// Key instruction patterns:
-/// - `factorial_i64`:   i64.le_s (base case), i64.mul + call (recursive multiply)
-/// - `fibonacci_i64`:   i64.le_s/i64.eq (base cases), two recursive calls + i64.add
-/// - `gcd_i64_helper`:  i64.eq (base), i64.rem_s + recursive call (Euclidean algorithm)
-/// - `gcd_i64`:         i64.lt_s (sign check), prefix unary neg (i64.const 0, i64.sub), delegates to helper
+/// - `factorial_i64`:   i64.le_s guard, conditional loop with i64.mul accumulation
+/// - `fibonacci_i64`:   i64.le_s/i64.eq guards, conditional loop advancing a two-term window
+/// - `gcd_i64`:         i64.lt_s sign normalisation (i64.const 0, i64.sub), conditional loop with i64.rem_s
 /// - `lcm_i64`:         i64.eq (zero checks), call gcd_i64, i64.div_s + i64.mul
 /// - `is_even`/`is_odd`: i32.and (bitwise mask), i32.eq (compare to 0 or 1)
 /// - `abs_i64`:         i64.lt_s (sign check), prefix unary neg (i64.const 0, i64.sub)
@@ -21,14 +24,14 @@ mod algo_i64_mixed_tests {
 
     #[test]
     fn algo_i64_mixed_test() {
-        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 35);
+        cov_mark::check_count!(wasm_codegen_emit_binary_expression, 39);
         cov_mark::check_count!(wasm_codegen_emit_if_statement, 14);
-        cov_mark::check_count!(wasm_codegen_emit_function_call, 7);
-        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 13);
+        cov_mark::check_count!(wasm_codegen_emit_function_call, 1);
+        cov_mark::check_count!(wasm_codegen_emit_variable_definition, 20);
         cov_mark::check_count!(wasm_codegen_emit_parenthesized_expression, 3);
-        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 2);
-        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 9);
-        cov_mark::check_count!(wasm_codegen_emit_function_params, 12);
+        cov_mark::check_count!(wasm_codegen_emit_prefix_unary_expression, 1);
+        cov_mark::check_count!(wasm_codegen_emit_assign_identifier, 18);
+        cov_mark::check_count!(wasm_codegen_emit_function_params, 10);
         let test_name = "algo_i64_mixed";
         let test_file_path = get_test_file_path(module_path!(), test_name);
         let source_code = std::fs::read_to_string(&test_file_path)

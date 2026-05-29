@@ -182,6 +182,9 @@ pub enum AnalysisDiagnostic {
         def_kind: &'static str,
         location: Location,
     },
+
+    #[error("recursive function call is not allowed: {cycle}; Inference forbids direct and indirect recursion (Power of 10, Rule 1) so stack usage stays statically bounded; restructure into an explicit loop")]
+    RecursionDetected { cycle: String, location: Location },
 }
 
 impl AnalysisDiagnostic {
@@ -219,7 +222,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
             | AnalysisDiagnostic::CombinedUnaryOperators { location, .. }
-            | AnalysisDiagnostic::VisibilityInsideSpec { location, .. } => location,
+            | AnalysisDiagnostic::VisibilityInsideSpec { location, .. }
+            | AnalysisDiagnostic::RecursionDetected { location, .. } => location,
         }
     }
 
@@ -261,6 +265,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::TopLevelConstNotSupported { .. } => "A032",
             AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
             AnalysisDiagnostic::VisibilityInsideSpec { .. } => "A034",
+            AnalysisDiagnostic::RecursionDetected { .. } => "A035",
         }
     }
 }
@@ -790,6 +795,28 @@ mod tests {
             "A034 diagnostic must reference the `pub` modifier, got: {text}"
         );
         assert_eq!(err.rule_id(), "A034");
+    }
+
+    #[test]
+    fn display_recursion_detected() {
+        let err = AnalysisDiagnostic::RecursionDetected {
+            cycle: "fact -> fact".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("recursive function call is not allowed"),
+            "A035 diagnostic must explain the prohibition, got: {text}"
+        );
+        assert!(
+            text.contains("fact -> fact"),
+            "A035 diagnostic must include the cycle chain, got: {text}"
+        );
+        assert!(
+            text.contains("Power of 10"),
+            "A035 diagnostic must cite Power of 10, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A035");
     }
 
     #[test]

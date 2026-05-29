@@ -3,36 +3,52 @@ pub fn factorial_i64(n: i64) -> i64 {
     if n <= one {
         return one;
     }
-    return n * factorial_i64(n - one);
+    let mut result: i64 = 1;
+    let mut i: i64 = 2;
+    loop i <= n {
+        result = result * i;
+        i = i + one;
+    }
+    return result;
 }
 
 pub fn fibonacci_i64(n: i64) -> i64 {
     let zero: i64 = 0;
     let one: i64 = 1;
-    let two: i64 = 2;
     if n <= zero {
         return zero;
     }
     if n == one {
         return one;
     }
-    return fibonacci_i64(n - one) + fibonacci_i64(n - two);
-}
-
-fn gcd_i64_helper(a: i64, b: i64) -> i64 {
-    let zero: i64 = 0;
-    if b == zero {
-        return a;
+    let mut a: i64 = 0;
+    let mut b: i64 = 1;
+    let mut i: i64 = 2;
+    loop i <= n {
+        let next: i64 = a + b;
+        a = b;
+        b = next;
+        i = i + one;
     }
-    return gcd_i64_helper(b, a % b);
+    return b;
 }
 
 pub fn gcd_i64(a: i64, b: i64) -> i64 {
     let zero: i64 = 0;
-    if a < zero {
-        return gcd_i64_helper(-a, b);
+    let mut x: i64 = a;
+    let mut y: i64 = b;
+    if x < zero {
+        x = zero - x;
     }
-    return gcd_i64_helper(a, b);
+    if y < zero {
+        y = zero - y;
+    }
+    loop y > zero {
+        let t: i64 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
 }
 
 pub fn lcm_i64(a: i64, b: i64) -> i64 {
