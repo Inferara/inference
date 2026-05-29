@@ -15,3 +15,6 @@ tree-sitter-inference.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 cov-mark.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
