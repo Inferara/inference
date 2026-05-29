@@ -2683,6 +2683,12 @@ mod base_codegen_tests {
         );
     }
 
+    /// The runtime `memory.fill` overflow trap is a defense-in-depth backstop:
+    /// analysis rule A036 (`StackDepthExceeded`) is the *primary* guard and now
+    /// rejects this two-frame chain at compile time (see
+    /// `analysis::rules_a036`). Codegen is exercised with analysis skipped here
+    /// to confirm the runtime backstop still traps when the chain reaches the
+    /// generator unchecked.
     #[test]
     fn stack_overflow_traps_at_runtime() {
         use wasmtime::{Engine, Module, Store, TypedFunc};
@@ -2697,7 +2703,7 @@ mod base_codegen_tests {
                  return a[0] + callee();\
              }}"
         );
-        let wasm_bytes = wasm_codegen(&source);
+        let wasm_bytes = wasm_codegen_no_analysis(&source);
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).expect("compile");
         let mut store = Store::new(&engine, ());

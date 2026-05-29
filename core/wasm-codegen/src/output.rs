@@ -85,6 +85,13 @@ pub struct CodegenOutput {
     /// per-spec `Definition <mod>__<SpecName>_specs : list N` lists consumed
     /// by the corresponding `ValidModule` theorems.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
+
+    /// Per-function shadow-stack frame sizes in bytes, keyed by canonical
+    /// function name (matching `FnKey`/analysis key scheme).
+    ///
+    /// Exposed for testing and diagnostics; empty unless populated by the
+    /// codegen entry point.
+    frame_sizes: FxHashMap<String, u32>,
 }
 
 impl CodegenOutput {
@@ -107,7 +114,29 @@ impl CodegenOutput {
             module_name,
             has_main,
             spec_func_indices_by_spec,
+            frame_sizes: FxHashMap::default(),
         }
+    }
+
+    /// Attaches per-function shadow-stack frame sizes to this output.
+    ///
+    /// Builder-style setter so the public [`Self::new`] signature stays
+    /// non-breaking. The map is keyed by canonical function name (matching the
+    /// `FnKey`/analysis key scheme) with the value in bytes.
+    #[must_use]
+    pub fn with_frame_sizes(mut self, frame_sizes: FxHashMap<String, u32>) -> Self {
+        self.frame_sizes = frame_sizes;
+        self
+    }
+
+    /// Returns the per-function shadow-stack frame sizes in bytes, keyed by
+    /// canonical function name (matching the `FnKey`/analysis key scheme).
+    ///
+    /// Exposed for testing and diagnostics; empty unless populated by the
+    /// codegen entry point.
+    #[must_use]
+    pub fn frame_sizes(&self) -> &FxHashMap<String, u32> {
+        &self.frame_sizes
     }
 
     /// Returns the WASM function indices for functions originating in `spec`

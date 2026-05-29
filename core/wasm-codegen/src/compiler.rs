@@ -97,6 +97,11 @@ pub(crate) enum FunctionOrigin {
     SpecInner(String),
 }
 
+/// The triple yielded by [`Compiler::finish_and_take`]: the assembled WASM
+/// binary, the per-spec function indices, and the per-function shadow-stack
+/// frame sizes (canonical [`FnKey`] string → bytes).
+type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<String, u32>);
+
 /// Structured key for `func_name_to_idx`, `func_array_returns`, and
 /// `func_struct_returns` values.
 ///
@@ -401,6 +406,13 @@ pub(crate) struct Compiler {
     /// can emit per-spec `Definition <mod>__<SpecName>_specs : list N`
     /// definitions.
     spec_func_indices_by_spec: FxHashMap<String, Vec<u32>>,
+    /// Real shadow-stack frame size in bytes for each function, keyed by its
+    /// canonical [`FnKey`] display string. Recorded in
+    /// [`Self::visit_function_definition`] right after the frame layout is
+    /// computed; frameless functions record 0. Moved out by
+    /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
+    /// invariant (A036's estimate ≥ this) can be checked cross-crate.
+    frame_sizes: FxHashMap<String, u32>,
 }
 
 impl Compiler {
@@ -430,6 +442,7 @@ impl Compiler {
             parent_blocks_stack: Vec::new(),
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
+            frame_sizes: FxHashMap::default(),
         }
     }
 
@@ -873,6 +886,18 @@ impl Compiler {
 
         self.frame_layout =
             Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name)?;
+
+        // Record the real frame size (0 for frameless functions) keyed by the
+        // canonical FnKey so A036's estimate can be checked against it. The key
+        // was set above and is always present here.
+        let frame_size = self.frame_layout.as_ref().map_or(0, |l| l.total_size);
+        self.frame_sizes.insert(
+            self.current_fn_key
+                .as_ref()
+                .expect("current_fn_key is set at the top of visit_function_definition")
+                .to_string(),
+            frame_size,
+        );
 
         if self.frame_layout.is_some() {
             self.has_memory = true;
@@ -3896,13 +3921,16 @@ impl Compiler {
     }
 
     /// Assembles the complete WASM binary from accumulated sections AND
-    /// returns the recorded spec function indices alongside it.
+    /// returns the recorded spec function indices and per-function frame sizes
+    /// alongside it.
     ///
-    /// Consumes `self` so the recorded spec map is moved out exactly once;
-    /// there is no separate drain step and no flag to track. The custom
+    /// Consumes `self` so the recorded maps are moved out exactly once; there is
+    /// no separate drain step and no flag to track. The custom
     /// `inference.spec_funcs` section is emitted from `self.spec_func_indices_by_spec`
-    /// before the move.
-    pub(crate) fn finish_and_take(self) -> (Vec<u8>, FxHashMap<String, Vec<u32>>) {
+    /// before the move. The `frame_sizes` map (canonical [`FnKey`] string →
+    /// real shadow-stack frame bytes) is surfaced for the cross-crate A036
+    /// frame-size soundness check.
+    pub(crate) fn finish_and_take(self) -> FinishedModule {
         let mut module = Module::new();
 
         let mut type_section = TypeSection::new();
@@ -3995,7 +4023,11 @@ impl Compiler {
             module.section(&spec_section);
         }
 
-        (module.finish(), self.spec_func_indices_by_spec)
+        (
+            module.finish(),
+            self.spec_func_indices_by_spec,
+            self.frame_sizes,
+        )
     }
 }
 
@@ -4043,7 +4075,7 @@ mod tests {
     #[test]
     fn finish_without_memory_omits_memory_section() {
         let compiler = Compiler::new("test");
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         assert!(!wasm.is_empty());
         assert!(!has_memory_section(&wasm));
     }
@@ -4053,7 +4085,7 @@ mod tests {
         cov_mark::check!(wasm_codegen_emit_memory_section);
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         assert!(has_memory_section(&wasm));
     }
 
@@ -4061,7 +4093,7 @@ mod tests {
     fn finish_with_memory_validates_via_wasmparser() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         inf_wasmparser::validate(&wasm)
             .unwrap_or_else(|e| panic!("Generated WASM with memory is invalid: {e}"));
     }
@@ -4070,7 +4102,7 @@ mod tests {
     fn finish_with_memory_exports_memory_and_stack_pointer() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -4087,7 +4119,7 @@ mod tests {
     fn finish_with_memory_has_correct_stack_pointer_init() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(
@@ -4100,7 +4132,7 @@ mod tests {
     fn finish_with_memory_has_mutable_global() {
         let mut compiler = Compiler::new("test");
         compiler.enable_memory();
-        let (wasm, _spec_map) = compiler.finish_and_take();
+        let (wasm, _spec_map, _frame_sizes) = compiler.finish_and_take();
         let wat =
             wasmprinter::print_bytes(&wasm).unwrap_or_else(|e| panic!("Failed to print WAT: {e}"));
         assert!(

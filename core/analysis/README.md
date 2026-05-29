@@ -105,6 +105,14 @@ These rules cover constructs that are valid in the type system but cannot yet be
 
 A035 builds a whole-program call graph keyed by the canonical function name (matching the codegen `FnKey` scheme) and reports each call cycle once, pointing at the call site that closes the cycle.
 
+### Stack Depth (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A036 | `StackDepthExceeded` | error | cumulative shadow-stack usage along a call chain must not exceed the 64 KB stack budget |
+
+A036 reuses A035's whole-program call graph (a DAG, since recursion is forbidden) and computes the maximum-weight root-to-leaf path, where each node's weight is a conservative upper bound on that function's compound (array/struct) frame size. Scalar locals live in WASM locals and contribute nothing. The estimate over-approximates codegen's real frame layout by construction, so the rule never accepts a program codegen would overflow. The shared graph construction lives in `src/call_graph.rs`.
+
 ## Diagnostic Output Format
 
 ```
@@ -200,6 +208,7 @@ Test files are organized by rule group:
 | `rules_a029_a030.rs` | A029 (compound literal in compound assign), A030 removal acceptance tests |
 | `rules_a031.rs` | A031 (unsupported compound return expression) |
 | `rules_a035.rs` | A035 (direct and mutual/indirect recursion) |
+| `rules_a036.rs` | A036 (cumulative stack depth exceeded) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

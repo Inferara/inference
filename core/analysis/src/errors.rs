@@ -185,6 +185,14 @@ pub enum AnalysisDiagnostic {
 
     #[error("recursive function call is not allowed: {cycle}; Inference forbids direct and indirect recursion (Power of 10, Rule 1) so stack usage stays statically bounded; restructure into an explicit loop")]
     RecursionDetected { cycle: String, location: Location },
+
+    #[error("maximum stack depth {chain} uses {depth_bytes} bytes, exceeding the {budget_bytes}-byte stack; reduce array/struct frame sizes along this call chain")]
+    StackDepthExceeded {
+        chain: String,
+        depth_bytes: u32,
+        budget_bytes: u32,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -223,7 +231,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
             | AnalysisDiagnostic::CombinedUnaryOperators { location, .. }
             | AnalysisDiagnostic::VisibilityInsideSpec { location, .. }
-            | AnalysisDiagnostic::RecursionDetected { location, .. } => location,
+            | AnalysisDiagnostic::RecursionDetected { location, .. }
+            | AnalysisDiagnostic::StackDepthExceeded { location, .. } => location,
         }
     }
 
@@ -266,6 +275,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::CombinedUnaryOperators { .. } => "A033",
             AnalysisDiagnostic::VisibilityInsideSpec { .. } => "A034",
             AnalysisDiagnostic::RecursionDetected { .. } => "A035",
+            AnalysisDiagnostic::StackDepthExceeded { .. } => "A036",
         }
     }
 }
@@ -538,6 +548,16 @@ mod tests {
         assert_eq!(
             AnalysisDiagnostic::ReturnInsideNonDetBlock { location: test_location(), block_kind: "forall" }.rule_id(),
             "A005"
+        );
+        assert_eq!(
+            AnalysisDiagnostic::StackDepthExceeded {
+                chain: "a -> b".to_string(),
+                depth_bytes: 80_000,
+                budget_bytes: 65_536,
+                location: test_location(),
+            }
+            .rule_id(),
+            "A036"
         );
     }
 
@@ -817,6 +837,30 @@ mod tests {
             "A035 diagnostic must cite Power of 10, got: {text}"
         );
         assert_eq!(err.rule_id(), "A035");
+    }
+
+    #[test]
+    fn display_stack_depth_exceeded() {
+        let err = AnalysisDiagnostic::StackDepthExceeded {
+            chain: "main -> work -> alloc".to_string(),
+            depth_bytes: 98_304,
+            budget_bytes: 65_536,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("main -> work -> alloc"),
+            "A036 diagnostic must include the call chain, got: {text}"
+        );
+        assert!(
+            text.contains("98304"),
+            "A036 diagnostic must include the depth in bytes, got: {text}"
+        );
+        assert!(
+            text.contains("65536"),
+            "A036 diagnostic must include the budget in bytes, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A036");
     }
 
     #[test]

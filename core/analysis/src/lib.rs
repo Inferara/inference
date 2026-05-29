@@ -67,6 +67,14 @@
 //!
 //! - A035: Direct or indirect (mutual) recursion is forbidden (Power of 10, Rule 1)
 //!
+//! ### Stack Depth (A036)
+//!
+//! - A036: Cumulative shadow-stack usage along a call chain must not exceed the
+//!   64 KB stack budget. Because A035 makes the call graph acyclic, the
+//!   worst-case usage is the maximum-weight root-to-leaf path (node weight =
+//!   that function's compound-frame size). The estimator over-approximates each
+//!   frame to stay sound against codegen; see [`rules::stack_depth`].
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -89,12 +97,15 @@
 
 use inference_type_checker::typed_context::TypedContext;
 
+mod call_graph;
 pub mod errors;
 pub mod rule;
 pub mod rules;
 mod walker;
 
 use errors::{AnalysisErrors, AnalysisResult, Severity};
+
+pub use rules::stack_depth::estimate_frame_sizes;
 
 /// Performs static analysis on the typed AST.
 ///
@@ -172,6 +183,7 @@ mod tests {
             AnalysisDiagnostic::CombinedUnaryOperators { op_outer: "-", op_inner: "~", location: dummy_location() },
             AnalysisDiagnostic::VisibilityInsideSpec { spec_name: "S".to_string(), def_name: "f".to_string(), def_kind: "fn", location: dummy_location() },
             AnalysisDiagnostic::RecursionDetected { cycle: "f -> f".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::StackDepthExceeded { chain: "a -> b".to_string(), depth_bytes: 80_000, budget_bytes: 65_536, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
