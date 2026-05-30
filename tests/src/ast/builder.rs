@@ -1,13 +1,12 @@
 use crate::ast::helpers::{
-    assert_array_index, assert_array_literal, assert_array_type, assert_assign,
-    assert_assert_stmt, assert_binary, assert_block, assert_block_stmt, assert_bool,
-    assert_break, assert_const_def, assert_custom_type, assert_enum_def, assert_expr_stmt,
-    assert_extern_function_def, assert_fn_call, assert_function_def, assert_generic_type,
-    assert_ident_expr, assert_if, assert_loop, assert_member_access, assert_named_arg,
-    assert_number, assert_parens, assert_prefix_unary, assert_return, assert_simple_type,
-    assert_string_literal, assert_struct_def, assert_struct_literal, assert_type_alias_def,
-    assert_type_expr, assert_type_only_arg, assert_unit_literal, assert_var_def, parse_defs,
-    parse_one,
+    assert_array_index, assert_array_literal, assert_array_type, assert_assert_stmt, assert_assign,
+    assert_binary, assert_block, assert_block_stmt, assert_bool, assert_break, assert_const_def,
+    assert_custom_type, assert_enum_def, assert_expr_stmt, assert_extern_function_def,
+    assert_fn_call, assert_function_def, assert_generic_type, assert_ident_expr, assert_if,
+    assert_loop, assert_member_access, assert_named_arg, assert_number, assert_parens,
+    assert_prefix_unary, assert_return, assert_simple_type, assert_string_literal,
+    assert_struct_def, assert_struct_literal, assert_type_alias_def, assert_type_expr,
+    assert_type_only_arg, assert_unit_literal, assert_var_def, parse_defs, parse_one,
 };
 use crate::utils::try_build_ast;
 use inference_ast::nodes::{
@@ -140,8 +139,15 @@ fn test_parse_function_with_bool_return() {
     let (arena, defs) = parse_defs(source);
     assert_eq!(defs.len(), 1);
 
-    let (args, ret, body) =
-        assert_function_def(&arena, defs[0], "is_positive", Visibility::Private, 1, true, 1);
+    let (args, ret, body) = assert_function_def(
+        &arena,
+        defs[0],
+        "is_positive",
+        Visibility::Private,
+        1,
+        true,
+        1,
+    );
 
     let x_ty = assert_named_arg(&arena, &args[0], "x", false);
     assert_simple_type(&arena, x_ty, SimpleTypeKind::I32);
@@ -161,8 +167,7 @@ fn test(p: Point) -> Point { return p; }"#;
     let (arena, defs) = parse_defs(source);
     assert_eq!(defs.len(), 2);
 
-    let (fields, methods) =
-        assert_struct_def(&arena, defs[0], "Point", Visibility::Private, 2, 0);
+    let (fields, methods) = assert_struct_def(&arena, defs[0], "Point", Visibility::Private, 2, 0);
     assert!(methods.is_empty());
     assert_eq!(arena[fields[0].name].name, "x");
     assert_simple_type(&arena, fields[0].ty, SimpleTypeKind::I32);
@@ -316,7 +321,13 @@ fn test_parse_enum_definition() {
     let (arena, defs) = parse_defs("enum Arch { Wasm, Evm }");
     assert_eq!(defs.len(), 1);
 
-    assert_enum_def(&arena, defs[0], "Arch", Visibility::Private, &["Wasm", "Evm"]);
+    assert_enum_def(
+        &arena,
+        defs[0],
+        "Arch",
+        Visibility::Private,
+        &["Wasm", "Evm"],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -328,8 +339,7 @@ fn test_parse_struct_definition() {
     let (arena, defs) = parse_defs("struct Point { x: i32; y: i32; }");
     assert_eq!(defs.len(), 1);
 
-    let (fields, methods) =
-        assert_struct_def(&arena, defs[0], "Point", Visibility::Private, 2, 0);
+    let (fields, methods) = assert_struct_def(&arena, defs[0], "Point", Visibility::Private, 2, 0);
     assert!(methods.is_empty());
 
     assert_eq!(arena[fields[0].name].name, "x");
@@ -1121,8 +1131,7 @@ fn test_parse_struct_expression() {
 #[test]
 fn test_parse_generic_type() {
     let (arena, defs) = parse_defs("fn test() -> Array i32' {}");
-    let (_, ret, _) =
-        assert_function_def(&arena, defs[0], "test", Visibility::Private, 0, true, 0);
+    let (_, ret, _) = assert_function_def(&arena, defs[0], "test", Visibility::Private, 0, true, 0);
     let params = assert_generic_type(&arena, ret.unwrap(), "Array", 1);
     assert_eq!(arena[params[0]].name, "i32");
 }
@@ -1142,8 +1151,7 @@ fn test_parse_function_type_param() {
 
 #[test]
 fn test_parse_external_function() {
-    let (arena, defs) =
-        parse_defs("external fn sorting_function(Address, Address) -> Address;");
+    let (arena, defs) = parse_defs("external fn sorting_function(Address, Address) -> Address;");
     assert_eq!(defs.len(), 1);
 
     let (args, ret) = assert_extern_function_def(
@@ -1266,17 +1274,28 @@ fn test() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Error recovery coverage tests
+// Error recovery tests
 // ---------------------------------------------------------------------------
+//
+// The parser is resilient: malformed input never panics, is reported as a
+// syntax error, and still yields a recovered AST. `try_build_ast` surfaces the
+// syntax errors as an `Err`, so a recovered-but-invalid parse is observable as
+// a non-panicking error here.
 
 #[test]
 fn test_error_definition_recovery() {
-    cov_mark::check!(ast_builder_error_definition_recovery);
-    let _ = try_build_ast("$$$".to_string());
+    let result = try_build_ast("$$$".to_string());
+    assert!(
+        result.is_err(),
+        "garbage at definition position is a syntax error"
+    );
 }
 
 #[test]
 fn test_error_statement_recovery() {
-    cov_mark::check!(ast_builder_error_statement_recovery);
-    let _ = try_build_ast("fn f() { $$$; }".to_string());
+    let result = try_build_ast("fn f() { $$$; }".to_string());
+    assert!(
+        result.is_err(),
+        "garbage at statement position is a syntax error"
+    );
 }

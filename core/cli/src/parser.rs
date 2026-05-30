@@ -116,7 +116,7 @@ pub(crate) struct Cli {
 
     /// Run the parse phase to build the typed AST.
     ///
-    /// This phase reads the source file, runs tree-sitter parsing, and constructs
+    /// This phase reads the source file, runs the custom parser, and constructs
     /// an arena-allocated typed AST. If parsing succeeds, the compiler prints
     /// "Parsed: <filepath>" and exits with code 0.
     ///

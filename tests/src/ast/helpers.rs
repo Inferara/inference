@@ -16,7 +16,7 @@ use inference_ast::nodes::{
 // ---------------------------------------------------------------------------
 
 /// Create a [`Location`] for assertions. Line and column values are 1-indexed
-/// to match tree-sitter conventions. Byte offsets are set to zero — use
+/// to match the parser's location convention. Byte offsets are set to zero — use
 /// [`assert_location`] which ignores them by default.
 #[must_use]
 pub(crate) fn loc(start_line: u32, start_col: u32, end_line: u32, end_col: u32) -> Location {
@@ -90,11 +90,7 @@ pub(crate) fn assert_function_def(
 
     assert_eq!(arena[*name_id].name, name, "function name");
     assert_eq!(*actual_vis, vis, "function '{name}' visibility");
-    assert_eq!(
-        args.len(),
-        param_count,
-        "function '{name}' param count"
-    );
+    assert_eq!(args.len(), param_count, "function '{name}' param count");
     assert_eq!(
         returns.is_some(),
         has_return,
@@ -136,11 +132,7 @@ pub(crate) fn assert_struct_def(
     assert_eq!(arena[*name_id].name, name, "struct name");
     assert_eq!(*actual_vis, vis, "struct '{name}' visibility");
     assert_eq!(fields.len(), field_count, "struct '{name}' field count");
-    assert_eq!(
-        methods.len(),
-        method_count,
-        "struct '{name}' method count"
-    );
+    assert_eq!(methods.len(), method_count, "struct '{name}' method count");
 
     (fields.clone(), methods.clone())
 }
@@ -342,11 +334,7 @@ pub(crate) fn assert_if(
         panic!("expected Stmt::If, got {:?}", stmt.kind);
     };
 
-    assert_eq!(
-        else_block.is_some(),
-        has_else,
-        "if statement has_else"
-    );
+    assert_eq!(else_block.is_some(), has_else, "if statement has_else");
 
     (*condition, *then_block, *else_block)
 }
@@ -364,11 +352,7 @@ pub(crate) fn assert_loop(
         panic!("expected Stmt::Loop, got {:?}", stmt.kind);
     };
 
-    assert_eq!(
-        condition.is_some(),
-        has_condition,
-        "loop has_condition"
-    );
+    assert_eq!(condition.is_some(), has_condition, "loop has_condition");
 
     (*condition, *body)
 }
@@ -454,10 +438,7 @@ pub(crate) fn assert_ident_expr(arena: &AstArena, expr_id: ExprId, name: &str) {
     let Expr::Identifier(ident_id) = &expr.kind else {
         panic!("expected Expr::Identifier('{name}'), got {:?}", expr.kind);
     };
-    assert_eq!(
-        arena[*ident_id].name, name,
-        "identifier name"
-    );
+    assert_eq!(arena[*ident_id].name, name, "identifier name");
 }
 
 /// Assert that `expr_id` is an `Expr::NumberLiteral` with the given value
@@ -477,10 +458,7 @@ pub(crate) fn assert_number(arena: &AstArena, expr_id: ExprId, value: &str) {
 pub(crate) fn assert_bool(arena: &AstArena, expr_id: ExprId, value: bool) {
     let expr = &arena[expr_id];
     let Expr::BoolLiteral { value: actual } = &expr.kind else {
-        panic!(
-            "expected Expr::BoolLiteral({value}), got {:?}",
-            expr.kind
-        );
+        panic!("expected Expr::BoolLiteral({value}), got {:?}", expr.kind);
     };
     assert_eq!(*actual, value, "bool literal value");
 }
@@ -559,10 +537,7 @@ pub(crate) fn assert_fn_call(
     arg_count: usize,
 ) -> Vec<ExprId> {
     let expr = &arena[expr_id];
-    let Expr::FunctionCall {
-        function, args, ..
-    } = &expr.kind
-    else {
+    let Expr::FunctionCall { function, args, .. } = &expr.kind else {
         panic!("expected Expr::FunctionCall('{name}'), got {:?}", expr.kind);
     };
 
@@ -572,10 +547,7 @@ pub(crate) fn assert_fn_call(
             arena[*function].kind
         );
     };
-    assert_eq!(
-        arena[*fn_ident].name, name,
-        "function call name"
-    );
+    assert_eq!(arena[*fn_ident].name, name, "function call name");
     assert_eq!(args.len(), arg_count, "function call '{name}' arg count");
 
     args.iter().map(|(_, expr_id)| *expr_id).collect()
@@ -591,10 +563,7 @@ pub(crate) fn assert_fn_call_raw(
     arg_count: usize,
 ) -> (ExprId, Vec<(Option<IdentId>, ExprId)>) {
     let expr = &arena[expr_id];
-    let Expr::FunctionCall {
-        function, args, ..
-    } = &expr.kind
-    else {
+    let Expr::FunctionCall { function, args, .. } = &expr.kind else {
         panic!("expected Expr::FunctionCall, got {:?}", expr.kind);
     };
     assert_eq!(args.len(), arg_count, "function call arg count");
@@ -607,10 +576,7 @@ pub(crate) fn assert_fn_call_raw(
 pub(crate) fn assert_array_index(arena: &AstArena, expr_id: ExprId) -> (ExprId, ExprId) {
     let expr = &arena[expr_id];
     let Expr::ArrayIndexAccess { array, index } = &expr.kind else {
-        panic!(
-            "expected Expr::ArrayIndexAccess, got {:?}",
-            expr.kind
-        );
+        panic!("expected Expr::ArrayIndexAccess, got {:?}", expr.kind);
     };
     (*array, *index)
 }
@@ -618,11 +584,7 @@ pub(crate) fn assert_array_index(arena: &AstArena, expr_id: ExprId) -> (ExprId, 
 /// Assert that `expr_id` is an `Expr::MemberAccess` with the given field
 /// name. Returns the base expression.
 #[must_use]
-pub(crate) fn assert_member_access(
-    arena: &AstArena,
-    expr_id: ExprId,
-    field: &str,
-) -> ExprId {
+pub(crate) fn assert_member_access(arena: &AstArena, expr_id: ExprId, field: &str) -> ExprId {
     let expr = &arena[expr_id];
     let Expr::MemberAccess {
         expr: base,
@@ -634,21 +596,14 @@ pub(crate) fn assert_member_access(
             expr.kind
         );
     };
-    assert_eq!(
-        arena[*name_id].name, field,
-        "member access field name"
-    );
+    assert_eq!(arena[*name_id].name, field, "member access field name");
     *base
 }
 
 /// Assert that `expr_id` is an `Expr::TypeMemberAccess` with the given member
 /// name. Returns the type expression (left-hand side of `::`).
 #[must_use]
-pub(crate) fn assert_type_member_access(
-    arena: &AstArena,
-    expr_id: ExprId,
-    member: &str,
-) -> ExprId {
+pub(crate) fn assert_type_member_access(arena: &AstArena, expr_id: ExprId, member: &str) -> ExprId {
     let expr = &arena[expr_id];
     let Expr::TypeMemberAccess {
         expr: base,
@@ -660,10 +615,7 @@ pub(crate) fn assert_type_member_access(
             expr.kind
         );
     };
-    assert_eq!(
-        arena[*name_id].name, member,
-        "type member access name"
-    );
+    assert_eq!(arena[*name_id].name, member, "type member access name");
     *base
 }
 
@@ -687,10 +639,7 @@ pub(crate) fn assert_struct_literal(
             expr.kind
         );
     };
-    assert_eq!(
-        arena[*name_id].name, name,
-        "struct literal name"
-    );
+    assert_eq!(arena[*name_id].name, name, "struct literal name");
     assert_eq!(
         fields.len(),
         field_count,
@@ -758,10 +707,7 @@ pub(crate) fn assert_type_expr(arena: &AstArena, expr_id: ExprId) -> TypeId {
 pub(crate) fn assert_simple_type(arena: &AstArena, type_id: TypeId, expected: SimpleTypeKind) {
     let ty = &arena[type_id];
     let TypeNode::Simple(actual) = &ty.kind else {
-        panic!(
-            "expected TypeNode::Simple({expected:?}), got {:?}",
-            ty.kind
-        );
+        panic!("expected TypeNode::Simple({expected:?}), got {:?}", ty.kind);
     };
     assert_eq!(*actual, expected, "simple type kind");
 }
@@ -781,10 +727,7 @@ pub(crate) fn assert_array_type(arena: &AstArena, type_id: TypeId) -> (TypeId, E
 pub(crate) fn assert_custom_type(arena: &AstArena, type_id: TypeId, name: &str) {
     let ty = &arena[type_id];
     let TypeNode::Custom(ident_id) = &ty.kind else {
-        panic!(
-            "expected TypeNode::Custom('{name}'), got {:?}",
-            ty.kind
-        );
+        panic!("expected TypeNode::Custom('{name}'), got {:?}", ty.kind);
     };
     assert_eq!(arena[*ident_id].name, name, "custom type name");
 }
@@ -804,10 +747,7 @@ pub(crate) fn assert_generic_type(
         params,
     } = &ty.kind
     else {
-        panic!(
-            "expected TypeNode::Generic('{base}'), got {:?}",
-            ty.kind
-        );
+        panic!("expected TypeNode::Generic('{base}'), got {:?}", ty.kind);
     };
     assert_eq!(arena[*base_id].name, base, "generic type base name");
     assert_eq!(
@@ -869,10 +809,7 @@ pub(crate) fn assert_named_arg(
         is_mut: actual_mut,
     } = &arg.kind
     else {
-        panic!(
-            "expected ArgKind::Named('{name}'), got {:?}",
-            arg.kind
-        );
+        panic!("expected ArgKind::Named('{name}'), got {:?}", arg.kind);
     };
     assert_eq!(arena[*name_id].name, name, "arg name");
     assert_eq!(*actual_mut, is_mut, "arg '{name}' is_mut");
@@ -881,10 +818,7 @@ pub(crate) fn assert_named_arg(
 
 /// Assert that `arg` is an `ArgKind::SelfRef` with the given mutability.
 pub(crate) fn assert_self_arg(arg: &ArgData, is_mut: bool) {
-    let ArgKind::SelfRef {
-        is_mut: actual_mut,
-    } = &arg.kind
-    else {
+    let ArgKind::SelfRef { is_mut: actual_mut } = &arg.kind else {
         panic!("expected ArgKind::SelfRef, got {:?}", arg.kind);
     };
     assert_eq!(*actual_mut, is_mut, "self arg is_mut");
@@ -1207,8 +1141,7 @@ mod tests {
             }
         "#;
         let (arena, defs) = parse_defs(source);
-        let (_, methods) =
-            assert_struct_def(&arena, defs[0], "Counter", Visibility::Private, 1, 1);
+        let (_, methods) = assert_struct_def(&arena, defs[0], "Counter", Visibility::Private, 1, 1);
         let (args, _, _) =
             assert_function_def(&arena, methods[0], "inc", Visibility::Private, 1, false, 1);
         assert_self_arg(&args[0], true);

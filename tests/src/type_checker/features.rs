@@ -56,8 +56,7 @@ mod import_tests {
         // Test documents expected behavior for when modules are fully implemented
         #[test]
         fn test_visibility_private_same_scope() {
-            let source =
-                r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
+            let source = r#"struct PrivateItem { x: i32; } fn use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -78,8 +77,7 @@ mod import_tests {
         // When implemented, this should test that private symbols are not accessible from sibling scopes
         #[test]
         fn test_visibility_private_sibling_scope_not_accessible() {
-            let source =
-                r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
+            let source = r#"struct PrivateItem { x: i32; } fn try_use_private() { let item: PrivateItem = PrivateItem { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -349,7 +347,8 @@ mod import_tests {
         // Test documents expected behavior for when qualified names across modules work
         #[test]
         fn test_qualified_name_resolution_simple() {
-            let source = r#"struct MyType { x: i32; } fn test() { let val: MyType = MyType { x: 0 }; }"#;
+            let source =
+                r#"struct MyType { x: i32; } fn test() { let val: MyType = MyType { x: 0 }; }"#;
             let result = try_type_check(source);
             assert!(
                 result.is_ok(),
@@ -461,11 +460,10 @@ mod import_tests {
         #[test]
         fn test_import_with_empty_path() {
             let source = r#"use ; fn test() -> i32 { return 42; }"#;
-            let arena = build_ast(source.to_string());
-            let result = TypeCheckerBuilder::build_typed_context(arena);
+            let result = crate::utils::try_build_ast(source.to_string());
             assert!(
                 result.is_err(),
-                "Empty import path should not parse or should fail type checking"
+                "Empty import path is a syntax error and should not parse"
             );
         }
 
@@ -997,7 +995,9 @@ mod enum_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("Neg") || error_msg.contains("negate") || error_msg.contains("signed integers"),
+                error_msg.contains("Neg")
+                    || error_msg.contains("negate")
+                    || error_msg.contains("signed integers"),
                 "Error should mention invalid negation, got: {}",
                 error_msg
             );
@@ -1023,7 +1023,9 @@ mod enum_tests {
         if let Err(error) = result {
             let error_msg = error.to_string();
             assert!(
-                error_msg.contains("bool") || error_msg.contains("condition") || error_msg.contains("type"),
+                error_msg.contains("bool")
+                    || error_msg.contains("condition")
+                    || error_msg.contains("type"),
                 "Error should mention boolean or condition type mismatch, got: {}",
                 error_msg
             );

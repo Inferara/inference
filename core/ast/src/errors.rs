@@ -22,10 +22,6 @@ pub enum AstError {
         source: std::io::Error,
     },
 
-    /// Failed to parse source code with tree-sitter.
-    #[error("failed to parse {}", path.display())]
-    ParseError { path: PathBuf },
-
     /// Failed to build AST from parsed tree.
     #[error("failed to build AST for {path}: {reason}")]
     AstBuildError { path: PathBuf, reason: String },

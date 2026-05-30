@@ -1,0 +1,359 @@
+//! Expression grammar: a Pratt parser over the grammar.js precedence table.
+//!
+//! grammar.js encodes expression precedence with numeric `prec` annotations
+//! (see its `PRECEDENCE` map). We reproduce those numbers as binding powers.
+//! Binary operators are left-associative except `**`, which is right. Prefix
+//! `! - ~` bind at `UNARY`; postfix call `(`, member `.`, type-member `::` and
+//! index `[` bind tighter still.
+//!
+//! Named expression nodes (`binary_expression`, `prefix_unary_expression`,
+//! `function_call_expression`, `member_access_expression`,
+//! `type_member_access_expression`, `array_index_access_expression`,
+//! `parenthesized_expression`, `struct_expression`, the literals,
+//! `uzumaki_keyword`) each emit a CST node. The hidden `_expression`,
+//! `_literal`, `_name` arms only dispatch.
+
+use crate::grammar::types;
+use crate::parser::{CompletedMarker, Parser};
+use crate::syntax_kind::SyntaxKind;
+use crate::token_set::TokenSet;
+
+/// Binding powers, mirroring grammar.js `PRECEDENCE`. Higher binds tighter.
+mod bp {
+    pub(super) const LOGICAL_OR: u8 = 48;
+    pub(super) const LOGICAL_AND: u8 = 49;
+    pub(super) const OR: u8 = 57;
+    pub(super) const XOR: u8 = 58;
+    pub(super) const AND: u8 = 59;
+    pub(super) const EQUALS: u8 = 60;
+    pub(super) const COMPARE: u8 = 70;
+    pub(super) const SHIFT: u8 = 80;
+    pub(super) const ADD: u8 = 97;
+    pub(super) const MUL: u8 = 98;
+    pub(super) const POW: u8 = 99;
+}
+
+/// The left binding power of a binary operator token, or `None` if the token is
+/// not a binary operator. `right` is whether it associates to the right.
+fn binary_bp(kind: SyntaxKind) -> Option<(u8, bool)> {
+    let bp = match kind {
+        SyntaxKind::PipePipe => (bp::LOGICAL_OR, false),
+        SyntaxKind::AmpAmp => (bp::LOGICAL_AND, false),
+        SyntaxKind::Pipe => (bp::OR, false),
+        SyntaxKind::Caret => (bp::XOR, false),
+        SyntaxKind::Amp => (bp::AND, false),
+        SyntaxKind::EqEq | SyntaxKind::Ne => (bp::EQUALS, false),
+        SyntaxKind::Lt | SyntaxKind::Le | SyntaxKind::Gt | SyntaxKind::Ge => (bp::COMPARE, false),
+        SyntaxKind::Shl | SyntaxKind::Shr => (bp::SHIFT, false),
+        SyntaxKind::Plus | SyntaxKind::Minus => (bp::ADD, false),
+        SyntaxKind::Star | SyntaxKind::Slash | SyntaxKind::Percent => (bp::MUL, false),
+        SyntaxKind::StarStar => (bp::POW, true),
+        _ => return None,
+    };
+    Some(bp)
+}
+
+/// The tokens that can begin an expression (grammar.js `_expression` first set).
+pub(crate) const EXPR_START: TokenSet = TokenSet::new(&[
+    SyntaxKind::Number,
+    SyntaxKind::String,
+    SyntaxKind::TrueKw,
+    SyntaxKind::FalseKw,
+    SyntaxKind::LBracket,
+    SyntaxKind::LParen,
+    SyntaxKind::At,
+    SyntaxKind::Ident,
+    SyntaxKind::Bang,
+    SyntaxKind::Minus,
+    SyntaxKind::Tilde,
+])
+.union(types::TYPE_START)
+.union(types::IDENT_LIKE);
+
+/// Whether the current token can begin an expression.
+pub(crate) fn at_expr_start(p: &Parser) -> bool {
+    p.at_ts(EXPR_START)
+}
+
+/// Parses a full expression in a normal context where a `{` after a name opens a
+/// struct literal (grammar.js `_expression`). Hidden rule: emits no node.
+pub(crate) fn expr(p: &mut Parser) {
+    expr_bp(p, 0, true);
+}
+
+/// Parses an expression in a condition context, where a trailing `{` opens the
+/// following block rather than a struct literal (the `if`/`loop` head). This is
+/// the rust-analyzer technique for the struct-literal/block ambiguity.
+pub(crate) fn expr_no_struct(p: &mut Parser) {
+    expr_bp(p, 0, false);
+}
+
+/// The Pratt loop: parse a unary/atom operand, then fold in binary operators
+/// whose binding power exceeds `min_bp`. `allow_struct` controls whether a name
+/// followed by `{` is read as a struct literal.
+fn expr_bp(p: &mut Parser, min_bp: u8, allow_struct: bool) -> Option<CompletedMarker> {
+    let mut lhs = unary_expr(p, allow_struct)?;
+
+    while let Some((op_bp, right_assoc)) = binary_bp(p.current()) {
+        // Stop when the operator binds no tighter than the caller's floor. For a
+        // right-associative operator at exactly the floor we still recurse, so
+        // `a ** b ** c` nests to the right.
+        if op_bp <= min_bp && !(right_assoc && op_bp == min_bp) {
+            break;
+        }
+        let m = lhs.precede(p);
+        p.bump_any(); // the operator token
+        let next_min = if right_assoc { op_bp - 1 } else { op_bp };
+        expr_bp(p, next_min, allow_struct);
+        lhs = m.complete(p, SyntaxKind::BinaryExpression);
+    }
+
+    Some(lhs)
+}
+
+/// Parses a prefix-unary expression or, if there is no prefix operator, an atom
+/// with its postfix chain (grammar.js `prefix_unary_expression` plus the postfix
+/// rules).
+fn unary_expr(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
+    let op = match p.current() {
+        SyntaxKind::Bang => SyntaxKind::UnaryNot,
+        SyntaxKind::Minus => SyntaxKind::UnaryMinus,
+        SyntaxKind::Tilde => SyntaxKind::UnaryBitnot,
+        _ => return postfix_expr(p, allow_struct),
+    };
+    let m = p.start();
+    let op_marker = p.start();
+    p.bump_any();
+    op_marker.complete(p, op);
+    unary_expr(p, allow_struct);
+    Some(m.complete(p, SyntaxKind::PrefixUnaryExpression))
+}
+
+/// Parses an atom and then repeatedly folds in postfix operators: function call
+/// `(`, member access `.`, type-member access `::` (glued), and index `[`.
+fn postfix_expr(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
+    let mut lhs = atom(p, allow_struct)?;
+    loop {
+        lhs = match p.current() {
+            SyntaxKind::LParen => function_call(p, lhs),
+            SyntaxKind::Dot => member_access(p, lhs),
+            SyntaxKind::ColonColon if p.prev_joint() => type_member_access(p, lhs),
+            SyntaxKind::LBracket => array_index(p, lhs),
+            _ => break,
+        };
+    }
+    Some(lhs)
+}
+
+/// `lhs ( [ args ] )` (grammar.js `function_call_expression`). Each argument is
+/// an optional `argument_name :` followed by an expression.
+fn function_call(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
+    let m = lhs.precede(p);
+    p.bump(SyntaxKind::LParen);
+    if !p.at(SyntaxKind::RParen) {
+        call_argument(p);
+        while p.eat(SyntaxKind::Comma) {
+            if p.at(SyntaxKind::RParen) {
+                break;
+            }
+            call_argument(p);
+        }
+    }
+    p.expect(SyntaxKind::RParen);
+    m.complete(p, SyntaxKind::FunctionCallExpression)
+}
+
+/// A single call argument: `[ name : ] expression` (grammar.js
+/// `function_call_expression` argument). The argument name is a `_name`; when
+/// present, the lower step pairs it with the following expression.
+fn call_argument(p: &mut Parser) {
+    if types::at_ident_like(p) && p.nth_at(1, SyntaxKind::Colon) {
+        types::name(p);
+        p.bump(SyntaxKind::Colon);
+    }
+    expr(p);
+}
+
+/// `lhs . simple_name` (grammar.js `member_access_expression`).
+fn member_access(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
+    let m = lhs.precede(p);
+    p.bump(SyntaxKind::Dot);
+    types::simple_name(p);
+    m.complete(p, SyntaxKind::MemberAccessExpression)
+}
+
+/// `lhs :: simple_name` (grammar.js `type_member_access_expression`), the `::`
+/// glued (token.immediate).
+fn type_member_access(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
+    let m = lhs.precede(p);
+    p.bump(SyntaxKind::ColonColon);
+    types::simple_name(p);
+    m.complete(p, SyntaxKind::TypeMemberAccessExpression)
+}
+
+/// `lhs [ index ]` (grammar.js `array_index_access_expression`).
+fn array_index(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
+    let m = lhs.precede(p);
+    p.bump(SyntaxKind::LBracket);
+    expr(p);
+    p.expect(SyntaxKind::RBracket);
+    m.complete(p, SyntaxKind::ArrayIndexAccessExpression)
+}
+
+/// Parses an atomic expression: a literal, a parenthesised expression, a unit
+/// literal, the uzumaki keyword, or a name (possibly the head of a struct
+/// literal). Returns `None` only when no expression could be started.
+fn atom(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
+    let cm = match p.current() {
+        SyntaxKind::Number => number_literal(p),
+        SyntaxKind::TrueKw | SyntaxKind::FalseKw => bool_literal(p),
+        SyntaxKind::String => string_literal(p),
+        SyntaxKind::LBracket => array_literal(p),
+        SyntaxKind::At => uzumaki(p),
+        SyntaxKind::LParen => paren_or_unit(p),
+        // A name atom: a plain identifier or a contextual keyword used in
+        // identifier position (`self`, `type`), per grammar.js.
+        kind if types::IDENT_LIKE.contains(kind) => name_atom(p, allow_struct),
+        _ => {
+            p.err_and_bump("expected an expression");
+            return None;
+        }
+    };
+    Some(cm)
+}
+
+/// Wraps a `Number` token in a `number_literal` node (grammar.js
+/// `number_literal`). A leading `-` glued to the digits is part of the token, so
+/// `-42` is a single literal while `- 42` is a prefix-unary expression.
+pub(crate) fn number_literal(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(SyntaxKind::Number);
+    m.complete(p, SyntaxKind::NumberLiteral)
+}
+
+/// Wraps `true`/`false` in a `bool_literal` node (grammar.js `bool_literal`).
+fn bool_literal(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump_any();
+    m.complete(p, SyntaxKind::BoolLiteral)
+}
+
+/// Wraps a `String` token in a `string_literal` node (grammar.js
+/// `string_literal`).
+pub(crate) fn string_literal(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.expect(SyntaxKind::String);
+    m.complete(p, SyntaxKind::StringLiteral)
+}
+
+/// `[ [ sep1(expr, ,) ] ]` (grammar.js `array_literal`).
+fn array_literal(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(SyntaxKind::LBracket);
+    if !p.at(SyntaxKind::RBracket) {
+        expr(p);
+        while p.eat(SyntaxKind::Comma) {
+            if p.at(SyntaxKind::RBracket) {
+                break;
+            }
+            expr(p);
+        }
+    }
+    p.expect(SyntaxKind::RBracket);
+    m.complete(p, SyntaxKind::ArrayLiteral)
+}
+
+/// The uzumaki keyword `@` (grammar.js `uzumaki_keyword`).
+fn uzumaki(p: &mut Parser) -> CompletedMarker {
+    let m = p.start();
+    p.bump(SyntaxKind::At);
+    m.complete(p, SyntaxKind::UzumakiKeyword)
+}
+
+/// Disambiguates the three `(`-led atoms: `( )` (glued) is the unit literal;
+/// `( generic_name )` is a bracketed generic name used as a type-member base;
+/// otherwise `( expression )` is a parenthesised expression.
+fn paren_or_unit(p: &mut Parser) -> CompletedMarker {
+    if p.nth_at(1, SyntaxKind::RParen) {
+        let m = p.start();
+        p.bump(SyntaxKind::LParen);
+        p.expect(SyntaxKind::RParen);
+        return m.complete(p, SyntaxKind::UnitLiteral);
+    }
+    let m = p.start();
+    p.bump(SyntaxKind::LParen);
+    expr(p);
+    p.expect(SyntaxKind::RParen);
+    m.complete(p, SyntaxKind::ParenthesizedExpression)
+}
+
+/// Parses a name-headed atom: a struct literal `Name { .. }` (when allowed and
+/// followed by `{`), or a plain name (`identifier`, `generic_name`, or
+/// `type_qualified_name`) that the postfix chain may extend.
+fn name_atom(p: &mut Parser, allow_struct: bool) -> CompletedMarker {
+    let name_cm = name_expr(p);
+    if allow_struct && p.at(SyntaxKind::LBrace) {
+        let m = name_cm.precede(p);
+        struct_body(p);
+        m.complete(p, SyntaxKind::StructExpression)
+    } else {
+        name_cm
+    }
+}
+
+/// `{ [ sep1(field_name : field_value, ,) ] }` (grammar.js `struct_expression`
+/// body). The leading name has already been parsed by the caller.
+fn struct_body(p: &mut Parser) {
+    p.bump(SyntaxKind::LBrace);
+    if !p.at(SyntaxKind::RBrace) {
+        struct_field_init(p);
+        while p.eat(SyntaxKind::Comma) {
+            if p.at(SyntaxKind::RBrace) {
+                break;
+            }
+            struct_field_init(p);
+        }
+    }
+    p.expect(SyntaxKind::RBrace);
+}
+
+/// A single `field_name : field_value` pair in a struct literal.
+fn struct_field_init(p: &mut Parser) {
+    types::name(p);
+    p.expect(SyntaxKind::Colon);
+    expr(p);
+}
+
+/// Parses a bare name as an expression: `identifier`, `generic_name`, or
+/// `type_qualified_name` (grammar.js `_name`, used as a `_simple_name` lval or a
+/// type-member base). Returns the completed name node so postfix can extend it.
+fn name_expr(p: &mut Parser) -> CompletedMarker {
+    if types::at_ident_like(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
+        let m = p.start();
+        types::identifier(p);
+        p.bump(SyntaxKind::ColonColon);
+        types::simple_name(p);
+        m.complete(p, SyntaxKind::TypeQualifiedName)
+    } else {
+        simple_name_expr(p)
+    }
+}
+
+/// Parses a `_simple_name` as an expression: a `generic_name` or an
+/// `identifier`, returning the completed node.
+fn simple_name_expr(p: &mut Parser) -> CompletedMarker {
+    if types::at_generic_name(p) {
+        let m = p.start();
+        types::identifier(p);
+        types::type_argument_list(p);
+        m.complete(p, SyntaxKind::GenericName)
+    } else {
+        let m = p.start();
+        if types::at_ident_like(p) {
+            p.bump_remap(SyntaxKind::Ident);
+        } else {
+            p.error("expected an identifier");
+        }
+        m.complete(p, SyntaxKind::Identifier)
+    }
+}

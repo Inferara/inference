@@ -1,6 +1,5 @@
 use inference_ast::{
     arena::AstArena,
-    builder::Builder,
     ids::{BlockId, DefId, ExprId, StmtId},
     nodes::{ArgKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind},
 };
@@ -18,17 +17,25 @@ pub(crate) fn build_ast(source_code: String) -> AstArena {
 }
 
 pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<AstArena> {
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .expect("Error loading Inference grammar");
-    let tree = parser.parse(source_code.clone(), None).unwrap();
-    let code = source_code.as_bytes();
-    let root_node = tree.root_node();
-    let mut builder = Builder::new();
-    builder.add_source_code(root_node, code);
-    builder.build_ast()
+    let parsed = inference_parser::parse(&source_code);
+    if parsed.errors.is_empty() {
+        Ok(parsed.arena)
+    } else {
+        let messages: Vec<String> = parsed
+            .errors
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}:{}: {}",
+                    e.span.start_line, e.span.start_column, e.message
+                )
+            })
+            .collect();
+        Err(anyhow::anyhow!(
+            "AST building failed due to errors:\n  {}",
+            messages.join("\n  ")
+        ))
+    }
 }
 
 /// Controls whether the analysis pass runs during codegen.
@@ -65,7 +72,14 @@ fn codegen_impl(
 pub(crate) fn codegen_output(source_code: &str) -> inference_wasm_codegen::CodegenOutput {
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    codegen_impl(source_code, target, mode, target.default_opt_level(), AnalysisMode::Run).unwrap()
+    codegen_impl(
+        source_code,
+        target,
+        mode,
+        target.default_opt_level(),
+        AnalysisMode::Run,
+    )
+    .unwrap()
 }
 
 /// Generates codegen output from source code, skipping analysis.
@@ -78,8 +92,14 @@ pub(crate) fn codegen_output_no_analysis(
 ) -> inference_wasm_codegen::CodegenOutput {
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
-    codegen_impl(source_code, target, mode, target.default_opt_level(), AnalysisMode::Skip)
-        .unwrap()
+    codegen_impl(
+        source_code,
+        target,
+        mode,
+        target.default_opt_level(),
+        AnalysisMode::Skip,
+    )
+    .unwrap()
 }
 
 /// Generates codegen output from source code with an explicit compilation mode.
@@ -90,7 +110,14 @@ pub(crate) fn codegen_output_with_mode(
     mode: inference_wasm_codegen::CompilationMode,
 ) -> inference_wasm_codegen::CodegenOutput {
     let target = inference_wasm_codegen::Target::Wasm32;
-    codegen_impl(source_code, target, mode, target.default_opt_level(), AnalysisMode::Run).unwrap()
+    codegen_impl(
+        source_code,
+        target,
+        mode,
+        target.default_opt_level(),
+        AnalysisMode::Run,
+    )
+    .unwrap()
 }
 
 /// Generates codegen output from source code with explicit target and mode.
@@ -135,8 +162,14 @@ pub(crate) fn codegen_output_with_mode_no_analysis(
     mode: inference_wasm_codegen::CompilationMode,
 ) -> inference_wasm_codegen::CodegenOutput {
     let target = inference_wasm_codegen::Target::Wasm32;
-    codegen_impl(source_code, target, mode, target.default_opt_level(), AnalysisMode::Skip)
-        .unwrap()
+    codegen_impl(
+        source_code,
+        target,
+        mode,
+        target.default_opt_level(),
+        AnalysisMode::Skip,
+    )
+    .unwrap()
 }
 
 /// Generates codegen output from source code with explicit target, mode, and optimization level.
@@ -560,14 +593,10 @@ fn block_contains_var_def(
     let block = &arena[block_id];
     for &stmt_id in &block.stmts {
         match &arena[stmt_id].kind {
-            Stmt::VarDef { name: name_id, .. }
-                if arena[*name_id].name == name =>
-            {
+            Stmt::VarDef { name: name_id, .. } if arena[*name_id].name == name => {
                 return true;
             }
-            Stmt::Block(inner)
-                if block_contains_var_def(arena, *inner, name) =>
-            {
+            Stmt::Block(inner) if block_contains_var_def(arena, *inner, name) => {
                 return true;
             }
             Stmt::If {
@@ -584,9 +613,7 @@ fn block_contains_var_def(
                     return true;
                 }
             }
-            Stmt::Loop { body, .. }
-                if block_contains_var_def(arena, *body, name) =>
-            {
+            Stmt::Loop { body, .. } if block_contains_var_def(arena, *body, name) => {
                 return true;
             }
             _ => {}
