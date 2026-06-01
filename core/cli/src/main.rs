@@ -14,7 +14,7 @@
 //!
 //! 1. **Parse** (`--parse`) – Builds the typed AST using the custom parser
 //!    - Reads the source file
-//!    - Runs the hand-written Inference parser
+//!    - Runs the Inference parser
 //!    - Constructs arena-allocated AST nodes
 //!    - Validates syntax and basic structure
 //!    - Reports parsing errors if any

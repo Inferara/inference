@@ -9,7 +9,7 @@
 //!
 //! Where `builder.rs` navigates the tree-sitter CST by field name or named-child
 //! index, this navigates our owned CST ([`SyntaxNode`]) by node kind and
-//! position (design §7). The CST mirrors grammar.js rule names, hidden `_rules`
+//! position (design §7). The CST mirrors the grammar rule names, hidden `_rules`
 //! are inlined, and node [`Location`]s already carry tree-sitter's byte span and
 //! 1-based line/byte-column (Phase 1/3), so locations come straight from the
 //! node's own `loc`.

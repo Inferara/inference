@@ -1,10 +1,9 @@
 //! The recursive-descent grammar for the Inference language (issue #62, Phases
 //! 3 & 4).
 //!
-//! Each function here mirrors a rule in the authoritative grammar
-//! (`tree-sitter-inference/grammar.js`). The emission contract follows
-//! tree-sitter's hidden-rule convention: a grammar.js rule whose name starts
-//! with an underscore is **inlined** (it opens no CST node and only dispatches),
+//! Each function here implements one grammar production. The emission contract
+//! uses a hidden-rule convention: a production whose name starts with an
+//! underscore is **inlined** (it opens no CST node and only dispatches),
 //! while a named rule produces a CST [`SyntaxNode`](crate::SyntaxNode) of the
 //! matching kind. So `_statement`, `_type`, `_expression`, `_name` etc. here are
 //! plain dispatch functions, whereas `function_definition`, `binary_expression`,
@@ -42,7 +41,7 @@ pub(crate) const ITEM_RECOVERY: TokenSet = TokenSet::new(&[
 ]);
 
 /// Parses a whole source file: a sequence of use directives, spec definitions
-/// and definitions, wrapped in a `SourceFile` node (grammar.js `source_file`).
+/// and definitions, wrapped in a `SourceFile` node (`source_file`).
 pub fn source_file(p: &mut Parser) {
     let m = p.start();
     while !p.at_eof() {
@@ -63,7 +62,7 @@ fn at_item_start(p: &Parser) -> bool {
 }
 
 /// Dispatches a single top-level item: a use directive, a spec definition, or a
-/// plain definition (grammar.js `source_file` choice arms).
+/// plain definition (`source_file` choice arms).
 fn item(p: &mut Parser) {
     match p.current() {
         SyntaxKind::UseKw => items::use_directive(p),

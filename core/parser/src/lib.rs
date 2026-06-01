@@ -1,4 +1,4 @@
-//! Hand-written, resilient parser for the Inference language.
+//! Resilient parser for the Inference language.
 //!
 //! This crate replaces the `tree-sitter` + `tree-sitter-inference` front end
 //! with a recursive-descent parser built on the rust-analyzer parser
@@ -10,7 +10,7 @@
 //! .inf source ──► lexer ──► tokens ──► parser (events) ──► owned CST ──► lower ──► AstArena
 //! ```
 //!
-//! - **Lexer**: hand-written, trivia-aware, produces a flat token stream with
+//! - **Lexer**: trivia-aware, produces a flat token stream with
 //!   byte spans and joint bits (for `::` / `'` immediacy and operator gluing).
 //! - **Parser**: event-based recursive descent with `Marker`s, a fuel counter
 //!   and advance assertions so a stuck recovery loop fails loudly instead of

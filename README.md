@@ -37,7 +37,7 @@ Install the official VS Code extension for syntax highlighting:
 
 The `infs build` command compiles a single `.inf` source file through three phases:
 
-1. **Parse** (`--parse`) – Build the typed AST with the hand-written `inference-parser`
+1. **Parse** (`--parse`) – Build the typed AST with the `inference-parser`
 2. **Analyze** (`--analyze`) – Perform type checking, static analysis, and semantic validation
 3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 

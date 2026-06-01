@@ -1,7 +1,7 @@
-//! Type grammar (grammar.js `_type`, `_embedded_type`, `_name`, names).
+//! Type grammar (`_type`, `_embedded_type`, `_name`, names).
 //!
 //! `_type`, `_embedded_type`, `_name`, `_simple_name` and
-//! `_bracketed_generic_name` are hidden in grammar.js, so they dispatch without
+//! `_bracketed_generic_name` are hidden rules, so they dispatch without
 //! opening a node. The concrete forms — `type_i32`, `type_array`, `type_fn`,
 //! `identifier`, `generic_name`, `type_qualified_name` — each emit their node.
 
@@ -24,7 +24,7 @@ const PRIMITIVE_TYPE_KW: TokenSet = TokenSet::new(&[
     SyntaxKind::BoolKw,
 ]);
 
-/// The tokens that can begin a `_type` (grammar.js `_type` first set).
+/// The tokens that can begin a `_type` (`_type` first set).
 pub(crate) const TYPE_START: TokenSet = PRIMITIVE_TYPE_KW.union(TokenSet::new(&[
     SyntaxKind::LParen,
     SyntaxKind::LBracket,
@@ -37,7 +37,7 @@ pub(crate) fn at_type_start(p: &Parser) -> bool {
     p.at_ts(TYPE_START)
 }
 
-/// Keyword-spelling tokens that grammar.js treats as ordinary identifiers when
+/// Keyword-spelling tokens that the grammar treats as ordinary identifiers when
 /// they appear in identifier position.
 ///
 /// In the tree-sitter grammar `self`, `type`, `from` and `spec` are keywords
@@ -70,7 +70,7 @@ pub(crate) fn at_ident_like(p: &Parser) -> bool {
 }
 
 /// Parses a `_type`: an embedded type, a bracketed generic name, or a name
-/// (grammar.js `_type`). Hidden rule: emits no node of its own.
+/// (`_type`). Hidden rule: emits no node of its own.
 pub(crate) fn type_(p: &mut Parser) {
     match p.current() {
         kind if PRIMITIVE_TYPE_KW.contains(kind) => primitive_type(p),
@@ -93,7 +93,7 @@ pub(crate) fn type_(p: &mut Parser) {
 }
 
 /// Wraps a primitive type keyword in its `type_iN`/`type_uN`/`type_bool` node
-/// (grammar.js `type_i8`..`type_bool`).
+/// (`type_i8`..`type_bool`).
 fn primitive_type(p: &mut Parser) {
     let kind = match p.current() {
         SyntaxKind::I8Kw => SyntaxKind::TypeI8,
@@ -112,7 +112,7 @@ fn primitive_type(p: &mut Parser) {
     m.complete(p, kind);
 }
 
-/// `( )` (joint) — the unit type (grammar.js `type_unit`).
+/// `( )` (joint) — the unit type (`type_unit`).
 fn unit_type(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::LParen);
@@ -120,7 +120,7 @@ fn unit_type(p: &mut Parser) {
     m.complete(p, SyntaxKind::TypeUnit);
 }
 
-/// `[ _type [ ; (number_literal | _name) ] ]` (grammar.js `type_array`).
+/// `[ _type [ ; (number_literal | _name) ] ]` (`type_array`).
 fn array_type(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::LBracket);
@@ -136,7 +136,7 @@ fn array_type(p: &mut Parser) {
     m.complete(p, SyntaxKind::TypeArray);
 }
 
-/// `fn argument_list [ -> _type ]` (grammar.js `type_fn`).
+/// `fn argument_list [ -> _type ]` (`type_fn`).
 fn fn_type(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::FnKw);
@@ -147,7 +147,7 @@ fn fn_type(p: &mut Parser) {
     m.complete(p, SyntaxKind::TypeFn);
 }
 
-/// `( generic_name )` (grammar.js `_bracketed_generic_name`). Hidden rule:
+/// `( generic_name )` (`_bracketed_generic_name`). Hidden rule:
 /// emits no node; the inner `generic_name` is the only named child.
 fn bracketed_generic_name(p: &mut Parser) {
     p.bump(SyntaxKind::LParen);
@@ -156,7 +156,7 @@ fn bracketed_generic_name(p: &mut Parser) {
 }
 
 /// Parses a `_name`: `type_qualified_name` (`ident :: simple_name`, the `::`
-/// glued) or a `_simple_name` (grammar.js `_name`). Hidden rule.
+/// glued) or a `_simple_name` (`_name`). Hidden rule.
 pub(crate) fn name(p: &mut Parser) {
     if at_ident_like(p) && p.nth_at(1, SyntaxKind::ColonColon) && p.at_joint() {
         let m = p.start();
@@ -176,7 +176,7 @@ pub(crate) fn name(p: &mut Parser) {
 /// Tree-sitter's GLR lexer is context-sensitive: in the `name` field of
 /// `type_qualified_name` only `_simple_name` (an `identifier` or `generic_name`)
 /// is valid, so a spelling like `i32` after `std::` lexes as the `identifier`
-/// `i32` rather than the `type_i32` keyword. A hand-written LL lexer cannot
+/// `i32` rather than the `type_i32` keyword. An LL lexer cannot
 /// distinguish these by context, so we mirror the grammar by treating the
 /// primitive type keywords as identifier spellings in this one position. The
 /// resulting CST child is an `Identifier` node (the keyword token is remapped to
@@ -194,7 +194,7 @@ fn qualified_simple_name(p: &mut Parser) {
 }
 
 /// Parses a `_simple_name`: a `generic_name` (`ident type_argument_list`) or a
-/// plain `identifier` (grammar.js `_simple_name`). Hidden rule.
+/// plain `identifier` (`_simple_name`). Hidden rule.
 pub(crate) fn simple_name(p: &mut Parser) {
     if !at_ident_like(p) {
         p.error("expected an identifier");
@@ -246,7 +246,7 @@ pub(crate) fn at_generic_name(p: &Parser) -> bool {
     false
 }
 
-/// `( _type ' )+` (grammar.js `type_argument_list`). Each argument is a type
+/// `( _type ' )+` (`type_argument_list`). Each argument is a type
 /// immediately followed by a glued tick. Emits a `TypeArgumentList` node.
 pub(crate) fn type_argument_list(p: &mut Parser) {
     let m = p.start();
@@ -279,7 +279,7 @@ fn next_type_argument(p: &Parser) -> bool {
     at_type_start(p)
 }
 
-/// Wraps an identifier token in an `Identifier` node (grammar.js `identifier`).
+/// Wraps an identifier token in an `Identifier` node (`identifier`).
 ///
 /// Accepts a plain identifier or a contextual keyword in identifier position
 /// (see [`IDENT_LIKE`]), recording the leaf under [`SyntaxKind::Ident`] so the

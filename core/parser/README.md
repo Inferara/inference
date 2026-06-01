@@ -1,6 +1,6 @@
 # inference-parser
 
-Hand-written, resilient recursive-descent parser for the Inference language. This crate
+Resilient recursive-descent parser for the Inference language. This crate
 replaced the `tree-sitter` + `tree-sitter-inference` front end (issue #62) with a pure-Rust
 implementation modeled on the rust-analyzer parser architecture and matklad's "Resilient LL
 Parsing" approach. It produces an `inference_ast::arena::AstArena` byte-identical to the
@@ -133,7 +133,7 @@ with a location spanning `0..src.len()`.
 
 ### Precedence table
 
-From `grammar.js PRECEDENCE`, reproduced verbatim (highest binds tightest):
+Operator precedence (highest binds tightest):
 
 | Operators | Level | Notes |
 |-----------|-------|-------|
@@ -183,4 +183,3 @@ end-to-end equivalence proof.
 - [`core/inference`](../inference/README.md) — public `parse()` entry that delegates to this crate
 - matklad, [Resilient LL Parsing Tutorial (2023)](https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html)
 - matklad, [Parsing Advances (2025)](https://matklad.github.io/2025/12/28/parsing-advances.html)
-- Inference grammar (source of truth): [tree-sitter-inference grammar.js](https://github.com/Inferara/tree-sitter-inference/blob/main/grammar.js)

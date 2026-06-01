@@ -1,6 +1,6 @@
 //! Parameter grammar: argument lists and type-parameter lists.
 //!
-//! Covers grammar.js `argument_list`, `argument_declaration`, `self_reference`,
+//! Covers `argument_list`, `argument_declaration`, `self_reference`,
 //! `ignore_argument`, the bare-type argument arm, and
 //! `type_argument_list_definition`.
 
@@ -8,7 +8,7 @@ use crate::grammar::types;
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 
-/// `( [ sep1(argument, ,) ] )` (grammar.js `argument_list`). Emits an
+/// `( [ sep1(argument, ,) ] )` (`argument_list`). Emits an
 /// `ArgumentList` node holding the comma-separated argument nodes.
 pub(crate) fn argument_list(p: &mut Parser) {
     let m = p.start();
@@ -26,10 +26,10 @@ pub(crate) fn argument_list(p: &mut Parser) {
     m.complete(p, SyntaxKind::ArgumentList);
 }
 
-/// A single argument (grammar.js `argument_list` choice arm): a declaration,
+/// A single argument (`argument_list` choice arm): a declaration,
 /// a self reference, an ignore argument, or a bare type.
 ///
-/// Disambiguation by lookahead, matching grammar.js:
+/// Disambiguation by lookahead:
 /// - `self` / `mut self` → `self_reference`
 /// - `mut ident` → `argument_declaration`
 /// - `_ :` → `ignore_argument`
@@ -57,7 +57,7 @@ fn argument(p: &mut Parser) {
     }
 }
 
-/// `[mut] ident : _type` (grammar.js `argument_declaration`).
+/// `[mut] ident : _type` (`argument_declaration`).
 fn argument_declaration(p: &mut Parser) {
     let m = p.start();
     mut_keyword(p);
@@ -67,7 +67,7 @@ fn argument_declaration(p: &mut Parser) {
     m.complete(p, SyntaxKind::ArgumentDeclaration);
 }
 
-/// `[mut] self` (grammar.js `self_reference`).
+/// `[mut] self` (`self_reference`).
 fn self_reference(p: &mut Parser) {
     let m = p.start();
     mut_keyword(p);
@@ -75,7 +75,7 @@ fn self_reference(p: &mut Parser) {
     m.complete(p, SyntaxKind::SelfReference);
 }
 
-/// `_ : _type` (grammar.js `ignore_argument`).
+/// `_ : _type` (`ignore_argument`).
 fn ignore_argument(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::Underscore);
@@ -84,8 +84,8 @@ fn ignore_argument(p: &mut Parser) {
     m.complete(p, SyntaxKind::IgnoreArgument);
 }
 
-/// Consumes an optional `mut` keyword as a `MutKeyword` node (grammar.js
-/// `mut_keyword`, an optional field on declarations and self references).
+/// Consumes an optional `mut` keyword as a `MutKeyword` node
+/// (`mut_keyword`, an optional field on declarations and self references).
 pub(crate) fn mut_keyword(p: &mut Parser) {
     if p.at(SyntaxKind::MutKw) {
         let m = p.start();
@@ -94,7 +94,7 @@ pub(crate) fn mut_keyword(p: &mut Parser) {
     }
 }
 
-/// `( ident ' )+` (grammar.js `type_argument_list_definition`). Each parameter
+/// `( ident ' )+` (`type_argument_list_definition`). Each parameter
 /// is an identifier immediately followed by a glued tick. Emits a
 /// `TypeArgumentListDefinition` node.
 pub(crate) fn type_argument_list_definition(p: &mut Parser) {

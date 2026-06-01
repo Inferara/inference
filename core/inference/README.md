@@ -75,7 +75,7 @@ let functions = arena.functions();
 assert_eq!(functions.len(), 1);
 ```
 
-The parser (`inference-parser`) is a hand-written, resilient recursive-descent parser that lowers source directly into a typed AST with O(1) node lookups via arena allocation.
+The parser (`inference-parser`) is a resilient recursive-descent parser that lowers source directly into a typed AST with O(1) node lookups via arena allocation.
 
 ### Phase 2: Type Checking
 
@@ -197,7 +197,7 @@ The generated Rocq code can be used with the Rocq proof assistant to verify prog
 This crate is a thin orchestration layer delegating to specialized crates:
 
 - **[`inference_ast`]** - Arena-based AST data model
-- **[`inference_parser`]** - Hand-written lexer + recursive-descent parser
+- **[`inference_parser`]** - Lexer + recursive-descent parser
 - **[`inference_type_checker`]** - Bidirectional type checking with error recovery
 - **[`inference_wasm_codegen`]** - WebAssembly code generation via wasm-encoder
 - **[`inference_wasm_to_v_translator`]** - WASM to Rocq translation

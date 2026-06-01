@@ -1,7 +1,7 @@
 # The Inference Parser
 
 This document explains how the Inference compiler turns `.inf` source text into a
-typed AST. It covers the hand-written, resilient parser that lives in the
+typed AST. It covers the resilient parser that lives in the
 `core/parser` crate (`inference-parser`), the rust-analyzer-derived architecture
 it is built on, and how it recovers from syntax errors without panicking.
 
@@ -13,7 +13,7 @@ job: read a string of Inference source and produce an
 Abstract Syntax Tree that every later phase (type checking, static analysis, code
 generation, Rocq translation) consumes.
 
-The parser is a single, self-contained, hand-written component. Its design goals
+The parser is a single, self-contained component. Its design goals
 shape everything that follows:
 
 - **No C toolchain dependency.** The parser is pure Rust, with no build script and
@@ -35,10 +35,8 @@ The design follows two references closely:
   and [Parsing Advances](https://matklad.github.io/2025/12/28/parsing-advances.html)
   for error recovery and the loop-progress ("fuel" + advance-assertion) guarantee.
 
-The parser reproduces the syntax defined by the
-[Inference grammar](https://github.com/Inferara/tree-sitter-inference/blob/main/grammar.js),
-which is the syntactic source of truth (an EBNF rendering lives alongside it
-as [`inference.ebnf`](https://github.com/Inferara/tree-sitter-inference/blob/main/inference.ebnf)).
+The parser implements the Inference language syntax directly; this crate is the
+syntactic source of truth for the compiler.
 
 ## The pipeline
 
@@ -85,7 +83,7 @@ mapping a non-empty `errors` list onto an `anyhow::Error` to fit the
 
 | Module | Responsibility |
 |--------|----------------|
-| `lexer.rs` | Hand-written, trivia-aware tokenizer → `Vec<Token>` |
+| `lexer.rs` | Trivia-aware tokenizer → `Vec<Token>` |
 | `syntax_kind.rs` | The single `SyntaxKind` enum (every token *and* node kind) |
 | `token_set.rs` | `TokenSet(u128)` bitset, used for recovery sets |
 | `input.rs` | A trivia-free *view* over the tokens, with joint bits |
@@ -271,7 +269,7 @@ handled at statement level (`assign_statement`), matching the grammar.
 
 ### Disambiguations the parser handles explicitly
 
-A hand-written LL parser has to resolve a few grammar ambiguities by hand. The
+An LL parser has to resolve a few grammar ambiguities by hand. The
 notable ones:
 
 - **`-42` vs `- x`** — resolved in the lexer (greedy negative numbers, above).
@@ -410,7 +408,7 @@ diff. To support exact arena comparisons in tests, `AstArena` derives
 
 ## Performance
 
-The hand-written parser is substantially faster than the tree-sitter front end it
+The parser is substantially faster than the tree-sitter front end it
 replaced. Measured on the same inputs (release build, full `source → AstArena`
 path):
 
@@ -433,7 +431,7 @@ directly from the event stream).
 
 ## Summary
 
-The Inference parser is a hand-written, recursive-descent parser modeled on
+The Inference parser is a recursive-descent parser modeled on
 rust-analyzer's event engine and matklad's resilient-LL techniques. It lexes
 trivia-aware tokens, parses them into a flat event stream via markers, builds a
 lossless owned CST, and lowers that CST into the `AstArena` that the rest of the
@@ -443,7 +441,6 @@ end-to-end AST and golden-codegen suites.
 
 ## References
 
-- Inference grammar (source of truth): [`grammar.js`](https://github.com/Inferara/tree-sitter-inference/blob/main/grammar.js)
 - [rust-analyzer parser crate](https://github.com/rust-lang/rust-analyzer/tree/master/crates/parser)
 - matklad, [Resilient LL Parsing Tutorial](https://matklad.github.io/2023/05/21/resilient-ll-parsing-tutorial.html)
 - matklad, [Simple but Powerful Pratt Parsing](https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html)

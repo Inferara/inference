@@ -43,7 +43,7 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! The parser is a hand-written, resilient recursive-descent front end
+//! The parser is a resilient recursive-descent front end
 //! ([`inference_parser`]) that lowers the source directly into a typed AST
 //! stored in an [`AstArena`]. The arena provides O(1) node lookup and maintains
 //! parent-child relationships for efficient traversal.
@@ -136,7 +136,7 @@
 //! This crate acts as a thin orchestration layer that delegates to specialized crates:
 //!
 //! - [`inference_ast`] - Arena-based AST data model
-//! - [`inference_parser`] - Hand-written, resilient parser front end
+//! - [`inference_parser`] - Resilient parser front end
 //! - [`inference_type_checker`] - Bidirectional type checking with error recovery
 //! - [`inference_wasm_codegen`] - WebAssembly code generation via wasm-encoder
 //! - [`inference_wasm_to_v_translator`] - WASM to Rocq translation
@@ -286,7 +286,7 @@ pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VER
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
-/// This function delegates to the hand-written [`inference_parser`] front end,
+/// This function delegates to the [`inference_parser`] front end,
 /// which lexes the source, parses it with a resilient recursive-descent grammar,
 /// and lowers the result directly into an [`AstArena`].
 ///

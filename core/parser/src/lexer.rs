@@ -1,4 +1,4 @@
-//! Hand-written, total lexer for the Inference language (issue #62 design §4).
+//! Total lexer for the Inference language (issue #62 design §4).
 //!
 //! [`tokenize`] turns a source string into a flat `Vec<Token>` in a single pass,
 //! tracking byte offset plus 1-based line and 1-based byte column so each token

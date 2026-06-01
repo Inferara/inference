@@ -1,6 +1,6 @@
 //! Item (top-level and spec-body) grammar.
 //!
-//! Covers grammar.js `use_directive`, `spec_definition`, `function_definition`,
+//! Covers `use_directive`, `spec_definition`, `function_definition`,
 //! `external_function_definition`, `struct_definition`, `struct_field`,
 //! `enum_definition`, `constant_definition`, `type_definition_statement`, and the
 //! hidden `_definition` dispatch.
@@ -12,7 +12,7 @@ use crate::grammar::types;
 use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 
-/// Dispatches a `_definition` (grammar.js `_definition`). Hidden rule: it peeks
+/// Dispatches a `_definition` (`_definition`). Hidden rule: it peeks
 /// past an optional `pub` to the definition keyword and routes accordingly.
 ///
 /// `external` definitions have no visibility, so a `pub` before `external` is a
@@ -37,7 +37,7 @@ pub(crate) fn definition(p: &mut Parser) {
     }
 }
 
-/// Consumes an optional `pub` as a `Visibility` node (grammar.js `visibility`).
+/// Consumes an optional `pub` as a `Visibility` node (`visibility`).
 fn visibility(p: &mut Parser) {
     if p.at(SyntaxKind::PubKw) {
         let m = p.start();
@@ -46,8 +46,8 @@ fn visibility(p: &mut Parser) {
     }
 }
 
-/// `use ( path [ :: { types } ] | { types } from string ) ;` (grammar.js
-/// `use_directive`). The two forms are distinguished by whether the body starts
+/// `use ( path [ :: { types } ] | { types } from string ) ;`
+/// (`use_directive`). The two forms are distinguished by whether the body starts
 /// with `{`.
 pub(crate) fn use_directive(p: &mut Parser) {
     let m = p.start();
@@ -90,7 +90,7 @@ fn imported_type_list(p: &mut Parser) {
     p.expect(SyntaxKind::RBrace);
 }
 
-/// `spec ident { _definition* }` (grammar.js `spec_definition`).
+/// `spec ident { _definition* }` (`spec_definition`).
 pub(crate) fn spec_definition(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::SpecKw);
@@ -125,7 +125,7 @@ fn at_definition_start(p: &Parser) -> bool {
 }
 
 /// `[pub] fn ident [type_params] argument_list [ -> _type ] _block`
-/// (grammar.js `function_definition`).
+/// (`function_definition`).
 pub(crate) fn function_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
@@ -146,8 +146,8 @@ pub(crate) fn function_definition(p: &mut Parser) {
     m.complete(p, SyntaxKind::FunctionDefinition);
 }
 
-/// `external fn ident argument_list [ -> _type ] ;` (grammar.js
-/// `external_function_definition`). No visibility is allowed.
+/// `external fn ident argument_list [ -> _type ] ;`
+/// (`external_function_definition`). No visibility is allowed.
 pub(crate) fn external_function_definition(p: &mut Parser) {
     let m = p.start();
     p.expect(SyntaxKind::ExternalKw);
@@ -162,7 +162,7 @@ pub(crate) fn external_function_definition(p: &mut Parser) {
 }
 
 /// `[pub] struct ident { ( struct_field ; | function_definition )* }`
-/// (grammar.js `struct_definition`).
+/// (`struct_definition`).
 pub(crate) fn struct_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
@@ -186,7 +186,7 @@ pub(crate) fn struct_definition(p: &mut Parser) {
     m.complete(p, SyntaxKind::StructDefinition);
 }
 
-/// `ident : _type` (grammar.js `struct_field`).
+/// `ident : _type` (`struct_field`).
 fn struct_field(p: &mut Parser) {
     let m = p.start();
     types::identifier(p);
@@ -195,7 +195,7 @@ fn struct_field(p: &mut Parser) {
     m.complete(p, SyntaxKind::StructField);
 }
 
-/// `[pub] enum ident { sep1(ident, ,) }` (grammar.js `enum_definition`).
+/// `[pub] enum ident { sep1(ident, ,) }` (`enum_definition`).
 pub(crate) fn enum_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
@@ -215,8 +215,8 @@ pub(crate) fn enum_definition(p: &mut Parser) {
     m.complete(p, SyntaxKind::EnumDefinition);
 }
 
-/// `[pub] const ident : _type = _expression ;` (grammar.js
-/// `constant_definition`). Also reachable as a statement inside a block.
+/// `[pub] const ident : _type = _expression ;`
+/// (`constant_definition`). Also reachable as a statement inside a block.
 pub(crate) fn constant_definition(p: &mut Parser) {
     let m = p.start();
     visibility(p);
@@ -230,7 +230,7 @@ pub(crate) fn constant_definition(p: &mut Parser) {
     m.complete(p, SyntaxKind::ConstantDefinition);
 }
 
-/// `[pub] type ident = _type ;` (grammar.js `type_definition_statement`). Also
+/// `[pub] type ident = _type ;` (`type_definition_statement`). Also
 /// reachable as a statement inside a block.
 pub(crate) fn type_definition_statement(p: &mut Parser) {
     let m = p.start();

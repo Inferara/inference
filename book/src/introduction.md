@@ -22,7 +22,7 @@ The compiler is a multi-phase pipeline. Each `.inf` source file flows through:
 
 The chapters follow that order:
 
-- **[The Inference Parser](parser.md)** — the hand-written, resilient
+- **[The Inference Parser](parser.md)** — the resilient
   recursive-descent parser that turns source text into the typed AST.
 - **[Static Analysis in Inference](static-analysis.md)** — the rule-based pass
   that enforces the control-flow invariants formal verification depends on.

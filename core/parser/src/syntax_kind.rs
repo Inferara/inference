@@ -1,4 +1,4 @@
-//! The shared syntactic vocabulary for the hand-written parser.
+//! The shared syntactic vocabulary for the parser.
 //!
 //! [`SyntaxKind`] enumerates every lexical token kind and every syntax-tree node
 //! kind in a single `#[repr(u16)]` enum, so the lexer, parser engine, CST and
@@ -12,13 +12,12 @@
 //! (recovery and expectation sets are token-only). Keeping token discriminants in
 //! `0..128` lets the bitset hold any token. The assertion below pins this.
 //!
-//! # Node-kind → tree-sitter rule mapping
+//! # Node-kind → grammar-rule mapping
 //!
-//! Node-kind variants mirror the rule names in the authoritative grammar
-//! (`tree-sitter-inference/grammar.js`) so that lowering can switch on node kind
-//! exactly where `builder.rs` switches on `node.kind()`:
+//! Node-kind variants mirror the grammar production names, so that lowering can
+//! switch on node kind one rule at a time:
 //!
-//! | `SyntaxKind`                  | grammar.js rule                  |
+//! | `SyntaxKind`                  | grammar rule                     |
 //! |-------------------------------|----------------------------------|
 //! | `SourceFile`                  | `source_file`                    |
 //! | `UseDirective`                | `use_directive`                  |

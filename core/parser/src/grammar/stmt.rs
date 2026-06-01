@@ -1,4 +1,4 @@
-//! Statement and block grammar (grammar.js `_statement`, `_block`, `block`, the
+//! Statement and block grammar (`_statement`, `_block`, `block`, the
 //! non-det blocks, and every statement form).
 //!
 //! `_statement` and `_block` are hidden dispatch rules. `block` and the non-det
@@ -12,7 +12,7 @@ use crate::parser::Parser;
 use crate::syntax_kind::SyntaxKind;
 use crate::token_set::TokenSet;
 
-/// The tokens that can begin a statement (grammar.js `_statement` first set,
+/// The tokens that can begin a statement (`_statement` first set,
 /// union of the block openers, the statement keywords, and the expression
 /// first set). Used for block-level recovery anchors.
 const STMT_START: TokenSet = TokenSet::new(&[
@@ -33,7 +33,7 @@ const STMT_START: TokenSet = TokenSet::new(&[
 .union(expr::EXPR_START);
 
 /// The tokens that open a `_block`: a plain `{` or a non-det block keyword
-/// (grammar.js `_block`).
+/// (`_block`).
 pub(crate) const BLOCK_START: TokenSet = TokenSet::new(&[
     SyntaxKind::LBrace,
     SyntaxKind::AssumeKw,
@@ -48,7 +48,7 @@ pub(crate) fn at_block_start(p: &Parser) -> bool {
 }
 
 /// Parses a `_block`: a plain block or a non-det block wrapping a block
-/// (grammar.js `_block`). Hidden rule: dispatches without a node of its own.
+/// (`_block`). Hidden rule: dispatches without a node of its own.
 pub(crate) fn block_or_nondet(p: &mut Parser) {
     match p.current() {
         SyntaxKind::AssumeKw => nondet_block(p, SyntaxKind::AssumeBlock),
@@ -63,7 +63,7 @@ pub(crate) fn block_or_nondet(p: &mut Parser) {
 }
 
 /// A non-det block (`assume`/`forall`/`exists`/`unique`) wrapping a `block`
-/// (grammar.js `assume_block` et al.).
+/// (`assume_block` et al.).
 fn nondet_block(p: &mut Parser, kind: SyntaxKind) {
     let m = p.start();
     p.bump_any(); // the non-det keyword
@@ -75,7 +75,7 @@ fn nondet_block(p: &mut Parser, kind: SyntaxKind) {
     m.complete(p, kind);
 }
 
-/// `{ _statement* }` (grammar.js `block`).
+/// `{ _statement* }` (`block`).
 pub(crate) fn block(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::LBrace);
@@ -99,7 +99,7 @@ fn at_stmt_start(p: &Parser) -> bool {
     p.at_ts(STMT_START)
 }
 
-/// Dispatches a single statement (grammar.js `_statement`). Hidden rule.
+/// Dispatches a single statement (`_statement`). Hidden rule.
 fn statement(p: &mut Parser) {
     match p.current() {
         kind if BLOCK_START.contains(kind) => block_statement(p),
@@ -115,13 +115,13 @@ fn statement(p: &mut Parser) {
     }
 }
 
-/// A bare block used as a statement (grammar.js `_statement` → `_block`). The
+/// A bare block used as a statement (`_statement` → `_block`). The
 /// inner `block`/non-det block is the statement's only child.
 fn block_statement(p: &mut Parser) {
     block_or_nondet(p);
 }
 
-/// `return [ _expression ] ;` (grammar.js `return_statement`).
+/// `return [ _expression ] ;` (`return_statement`).
 fn return_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::ReturnKw);
@@ -132,7 +132,7 @@ fn return_statement(p: &mut Parser) {
     m.complete(p, SyntaxKind::ReturnStatement);
 }
 
-/// `loop [ condition ] _block` (grammar.js `loop_statement`). The optional
+/// `loop [ condition ] _block` (`loop_statement`). The optional
 /// condition is parsed in no-struct context so a following `{` opens the body.
 fn loop_statement(p: &mut Parser) {
     let m = p.start();
@@ -144,8 +144,8 @@ fn loop_statement(p: &mut Parser) {
     m.complete(p, SyntaxKind::LoopStatement);
 }
 
-/// `if cond _block ( else if cond _block )* [ else _block ]` (grammar.js
-/// `if_statement`). Conditions are parsed in no-struct context.
+/// `if cond _block ( else if cond _block )* [ else _block ]`
+/// (`if_statement`). Conditions are parsed in no-struct context.
 fn if_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::IfKw);
@@ -164,8 +164,8 @@ fn if_statement(p: &mut Parser) {
     m.complete(p, SyntaxKind::IfStatement);
 }
 
-/// `let [mut] ident : _type [ = _expression ] ;` (grammar.js
-/// `variable_definition_statement`).
+/// `let [mut] ident : _type [ = _expression ] ;`
+/// (`variable_definition_statement`).
 fn variable_definition_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::LetKw);
@@ -180,7 +180,7 @@ fn variable_definition_statement(p: &mut Parser) {
     m.complete(p, SyntaxKind::VariableDefinitionStatement);
 }
 
-/// `assert _expression ;` (grammar.js `assert_statement`).
+/// `assert _expression ;` (`assert_statement`).
 fn assert_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::AssertKw);
@@ -189,7 +189,7 @@ fn assert_statement(p: &mut Parser) {
     m.complete(p, SyntaxKind::AssertStatement);
 }
 
-/// `break ;` (grammar.js `break_statement`).
+/// `break ;` (`break_statement`).
 fn break_statement(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::BreakKw);
@@ -200,7 +200,7 @@ fn break_statement(p: &mut Parser) {
 /// Parses an expression statement or an assignment, disambiguated after the
 /// fact: parse an expression; if `=` follows, it is the left side of an
 /// `assign_statement`, otherwise the whole thing is an `expression_statement`
-/// (grammar.js `expression_statement` / `assign_statement`).
+/// (`expression_statement` / `assign_statement`).
 fn expression_or_assign_statement(p: &mut Parser) {
     let m = p.start();
     expr::expr(p);
