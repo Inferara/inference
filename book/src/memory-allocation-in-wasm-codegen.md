@@ -527,23 +527,9 @@ This precondition holds for free — the compiler guarantees it, so the Rocq pro
 
 ### Bounds Checking as a Future Proof Obligation
 
-Currently, array index access is unchecked. `arr[i]` with an out-of-bounds `i` reads or writes arbitrary linear memory. This is a known limitation.
+Array index access is bounds-checked: a constant out-of-bounds index is rejected at compile time (analysis rule A037), and a dynamic index emits a runtime guard (`index >= length -> unreachable`) in all Compile-mode builds.
 
-A future implementation, gated on `BuildProfile`, will add bounds checking in Debug mode (runtime trap on out-of-bounds access) and treat bounds as proof obligations in proof mode (the programmer must prove `0 <= i < array_length` before the access is allowed in the Rocq translation).
-
-## Known Limitations
-
-1. **No runtime bounds checking**: Out-of-bounds array access reads/writes arbitrary memory. Deferred to a future `BuildProfile`-gated feature.
-
-2. **Natural stack overflow protection via stack-first layout**: Stack overflow that pushes `__stack_pointer` below address 0 is caught automatically as a WASM out-of-bounds memory trap. The error message from the runtime is generic ("out of bounds memory access") rather than "stack overflow". A future compile-time static call-graph analysis (feasible because recursion is forbidden) could detect overflow at compile time and produce a better diagnostic.
-
-3. **Nested scalar arrays are supported**: Multi-dimensional scalar arrays such as `[[i32; 3]; 2]` are fully supported, including literal and uzumaki initialization, read/write access at any depth, and parameter passing. Arrays of structs are still limited to a single level of nesting (a nested array of structs such as `[[Point; 2]; 2]` is not yet supported).
-
-4. **No array return values**: Returning an array from a function requires an ABI transformation (hidden first parameter for the return buffer, known as "sret"). This is a separate feature.
-
-5. **No constant arrays**: `const ARR: [i32; 3] = [1, 2, 3]` is not handled and would panic at codegen time.
-
-6. **Single memory page**: Linear memory is limited to 64 KB (`maximum: 1`). Sufficient for current use cases but will need expansion for heap allocation or large programs.
+The remaining verification step is Proof mode. Emitting the guard in proof mode and extending the Rocq `ValidModule`/`ValidSpec` contract with a "no reachable trap" clause would turn the bound into a proof obligation — the programmer proves `0 <= i < array_length` to discharge it, and a proven module can then elide the runtime guard so the verified artifact is the deployed artifact. This is tracked as future work (issue #214).
 
 ## Current Implementation
 
