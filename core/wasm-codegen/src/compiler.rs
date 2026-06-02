@@ -413,6 +413,18 @@ pub(crate) struct Compiler {
     /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
     /// invariant (A036's estimate ≥ this) can be checked cross-crate.
     frame_sizes: FxHashMap<String, u32>,
+    /// When true, dynamic (runtime-index) array accesses are preceded by a
+    /// bounds-check guard (`index >= length → unreachable`). Derived in
+    /// [`crate::codegen`] from `OptLevel::O0` (Debug profile); defaults to
+    /// `false` so Release output and `Compiler::new` call sites stay
+    /// byte-identical. See AD-2.
+    emit_bounds_checks: bool,
+    /// WASM local index of the scratch i32 used to single-evaluate a dynamic
+    /// array index for the bounds-check guard (AD-3). Reserved per-function in
+    /// [`Self::visit_function_definition`] only when `emit_bounds_checks` is set
+    /// and the function has a frame layout; `None` otherwise. Reset per
+    /// function alongside the rest of the per-function state.
+    bounds_check_scratch_local: Option<u32>,
 }
 
 impl Compiler {
@@ -443,7 +455,19 @@ impl Compiler {
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
+            emit_bounds_checks: false,
+            bounds_check_scratch_local: None,
         }
+    }
+
+    /// Enables or disables runtime array bounds-check emission.
+    ///
+    /// Set from `OptLevel::O0` (Debug) in [`crate::codegen`]; leaving it `false`
+    /// (the default, used by Release and by test call sites of
+    /// [`Self::new`]) keeps the emitted bytes byte-identical to an
+    /// unchecked build. See AD-2.
+    pub(crate) fn set_emit_bounds_checks(&mut self, enabled: bool) {
+        self.emit_bounds_checks = enabled;
     }
 
     /// Records a single WASM function index as belonging to `spec_name`.
@@ -914,8 +938,18 @@ impl Compiler {
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
-        if self.frame_layout.is_some() {
+        if let Some(layout) = &self.frame_layout {
             local_declarations.push((1, ValType::I32));
+
+            // Reserve a second i32 scratch local for the bounds-check guard,
+            // immediately after the frame-pointer temp, so a dynamic array index
+            // can be single-evaluated via `local.tee` (AD-3). Gating on
+            // `emit_bounds_checks` keeps Release local declarations — and thus
+            // the emitted bytes — byte-identical to an unchecked build.
+            if self.emit_bounds_checks {
+                local_declarations.push((1, ValType::I32));
+                self.bounds_check_scratch_local = Some(layout.frame_ptr_local + 1);
+            }
         }
 
         self.func = Some(Function::new(local_declarations));
@@ -1022,6 +1056,7 @@ impl Compiler {
         self.bodies.push(completed_func);
         self.frame_layout = None;
         self.locals_map.clear();
+        self.bounds_check_scratch_local = None;
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -2607,13 +2642,15 @@ impl Compiler {
             TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
+        let array_len = Self::array_length(array_expr_id, ctx);
+
         if is_compound_element {
             let elem_sz = type_byte_size(&elem_type_info.kind, ctx)
                 .expect("array index write: type_byte_size failed for compound element");
 
             // dest: array_base + index * struct_size
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
             // src: RHS expression (struct pointer)
             self.lower_expression(arena, right_expr_id, ctx, None);
             self.emit_memory_copy(elem_sz);
@@ -2622,7 +2659,7 @@ impl Compiler {
             let store_instr = memory::store_instruction(&elem_type_info.kind);
 
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
             self.lower_expression(arena, right_expr_id, ctx, None);
 
             self.func().instruction(&store_instr);
@@ -2777,8 +2814,10 @@ impl Compiler {
             memory::element_size(&elem_type_info.kind)
         };
 
+        let array_len = Self::array_length(array_expr_id, ctx);
+
         self.lower_expression(arena, array_expr_id, ctx, None);
-        self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+        self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
 
         if !is_compound_element {
             let load_instr = memory::load_instruction(&elem_type_info.kind);
@@ -2786,12 +2825,37 @@ impl Compiler {
         }
     }
 
+    /// Returns the length of the array that `array_expr_id` evaluates to, when
+    /// the type checker stamped an `Array(_, length)` type on that sub-expression.
+    ///
+    /// The element-type info on the `ArrayIndexAccess` node discards the length;
+    /// the array sub-expression retains it. Returns `None` for any other type
+    /// (e.g. an unresolved expression), in which case the bounds-check guard is
+    /// skipped rather than panicking.
+    fn array_length(array_expr_id: ExprId, ctx: &TypedContext) -> Option<u32> {
+        match ctx.get_node_typeinfo(NodeId::Expr(array_expr_id)) {
+            Some(TypeInfo {
+                kind: TypeInfoKind::Array(_, length),
+                ..
+            }) => Some(length),
+            _ => None,
+        }
+    }
+
     /// Emits the byte-offset computation for an array index expression.
+    ///
+    /// On entry the array base address is already on the WASM stack. For a
+    /// constant index the offset folds to an `i32.const` add (no runtime guard —
+    /// constant indices are validated statically by analysis rule A037, AD-5).
+    /// For a dynamic index the runtime index is lowered, then — when
+    /// `emit_bounds_checks` is set and `array_len` is known — a bounds-check
+    /// guard traps before the offset multiply (AD-3, AD-4).
     fn emit_index_offset(
         &mut self,
         arena: &AstArena,
         index_expr_id: ExprId,
         elem_sz: u32,
+        array_len: Option<u32>,
         ctx: &TypedContext,
     ) {
         if let Some(byte_offset) = try_const_index_byte_offset(arena, index_expr_id, elem_sz) {
@@ -2801,12 +2865,59 @@ impl Compiler {
             }
         } else {
             self.lower_expression(arena, index_expr_id, ctx, None);
+            self.emit_bounds_check_guard(array_len);
             #[allow(clippy::cast_possible_wrap)]
             self.func()
                 .instruction(&Instruction::I32Const(elem_sz as i32));
             self.func().instruction(&Instruction::I32Mul);
             self.func().instruction(&Instruction::I32Add);
         }
+    }
+
+    /// Emits the runtime bounds-check guard for a dynamic array index.
+    ///
+    /// Precondition: the stack top holds the just-lowered index, sitting above
+    /// the array base address (`[base, index]`). The guard single-evaluates the
+    /// index into a scratch local, then traps when `index >= length`:
+    ///
+    /// ```wat
+    /// local.tee $scratch   ;; [base, index]; $scratch = index
+    /// local.get $scratch   ;; [base, index, index]
+    /// i32.const N          ;; [base, index, index, N]
+    /// i32.ge_u             ;; [base, index, cond]   (unsigned: also traps negatives, which arrive as huge u32)
+    /// if (empty)           ;; [base, index]
+    ///   unreachable
+    /// end                  ;; [base, index]
+    /// ```
+    ///
+    /// The empty-result `if` leaves `base` and `index` untouched on the stack,
+    /// so the caller's offset multiply proceeds unchanged. No guard is emitted
+    /// when `emit_bounds_checks` is unset or `array_len` is unknown (the offset
+    /// computation stays valid either way).
+    fn emit_bounds_check_guard(&mut self, array_len: Option<u32>) {
+        let Some(length) = array_len.filter(|_| self.emit_bounds_checks) else {
+            return;
+        };
+        cov_mark::hit!(wasm_codegen_emit_bounds_check);
+
+        let scratch = self.bounds_check_scratch_local.expect(
+            "bounds-check scratch local must be reserved: a dynamic array index implies a frame \
+             layout, which reserves the scratch under emit_bounds_checks",
+        );
+
+        #[allow(clippy::cast_possible_wrap)]
+        let length = length as i32;
+
+        self.func().instruction(&Instruction::LocalTee(scratch));
+        self.func().instruction(&Instruction::LocalGet(scratch));
+        self.func().instruction(&Instruction::I32Const(length));
+        self.func().instruction(&Instruction::I32GeU);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
     }
 
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
@@ -4147,6 +4258,19 @@ mod tests {
         assert!(!compiler.has_memory);
         compiler.enable_memory();
         assert!(compiler.has_memory);
+    }
+
+    #[test]
+    fn emit_bounds_checks_defaults_off_and_toggles() {
+        let mut compiler = Compiler::new("test");
+        assert!(
+            !compiler.emit_bounds_checks,
+            "bounds checks must default off so Release / Compiler::new output stays byte-identical"
+        );
+        compiler.set_emit_bounds_checks(true);
+        assert!(compiler.emit_bounds_checks);
+        compiler.set_emit_bounds_checks(false);
+        assert!(!compiler.emit_bounds_checks);
     }
 
     fn has_memory_section(wasm: &[u8]) -> bool {

@@ -15,6 +15,7 @@ mod binops_shift_edge;
 mod binops_sub_i32;
 mod binops_unary_combos;
 mod binops_u32;
+mod bounds_check;
 mod expr_deep_nesting;
 mod inference_wrapper;
 mod loops;

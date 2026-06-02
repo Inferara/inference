@@ -127,6 +127,13 @@ pub fn codegen(
 
     let mut compiler = Compiler::new(module_name);
 
+    // Runtime array bounds checks are emitted only in the Debug profile, which
+    // the profile matrix (`core/cli/.../profile.rs`) maps to `OptLevel::O0` as a
+    // total invariant in Compile mode (O0 ⟺ Debug ⟺ checks-on). Deriving the
+    // flag from the already-plumbed `opt_level` avoids a signature change and a
+    // layering inversion onto `core/cli`'s `BuildProfile` type. See AD-2.
+    compiler.set_emit_bounds_checks(matches!(opt_level, OptLevel::O0));
+
     if typed_context.source_files().len() > 1 {
         todo!("Multi-file support not yet implemented");
     }

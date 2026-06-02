@@ -1,4 +1,5 @@
 pub mod array_index_64bit;
+pub mod array_index_const_oob;
 pub mod array_uzumaki_as_argument;
 pub mod compound_literal_as_argument;
 pub mod break_inside_nondet_block;
@@ -33,6 +34,7 @@ pub mod uzumaki_outside_nondet_block;
 pub mod visibility_inside_spec;
 
 use array_index_64bit::ArrayIndex64Bit;
+use array_index_const_oob::ArrayIndexConstOob;
 use array_uzumaki_as_argument::ArrayUzumakiAsArgument;
 use compound_literal_as_argument::CompoundLiteralAsArgument;
 use break_inside_nondet_block::BreakInsideNonDetBlock;
@@ -108,5 +110,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &VisibilityInsideSpec,
         &RecursionDetected,
         &StackDepthExceeded,
+        &ArrayIndexConstOob,
     ]
 }

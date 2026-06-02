@@ -489,6 +489,32 @@ i32.load / i64.load / ...  ;; load element
 
 The same three-case specialization applies to array index writes (`arr[i] = x`): zero-index emits no offset instruction, constant non-zero index folds to a single `i32.const`, and variable index uses runtime multiply.
 
+## Runtime Bounds Checking
+
+A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. In **Debug** builds the codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead. Constant indices are *not* guarded here — they are rejected at compile time by analysis rule `A037` (see `core/analysis`), so the static and dynamic halves together cover every index.
+
+The guard is gated on `OptLevel::O0`, which the build-profile matrix maps to the Debug profile (`O0 ⟺ Debug ⟺ checks-on`). The `codegen()` entry point derives a `Compiler::emit_bounds_checks` flag from the `opt_level` it already receives — no new parameter and no dependency on the CLI-layer `BuildProfile`. **Release** (`O3`/`Oz`) and **Proof** (always a release opt level) builds emit no guard, so their output is byte-identical to an unchecked build and the verified artifact stays the deployed artifact.
+
+For Case 3 (`arr[i]`) under Debug, the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local (reserved immediately after the frame-pointer temp, only when bounds checks are on) via `local.tee`, so an index expression with side effects runs exactly once:
+
+```wasm
+<lower array expr>      ;; push base pointer
+<lower index expr>      ;; push i32 index
+local.tee   $scratch    ;; [base, index]; $scratch = index
+local.get   $scratch    ;; [base, index, index]
+i32.const   <length>
+i32.ge_u                ;; index >= length ?  (unsigned: also traps negatives, which arrive as huge u32)
+if (empty)
+  unreachable           ;; trap on out-of-bounds
+end                     ;; [base, index]
+i32.const   <elem_size>
+i32.mul
+i32.add                 ;; address = base + index * elem_size
+i32.load / i64.load / ...
+```
+
+The empty-result `if` consumes only the comparison result and leaves `base` and `index` on the stack, so the offset computation proceeds unchanged. The `unreachable` trap reuses the `assert` lowering idiom and maps to `BI_unreachable` in the Rocq translator, so guarded code remains translatable. Both the read path (`lower_array_index_access`) and the write path (`lower_array_index_write`) share the single `emit_index_offset` choke point, so reads and writes are guarded identically. Treating dynamic bounds as discharged Rocq proof obligations (rather than runtime traps) is reserved future work; this seam is where such a Proof-mode path would hook in.
+
 ## Zero-Store Elision During Initialization
 
 The function prologue emits `memory.fill 0` to zero-initialize the entire stack frame before any instructions run. This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
@@ -951,6 +977,7 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter copied to frame |
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
+| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (Debug/`O0` only) |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
 | `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |

@@ -193,6 +193,13 @@ pub enum AnalysisDiagnostic {
         budget_bytes: u32,
         location: Location,
     },
+
+    #[error("array index `{index}` is out of bounds for array of length {length}; valid indices are 0..{length}")]
+    ArrayIndexConstOutOfBounds {
+        index: String,
+        length: u32,
+        location: Location,
+    },
 }
 
 impl AnalysisDiagnostic {
@@ -232,7 +239,8 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::CombinedUnaryOperators { location, .. }
             | AnalysisDiagnostic::VisibilityInsideSpec { location, .. }
             | AnalysisDiagnostic::RecursionDetected { location, .. }
-            | AnalysisDiagnostic::StackDepthExceeded { location, .. } => location,
+            | AnalysisDiagnostic::StackDepthExceeded { location, .. }
+            | AnalysisDiagnostic::ArrayIndexConstOutOfBounds { location, .. } => location,
         }
     }
 
@@ -276,6 +284,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::VisibilityInsideSpec { .. } => "A034",
             AnalysisDiagnostic::RecursionDetected { .. } => "A035",
             AnalysisDiagnostic::StackDepthExceeded { .. } => "A036",
+            AnalysisDiagnostic::ArrayIndexConstOutOfBounds { .. } => "A037",
         }
     }
 }
@@ -861,6 +870,47 @@ mod tests {
             "A036 diagnostic must include the budget in bytes, got: {text}"
         );
         assert_eq!(err.rule_id(), "A036");
+    }
+
+    #[test]
+    fn display_array_index_const_out_of_bounds() {
+        let err = AnalysisDiagnostic::ArrayIndexConstOutOfBounds {
+            index: "3".to_string(),
+            length: 3,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("out of bounds"),
+            "A037 diagnostic must say the index is out of bounds, got: {text}"
+        );
+        assert!(
+            text.contains('3'),
+            "A037 diagnostic must include the offending index and length, got: {text}"
+        );
+        assert!(
+            text.contains("length 3"),
+            "A037 diagnostic must include the array length, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A037");
+    }
+
+    #[test]
+    fn display_array_index_const_out_of_bounds_negative() {
+        let err = AnalysisDiagnostic::ArrayIndexConstOutOfBounds {
+            index: "-1".to_string(),
+            length: 5,
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("-1"),
+            "A037 diagnostic must include a negative index verbatim, got: {text}"
+        );
+        assert!(
+            text.contains("length 5"),
+            "A037 diagnostic must include the array length, got: {text}"
+        );
     }
 
     #[test]
