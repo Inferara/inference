@@ -119,7 +119,7 @@ A036 reuses A035's whole-program call graph (a DAG, since recursion is forbidden
 |----|--------|----------|----------------|
 | A037 | `ArrayIndexConstOutOfBounds` | error | a constant array index (`arr[c]`) is negative or `>= length` |
 
-A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time in Debug builds by `core/wasm-codegen` (see that crate's docs); the two mechanisms together close the bounds-safety hole.
+A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time in all Compile-mode builds by `core/wasm-codegen` (see that crate's docs); the two mechanisms together close the bounds-safety hole.
 
 ## Diagnostic Output Format
 

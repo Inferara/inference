@@ -127,12 +127,14 @@ pub fn codegen(
 
     let mut compiler = Compiler::new(module_name);
 
-    // Runtime array bounds checks are emitted only in the Debug profile, which
-    // the profile matrix (`core/cli/.../profile.rs`) maps to `OptLevel::O0` as a
-    // total invariant in Compile mode (O0 ⟺ Debug ⟺ checks-on). Deriving the
-    // flag from the already-plumbed `opt_level` avoids a signature change and a
-    // layering inversion onto `core/cli`'s `BuildProfile` type. See AD-2.
-    compiler.set_emit_bounds_checks(matches!(opt_level, OptLevel::O0));
+    // Runtime array bounds checks are emitted for every Compile-mode build
+    // (Debug and Release, Wasm32 and Soroban): the executed/deployed artifact is
+    // always checked so a dynamic out-of-range access traps cleanly instead of
+    // corrupting adjacent frame slots. `OptLevel` no longer influences this.
+    // Proof mode is left unguarded pending the proof-obligation path (#212),
+    // which discharges dynamic bounds as Rocq obligations rather than runtime
+    // traps; the `emit_index_offset` choke point is the seam where it hooks in.
+    compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
 
     if typed_context.source_files().len() > 1 {
         todo!("Multi-file support not yet implemented");

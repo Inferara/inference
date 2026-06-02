@@ -406,8 +406,16 @@
     unreachable
   )
   (func $HasArray.get_arr_elem (;9;) (type 9) (param $self i32) (param $idx i32) (result i32)
+    (local i32)
     local.get $self
     local.get $idx
+    local.tee 2
+    local.get 2
+    i32.const 3
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 4
     i32.mul
     i32.add

@@ -1,10 +1,10 @@
 // Runtime array bounds-check tests (Issue 164, Phases 2-3).
 //
-// Under the Debug profile (`OptLevel::O0`) every dynamic-index array load and
-// store is preceded by a guard `index >= length -> unreachable`. Constant
-// indices are validated statically by analysis rule A037 and get no runtime
-// guard. Under the Release profile the guard is omitted and output stays
-// byte-identical to an unchecked build.
+// In Compile mode (Debug and Release, Wasm32 and Soroban) every dynamic-index
+// array load and store is preceded by a guard `index >= length -> unreachable`:
+// the deployed artifact is always checked. Constant indices are validated
+// statically by analysis rule A037 and get no runtime guard. Proof mode is left
+// unguarded pending the proof-obligation path (#212).
 //
 // The single choke point `emit_index_offset` is shared by reads and writes, so
 // a source exercising both proves both paths are guarded.
@@ -16,7 +16,7 @@
 //   - A multi-dimensional dynamic access `m[i][j]` lowers as an outer compound
 //     element access (`m[i]`, 1 guard) feeding an inner scalar access (`[j]`,
 //     1 guard) -> 2 guards.
-//   - Release (O3/Oz) builds and constant-only functions contribute 0.
+//   - Constant-only functions and Proof-mode builds contribute 0.
 //
 // Known codegen limitation exercised below: a *literal*-initialised
 // multi-dimensional array (`[[i32;3];2] = [[..],[..]]`) panics in codegen today
@@ -48,6 +48,9 @@ mod bounds_check_tests {
     use crate::utils::{codegen_output, codegen_with_full_config};
     use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
 
+    /// Compiles `source` under the Debug profile (`O0`). The guard is emitted in
+    /// every Compile-mode build, so Debug and Release behave identically here;
+    /// the dedicated `release_*` tests cover the default (`O3`) path.
     fn debug_wasm(source: &str) -> Vec<u8> {
         codegen_with_full_config(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O0)
             .expect("O0 codegen failed")
@@ -74,15 +77,40 @@ mod bounds_check_tests {
     }
 
     #[test]
-    fn release_profile_emits_no_guard() {
-        // Default path is Release (`Wasm32` -> O3). The guard cov_mark must never
-        // fire, proving Release output stays unchecked / byte-identical.
-        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+    fn release_profile_emits_guard_for_dynamic_read_and_write() {
+        // The default path is Release (`Wasm32` -> O3). The guard is now emitted
+        // for every Compile-mode build, so the cov_mark fires twice here just as
+        // it does under Debug -- the deployed artifact is always checked.
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 2);
         let out = codegen_output(READ_WRITE_SOURCE);
         let wat = wasmprinter::print_bytes(out.wasm()).expect("failed to print WAT");
         assert!(
+            wat.contains("i32.ge_u"),
+            "Release WAT must contain the bounds-check comparison:\n{wat}"
+        );
+        assert!(
+            wat.contains("unreachable"),
+            "Release WAT must contain the trap on out-of-bounds:\n{wat}"
+        );
+    }
+
+    #[test]
+    fn proof_mode_emits_no_guard() {
+        // Proof mode is the one remaining unguarded path (#212): dynamic bounds
+        // become Rocq proof obligations, not runtime traps. The guard cov_mark
+        // must never fire and the WAT must carry no bounds comparison.
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+        let out = codegen_with_full_config(
+            READ_WRITE_SOURCE,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+        )
+        .expect("proof-mode codegen failed");
+        let wat = wasmprinter::print_bytes(out.wasm()).expect("failed to print WAT");
+        assert!(
             !wat.contains("i32.ge_u"),
-            "Release WAT must not contain a bounds-check comparison:\n{wat}"
+            "Proof-mode WAT must not contain a bounds-check comparison:\n{wat}"
         );
     }
 
@@ -174,11 +202,11 @@ mod bounds_check_tests {
 // Scenario groups:
 //   * element-type breadth (u8 / i16 / i64) -> guard compares length not bytes
 //   * const-only and mixed const/dynamic indexing -> exact guard counts
-//   * Release regression for richer shapes (multi-dim, array-of-structs)
+//   * richer shapes guarded under Release too (multi-dim, array-of-structs)
 //   * wasmtime execution: in-bounds correctness + boundary / negative / huge OOB
 //   * nested block depth (loop, if, forall), array-of-structs, multiple accesses
 //   * multi-dimensional (uzumaki) guard count + structural validation
-//   * structural validation of guarded O0 modules at non-trivial block depths
+//   * structural validation of guarded modules at non-trivial block depths
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod extended {
@@ -187,7 +215,9 @@ mod extended {
     use wasmtime::{Engine, Instance, Module, Store, Trap, TypedFunc};
 
     /// Compiles `source` under the Debug profile (`O0`), where the bounds-check
-    /// guard is emitted, and returns the WASM bytes.
+    /// guard is emitted, and returns the WASM bytes. The guard is emitted in
+    /// every Compile-mode build, so the `O0` vs `O3` choice is immaterial here;
+    /// `release_wasm` exercises the default path for parity.
     fn debug_wasm(source: &str) -> Vec<u8> {
         codegen_with_full_config(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O0)
             .expect("O0 codegen failed")
@@ -195,8 +225,9 @@ mod extended {
             .to_vec()
     }
 
-    /// Compiles `source` under the Release profile (`O3`), where no guard is
-    /// emitted, and returns the WASM bytes.
+    /// Compiles `source` under the Release profile (`O3`). The guard is emitted
+    /// for every Compile-mode build, so Release output is guarded identically to
+    /// Debug; this helper confirms the default path is checked.
     fn release_wasm(source: &str) -> Vec<u8> {
         codegen_with_full_config(source, Target::Wasm32, CompilationMode::Compile, OptLevel::O3)
             .expect("O3 codegen failed")
@@ -340,14 +371,16 @@ pub fn f(i: u32) -> i32 {
         assert_unreachable_trap(&f.call(&mut store, 4).expect_err("OOB must trap"));
     }
 
-    // --- Release regression for richer shapes --------------------------------
+    // --- Richer shapes are guarded under Release too -------------------------
 
-    /// A multi-dimensional (uzumaki) dynamic access produces NO guard under the
-    /// Release profile (O3). Multi-dim uses custom non-det opcodes, so this is a
-    /// pure cov_mark assertion plus structural validation (no WAT extraction).
+    /// A multi-dimensional (uzumaki) dynamic access `g[i][j]` emits TWO guards
+    /// under the Release profile (O3) -- one per dynamic dimension -- proving the
+    /// guard is no longer gated on opt level. Multi-dim uses custom non-det
+    /// opcodes, so this is a cov_mark assertion plus structural validation (no
+    /// WAT extraction).
     #[test]
-    fn release_multidim_emits_no_guard() {
-        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+    fn release_multidim_emits_guard() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 2);
         let source = r#"
 pub fn m(i: i32, j: i32) {
     forall {
@@ -361,11 +394,11 @@ pub fn m(i: i32, j: i32) {
             .unwrap_or_else(|e| panic!("Release multi-dim module must validate: {e}"));
     }
 
-    /// An array-of-structs dynamic access produces NO guard under the Release
-    /// profile, and the Release WAT contains no bounds comparison.
+    /// An array-of-structs dynamic access emits a guard under the Release
+    /// profile, and the Release WAT contains the bounds comparison.
     #[test]
-    fn release_array_of_structs_emits_no_guard() {
-        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 0);
+    fn release_array_of_structs_emits_guard() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
         let source = r#"
 struct Pt { x: i32; y: i32; }
 pub fn f(i: u32) -> i32 {
@@ -375,8 +408,8 @@ pub fn f(i: u32) -> i32 {
 "#;
         let wat = wat(&release_wasm(source));
         assert!(
-            !wat.contains("i32.ge_u"),
-            "Release array-of-structs must not emit a guard:\n{wat}"
+            wat.contains("i32.ge_u"),
+            "Release array-of-structs must emit a guard:\n{wat}"
         );
     }
 
@@ -633,6 +666,80 @@ pub fn set_x(i: u32, v: i32) -> i32 {
         assert_unreachable_trap(
             &set_x.call(&mut store, (2, 9)).expect_err("AoS OOB write must trap"),
         );
+    }
+
+    // --- Immutable-self method dynamic index (regression for #164 panic) -----
+
+    /// A dynamic index through an **immutable-`self`** method (`self.arr[idx]`)
+    /// where the index comes from a parameter. An immutable `self` needs no frame
+    /// slot, so `compute_frame_layout` returns `None` and the method has no
+    /// frame; the bounds-check scratch local must therefore be reserved
+    /// independently of frame presence. Before the fix this path panicked at the
+    /// guard-emission site ("bounds-check scratch local must be reserved").
+    ///
+    /// The method is driven through a `pub fn` wrapper that constructs the struct
+    /// and forwards the runtime index. The guard fires once (only `self.arr[idx]`
+    /// is dynamic; the struct literal's element indices are constants). Verified
+    /// under BOTH the Debug profile (`O0`) and the default Release profile
+    /// (`O3`) -- the guard is emitted in every Compile-mode build.
+    #[test]
+    fn immutable_self_method_dynamic_index_guards_and_runs() {
+        let source = r#"
+struct Holder { arr: [i32; 4]; val: i32;
+    fn get(self, idx: i32) -> i32 {
+        return self.arr[idx];
+    }
+}
+
+pub fn at(idx: i32) -> i32 {
+    let h: Holder = Holder { arr: [10, 20, 30, 40], val: 0 };
+    return h.get(idx);
+}
+"#;
+
+        // Exercise both profiles. The guard count is asserted per build below.
+        for (label, wasm) in [("debug", debug_wasm(source)), ("release", release_wasm(source))]
+        {
+            let wat = wat(&wasm);
+            assert!(
+                wat.contains("i32.ge_u"),
+                "{label}: immutable-self method dynamic index must emit a guard:\n{wat}"
+            );
+
+            let (mut store, instance) = instantiate(&wasm);
+            let at: TypedFunc<i32, i32> = instance
+                .get_typed_func(&mut store, "at")
+                .unwrap_or_else(|e| panic!("{label}: failed to get at: {e}"));
+
+            assert_eq!(at.call(&mut store, 0).expect("call failed"), 10, "{label}");
+            assert_eq!(at.call(&mut store, 3).expect("call failed"), 40, "{label}");
+            // index == length (4) traps; -1 arrives as u32::MAX and also traps.
+            assert_unreachable_trap(&at.call(&mut store, 4).expect_err("OOB must trap"));
+            assert_unreachable_trap(&at.call(&mut store, -1).expect_err("negative must trap"));
+        }
+    }
+
+    /// Pins the guard count for the immutable-self method path to exactly one.
+    /// Kept separate from the execution test so the single-threaded `cov_mark`
+    /// check brackets a single codegen call.
+    #[test]
+    fn immutable_self_method_dynamic_index_emits_single_guard() {
+        cov_mark::check_count!(wasm_codegen_emit_bounds_check, 1);
+        let source = r#"
+struct Holder { arr: [i32; 4]; val: i32;
+    fn get(self, idx: i32) -> i32 {
+        return self.arr[idx];
+    }
+}
+
+pub fn at(idx: i32) -> i32 {
+    let h: Holder = Holder { arr: [10, 20, 30, 40], val: 0 };
+    return h.get(idx);
+}
+"#;
+        let wasm = debug_wasm(source);
+        inf_wasmparser::validate(&wasm)
+            .unwrap_or_else(|e| panic!("guarded immutable-self method module must validate: {e}"));
     }
 
     // --- Array parameter (copy-on-entry) -------------------------------------

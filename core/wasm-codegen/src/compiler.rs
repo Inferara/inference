@@ -415,15 +415,17 @@ pub(crate) struct Compiler {
     frame_sizes: FxHashMap<String, u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
     /// bounds-check guard (`index >= length → unreachable`). Derived in
-    /// [`crate::codegen`] from `OptLevel::O0` (Debug profile); defaults to
-    /// `false` so Release output and `Compiler::new` call sites stay
-    /// byte-identical. See AD-2.
+    /// Set by [`crate::codegen`] for every Compile-mode build (the deployed
+    /// artifact is always checked); left `false` in Proof mode and at
+    /// `Compiler::new` call sites so those paths stay unguarded.
     emit_bounds_checks: bool,
     /// WASM local index of the scratch i32 used to single-evaluate a dynamic
     /// array index for the bounds-check guard (AD-3). Reserved per-function in
     /// [`Self::visit_function_definition`] only when `emit_bounds_checks` is set
-    /// and the function has a frame layout; `None` otherwise. Reset per
-    /// function alongside the rest of the per-function state.
+    /// and the body actually contains a dynamic array index (the only case that
+    /// emits a guard); `None` otherwise — including for constant-index-only and
+    /// frameless functions. Reset per function alongside the rest of the
+    /// per-function state.
     bounds_check_scratch_local: Option<u32>,
 }
 
@@ -462,10 +464,10 @@ impl Compiler {
 
     /// Enables or disables runtime array bounds-check emission.
     ///
-    /// Set from `OptLevel::O0` (Debug) in [`crate::codegen`]; leaving it `false`
-    /// (the default, used by Release and by test call sites of
-    /// [`Self::new`]) keeps the emitted bytes byte-identical to an
-    /// unchecked build. See AD-2.
+    /// [`crate::codegen`] enables it for every Compile-mode build (so the
+    /// deployed artifact always traps on a dynamic out-of-range access) and
+    /// leaves it `false` in Proof mode. Test call sites of [`Self::new`] keep
+    /// the default `false`, so their emitted bytes stay unguarded.
     pub(crate) fn set_emit_bounds_checks(&mut self, enabled: bool) {
         self.emit_bounds_checks = enabled;
     }
@@ -938,18 +940,23 @@ impl Compiler {
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
-        if let Some(layout) = &self.frame_layout {
+        let has_frame = self.frame_layout.is_some();
+        if has_frame {
             local_declarations.push((1, ValType::I32));
+        }
 
-            // Reserve a second i32 scratch local for the bounds-check guard,
-            // immediately after the frame-pointer temp, so a dynamic array index
-            // can be single-evaluated via `local.tee` (AD-3). Gating on
-            // `emit_bounds_checks` keeps Release local declarations — and thus
-            // the emitted bytes — byte-identical to an unchecked build.
-            if self.emit_bounds_checks {
-                local_declarations.push((1, ValType::I32));
-                self.bounds_check_scratch_local = Some(layout.frame_ptr_local + 1);
-            }
+        // Reserve an i32 scratch local for the bounds-check guard so a dynamic
+        // array index can be single-evaluated via `local.tee` (AD-3). It is
+        // reserved iff the function actually contains a dynamic index (the only
+        // case that emits a guard), independent of whether a frame exists: an
+        // immutable-`self` method like `self.arr[idx]` needs no frame slot yet
+        // still emits the guard. Tying the reservation to guard emission keeps
+        // constant-index-only functions byte-identical to an unchecked build.
+        // The scratch sits at the next free local after the named locals and the
+        // optional frame-pointer temp, so its index and its push order agree.
+        if self.emit_bounds_checks && Self::body_has_dynamic_array_index(arena, body_id) {
+            local_declarations.push((1, ValType::I32));
+            self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
 
         self.func = Some(Function::new(local_declarations));
@@ -1133,6 +1140,99 @@ impl Compiler {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Returns `true` if the function body contains at least one *dynamic* array
+    /// index — an `Expr::ArrayIndexAccess` whose index is not a numeric literal.
+    ///
+    /// A non-`NumberLiteral` index is exactly the case that takes the dynamic
+    /// branch of [`Self::emit_index_offset`] and therefore emits a bounds-check
+    /// guard. The bounds-check scratch local is reserved iff this returns `true`
+    /// (and `emit_bounds_checks` is set), so functions that only index by
+    /// constants reserve no scratch and stay byte-identical to an unchecked
+    /// build, while a dynamic index — even through an immutable-`self` method
+    /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
+    ///
+    /// The walk mirrors [`Self::pre_scan_locals`]' block descent (regular,
+    /// `if`/`else`, `loop`, and non-det blocks all flow through `Stmt::Block`)
+    /// and additionally descends into every sub-expression so nested forms such
+    /// as `m[i][j]`, `arr[idx].x`, and indices inside calls are not missed.
+    fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
+        arena[block_id].stmts.iter().any(|&stmt_id| {
+            match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_has_dynamic_array_index(arena, *e)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_has_dynamic_array_index(arena, *left)
+                        || Self::expr_has_dynamic_array_index(arena, *right)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_has_dynamic_array_index(arena, v)),
+                Stmt::Block(inner) => Self::body_has_dynamic_array_index(arena, *inner),
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    Self::expr_has_dynamic_array_index(arena, *condition)
+                        || Self::body_has_dynamic_array_index(arena, *then_block)
+                        || else_block
+                            .as_ref()
+                            .is_some_and(|&e| Self::body_has_dynamic_array_index(arena, e))
+                }
+                Stmt::Loop { condition, body } => {
+                    condition
+                        .as_ref()
+                        .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c))
+                        || Self::body_has_dynamic_array_index(arena, *body)
+                }
+                Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+            }
+        })
+    }
+
+    /// Recursively reports whether `expr_id` (or any sub-expression) is an
+    /// `ArrayIndexAccess` with a non-literal index. Supporting helper for
+    /// [`Self::body_has_dynamic_array_index`].
+    fn expr_has_dynamic_array_index(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::ArrayIndexAccess { array, index } => {
+                !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
+                    || Self::expr_has_dynamic_array_index(arena, *array)
+                    || Self::expr_has_dynamic_array_index(arena, *index)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *left)
+                    || Self::expr_has_dynamic_array_index(arena, *right)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *expr)
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_has_dynamic_array_index(arena, *arg))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_has_dynamic_array_index(arena, *value)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&e| Self::expr_has_dynamic_array_index(arena, e)),
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
         }
     }
 
@@ -4265,7 +4365,7 @@ mod tests {
         let mut compiler = Compiler::new("test");
         assert!(
             !compiler.emit_bounds_checks,
-            "bounds checks must default off so Release / Compiler::new output stays byte-identical"
+            "bounds checks must default off so Proof mode / Compiler::new output stays unguarded"
         );
         compiler.set_emit_bounds_checks(true);
         assert!(compiler.emit_bounds_checks);

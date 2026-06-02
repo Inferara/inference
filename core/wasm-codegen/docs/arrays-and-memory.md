@@ -491,11 +491,11 @@ The same three-case specialization applies to array index writes (`arr[i] = x`):
 
 ## Runtime Bounds Checking
 
-A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. In **Debug** builds the codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead. Constant indices are *not* guarded here — they are rejected at compile time by analysis rule `A037` (see `core/analysis`), so the static and dynamic halves together cover every index.
+A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. In **Compile mode** the codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead. Constant indices are *not* guarded here — they are rejected at compile time by analysis rule `A037` (see `core/analysis`), so the static and dynamic halves together cover every index.
 
-The guard is gated on `OptLevel::O0`, which the build-profile matrix maps to the Debug profile (`O0 ⟺ Debug ⟺ checks-on`). The `codegen()` entry point derives a `Compiler::emit_bounds_checks` flag from the `opt_level` it already receives — no new parameter and no dependency on the CLI-layer `BuildProfile`. **Release** (`O3`/`Oz`) and **Proof** (always a release opt level) builds emit no guard, so their output is byte-identical to an unchecked build and the verified artifact stays the deployed artifact.
+The guard is emitted for **all Compile-mode builds** (Debug and Release, Wasm32 and Soroban): the `codegen()` entry point sets the `Compiler::emit_bounds_checks` flag whenever `mode == CompilationMode::Compile`, so the executed/deployed artifact is always checked. `OptLevel` no longer influences bounds checks. **Proof** mode is left unguarded pending the proof-obligation path (#212), which will discharge dynamic bounds as Rocq obligations rather than runtime traps; the `emit_index_offset` choke point is the seam where that path hooks in.
 
-For Case 3 (`arr[i]`) under Debug, the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local (reserved immediately after the frame-pointer temp, only when bounds checks are on) via `local.tee`, so an index expression with side effects runs exactly once:
+For Case 3 (`arr[i]`) in Compile mode, the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local via `local.tee`, so an index expression with side effects runs exactly once. The scratch is reserved per function **iff the body actually contains a dynamic array index** (`body_has_dynamic_array_index` — a non-`NumberLiteral` index, the only case that emits a guard), independent of whether the function has a frame. This keeps constant-index-only functions byte-identical to an unchecked build, and reserves the scratch even for an immutable-`self` method like `self.arr[idx]` that needs no frame slot. The scratch sits at the next free local after the named locals and the optional frame-pointer temp:
 
 ```wasm
 <lower array expr>      ;; push base pointer
@@ -977,7 +977,7 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter copied to frame |
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
-| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (Debug/`O0` only) |
+| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (all Compile-mode builds) |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
 | `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |
