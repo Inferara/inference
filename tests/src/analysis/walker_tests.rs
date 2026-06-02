@@ -183,7 +183,7 @@ mod walker_traversal_tests {
 
     #[test]
     fn a001_break_outside_loop_in_module_function() {
-        // FIXME: module definitions are not yet supported in the tree-sitter grammar.
+        // FIXME: module definitions are not yet supported by the grammar.
         // Once supported, this test should verify that analysis detects BreakOutsideLoop
         // inside module functions. Currently the parser rejects `mod` blocks.
         let source = r#"

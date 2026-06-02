@@ -18,17 +18,13 @@ This crate provides a memory-efficient AST representation using typed arena allo
 ### Building an Arena
 
 ```rust
-use inference_ast::builder::Builder;
-use tree_sitter::Parser;
+use inference_ast::arena::AstArena;
 
 let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
-let mut parser = Parser::new();
-parser.set_language(&tree_sitter_inference::language()).unwrap();
-let tree = parser.parse(source, None).unwrap();
 
-let mut builder = Builder::new();
-builder.add_source_code(tree.root_node(), source.as_bytes());
-let arena = builder.build_ast()?;
+// Parsing lives in the `inference-parser` crate, which lowers source
+// directly into an `AstArena`. `inference-ast` is the data model only.
+let arena: AstArena = inference_parser::parse(source).arena;
 ```
 
 ### Querying the Arena
@@ -184,7 +180,6 @@ Test coverage includes:
 | `arena` | `AstArena` struct, typed allocators, query methods, source text retrieval |
 | `ids` | `SourceFileId`, `DefId`, `StmtId`, `ExprId`, `TypeId`, `BlockId`, `IdentId`, `NodeId` |
 | `nodes` | All node wrapper structs and kind enums (`Expr`, `Stmt`, `Def`, `TypeNode`, `Location`, …) |
-| `builder` | `Builder` — converts a tree-sitter CST into an `AstArena` |
 | `la_arena` | Vendored `la_arena` crate providing `Arena<T>` and `Idx<T>` |
 | `extern_prelude` | Utilities for parsing external modules (stdlib, prelude) |
 | `parser_context` | Multi-file parsing support |
@@ -201,9 +196,7 @@ Test coverage includes:
 
 ## Dependencies
 
-- `rustc-hash`: Fast hash maps (`FxHashMap`) used in the builder and query methods
-- `tree-sitter`: Parser integration for building the AST from source
-- `tree-sitter-inference`: Grammar for the Inference language
+- `rustc-hash`: Fast hash maps (`FxHashMap`) used in query methods
 - `anyhow`: Error handling
 - `thiserror`: Structured error types
 

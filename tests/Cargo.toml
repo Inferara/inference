@@ -13,13 +13,12 @@ wasmtime="43.0.0"
 
 inference-analysis.workspace = true
 inference-ast.workspace = true
+inference-parser.workspace = true
 inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
 inference-type-checker = { workspace = true, features = ["test-utils"] }
 inference.workspace = true
 inf-wasmparser.workspace = true
-tree-sitter.workspace = true
-tree-sitter-inference.workspace = true
 rustc-hash.workspace = true
 wasmprinter = "0.245.1"
 

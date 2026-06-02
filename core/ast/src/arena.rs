@@ -19,7 +19,7 @@ use crate::nodes::{
 ///
 /// Each node category has its own `Arena<T>`. Typed IDs (`ExprId`, `StmtId`, etc.)
 /// index into the corresponding `Arena`.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
 pub struct AstArena {
     pub source_files: Arena<SourceFileData>,
     pub defs: Arena<DefData>,
@@ -130,9 +130,7 @@ impl AstArena {
                 return true;
             }
             match &self[def_id].kind {
-                Def::Struct { methods, .. }
-                    if self.def_in_list(target, methods) =>
-                {
+                Def::Struct { methods, .. } if self.def_in_list(target, methods) => {
                     return true;
                 }
                 Def::Spec { defs, .. }

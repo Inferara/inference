@@ -1,16 +1,16 @@
-//! External module discovery and parsing.
+//! External module discovery.
 //!
-//! This module handles finding and parsing external module source files.
-//! It returns parsed ASTs that can then be integrated into the symbol table
-//! by the type-checker.
+//! This module handles finding external module source files and modelling the
+//! parsed ASTs that the type-checker integrates into its symbol table. Parsing
+//! itself lives in the `inference` orchestration crate (`inference::extern_prelude`),
+//! which owns the parser dependency; `inference-ast` only describes the data and
+//! locates module roots.
 
 use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
 use crate::arena::AstArena;
-use crate::builder::Builder;
-use crate::errors::AstError;
 
 /// Represents a parsed external module
 #[derive(Clone)]
@@ -44,81 +44,11 @@ pub fn find_module_root(module_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-/// Create an empty prelude
+/// Create an empty prelude.
 ///
-/// The prelude can be populated by calling `parse_external_module` for each
-/// external dependency.
+/// The prelude can be populated by calling `inference::extern_prelude::parse_external_module`
+/// for each external dependency.
 #[must_use]
 pub fn create_empty_prelude() -> ExternPrelude {
     FxHashMap::default()
-}
-
-/// Parse an external module and add it to the prelude.
-///
-/// Locates the module's root source file using `find_module_root`, parses it,
-/// and adds the resulting AST to the prelude registry.
-///
-/// Module names are normalized: hyphens are replaced with underscores to match
-/// Inference's convention for crate names.
-///
-/// # Errors
-/// Returns an error if the module root is not found, the source cannot be read,
-/// or parsing fails.
-///
-/// # Panics
-/// Panics if the Inference grammar fails to load.
-pub fn parse_external_module(
-    module_dir: &Path,
-    name: &str,
-    prelude: &mut ExternPrelude,
-) -> anyhow::Result<()> {
-    let normalized_name = name.replace('-', "_");
-
-    if prelude.contains_key(&normalized_name) {
-        return Ok(());
-    }
-
-    let root_path = find_module_root(module_dir).ok_or_else(|| AstError::ModuleRootNotFound {
-        path: module_dir.to_path_buf(),
-        expected: format!(
-            "src{}lib.inf or src{}main.inf",
-            std::path::MAIN_SEPARATOR,
-            std::path::MAIN_SEPARATOR
-        ),
-    })?;
-
-    let source = std::fs::read_to_string(&root_path).map_err(|e| AstError::FileReadError {
-        path: root_path.clone(),
-        source: e,
-    })?;
-
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .expect("Error loading Inference grammar");
-
-    let tree = parser
-        .parse(&source, None)
-        .ok_or_else(|| AstError::ParseError {
-            path: root_path.clone(),
-        })?;
-
-    let mut builder = Builder::new();
-    builder.add_source_code(tree.root_node(), source.as_bytes());
-    let arena = builder.build_ast().map_err(|e| AstError::AstBuildError {
-        path: root_path.clone(),
-        reason: e.to_string(),
-    })?;
-
-    prelude.insert(
-        normalized_name.clone(),
-        ParsedModule {
-            name: normalized_name,
-            arena,
-            root_path,
-        },
-    );
-
-    Ok(())
 }

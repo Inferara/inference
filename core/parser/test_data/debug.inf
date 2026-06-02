@@ -1,0 +1,8 @@
+fn type_check(exprs : [Expr]) -> () {
+    let env : Binding = Binding { a: "", b: 0, c: [] };
+    let mut i : i32 = 0;
+    loop exprs.len {
+      check_expr(exprs[i], env);
+      i = i + 1;
+    }
+  }

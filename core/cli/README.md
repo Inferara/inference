@@ -24,11 +24,11 @@ The Inference compiler operates in three distinct phases:
 
 ### 1. Parse (`--parse`)
 
-Builds the typed AST using tree-sitter.
+Builds the typed AST using the `inference-parser`.
 
 **What it does:**
 - Reads the source file
-- Runs tree-sitter parser with Inference grammar
+- Runs the `inference-parser` lexer + recursive-descent parser
 - Constructs arena-allocated AST nodes
 - Validates syntax and basic structure
 - Reports parsing errors if any

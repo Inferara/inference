@@ -12,9 +12,9 @@
 //!
 //! The Inference compiler operates in three distinct phases:
 //!
-//! 1. **Parse** (`--parse`) – Builds the typed AST using tree-sitter
+//! 1. **Parse** (`--parse`) – Builds the typed AST using the custom parser
 //!    - Reads the source file
-//!    - Runs tree-sitter parser with Inference grammar
+//!    - Runs the Inference parser
 //!    - Constructs arena-allocated AST nodes
 //!    - Validates syntax and basic structure
 //!    - Reports parsing errors if any
@@ -175,14 +175,9 @@ pub(crate) fn normalize_args(args: &mut Cli) {
     // Detect explicit proof-mode combined with a non-codegen phase BEFORE the
     // default-normalization runs, so we can warn that the .v output will not
     // be produced. The warning is purely informational; exit code is unchanged.
-    if matches!(args.mode, Some(CliMode::Proof))
-        && (args.parse || args.analyze)
-        && !args.codegen
-    {
+    if matches!(args.mode, Some(CliMode::Proof)) && (args.parse || args.analyze) && !args.codegen {
         let flag = if args.parse { "--parse" } else { "--analyze" };
-        eprintln!(
-            "warning: --mode proof is ignored when {flag} is set; no .v will be written"
-        );
+        eprintln!("warning: --mode proof is ignored when {flag} is set; no .v will be written");
     }
     if !args.parse && !args.analyze && !args.codegen {
         args.codegen = true;
@@ -304,7 +299,7 @@ fn eprint_translation_error(e: &anyhow::Error) {
 /// 3. **Apply default normalization**: when no phase flags are given, defaults
 ///    to full pipeline (`--codegen -o`) so that `infc file.inf` just works
 /// 4. **Execute compilation phases** in canonical order:
-///    - Parse: Build typed AST from source using tree-sitter
+///    - Parse: Build typed AST from source using the custom parser
 ///    - Analyze: Type check and semantic validation
 ///    - Codegen: Generate WebAssembly binary from typed AST
 /// 5. **Generate output files** (if requested):
@@ -550,8 +545,14 @@ mod tests {
         let mut args = make_args(false, false, false);
         args.mode = Some(CliMode::Proof);
         normalize_args(&mut args);
-        assert!(args.codegen, "proof mode should still trigger default codegen");
-        assert!(args.generate_wasm_output, "proof mode should still emit wasm");
+        assert!(
+            args.codegen,
+            "proof mode should still trigger default codegen"
+        );
+        assert!(
+            args.generate_wasm_output,
+            "proof mode should still emit wasm"
+        );
         assert!(
             args.generate_v_output,
             "proof mode must imply -v so the .v artifact is written"

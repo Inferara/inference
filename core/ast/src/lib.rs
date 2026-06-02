@@ -13,7 +13,6 @@
 
 #![warn(clippy::pedantic)]
 pub mod arena;
-pub mod builder;
 pub mod errors;
 pub mod extern_prelude;
 pub mod ids;

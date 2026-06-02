@@ -1,0 +1,19 @@
+[book]
+title = "The Inference Compiler Book"
+description = "Design and implementation notes for the Inference compiler toolchain."
+authors = ["The Inferara Team"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Inferara/inference"
+edit-url-template = "https://github.com/Inferara/inference/edit/main/book/{path}"
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true

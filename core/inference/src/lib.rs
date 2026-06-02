@@ -10,7 +10,7 @@
 //! The Inference compiler implements a multi-phase compilation pipeline:
 //!
 //! ```text
-//! .inf source → tree-sitter → Typed AST → Type Check → WASM → Rocq (.v)
+//! .inf source → parser → Typed AST → Type Check → WASM → Rocq (.v)
 //! ```
 //!
 //! Each phase is exposed as a standalone function in this crate, allowing flexible
@@ -43,9 +43,10 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 //!
-//! The parser uses tree-sitter for concrete syntax tree (CST) construction,
-//! then transforms it into a typed AST stored in an [`AstArena`]. The arena provides
-//! O(1) node lookup and maintains parent-child relationships for efficient traversal.
+//! The parser is a resilient recursive-descent front end
+//! ([`inference_parser`]) that lowers the source directly into a typed AST
+//! stored in an [`AstArena`]. The arena provides O(1) node lookup and maintains
+//! parent-child relationships for efficient traversal.
 //!
 //! [`AstArena`]: inference_ast::arena::AstArena
 //!
@@ -134,7 +135,8 @@
 //!
 //! This crate acts as a thin orchestration layer that delegates to specialized crates:
 //!
-//! - [`inference_ast`] - Arena-based AST construction and tree-sitter parsing
+//! - [`inference_ast`] - Arena-based AST data model
+//! - [`inference_parser`] - Resilient parser front end
 //! - [`inference_type_checker`] - Bidirectional type checking with error recovery
 //! - [`inference_wasm_codegen`] - WebAssembly code generation via wasm-encoder
 //! - [`inference_wasm_to_v_translator`] - WASM to Rocq translation
@@ -249,7 +251,7 @@
 //! ### Internal Crates
 //!
 //! - [`inference_ast::arena::AstArena`] - Arena-based AST storage
-//! - [`inference_ast::builder::Builder`] - AST construction from tree-sitter CST
+//! - [`inference_parser::parse`] - Source-to-AST parsing entry point
 //! - [`inference_type_checker::TypeCheckerBuilder`] - Type checking entry point
 //! - [`inference_type_checker::typed_context::TypedContext`] - Type information storage
 //! - [`inference_wasm_codegen::codegen`] - WebAssembly code generation entry point
@@ -259,11 +261,13 @@
 //!
 //! - [Inference Language Specification](https://github.com/Inferara/inference-language-spec)
 //! - [Inference Book](https://github.com/Inferara/book)
-//! - [Tree-sitter Grammar](https://github.com/Inferara/tree-sitter-inference)
+//! - [Inference Grammar](https://github.com/Inferara/tree-sitter-inference)
 
-use inference_ast::{arena::AstArena, builder::Builder};
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
+use inference_ast::arena::AstArena;
 use inference_type_checker::typed_context::TypedContext;
+
+pub mod extern_prelude;
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
@@ -282,10 +286,9 @@ pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VER
 
 /// Parses source code and builds an arena-based Abstract Syntax Tree.
 ///
-/// This function orchestrates the parsing pipeline:
-/// 1. Initializes a tree-sitter parser with the Inference grammar
-/// 2. Parses the source code into a Concrete Syntax Tree (CST)
-/// 3. Transforms the CST into an arena-based AST using [`Builder`]
+/// This function delegates to the [`inference_parser`] front end,
+/// which lexes the source, parses it with a resilient recursive-descent grammar,
+/// and lowers the result directly into an [`AstArena`].
 ///
 /// The resulting [`AstArena`] stores all AST nodes with unique IDs and maintains
 /// parent-child relationships for efficient traversal. Root nodes are
@@ -347,38 +350,33 @@ pub use inference_wasm_codegen::{SPEC_FUNCS_SECTION_NAME, SPEC_FUNCS_SECTION_VER
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - The source code contains syntax errors that prevent AST construction
-/// - The tree-sitter parser fails to generate a valid CST
-/// - The [`Builder`] encounters malformed nodes during AST construction
-///
-/// The error collection mechanism reports all parsing errors at once rather than
-/// failing on the first error, enabling faster iteration during development.
-///
-/// # Panics
-///
-/// This function will panic if the Inference language grammar cannot be loaded
-/// into the tree-sitter parser. This indicates a critical setup issue with the
-/// `tree-sitter-inference` dependency and should never occur in normal operation.
+/// Returns an error if the source code contains syntax errors. The parser is
+/// resilient and collects every syntax error rather than failing on the first
+/// one, so the returned error aggregates all of them at once, enabling faster
+/// iteration during development.
 ///
 /// [`SourceFileData`]: inference_ast::nodes::SourceFileData
-/// [`Builder`]: inference_ast::builder::Builder
 /// [`AstArena`]: inference_ast::arena::AstArena
 pub fn parse(source_code: &str) -> anyhow::Result<AstArena> {
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .map_err(|e| anyhow::anyhow!("Failed to load Inference grammar: {e}"))?;
-    let tree = parser
-        .parse(source_code, None)
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse source code"))?;
-    let code = source_code.as_bytes();
-    let root_node = tree.root_node();
-    let mut builder = Builder::new();
-    builder.add_source_code(root_node, code);
-    let arena = builder.build_ast()?;
-    Ok(arena)
+    let parsed = inference_parser::parse(source_code);
+    if parsed.errors.is_empty() {
+        return Ok(parsed.arena);
+    }
+
+    let lines: Vec<String> = parsed
+        .errors
+        .iter()
+        .map(|error| {
+            format!(
+                "  {}:{}: {}",
+                error.span.start_line, error.span.start_column, error.message
+            )
+        })
+        .collect();
+    Err(anyhow::anyhow!(
+        "AST building failed due to errors:\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// Performs bidirectional type checking and inference on the AST.
@@ -743,9 +741,5 @@ pub fn wasm_to_v(
     wasm: &[u8],
     spec_funcs_by_spec: &FxHashMap<String, Vec<u32>>,
 ) -> anyhow::Result<String> {
-    inference_wasm_to_v_translator::wasm_parser::translate_bytes(
-        mod_name,
-        wasm,
-        spec_funcs_by_spec,
-    )
+    inference_wasm_to_v_translator::wasm_parser::translate_bytes(mod_name, wasm, spec_funcs_by_spec)
 }

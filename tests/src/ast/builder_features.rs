@@ -3,7 +3,6 @@ use crate::utils::{
     collect_exprs_matching, find_function_by_name, try_build_ast,
 };
 use inference_ast::arena::AstArena;
-use inference_ast::builder::Builder;
 use inference_ast::ids::*;
 use inference_ast::nodes::{
     ArgKind, BlockKind, Def, Expr, OperatorKind, Stmt, TypeNode, Visibility,
@@ -12,31 +11,12 @@ use inference_ast::nodes::{
 // --- Parse Error Detection Tests ---
 
 #[test]
-fn test_check_treesitter_errors() {
-    fn check_source(source: &str) -> (bool, String) {
-        let inference_language = tree_sitter_inference::language();
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&inference_language).unwrap();
-        let tree = parser.parse(source, None).unwrap();
-        (tree.root_node().has_error(), tree.root_node().to_sexp())
-    }
-
-    let source = r#"fn test() { return >= 0; }"#;
-    let (has_error, sexp) = check_source(source);
-    println!("Source: {}", source);
-    println!("has_error: {}", has_error);
-    println!("Tree: {}", sexp);
-}
-
-#[test]
 fn test_invalid_syntax_return_missing_left_operand_is_rejected() {
     let source = r#"fn test() { return >= 0; }"#;
-    let result = std::panic::catch_unwind(|| {
-        build_ast(source.to_string());
-    });
+    let result = try_build_ast(source.to_string());
     assert!(
         result.is_err(),
-        "Invalid syntax 'return >= 0;' should panic during parsing"
+        "Invalid syntax 'return >= 0;' should be rejected during parsing"
     );
 }
 
@@ -44,25 +24,20 @@ fn test_invalid_syntax_return_missing_left_operand_is_rejected() {
 fn test_invalid_syntax_in_forall_block_is_rejected() {
     let source =
         r#"fn sum(items: [i32; 10]) -> i32 { forall { return >= 0; } let result: i32 = 0; }"#;
-    let result = std::panic::catch_unwind(|| {
-        build_ast(source.to_string());
-    });
+    let result = try_build_ast(source.to_string());
     assert!(
         result.is_err(),
-        "Invalid syntax inside forall block should panic during parsing"
+        "Invalid syntax inside forall block should be rejected during parsing"
     );
 }
 
-// FIXME: Missing semicolons are marked as MISSING nodes by tree-sitter, not ERROR nodes.
 #[test]
-fn test_missing_semicolon_not_yet_detected() {
+fn test_missing_semicolon_is_detected() {
     let source = r#"fn test() { let x: i32 = 5 }"#;
-    let result = std::panic::catch_unwind(|| {
-        build_ast(source.to_string());
-    });
+    let result = try_build_ast(source.to_string());
     assert!(
-        result.is_ok(),
-        "FIXME: Missing semicolon is currently NOT detected (uses MISSING node, not ERROR)"
+        result.is_err(),
+        "Missing semicolon after a variable definition is a syntax error"
     );
 }
 
@@ -211,10 +186,7 @@ fn test_location_offset_extracts_enum_definition() {
     let source_file = &source_files[0];
 
     let def_id = source_file.defs[0];
-    if let Def::Enum {
-        name, variants, ..
-    } = &arena[def_id].kind
-    {
+    if let Def::Enum { name, variants, .. } = &arena[def_id].kind {
         let loc = arena[def_id].location;
         let extracted = &source_file.source[loc.offset_start as usize..loc.offset_end as usize];
         assert_eq!(extracted, source);
@@ -283,8 +255,8 @@ fn test_location_offset_extracts_function_arguments() {
 
         if let ArgKind::Named { name, .. } = &args[0].kind {
             let name_loc = arena[*name].location;
-            let arg1_name = &source_file.source
-                [name_loc.offset_start as usize..name_loc.offset_end as usize];
+            let arg1_name =
+                &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
             assert_eq!(arg1_name, "first_arg");
         } else {
             panic!("Expected Named argument");
@@ -292,8 +264,8 @@ fn test_location_offset_extracts_function_arguments() {
 
         if let ArgKind::Named { name, .. } = &args[1].kind {
             let name_loc = arena[*name].location;
-            let arg2_name = &source_file.source
-                [name_loc.offset_start as usize..name_loc.offset_end as usize];
+            let arg2_name =
+                &source_file.source[name_loc.offset_start as usize..name_loc.offset_end as usize];
             assert_eq!(arg2_name, "second_arg");
         } else {
             panic!("Expected Named argument");
@@ -410,29 +382,6 @@ fn test_location_offset_extracts_nested_expressions() {
     assert_eq!(source_file.defs.len(), 1);
 }
 
-// --- Builder API Tests ---
-
-#[test]
-fn test_builder_default_creates_empty_builder() {
-    let builder: Builder<'_> = Builder::default();
-    let inference_language = tree_sitter_inference::language();
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&inference_language)
-        .expect("Error loading Inference grammar");
-
-    let source = r#"fn test() -> i32 { return 42; }"#;
-    let tree = parser.parse(source, None).unwrap();
-    let code = source.as_bytes();
-    let root_node = tree.root_node();
-
-    let mut builder = builder;
-    builder.add_source_code(root_node, code);
-    let arena = builder.build_ast().unwrap();
-
-    assert_eq!(arena.source_files().len(), 1);
-}
-
 /// Tests for struct expressions with fields
 
 #[test]
@@ -443,9 +392,8 @@ fn test() -> Point { return Point { x: 10, y: 20 }; }"#;
 
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
-        let exprs = collect_exprs_matching(&arena, *body, &|e| {
-            matches!(e, Expr::StructLiteral { .. })
-        });
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::StructLiteral { .. }));
         assert_eq!(exprs.len(), 1, "Should find 1 struct expression");
 
         if let Expr::StructLiteral { name, .. } = &arena[exprs[0]].kind {
@@ -462,9 +410,8 @@ fn test() -> Empty { return Empty {}; }"#;
 
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
-        let exprs = collect_exprs_matching(&arena, *body, &|e| {
-            matches!(e, Expr::StructLiteral { .. })
-        });
+        let exprs =
+            collect_exprs_matching(&arena, *body, &|e| matches!(e, Expr::StructLiteral { .. }));
         assert_eq!(exprs.len(), 1, "Should find 1 struct expression");
 
         if let Expr::StructLiteral { name, .. } = &arena[exprs[0]].kind {
@@ -488,7 +435,11 @@ fn test_parse_type_definition_in_function_body() {
             .iter()
             .filter(|&&s| matches!(arena[s].kind, Stmt::TypeDef { .. }))
             .collect();
-        assert_eq!(type_defs.len(), 1, "Should find 1 type definition statement");
+        assert_eq!(
+            type_defs.len(),
+            1,
+            "Should find 1 type definition statement"
+        );
 
         if let Stmt::TypeDef { name, .. } = &arena[*type_defs[0]].kind {
             assert_eq!(arena[*name].name, "LocalInt");
@@ -509,7 +460,10 @@ fn test_parse_multiple_type_definitions_in_function() {
             .iter()
             .filter(|&&s| matches!(arena[s].kind, Stmt::TypeDef { .. }))
             .count();
-        assert_eq!(type_def_count, 3, "Should find 3 type definition statements");
+        assert_eq!(
+            type_def_count, 3,
+            "Should find 3 type definition statements"
+        );
     }
 }
 
@@ -523,13 +477,17 @@ fn test_parse_forall_block() {
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
         let block = &arena[*body];
-        let forall_count = block.stmts.iter().filter(|&&s| {
-            if let Stmt::Block(block_id) = &arena[s].kind {
-                arena[*block_id].block_kind == BlockKind::Forall
-            } else {
-                false
-            }
-        }).count();
+        let forall_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| {
+                if let Stmt::Block(block_id) = &arena[s].kind {
+                    arena[*block_id].block_kind == BlockKind::Forall
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(forall_count, 1, "Should find 1 forall block");
     }
 }
@@ -542,13 +500,17 @@ fn test_parse_exists_block() {
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
         let block = &arena[*body];
-        let exists_count = block.stmts.iter().filter(|&&s| {
-            if let Stmt::Block(block_id) = &arena[s].kind {
-                arena[*block_id].block_kind == BlockKind::Exists
-            } else {
-                false
-            }
-        }).count();
+        let exists_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| {
+                if let Stmt::Block(block_id) = &arena[s].kind {
+                    arena[*block_id].block_kind == BlockKind::Exists
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(exists_count, 1, "Should find 1 exists block");
     }
 }
@@ -561,13 +523,17 @@ fn test_parse_unique_block() {
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
         let block = &arena[*body];
-        let unique_count = block.stmts.iter().filter(|&&s| {
-            if let Stmt::Block(block_id) = &arena[s].kind {
-                arena[*block_id].block_kind == BlockKind::Unique
-            } else {
-                false
-            }
-        }).count();
+        let unique_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| {
+                if let Stmt::Block(block_id) = &arena[s].kind {
+                    arena[*block_id].block_kind == BlockKind::Unique
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(unique_count, 1, "Should find 1 unique block");
     }
 }
@@ -580,13 +546,17 @@ fn test_parse_assume_block() {
     let func_id = find_function_by_name(&arena, "test").unwrap();
     if let Def::Function { body, .. } = &arena[func_id].kind {
         let block = &arena[*body];
-        let assume_count = block.stmts.iter().filter(|&&s| {
-            if let Stmt::Block(block_id) = &arena[s].kind {
-                arena[*block_id].block_kind == BlockKind::Assume
-            } else {
-                false
-            }
-        }).count();
+        let assume_count = block
+            .stmts
+            .iter()
+            .filter(|&&s| {
+                if let Stmt::Block(block_id) = &arena[s].kind {
+                    arena[*block_id].block_kind == BlockKind::Assume
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(assume_count, 1, "Should find 1 assume block");
     }
 }
@@ -836,7 +806,11 @@ fn test_parse_public_function_visibility() {
 
     let func_id = find_function_by_name(&arena, "public_function").unwrap();
     if let Def::Function { vis, .. } = &arena[func_id].kind {
-        assert_eq!(*vis, Visibility::Public, "Function should have Public visibility");
+        assert_eq!(
+            *vis,
+            Visibility::Public,
+            "Function should have Public visibility"
+        );
     }
 }
 
@@ -863,7 +837,11 @@ fn test_parse_public_struct_visibility() {
     let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Struct { vis, .. } = &arena[def_id].kind {
-        assert_eq!(*vis, Visibility::Public, "Struct should have Public visibility");
+        assert_eq!(
+            *vis,
+            Visibility::Public,
+            "Struct should have Public visibility"
+        );
     } else {
         panic!("Expected struct definition");
     }
@@ -889,7 +867,11 @@ fn test_parse_public_enum_visibility() {
     let source_files: Vec<_> = arena.source_files().collect();
     let def_id = source_files[0].defs[0];
     if let Def::Enum { vis, .. } = &arena[def_id].kind {
-        assert_eq!(*vis, Visibility::Public, "Enum should have Public visibility");
+        assert_eq!(
+            *vis,
+            Visibility::Public,
+            "Enum should have Public visibility"
+        );
     }
 }
 

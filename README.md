@@ -37,7 +37,7 @@ Install the official VS Code extension for syntax highlighting:
 
 The `infs build` command compiles a single `.inf` source file through three phases:
 
-1. **Parse** (`--parse`) – Build the typed AST using tree-sitter
+1. **Parse** (`--parse`) – Build the typed AST with the `inference-parser`
 2. **Analyze** (`--analyze`) – Perform type checking, static analysis, and semantic validation
 3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
@@ -60,7 +60,7 @@ The compiler supports two modes that control optimization and verification behav
 1. **`compile`** produces optimized production binaries. Non-deterministic `spec` nodes are stripped since they have no runtime meaning.
 2. **`proof`** produces WASM for formal verification. Spec functions (containing non-deterministic operations) are compiled unoptimized to preserve structural correspondence with the source code for Rocq formalization. Execution functions use the target's release optimization so that proofs cover the actual deployed code.
 
-Read more about [compilation modes in the book](./book/compilation_targets.md).
+Read more about [compilation modes in the book](./book/src/compilation_targets.md).
 
 ### Output Flags
 
