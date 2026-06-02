@@ -461,39 +461,6 @@ pub(crate) fn align_to_frame(size: u32) -> u32 {
     align_to(size, FRAME_ALIGNMENT)
 }
 
-/// Selects the appropriate WASM store instruction based on an `ArraySlot`'s element size.
-///
-/// This avoids needing a `TypeInfoKind` at the call site (useful when the array
-/// literal node may not have type info, but the slot was pre-computed from the
-/// variable definition).
-#[must_use = "returns the WASM store instruction"]
-pub(crate) fn store_instruction_from_slot(slot: &ArraySlot) -> Instruction<'static> {
-    store_instruction_for_size(slot.elem_size)
-}
-
-/// Selects the appropriate WASM store instruction for an element byte size.
-fn store_instruction_for_size(size: u32) -> Instruction<'static> {
-    let align = match size {
-        1 => 0,
-        2 => 1,
-        4 => 2,
-        8 => 3,
-        _ => unreachable!("Invalid element size: {size}"),
-    };
-    let memarg = MemArg {
-        offset: 0,
-        align,
-        memory_index: MEMORY_INDEX,
-    };
-    match size {
-        1 => Instruction::I32Store8(memarg),
-        2 => Instruction::I32Store16(memarg),
-        4 => Instruction::I32Store(memarg),
-        8 => Instruction::I64Store(memarg),
-        _ => unreachable!("Invalid element size: {size}"),
-    }
-}
-
 /// Selects the appropriate WASM store instruction for an element type.
 ///
 /// The `MemArg` uses offset 0 and the natural alignment for the element size:

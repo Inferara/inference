@@ -537,7 +537,7 @@ A future implementation, gated on `BuildProfile`, will add bounds checking in De
 
 2. **Natural stack overflow protection via stack-first layout**: Stack overflow that pushes `__stack_pointer` below address 0 is caught automatically as a WASM out-of-bounds memory trap. The error message from the runtime is generic ("out of bounds memory access") rather than "stack overflow". A future compile-time static call-graph analysis (feasible because recursion is forbidden) could detect overflow at compile time and produce a better diagnostic.
 
-3. **No nested arrays**: `[[i32; 3]; 2]` is not supported. Interior pointer management and aliasing concerns need design work.
+3. **Nested scalar arrays are supported**: Multi-dimensional scalar arrays such as `[[i32; 3]; 2]` are fully supported, including literal and uzumaki initialization, read/write access at any depth, and parameter passing. Arrays of structs are still limited to a single level of nesting (a nested array of structs such as `[[Point; 2]; 2]` is not yet supported).
 
 4. **No array return values**: Returning an array from a function requires an ABI transformation (hidden first parameter for the return buffer, known as "sret"). This is a separate feature.
 

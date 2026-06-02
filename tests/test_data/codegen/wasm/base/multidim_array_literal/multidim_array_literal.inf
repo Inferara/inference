@@ -1,0 +1,32 @@
+pub fn grid_2d() -> i32 {
+    let g: [[i32; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+    return g[1][2];
+}
+
+pub fn cube_3d() -> i32 {
+    let c: [[[i32; 2]; 2]; 2] = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]];
+    return c[1][0][1];
+}
+
+pub fn grid_mixed_zero() -> i32 {
+    let g: [[i32; 2]; 2] = [[0, 7], [0, 0]];
+    return g[0][1];
+}
+
+pub fn grid_rows() -> i32 {
+    let r: [i32; 3] = [1, 2, 3];
+    let g: [[i32; 3]; 2] = [r, r];
+    return g[1][2];
+}
+
+pub fn grid_u8() -> u8 {
+    let r: [u8; 3] = [1, 2, 3];
+    let g: [[u8; 3]; 2] = [r, r];
+    return g[1][2];
+}
+
+pub fn grid_i64() -> i64 {
+    let r: [i64; 2] = [3, 4];
+    let g: [[i64; 2]; 2] = [r, r];
+    return g[1][1];
+}

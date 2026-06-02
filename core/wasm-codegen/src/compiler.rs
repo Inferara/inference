@@ -2033,7 +2033,7 @@ impl Compiler {
                     )
                 });
                 let elements = elements.clone();
-                self.lower_array_literal(arena, &elements, var_name, ctx);
+                self.lower_array_literal(arena, expr_id, &elements, var_name, ctx);
             }
             Expr::BoolLiteral { value } => {
                 self.func()
@@ -3593,6 +3593,7 @@ impl Compiler {
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
+        expr_id: ExprId,
         elements: &[ExprId],
         enclosing_var_name: &str,
         ctx: &TypedContext,
@@ -3641,25 +3642,24 @@ impl Compiler {
                 self.init_zero_elision,
             );
         } else {
-            let store_instr = memory::store_instruction_from_slot(slot);
-            for (i, &element_id) in elements.iter().enumerate() {
-                // Scalar path checks self.init_zero_elision directly (single call site,
-                // no recursion). Struct/nested paths use skip_zero_stores parameter
-                // for recursive descent through lower_struct_literal_fields.
-                if self.init_zero_elision && Self::is_syntactic_zero(arena, element_id) {
-                    continue;
-                }
-                #[allow(clippy::cast_possible_truncation)]
-                let byte_offset = slot_offset + (i as u32) * slot_elem_size;
-                self.func()
-                    .instruction(&Instruction::LocalGet(frame_ptr_local));
-                #[allow(clippy::cast_possible_wrap)]
-                self.func()
-                    .instruction(&Instruction::I32Const(byte_offset as i32));
-                self.func().instruction(&Instruction::I32Add);
-                self.lower_expression(arena, element_id, ctx, None);
-                self.func().instruction(&store_instr);
-            }
+            let elem_kind = match ctx
+                .get_node_typeinfo(NodeId::Expr(expr_id))
+                .map(|info| info.kind)
+            {
+                Some(TypeInfoKind::Array(elem, _)) => elem.kind,
+                other => panic!(
+                    "array literal '{parent_var_name}' has non-array type info: {other:?}"
+                ),
+            };
+            self.store_array_literal_elements(
+                arena,
+                elements,
+                &elem_kind,
+                slot_offset,
+                frame_ptr_local,
+                ctx,
+                self.init_zero_elision,
+            );
         }
 
         self.func()
@@ -3669,6 +3669,127 @@ impl Compiler {
             self.func()
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Recursively stores the leaves of a (possibly multi-dimensional) scalar
+    /// array literal into the frame slot at `dest_base_offset`.
+    ///
+    /// Mirrors [`Self::emit_array_uzumaki_recursive`], but stores literal values
+    /// rather than non-deterministic opcodes. For an `Array(inner, _)` element
+    /// kind, each sub-array literal recurses at offset `dest_base_offset + i *
+    /// stride` (where `stride` is the inner sub-array's total byte size); a
+    /// non-literal array element (identifier or call) is copied with
+    /// `memory.copy`. For a scalar leaf, the value is lowered and stored.
+    ///
+    /// The leaf store emits the **unconditional** `local.get; i32.const off;
+    /// i32.add` address sequence (not [`memory::emit_ptr_offset_addr`], which
+    /// elides the `i32.const 0; i32.add` at offset 0) and [`memory::store_instruction`]
+    /// so that single-dimensional scalar arrays produce byte-identical output to
+    /// the pre-recursion path. Scalar leaves are zero-elided through the same
+    /// `skip_zero_stores` thread used by the struct-element path.
+    #[allow(clippy::too_many_arguments)]
+    fn store_array_literal_elements(
+        &mut self,
+        arena: &AstArena,
+        elements: &[ExprId],
+        elem_kind: &TypeInfoKind,
+        dest_base_offset: u32,
+        frame_ptr_local: u32,
+        ctx: &TypedContext,
+        skip_zero_stores: bool,
+    ) {
+        let stride = type_byte_size(elem_kind, ctx)
+            .expect("element byte size must be computable for array literal leaves");
+
+        // For a struct leaf (reached only via the `Array` arm's recursion on a
+        // nested array-of-structs literal), the field layout is constant for this
+        // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
+        let struct_leaf_layout = match elem_kind {
+            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                ctx.lookup_struct(name).map(|struct_info| {
+                    let (total_size, field_slots) =
+                        memory::compute_struct_field_layout(&struct_info, ctx)
+                            .expect("struct field layout must be computable for array literal leaves");
+                    (name.clone(), total_size, field_slots)
+                })
+            }
+            _ => None,
+        };
+
+        for (i, &element_id) in elements.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let off = dest_base_offset
+                .checked_add(
+                    (i as u32)
+                        .checked_mul(stride)
+                        .expect("array literal element offset overflow"),
+                )
+                .expect("array literal base + element offset overflow");
+
+            // Struct leaf: reached only via the `Array` arm's recursion on a nested
+            // array-of-structs literal. Mirrors `lower_array_literal_struct_elements`,
+            // the path single-dim AoS uses, so each element's fields land at
+            // `off + field_offset`. An enum `Custom` leaf has `struct_leaf_layout == None`
+            // and falls through to the scalar arm below (enums are scalar-sized).
+            if let Some((ref struct_name, struct_total_size, ref field_slots)) = struct_leaf_layout {
+                if let Expr::StructLiteral { fields, .. } = &arena[element_id].kind {
+                    let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                    self.lower_struct_literal_fields(
+                        arena,
+                        &fields,
+                        field_slots,
+                        frame_ptr_local,
+                        off,
+                        ctx,
+                        struct_name,
+                        0,
+                        skip_zero_stores,
+                    );
+                } else {
+                    memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, off);
+                    self.lower_expression(arena, element_id, ctx, None);
+                    self.emit_memory_copy(struct_total_size);
+                }
+                continue;
+            }
+
+            match elem_kind {
+                TypeInfoKind::Array(inner, _) => {
+                    if let Expr::ArrayLiteral {
+                        elements: inner_elements,
+                    } = &arena[element_id].kind
+                    {
+                        let inner_elements = inner_elements.clone();
+                        self.store_array_literal_elements(
+                            arena,
+                            &inner_elements,
+                            &inner.kind,
+                            off,
+                            frame_ptr_local,
+                            ctx,
+                            skip_zero_stores,
+                        );
+                    } else {
+                        memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, off);
+                        self.lower_expression(arena, element_id, ctx, None);
+                        self.emit_memory_copy(stride);
+                    }
+                }
+                scalar_kind => {
+                    if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
+                        continue;
+                    }
+                    self.func()
+                        .instruction(&Instruction::LocalGet(frame_ptr_local));
+                    #[allow(clippy::cast_possible_wrap)]
+                    self.func().instruction(&Instruction::I32Const(off as i32));
+                    self.func().instruction(&Instruction::I32Add);
+                    self.lower_expression(arena, element_id, ctx, None);
+                    self.func()
+                        .instruction(&memory::store_instruction(scalar_kind));
+                }
+            }
         }
     }
 

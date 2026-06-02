@@ -1694,6 +1694,99 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn multidim_array_literal_test() {
+        // Each top-level array literal hits the mark once; nested literals
+        // recurse through `store_array_literal_elements` and do not re-hit it.
+        // Measured empirically: grid_2d(1) + cube_3d(1) + grid_mixed_zero(1)
+        // + grid_rows([r,r] + [1,2,3] = 2) + grid_u8(2) + grid_i64(2) = 9.
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 9);
+        let test_name = "multidim_array_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn multidim_array_literal_execution_test() {
+        use wasmtime::{Engine, Module, Store};
+
+        let test_name = "multidim_array_literal";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        let stack_pointer = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export '__stack_pointer'");
+        let initial_sp = stack_pointer.get(&mut store).i32().unwrap();
+
+        // Each function returns a leaf element read back through the array
+        // index path, validating that the recursive literal stores wrote the
+        // correct strides and offsets.
+        let i32_cases: [(&str, i32); 4] = [
+            ("grid_2d", 6),         // [[i32;3];2], g[1][2]
+            ("cube_3d", 6),         // [[[i32;2];2];2], c[1][0][1]
+            ("grid_mixed_zero", 7), // [[i32;2];2] = [[0,7],[0,0]], g[0][1]
+            ("grid_rows", 3),       // [[i32;3];2] = [r,r], g[1][2]
+        ];
+        for (name, expected) in i32_cases {
+            let f: wasmtime::TypedFunc<(), i32> = instance
+                .get_typed_func(&mut store, name)
+                .unwrap_or_else(|e| panic!("Failed to get '{name}': {e}"));
+            let result = f
+                .call(&mut store, ())
+                .unwrap_or_else(|e| panic!("'{name}' failed: {e}"));
+            assert_eq!(result, expected, "{name} returned wrong element");
+            let sp_after = stack_pointer.get(&mut store).i32().unwrap();
+            assert_eq!(
+                sp_after, initial_sp,
+                "Stack pointer should be restored after {name} call"
+            );
+        }
+
+        // grid_u8: [[u8;3];2] = [r,r], g[1][2] -> 3 (sub-i32 leaf, zero-extended)
+        let grid_u8: wasmtime::TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "grid_u8")
+            .expect("Failed to get 'grid_u8'");
+        assert_eq!(
+            grid_u8.call(&mut store, ()).expect("grid_u8 failed"),
+            3,
+            "grid_u8 returned wrong element"
+        );
+
+        // grid_i64: [[i64;2];2] = [r,r], g[1][1] -> 4 (8-byte leaf)
+        let grid_i64: wasmtime::TypedFunc<(), i64> = instance
+            .get_typed_func(&mut store, "grid_i64")
+            .expect("Failed to get 'grid_i64'");
+        assert_eq!(
+            grid_i64.call(&mut store, ()).expect("grid_i64 failed"),
+            4,
+            "grid_i64 returned wrong element"
+        );
+        let sp_after = stack_pointer.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_after, initial_sp,
+            "Stack pointer should be restored after grid_i64 call"
+        );
+    }
+
+    #[test]
     fn array_zero_literal_test() {
         cov_mark::check_count!(wasm_codegen_emit_array_literal, 8);
         cov_mark::check_count!(wasm_codegen_emit_stack_prologue, 8);
@@ -5319,6 +5412,88 @@ mod base_codegen_tests {
         );
     }
 
+    // --- nested_array_of_structs tests (array-of-structs at nesting depth >= 2) ---
+
+    #[test]
+    fn nested_array_of_structs_test() {
+        cov_mark::check_count!(wasm_codegen_emit_array_literal, 4);
+        let test_name = "nested_array_of_structs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {e}"));
+        let expected = get_test_wasm_path(module_path!(), test_name);
+        let expected = std::fs::read(&expected)
+            .unwrap_or_else(|_| panic!("Failed to read expected wasm file for test: {test_name}"));
+        assert_wasms_modules_equivalence(&expected, &actual);
+        assert_wat_equivalence(&actual, module_path!(), test_name);
+    }
+
+    #[test]
+    fn nested_array_of_structs_execution_test() {
+        use wasmtime::{Engine, Module, Store, TypedFunc};
+
+        let test_name = "nested_array_of_structs";
+        let test_file_path = get_test_file_path(module_path!(), test_name);
+        let source_code = std::fs::read_to_string(&test_file_path)
+            .unwrap_or_else(|_| panic!("Failed to read test file: {test_file_path:?}"));
+        let wasm_bytes = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Generated WASM is invalid: {e}"));
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, &wasm_bytes)
+            .unwrap_or_else(|e| panic!("Failed to create Wasm module: {e}"));
+        let mut store = Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[])
+            .unwrap_or_else(|e| panic!("Failed to instantiate Wasm module: {e}"));
+
+        // grid_2d_x reads g[1][0].x from [[Pt;2];2] = [[1,2],[3,4]],[[5,6],[7,8]] -> 5.
+        let grid_2d_x: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "grid_2d_x")
+            .expect("Failed to get 'grid_2d_x'");
+        let result = grid_2d_x.call(&mut store, ()).expect("grid_2d_x failed");
+        assert_eq!(result, 5, "grid_2d_x should return 5 (g[1][0].x)");
+
+        // grid_2d_y reads g[0][1].y -> 4.
+        let grid_2d_y: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "grid_2d_y")
+            .expect("Failed to get 'grid_2d_y'");
+        let result = grid_2d_y.call(&mut store, ()).expect("grid_2d_y failed");
+        assert_eq!(result, 4, "grid_2d_y should return 4 (g[0][1].y)");
+
+        // cube_3d reads c[1][0][0].y from a [[[Pt;1];2];2] literal -> 15.
+        let cube_3d: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "cube_3d")
+            .expect("Failed to get 'cube_3d'");
+        let result = cube_3d.call(&mut store, ()).expect("cube_3d failed");
+        assert_eq!(result, 15, "cube_3d should return 15 (c[1][0][0].y)");
+
+        // grid_nonliteral builds [[p,p],[p,p]] from a local struct p{x:21,y:22}
+        // (non-literal struct elements -> memory.copy) and returns g[1][1].x + g[0][1].y.
+        let grid_nonliteral: TypedFunc<(), i32> = instance
+            .get_typed_func(&mut store, "grid_nonliteral")
+            .expect("Failed to get 'grid_nonliteral'");
+        let result = grid_nonliteral
+            .call(&mut store, ())
+            .expect("grid_nonliteral failed");
+        assert_eq!(
+            result, 43,
+            "grid_nonliteral should return 43 (g[1][1].x 21 + g[0][1].y 22)"
+        );
+
+        let sp_global = instance
+            .get_global(&mut store, "__stack_pointer")
+            .expect("Module should export __stack_pointer");
+        let sp_val = sp_global.get(&mut store).i32().unwrap();
+        assert_eq!(
+            sp_val, 65536,
+            "Stack pointer should be restored to initial value after all calls"
+        );
+    }
+
     #[test]
     fn multidim_array_uzumaki_test() {
         cov_mark::check_count!(wasm_codegen_emit_array_uzumaki, 2);
@@ -7223,6 +7398,26 @@ mod regenerate {
 
     #[test]
     #[ignore]
+    fn regenerate_multidim_array_literal_wasm() {
+        let dir = base_test_dir().join("multidim_array_literal");
+        let source_code = std::fs::read_to_string(dir.join("multidim_array_literal.inf"))
+            .expect("Failed to read multidim_array_literal.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("multidim_array_literal.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "multidim_array_literal");
+    }
+
+    #[test]
+    #[ignore]
     fn regenerate_array_index_wasm() {
         let dir = base_test_dir().join("array_index");
         let source_code = std::fs::read_to_string(dir.join("array_index.inf"))
@@ -7699,6 +7894,26 @@ mod regenerate {
             actual.len()
         );
         regenerate_wat(&actual, &dir, "array_of_structs");
+    }
+
+    #[test]
+    #[ignore]
+    fn regenerate_nested_array_of_structs_wasm() {
+        let dir = base_test_dir().join("nested_array_of_structs");
+        let source_code = std::fs::read_to_string(dir.join("nested_array_of_structs.inf"))
+            .expect("Failed to read nested_array_of_structs.inf");
+        let actual = wasm_codegen(&source_code);
+        inf_wasmparser::validate(&actual)
+            .unwrap_or_else(|e| panic!("Generated Wasm module is invalid: {}", e));
+        let wasm_path = dir.join("nested_array_of_structs.wasm");
+        std::fs::write(&wasm_path, &actual)
+            .unwrap_or_else(|e| panic!("Failed to write {}: {e}", wasm_path.display()));
+        println!(
+            "Regenerated: {} ({} bytes)",
+            wasm_path.display(),
+            actual.len()
+        );
+        regenerate_wat(&actual, &dir, "nested_array_of_structs");
     }
 
     #[test]

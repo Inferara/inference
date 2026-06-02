@@ -19,7 +19,7 @@ The `core/type-checker` crate validates:
 - Array variables, parameters, and literals have correct types
 
 The `core/analysis` crate enforces codegen constraints:
-- Multidimensional scalar arrays (`[[i32; 3]; 2]`) support full read/write access at any depth, uzumaki initialization, and parameter passing
+- Multidimensional scalar arrays (`[[i32; 3]; 2]`) support full read/write access at any depth, literal initialization, uzumaki initialization, and parameter passing
 - Struct-element arrays (`[Point; 3]`) are supported at one level of nesting
 - Struct fields whose type is itself a compound type (another struct or an array) are rejected by rule A026 when the nesting would exceed one level (e.g., a struct field of type `[[i32; 3]; 2]` or a struct field of a struct that itself has compound fields)
 
@@ -151,6 +151,10 @@ This module contains all memory-related helpers:
 During the `pre_scan_locals()` phase (which walks all statements before instruction emission), array variables are registered as **i32 WASM locals**, identical to any other scalar variable. The type-checker sets `TypeInfoKind::Array(...)` on the variable node, and `pre_scan_locals` treats it as a non-i64 type and assigns an `i32` local.
 
 Later, during instruction emission, when an array literal is initialized, `lower_array_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
+
+For struct-element arrays the `else` branch delegates to `lower_array_literal_struct_elements`. For scalar-element arrays — including multi-dimensional ones (`[[i32; 3]; 2]`) — it delegates to `store_array_literal_elements`, which recurses on the declared array type (derived from the literal's `expr_id` type info) and stores each scalar leaf at `slot_offset + Σ idxᵢ · strideᵢ`, mirroring `emit_array_uzumaki_recursive`. A nested array element that is itself a literal recurses; a non-literal array element (an identifier or call, e.g. `let g = [r, r];`) is copied with `memory.copy` for its full sub-array byte size. Single-dimensional scalar arrays only reach the scalar leaf path and emit byte-identical output to before.
+
+Nested **array-of-structs** literals (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], [..]]`) are also handled by `store_array_literal_elements`: the outer array's element is itself an array, so the `Array` arm recurses until it reaches a struct leaf. The struct leaf reuses the single-dimensional AoS machinery — its field layout is computed once via `compute_struct_field_layout`, then each element writes its fields at `base + i·stride + field_offset` through `lower_struct_literal_fields` (for a `StructLiteral` element) or a full-struct `memory.copy` (for a non-literal element such as `let p = Pt{..}; let g = [[p, p], [p, p]];`). An **enum** leaf (`[[Color; 2]; 2]`) is scalar-sized, so `lookup_struct` returns `None` and the element falls through to the scalar leaf path. Single-dimensional AoS (`[Pt; 3]`) never enters this helper — it takes the `lower_array_literal_struct_elements` branch in `lower_array_literal` — so its output is unaffected.
 
 #### `compute_frame_layout()`
 
@@ -523,11 +527,11 @@ The function prologue emits `memory.fill 0` to zero-initialize the entire stack 
 
 During variable initialization (inside a `Stmt::VarDef` handler), the compiler sets the `init_zero_elision` flag on the `Compiler` struct to `true` before calling the expression lowering path, and resets it to `false` immediately after. While this flag is set:
 
-- **Scalar array elements** — if `is_syntactic_zero(element_expr)` returns `true`, the element's store is skipped entirely.
+- **Scalar array elements** — if `is_syntactic_zero(element_expr)` returns `true`, the element's store is skipped entirely. For multi-dimensional scalar arrays this check runs at each leaf inside `store_array_literal_elements`, so an inner literal such as `[[0, 7], [0, 0]]` stores only the single non-zero leaf.
 - **Struct scalar fields** — if `is_syntactic_zero(field_value_expr)` returns `true`, the field's store is skipped.
 - **Struct nested-array field elements** — each element is checked individually; zero elements are skipped.
 
-The flag is threaded into recursive helpers as the `skip_zero_stores: bool` parameter on `lower_struct_literal_fields` and the struct-element array path in `lower_array_literal`.
+The flag is threaded into recursive helpers as the `skip_zero_stores: bool` parameter on `lower_struct_literal_fields`, `store_array_literal_elements` (the scalar-element array path in `lower_array_literal`), and the struct-element array path in `lower_array_literal`.
 
 ### Recognized Zero Patterns
 
