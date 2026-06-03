@@ -113,6 +113,14 @@ A035 builds a whole-program call graph keyed by the canonical function name (mat
 
 A036 reuses A035's whole-program call graph (a DAG, since recursion is forbidden) and computes the maximum-weight root-to-leaf path, where each node's weight is a conservative upper bound on that function's compound (array/struct) frame size. Scalar locals live in WASM locals and contribute nothing. The estimate over-approximates codegen's real frame layout by construction, so the rule never accepts a program codegen would overflow. The shared graph construction lives in `src/call_graph.rs`.
 
+### Array Bounds (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A037 | `ArrayIndexConstOutOfBounds` | error | a constant array index (`arr[c]`) is negative or `>= length` |
+
+A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time in all Compile-mode builds by `core/wasm-codegen` (see that crate's docs); the two mechanisms together close the bounds-safety hole.
+
 ## Diagnostic Output Format
 
 ```
@@ -209,6 +217,7 @@ Test files are organized by rule group:
 | `rules_a031.rs` | A031 (unsupported compound return expression) |
 | `rules_a035.rs` | A035 (direct and mutual/indirect recursion) |
 | `rules_a036.rs` | A036 (cumulative stack depth exceeded) |
+| `rules_a037.rs` | A037 (constant array index out of bounds) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies

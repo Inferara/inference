@@ -131,7 +131,7 @@
     unreachable
   )
   (func $read_with_variable (;3;) (type 3) (param $i i32) (result i32)
-    (local $arr i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -160,6 +160,13 @@
     local.set $arr
     local.get $arr
     local.get $i
+    local.tee 3
+    local.get 3
+    i32.const 3
+    i32.ge_u
+    if ;; label = @1
+      unreachable
+    end
     i32.const 4
     i32.mul
     i32.add

@@ -8,7 +8,7 @@
   (export "memory" (memory 0))
   (export "__stack_pointer" (global 0))
   (func $sum_array_elements (;0;) (type 0) (result i32)
-    (local $arr i32) (local $sum i32) (local $i i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $sum i32) (local $i i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 16
     i32.sub
@@ -54,6 +54,13 @@
         local.get $sum
         local.get $arr
         local.get $i
+        local.tee 4
+        local.get 4
+        i32.const 4
+        i32.ge_u
+        if ;; label = @3
+          unreachable
+        end
         i32.const 4
         i32.mul
         i32.add
@@ -76,7 +83,7 @@
     unreachable
   )
   (func $fill_and_sum (;1;) (type 1) (param $n i32) (result i32)
-    (local $arr i32) (local $i i32) (local $__frame_ptr i32)
+    (local $arr i32) (local $i i32) (local $__frame_ptr i32) (local i32)
     global.get 0
     i32.const 32
     i32.sub
@@ -99,6 +106,13 @@
         br_if 1 (;@1;)
         local.get $arr
         local.get $i
+        local.tee 4
+        local.get 4
+        i32.const 5
+        i32.ge_u
+        if ;; label = @3
+          unreachable
+        end
         i32.const 4
         i32.mul
         i32.add

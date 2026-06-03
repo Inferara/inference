@@ -19,7 +19,7 @@ The `core/type-checker` crate validates:
 - Array variables, parameters, and literals have correct types
 
 The `core/analysis` crate enforces codegen constraints:
-- Multidimensional scalar arrays (`[[i32; 3]; 2]`) support full read/write access at any depth, uzumaki initialization, and parameter passing
+- Multidimensional scalar arrays (`[[i32; 3]; 2]`) support full read/write access at any depth, literal initialization, uzumaki initialization, and parameter passing
 - Struct-element arrays (`[Point; 3]`) are supported at one level of nesting
 - Struct fields whose type is itself a compound type (another struct or an array) are rejected by rule A026 when the nesting would exceed one level (e.g., a struct field of type `[[i32; 3]; 2]` or a struct field of a struct that itself has compound fields)
 
@@ -151,6 +151,10 @@ This module contains all memory-related helpers:
 During the `pre_scan_locals()` phase (which walks all statements before instruction emission), array variables are registered as **i32 WASM locals**, identical to any other scalar variable. The type-checker sets `TypeInfoKind::Array(...)` on the variable node, and `pre_scan_locals` treats it as a non-i64 type and assigns an `i32` local.
 
 Later, during instruction emission, when an array literal is initialized, `lower_array_literal()` stores array elements in linear memory and pushes the frame pointer (pointer to the array data) onto the WASM stack, which is then assigned to the local via `local.set`.
+
+For struct-element arrays the `else` branch delegates to `lower_array_literal_struct_elements`. For scalar-element arrays — including multi-dimensional ones (`[[i32; 3]; 2]`) — it delegates to `store_array_literal_elements`, which recurses on the declared array type (derived from the literal's `expr_id` type info) and stores each scalar leaf at `slot_offset + Σ idxᵢ · strideᵢ`, mirroring `emit_array_uzumaki_recursive`. A nested array element that is itself a literal recurses; a non-literal array element (an identifier or call, e.g. `let g = [r, r];`) is copied with `memory.copy` for its full sub-array byte size. Single-dimensional scalar arrays only reach the scalar leaf path and emit byte-identical output to before.
+
+Nested **array-of-structs** literals (`let g: [[Pt; 2]; 2] = [[Pt{..}, Pt{..}], [..]]`) are also handled by `store_array_literal_elements`: the outer array's element is itself an array, so the `Array` arm recurses until it reaches a struct leaf. The struct leaf reuses the single-dimensional AoS machinery — its field layout is computed once via `compute_struct_field_layout`, then each element writes its fields at `base + i·stride + field_offset` through `lower_struct_literal_fields` (for a `StructLiteral` element) or a full-struct `memory.copy` (for a non-literal element such as `let p = Pt{..}; let g = [[p, p], [p, p]];`). An **enum** leaf (`[[Color; 2]; 2]`) is scalar-sized, so `lookup_struct` returns `None` and the element falls through to the scalar leaf path. Single-dimensional AoS (`[Pt; 3]`) never enters this helper — it takes the `lower_array_literal_struct_elements` branch in `lower_array_literal` — so its output is unaffected.
 
 #### `compute_frame_layout()`
 
@@ -489,6 +493,32 @@ i32.load / i64.load / ...  ;; load element
 
 The same three-case specialization applies to array index writes (`arr[i] = x`): zero-index emits no offset instruction, constant non-zero index folds to a single `i32.const`, and variable index uses runtime multiply.
 
+## Runtime Bounds Checking
+
+A dynamic (runtime-variable) index can address memory outside the array's bounds and silently corrupt adjacent frame slots. In **Compile mode** the codegen emits a guard before the offset multiply so an out-of-range access traps cleanly instead. Constant indices are *not* guarded here — they are rejected at compile time by analysis rule `A037` (see `core/analysis`), so the static and dynamic halves together cover every index.
+
+The guard is emitted for **all Compile-mode builds** (Debug and Release, Wasm32 and Soroban): the `codegen()` entry point sets the `Compiler::emit_bounds_checks` flag whenever `mode == CompilationMode::Compile`, so the executed/deployed artifact is always checked. `OptLevel` no longer influences bounds checks. **Proof** mode is left unguarded pending the proof-obligation path (#212), which will discharge dynamic bounds as Rocq obligations rather than runtime traps; the `emit_index_offset` choke point is the seam where that path hooks in.
+
+For Case 3 (`arr[i]`) in Compile mode, the guard is inserted between the index push and the offset multiply. The index is single-evaluated into a scratch i32 local via `local.tee`, so an index expression with side effects runs exactly once. The scratch is reserved per function **iff the body actually contains a dynamic array index** (`body_has_dynamic_array_index` — a non-`NumberLiteral` index, the only case that emits a guard), independent of whether the function has a frame. This keeps constant-index-only functions byte-identical to an unchecked build, and reserves the scratch even for an immutable-`self` method like `self.arr[idx]` that needs no frame slot. The scratch sits at the next free local after the named locals and the optional frame-pointer temp:
+
+```wasm
+<lower array expr>      ;; push base pointer
+<lower index expr>      ;; push i32 index
+local.tee   $scratch    ;; [base, index]; $scratch = index
+local.get   $scratch    ;; [base, index, index]
+i32.const   <length>
+i32.ge_u                ;; index >= length ?  (unsigned: also traps negatives, which arrive as huge u32)
+if (empty)
+  unreachable           ;; trap on out-of-bounds
+end                     ;; [base, index]
+i32.const   <elem_size>
+i32.mul
+i32.add                 ;; address = base + index * elem_size
+i32.load / i64.load / ...
+```
+
+The empty-result `if` consumes only the comparison result and leaves `base` and `index` on the stack, so the offset computation proceeds unchanged. The `unreachable` trap reuses the `assert` lowering idiom and maps to `BI_unreachable` in the Rocq translator, so guarded code remains translatable. Both the read path (`lower_array_index_access`) and the write path (`lower_array_index_write`) share the single `emit_index_offset` choke point, so reads and writes are guarded identically. Treating dynamic bounds as discharged Rocq proof obligations (rather than runtime traps) is reserved future work; this seam is where such a Proof-mode path would hook in.
+
 ## Zero-Store Elision During Initialization
 
 The function prologue emits `memory.fill 0` to zero-initialize the entire stack frame before any instructions run. This means that every byte of the frame is already zero at the point where the first `let` or `const` initializer executes. Any store of a zero value into that freshly-zeroed memory is therefore redundant.
@@ -497,11 +527,11 @@ The function prologue emits `memory.fill 0` to zero-initialize the entire stack 
 
 During variable initialization (inside a `Stmt::VarDef` handler), the compiler sets the `init_zero_elision` flag on the `Compiler` struct to `true` before calling the expression lowering path, and resets it to `false` immediately after. While this flag is set:
 
-- **Scalar array elements** — if `is_syntactic_zero(element_expr)` returns `true`, the element's store is skipped entirely.
+- **Scalar array elements** — if `is_syntactic_zero(element_expr)` returns `true`, the element's store is skipped entirely. For multi-dimensional scalar arrays this check runs at each leaf inside `store_array_literal_elements`, so an inner literal such as `[[0, 7], [0, 0]]` stores only the single non-zero leaf.
 - **Struct scalar fields** — if `is_syntactic_zero(field_value_expr)` returns `true`, the field's store is skipped.
 - **Struct nested-array field elements** — each element is checked individually; zero elements are skipped.
 
-The flag is threaded into recursive helpers as the `skip_zero_stores: bool` parameter on `lower_struct_literal_fields` and the struct-element array path in `lower_array_literal`.
+The flag is threaded into recursive helpers as the `skip_zero_stores: bool` parameter on `lower_struct_literal_fields`, `store_array_literal_elements` (the scalar-element array path in `lower_array_literal`), and the struct-element array path in `lower_array_literal`.
 
 ### Recognized Zero Patterns
 
@@ -951,6 +981,7 @@ Coverage marks for testing array- and struct-related code:
 | `wasm_codegen_emit_array_param_copy` | `emit_array_param_copy()` | Array parameter copied to frame |
 | `wasm_codegen_emit_array_index_read` | `lower_array_index_access()` | Array element read via load |
 | `wasm_codegen_emit_array_index_write` | `lower_array_index_write()` | Array element written via store |
+| `wasm_codegen_emit_bounds_check` | `emit_bounds_check_guard()` | Runtime bounds-check guard emitted for a dynamic index (all Compile-mode builds) |
 | `wasm_codegen_emit_array_uzumaki` | `lower_array_uzumaki()` | Non-deterministic array initialization |
 | `wasm_codegen_emit_struct_literal` | `lower_struct_literal()` | Struct literal stored field-by-field |
 | `wasm_codegen_emit_struct_param_copy` | `emit_struct_param_copy()` | Struct parameter copied to callee frame |

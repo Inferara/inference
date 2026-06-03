@@ -186,15 +186,14 @@ mod unsupported_compound_types {
     use crate::utils::try_codegen;
 
     #[test]
-    fn array_of_arrays() {
+    fn array_of_arrays_succeeds() {
         let result = try_codegen(
             "pub fn test() -> i32 { let a: [[i32; 2]; 2] = [[1,2],[3,4]]; return a[0][0]; }",
         );
-        assert!(result.is_err(), "array of arrays should fail codegen");
-        let err = result.unwrap_err();
         assert!(
-            err.contains("unsupported position"),
-            "unexpected error message: {err}"
+            result.is_ok(),
+            "multi-dimensional array literal init should succeed codegen: {:?}",
+            result.err()
         );
     }
 
@@ -218,6 +217,18 @@ mod unsupported_compound_types {
         assert!(
             result.is_ok(),
             "struct with array field should succeed codegen: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn nested_array_of_structs_succeeds() {
+        let result = try_codegen(
+            "struct P { x: i32; y: i32; }\npub fn test() -> i32 { let g: [[P; 2]; 2] = [[P{x:1,y:2}, P{x:3,y:4}], [P{x:5,y:6}, P{x:7,y:8}]]; return g[1][0].x; }",
+        );
+        assert!(
+            result.is_ok(),
+            "nested array-of-structs literal init should succeed codegen: {:?}",
             result.err()
         );
     }

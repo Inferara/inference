@@ -413,6 +413,20 @@ pub(crate) struct Compiler {
     /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
     /// invariant (A036's estimate ≥ this) can be checked cross-crate.
     frame_sizes: FxHashMap<String, u32>,
+    /// When true, dynamic (runtime-index) array accesses are preceded by a
+    /// bounds-check guard (`index >= length → unreachable`). Derived in
+    /// Set by [`crate::codegen`] for every Compile-mode build (the deployed
+    /// artifact is always checked); left `false` in Proof mode and at
+    /// `Compiler::new` call sites so those paths stay unguarded.
+    emit_bounds_checks: bool,
+    /// WASM local index of the scratch i32 used to single-evaluate a dynamic
+    /// array index for the bounds-check guard (AD-3). Reserved per-function in
+    /// [`Self::visit_function_definition`] only when `emit_bounds_checks` is set
+    /// and the body actually contains a dynamic array index (the only case that
+    /// emits a guard); `None` otherwise — including for constant-index-only and
+    /// frameless functions. Reset per function alongside the rest of the
+    /// per-function state.
+    bounds_check_scratch_local: Option<u32>,
 }
 
 impl Compiler {
@@ -443,7 +457,19 @@ impl Compiler {
             init_zero_elision: false,
             spec_func_indices_by_spec: FxHashMap::default(),
             frame_sizes: FxHashMap::default(),
+            emit_bounds_checks: false,
+            bounds_check_scratch_local: None,
         }
+    }
+
+    /// Enables or disables runtime array bounds-check emission.
+    ///
+    /// [`crate::codegen`] enables it for every Compile-mode build (so the
+    /// deployed artifact always traps on a dynamic out-of-range access) and
+    /// leaves it `false` in Proof mode. Test call sites of [`Self::new`] keep
+    /// the default `false`, so their emitted bytes stay unguarded.
+    pub(crate) fn set_emit_bounds_checks(&mut self, enabled: bool) {
+        self.emit_bounds_checks = enabled;
     }
 
     /// Records a single WASM function index as belonging to `spec_name`.
@@ -914,8 +940,23 @@ impl Compiler {
             sorted_locals.into_iter().map(|(_, vt)| (1, vt)).collect()
         };
 
-        if self.frame_layout.is_some() {
+        let has_frame = self.frame_layout.is_some();
+        if has_frame {
             local_declarations.push((1, ValType::I32));
+        }
+
+        // Reserve an i32 scratch local for the bounds-check guard so a dynamic
+        // array index can be single-evaluated via `local.tee` (AD-3). It is
+        // reserved iff the function actually contains a dynamic index (the only
+        // case that emits a guard), independent of whether a frame exists: an
+        // immutable-`self` method like `self.arr[idx]` needs no frame slot yet
+        // still emits the guard. Tying the reservation to guard emission keeps
+        // constant-index-only functions byte-identical to an unchecked build.
+        // The scratch sits at the next free local after the named locals and the
+        // optional frame-pointer temp, so its index and its push order agree.
+        if self.emit_bounds_checks && Self::body_has_dynamic_array_index(arena, body_id) {
+            local_declarations.push((1, ValType::I32));
+            self.bounds_check_scratch_local = Some(local_idx + u32::from(has_frame));
         }
 
         self.func = Some(Function::new(local_declarations));
@@ -1022,6 +1063,7 @@ impl Compiler {
         self.bodies.push(completed_func);
         self.frame_layout = None;
         self.locals_map.clear();
+        self.bounds_check_scratch_local = None;
         self.loop_ctx = LoopContext::default();
         self.parent_blocks_stack.clear();
         // `current_spec` is reset by `SpecScopeGuard` in the caller.
@@ -1098,6 +1140,99 @@ impl Compiler {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Returns `true` if the function body contains at least one *dynamic* array
+    /// index — an `Expr::ArrayIndexAccess` whose index is not a numeric literal.
+    ///
+    /// A non-`NumberLiteral` index is exactly the case that takes the dynamic
+    /// branch of [`Self::emit_index_offset`] and therefore emits a bounds-check
+    /// guard. The bounds-check scratch local is reserved iff this returns `true`
+    /// (and `emit_bounds_checks` is set), so functions that only index by
+    /// constants reserve no scratch and stay byte-identical to an unchecked
+    /// build, while a dynamic index — even through an immutable-`self` method
+    /// like `self.arr[idx]` that needs no frame slot — still gets its scratch.
+    ///
+    /// The walk mirrors [`Self::pre_scan_locals`]' block descent (regular,
+    /// `if`/`else`, `loop`, and non-det blocks all flow through `Stmt::Block`)
+    /// and additionally descends into every sub-expression so nested forms such
+    /// as `m[i][j]`, `arr[idx].x`, and indices inside calls are not missed.
+    fn body_has_dynamic_array_index(arena: &AstArena, block_id: BlockId) -> bool {
+        arena[block_id].stmts.iter().any(|&stmt_id| {
+            match &arena[stmt_id].kind {
+                Stmt::Expr(e) | Stmt::Return { expr: e } | Stmt::Assert { expr: e } => {
+                    Self::expr_has_dynamic_array_index(arena, *e)
+                }
+                Stmt::Assign { left, right } => {
+                    Self::expr_has_dynamic_array_index(arena, *left)
+                        || Self::expr_has_dynamic_array_index(arena, *right)
+                }
+                Stmt::VarDef { value, .. } => value
+                    .as_ref()
+                    .is_some_and(|&v| Self::expr_has_dynamic_array_index(arena, v)),
+                Stmt::Block(inner) => Self::body_has_dynamic_array_index(arena, *inner),
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    Self::expr_has_dynamic_array_index(arena, *condition)
+                        || Self::body_has_dynamic_array_index(arena, *then_block)
+                        || else_block
+                            .as_ref()
+                            .is_some_and(|&e| Self::body_has_dynamic_array_index(arena, e))
+                }
+                Stmt::Loop { condition, body } => {
+                    condition
+                        .as_ref()
+                        .is_some_and(|&c| Self::expr_has_dynamic_array_index(arena, c))
+                        || Self::body_has_dynamic_array_index(arena, *body)
+                }
+                Stmt::Break | Stmt::TypeDef { .. } | Stmt::ConstDef(_) => false,
+            }
+        })
+    }
+
+    /// Recursively reports whether `expr_id` (or any sub-expression) is an
+    /// `ArrayIndexAccess` with a non-literal index. Supporting helper for
+    /// [`Self::body_has_dynamic_array_index`].
+    fn expr_has_dynamic_array_index(arena: &AstArena, expr_id: ExprId) -> bool {
+        match &arena[expr_id].kind {
+            Expr::ArrayIndexAccess { array, index } => {
+                !matches!(arena[*index].kind, Expr::NumberLiteral { .. })
+                    || Self::expr_has_dynamic_array_index(arena, *array)
+                    || Self::expr_has_dynamic_array_index(arena, *index)
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *left)
+                    || Self::expr_has_dynamic_array_index(arena, *right)
+            }
+            Expr::PrefixUnary { expr, .. }
+            | Expr::Parenthesized { expr }
+            | Expr::MemberAccess { expr, .. }
+            | Expr::TypeMemberAccess { expr, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *expr)
+            }
+            Expr::FunctionCall { function, args, .. } => {
+                Self::expr_has_dynamic_array_index(arena, *function)
+                    || args
+                        .iter()
+                        .any(|(_, arg)| Self::expr_has_dynamic_array_index(arena, *arg))
+            }
+            Expr::StructLiteral { fields, .. } => fields
+                .iter()
+                .any(|(_, value)| Self::expr_has_dynamic_array_index(arena, *value)),
+            Expr::ArrayLiteral { elements } => elements
+                .iter()
+                .any(|&e| Self::expr_has_dynamic_array_index(arena, e)),
+            Expr::Identifier(_)
+            | Expr::NumberLiteral { .. }
+            | Expr::BoolLiteral { .. }
+            | Expr::StringLiteral { .. }
+            | Expr::UnitLiteral
+            | Expr::Uzumaki
+            | Expr::Type(_) => false,
         }
     }
 
@@ -1898,7 +2033,7 @@ impl Compiler {
                     )
                 });
                 let elements = elements.clone();
-                self.lower_array_literal(arena, &elements, var_name, ctx);
+                self.lower_array_literal(arena, expr_id, &elements, var_name, ctx);
             }
             Expr::BoolLiteral { value } => {
                 self.func()
@@ -2607,13 +2742,15 @@ impl Compiler {
             TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
+        let array_len = Self::array_length(array_expr_id, ctx);
+
         if is_compound_element {
             let elem_sz = type_byte_size(&elem_type_info.kind, ctx)
                 .expect("array index write: type_byte_size failed for compound element");
 
             // dest: array_base + index * struct_size
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
             // src: RHS expression (struct pointer)
             self.lower_expression(arena, right_expr_id, ctx, None);
             self.emit_memory_copy(elem_sz);
@@ -2622,7 +2759,7 @@ impl Compiler {
             let store_instr = memory::store_instruction(&elem_type_info.kind);
 
             self.lower_expression(arena, array_expr_id, ctx, None);
-            self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+            self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
             self.lower_expression(arena, right_expr_id, ctx, None);
 
             self.func().instruction(&store_instr);
@@ -2777,8 +2914,10 @@ impl Compiler {
             memory::element_size(&elem_type_info.kind)
         };
 
+        let array_len = Self::array_length(array_expr_id, ctx);
+
         self.lower_expression(arena, array_expr_id, ctx, None);
-        self.emit_index_offset(arena, index_expr_id, elem_sz, ctx);
+        self.emit_index_offset(arena, index_expr_id, elem_sz, array_len, ctx);
 
         if !is_compound_element {
             let load_instr = memory::load_instruction(&elem_type_info.kind);
@@ -2786,12 +2925,37 @@ impl Compiler {
         }
     }
 
+    /// Returns the length of the array that `array_expr_id` evaluates to, when
+    /// the type checker stamped an `Array(_, length)` type on that sub-expression.
+    ///
+    /// The element-type info on the `ArrayIndexAccess` node discards the length;
+    /// the array sub-expression retains it. Returns `None` for any other type
+    /// (e.g. an unresolved expression), in which case the bounds-check guard is
+    /// skipped rather than panicking.
+    fn array_length(array_expr_id: ExprId, ctx: &TypedContext) -> Option<u32> {
+        match ctx.get_node_typeinfo(NodeId::Expr(array_expr_id)) {
+            Some(TypeInfo {
+                kind: TypeInfoKind::Array(_, length),
+                ..
+            }) => Some(length),
+            _ => None,
+        }
+    }
+
     /// Emits the byte-offset computation for an array index expression.
+    ///
+    /// On entry the array base address is already on the WASM stack. For a
+    /// constant index the offset folds to an `i32.const` add (no runtime guard —
+    /// constant indices are validated statically by analysis rule A037, AD-5).
+    /// For a dynamic index the runtime index is lowered, then — when
+    /// `emit_bounds_checks` is set and `array_len` is known — a bounds-check
+    /// guard traps before the offset multiply (AD-3, AD-4).
     fn emit_index_offset(
         &mut self,
         arena: &AstArena,
         index_expr_id: ExprId,
         elem_sz: u32,
+        array_len: Option<u32>,
         ctx: &TypedContext,
     ) {
         if let Some(byte_offset) = try_const_index_byte_offset(arena, index_expr_id, elem_sz) {
@@ -2801,12 +2965,59 @@ impl Compiler {
             }
         } else {
             self.lower_expression(arena, index_expr_id, ctx, None);
+            self.emit_bounds_check_guard(array_len);
             #[allow(clippy::cast_possible_wrap)]
             self.func()
                 .instruction(&Instruction::I32Const(elem_sz as i32));
             self.func().instruction(&Instruction::I32Mul);
             self.func().instruction(&Instruction::I32Add);
         }
+    }
+
+    /// Emits the runtime bounds-check guard for a dynamic array index.
+    ///
+    /// Precondition: the stack top holds the just-lowered index, sitting above
+    /// the array base address (`[base, index]`). The guard single-evaluates the
+    /// index into a scratch local, then traps when `index >= length`:
+    ///
+    /// ```wat
+    /// local.tee $scratch   ;; [base, index]; $scratch = index
+    /// local.get $scratch   ;; [base, index, index]
+    /// i32.const N          ;; [base, index, index, N]
+    /// i32.ge_u             ;; [base, index, cond]   (unsigned: also traps negatives, which arrive as huge u32)
+    /// if (empty)           ;; [base, index]
+    ///   unreachable
+    /// end                  ;; [base, index]
+    /// ```
+    ///
+    /// The empty-result `if` leaves `base` and `index` untouched on the stack,
+    /// so the caller's offset multiply proceeds unchanged. No guard is emitted
+    /// when `emit_bounds_checks` is unset or `array_len` is unknown (the offset
+    /// computation stays valid either way).
+    fn emit_bounds_check_guard(&mut self, array_len: Option<u32>) {
+        let Some(length) = array_len.filter(|_| self.emit_bounds_checks) else {
+            return;
+        };
+        cov_mark::hit!(wasm_codegen_emit_bounds_check);
+
+        let scratch = self.bounds_check_scratch_local.expect(
+            "bounds-check scratch local must be reserved: a dynamic array index implies a frame \
+             layout, which reserves the scratch under emit_bounds_checks",
+        );
+
+        #[allow(clippy::cast_possible_wrap)]
+        let length = length as i32;
+
+        self.func().instruction(&Instruction::LocalTee(scratch));
+        self.func().instruction(&Instruction::LocalGet(scratch));
+        self.func().instruction(&Instruction::I32Const(length));
+        self.func().instruction(&Instruction::I32GeU);
+        self.func()
+            .instruction(&Instruction::If(WasmBlockType::Empty));
+        self.loop_ctx.wasm_block_depth += 1;
+        self.func().instruction(&Instruction::Unreachable);
+        self.loop_ctx.wasm_block_depth -= 1;
+        self.func().instruction(&Instruction::End);
     }
 
     /// Lowers an array-typed uzumaki expression to element-wise non-deterministic stores.
@@ -3382,6 +3593,7 @@ impl Compiler {
     fn lower_array_literal(
         &mut self,
         arena: &AstArena,
+        expr_id: ExprId,
         elements: &[ExprId],
         enclosing_var_name: &str,
         ctx: &TypedContext,
@@ -3430,25 +3642,24 @@ impl Compiler {
                 self.init_zero_elision,
             );
         } else {
-            let store_instr = memory::store_instruction_from_slot(slot);
-            for (i, &element_id) in elements.iter().enumerate() {
-                // Scalar path checks self.init_zero_elision directly (single call site,
-                // no recursion). Struct/nested paths use skip_zero_stores parameter
-                // for recursive descent through lower_struct_literal_fields.
-                if self.init_zero_elision && Self::is_syntactic_zero(arena, element_id) {
-                    continue;
-                }
-                #[allow(clippy::cast_possible_truncation)]
-                let byte_offset = slot_offset + (i as u32) * slot_elem_size;
-                self.func()
-                    .instruction(&Instruction::LocalGet(frame_ptr_local));
-                #[allow(clippy::cast_possible_wrap)]
-                self.func()
-                    .instruction(&Instruction::I32Const(byte_offset as i32));
-                self.func().instruction(&Instruction::I32Add);
-                self.lower_expression(arena, element_id, ctx, None);
-                self.func().instruction(&store_instr);
-            }
+            let elem_kind = match ctx
+                .get_node_typeinfo(NodeId::Expr(expr_id))
+                .map(|info| info.kind)
+            {
+                Some(TypeInfoKind::Array(elem, _)) => elem.kind,
+                other => panic!(
+                    "array literal '{parent_var_name}' has non-array type info: {other:?}"
+                ),
+            };
+            self.store_array_literal_elements(
+                arena,
+                elements,
+                &elem_kind,
+                slot_offset,
+                frame_ptr_local,
+                ctx,
+                self.init_zero_elision,
+            );
         }
 
         self.func()
@@ -3458,6 +3669,127 @@ impl Compiler {
             self.func()
                 .instruction(&Instruction::I32Const(slot_offset as i32));
             self.func().instruction(&Instruction::I32Add);
+        }
+    }
+
+    /// Recursively stores the leaves of a (possibly multi-dimensional) scalar
+    /// array literal into the frame slot at `dest_base_offset`.
+    ///
+    /// Mirrors [`Self::emit_array_uzumaki_recursive`], but stores literal values
+    /// rather than non-deterministic opcodes. For an `Array(inner, _)` element
+    /// kind, each sub-array literal recurses at offset `dest_base_offset + i *
+    /// stride` (where `stride` is the inner sub-array's total byte size); a
+    /// non-literal array element (identifier or call) is copied with
+    /// `memory.copy`. For a scalar leaf, the value is lowered and stored.
+    ///
+    /// The leaf store emits the **unconditional** `local.get; i32.const off;
+    /// i32.add` address sequence (not [`memory::emit_ptr_offset_addr`], which
+    /// elides the `i32.const 0; i32.add` at offset 0) and [`memory::store_instruction`]
+    /// so that single-dimensional scalar arrays produce byte-identical output to
+    /// the pre-recursion path. Scalar leaves are zero-elided through the same
+    /// `skip_zero_stores` thread used by the struct-element path.
+    #[allow(clippy::too_many_arguments)]
+    fn store_array_literal_elements(
+        &mut self,
+        arena: &AstArena,
+        elements: &[ExprId],
+        elem_kind: &TypeInfoKind,
+        dest_base_offset: u32,
+        frame_ptr_local: u32,
+        ctx: &TypedContext,
+        skip_zero_stores: bool,
+    ) {
+        let stride = type_byte_size(elem_kind, ctx)
+            .expect("element byte size must be computable for array literal leaves");
+
+        // For a struct leaf (reached only via the `Array` arm's recursion on a
+        // nested array-of-structs literal), the field layout is constant for this
+        // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
+        let struct_leaf_layout = match elem_kind {
+            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                ctx.lookup_struct(name).map(|struct_info| {
+                    let (total_size, field_slots) =
+                        memory::compute_struct_field_layout(&struct_info, ctx)
+                            .expect("struct field layout must be computable for array literal leaves");
+                    (name.clone(), total_size, field_slots)
+                })
+            }
+            _ => None,
+        };
+
+        for (i, &element_id) in elements.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            let off = dest_base_offset
+                .checked_add(
+                    (i as u32)
+                        .checked_mul(stride)
+                        .expect("array literal element offset overflow"),
+                )
+                .expect("array literal base + element offset overflow");
+
+            // Struct leaf: reached only via the `Array` arm's recursion on a nested
+            // array-of-structs literal. Mirrors `lower_array_literal_struct_elements`,
+            // the path single-dim AoS uses, so each element's fields land at
+            // `off + field_offset`. An enum `Custom` leaf has `struct_leaf_layout == None`
+            // and falls through to the scalar arm below (enums are scalar-sized).
+            if let Some((ref struct_name, struct_total_size, ref field_slots)) = struct_leaf_layout {
+                if let Expr::StructLiteral { fields, .. } = &arena[element_id].kind {
+                    let fields: Vec<_> = fields.iter().map(|(id, expr)| (*id, *expr)).collect();
+                    self.lower_struct_literal_fields(
+                        arena,
+                        &fields,
+                        field_slots,
+                        frame_ptr_local,
+                        off,
+                        ctx,
+                        struct_name,
+                        0,
+                        skip_zero_stores,
+                    );
+                } else {
+                    memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, off);
+                    self.lower_expression(arena, element_id, ctx, None);
+                    self.emit_memory_copy(struct_total_size);
+                }
+                continue;
+            }
+
+            match elem_kind {
+                TypeInfoKind::Array(inner, _) => {
+                    if let Expr::ArrayLiteral {
+                        elements: inner_elements,
+                    } = &arena[element_id].kind
+                    {
+                        let inner_elements = inner_elements.clone();
+                        self.store_array_literal_elements(
+                            arena,
+                            &inner_elements,
+                            &inner.kind,
+                            off,
+                            frame_ptr_local,
+                            ctx,
+                            skip_zero_stores,
+                        );
+                    } else {
+                        memory::emit_ptr_offset_addr(self.func(), frame_ptr_local, off);
+                        self.lower_expression(arena, element_id, ctx, None);
+                        self.emit_memory_copy(stride);
+                    }
+                }
+                scalar_kind => {
+                    if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
+                        continue;
+                    }
+                    self.func()
+                        .instruction(&Instruction::LocalGet(frame_ptr_local));
+                    #[allow(clippy::cast_possible_wrap)]
+                    self.func().instruction(&Instruction::I32Const(off as i32));
+                    self.func().instruction(&Instruction::I32Add);
+                    self.lower_expression(arena, element_id, ctx, None);
+                    self.func()
+                        .instruction(&memory::store_instruction(scalar_kind));
+                }
+            }
         }
     }
 
@@ -4147,6 +4479,19 @@ mod tests {
         assert!(!compiler.has_memory);
         compiler.enable_memory();
         assert!(compiler.has_memory);
+    }
+
+    #[test]
+    fn emit_bounds_checks_defaults_off_and_toggles() {
+        let mut compiler = Compiler::new("test");
+        assert!(
+            !compiler.emit_bounds_checks,
+            "bounds checks must default off so Proof mode / Compiler::new output stays unguarded"
+        );
+        compiler.set_emit_bounds_checks(true);
+        assert!(compiler.emit_bounds_checks);
+        compiler.set_emit_bounds_checks(false);
+        assert!(!compiler.emit_bounds_checks);
     }
 
     fn has_memory_section(wasm: &[u8]) -> bool {

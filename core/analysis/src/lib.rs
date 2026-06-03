@@ -75,6 +75,13 @@
 //!   that function's compound-frame size). The estimator over-approximates each
 //!   frame to stay sound against codegen; see [`rules::stack_depth`].
 //!
+//! ### Array Bounds (A037)
+//!
+//! - A037: A constant array index must be in bounds. When `arr[c]` has a literal
+//!   index `c` and the array's type is `[T; length]`, the access is rejected if
+//!   `c < 0` or `c >= length`. This is a compile-time check with zero runtime
+//!   cost; dynamic (non-literal) indices are out of scope for this rule.
+//!
 //! ## Pipeline Position
 //!
 //! ```text
@@ -184,6 +191,7 @@ mod tests {
             AnalysisDiagnostic::VisibilityInsideSpec { spec_name: "S".to_string(), def_name: "f".to_string(), def_kind: "fn", location: dummy_location() },
             AnalysisDiagnostic::RecursionDetected { cycle: "f -> f".to_string(), location: dummy_location() },
             AnalysisDiagnostic::StackDepthExceeded { chain: "a -> b".to_string(), depth_bytes: 80_000, budget_bytes: 65_536, location: dummy_location() },
+            AnalysisDiagnostic::ArrayIndexConstOutOfBounds { index: "3".to_string(), length: 3, location: dummy_location() },
         ];
 
         let rules = rules::all_rules();
