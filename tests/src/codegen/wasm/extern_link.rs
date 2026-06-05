@@ -24,8 +24,9 @@ mod extern_link_tests {
     use inf_wasmparser::{Parser, Payload, TypeRef};
 
     /// Compiles `source` to a `.wasm` with the default settings, skipping the
-    /// analysis phase (rule A024 still rejects extern calls, so the link that
-    /// satisfies them runs in a later phase than analysis).
+    /// analysis phase — this codegen path does not need it. (The library sources
+    /// passed here define no externs; in the main programs that do, A024 accepts
+    /// the bound externs and rejects only unbound ones.)
     fn compile_wasm(source: &str, module_name: &str) -> Vec<u8> {
         let arena = parse(source).expect("library source parses");
         let typed = type_check(arena).expect("library source type-checks");

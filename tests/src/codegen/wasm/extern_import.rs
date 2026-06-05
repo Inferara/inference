@@ -5,10 +5,10 @@
 //! (`0..N`), so every locally defined function is shifted by the import count and
 //! every extern call lowers to its import index.
 //!
-//! These tests run codegen WITHOUT analysis: analysis rule A024 still rejects
-//! calls to external functions (the link step that satisfies the import is a
-//! later phase), so the no-analysis path is the only way to exercise the codegen
-//! in isolation — mirroring how the non-det golden tests bypass analysis.
+//! These tests run codegen WITHOUT analysis to exercise the import-emission
+//! shape in isolation, mirroring how the non-det golden tests bypass analysis.
+//! (Analysis would also accept these fixtures: rule A024 rejects only *unbound*
+//! externs, and every extern here is bound via `use … from`.)
 
 #[cfg(test)]
 mod extern_import_tests {
