@@ -39,7 +39,8 @@ compiler resolves it at build time by searching:
 
 1. The `[wasm-dependencies]` table in `Inference.toml` (highest priority).
 2. Directories passed via `-L` / `--wasm-lib-dir` on the command line.
-3. Directories listed in the `INFERENCE_WASM_LIB` environment variable.
+3. Directories listed in the `INFERENCE_WASM_LIB_PATH` environment variable
+   (a `PATH`-style list, separated by `:` on Unix and `;` on Windows).
 
 A `::` separator is used for namespaced logical names:
 
@@ -147,9 +148,11 @@ Tier-C support in a future release.
 
 - External functions that themselves import their host environment (memory, globals)
   are rejected with a clear error: a static merge cannot reconstruct that environment.
-- Analysis rule A024 (`ExternFunctionCall`) rejects `external fn` calls during the
-  analysis phase so that programs using them go through the dedicated codegen path
-  and the subsequent link step.
+- Analysis rule A024 (`ExternFunctionCall`) is scope-aware: a call to a *bound*
+  external (one named by a `use { … } from <module>;` in scope) is allowed and
+  flows through the codegen + link path. Only a call to an *unbound* bare
+  `external fn` — one with no `use` binding — is rejected, since codegen emits no
+  import for it and so cannot compile the call.
 - Only one version of each logical module is resolved per build. Multi-version
   dependency resolution is deferred to a future manifest update.
 

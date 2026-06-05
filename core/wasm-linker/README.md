@@ -149,17 +149,23 @@ memory (load/store/copy/fill/size/grow), and Tier A otherwise.
 ```rust
 use inference_wasm_linker::{link, LinkError};
 
-let unified: Vec<u8> = link(main_wasm, &[external_wasm_a, external_wasm_b])?;
+let unified: Vec<u8> = link(
+    main_wasm,
+    &[("arith", arith_wasm), ("crypto", crypto_wasm)],
+)?;
 ```
 
-`link` takes the main module bytes and a slice of external module byte slices.
-It returns the unified module bytes, or a `LinkError` if any module fails to
+`link` takes the main module bytes and a slice of `(logical_module, bytes)`
+pairs — each external is tagged with the logical module name codegen emitted for
+it. It returns the unified module bytes, or a `LinkError` if any module fails to
 parse, a merged closure reaches a transitive host import, or a closure is Tier C.
 
 Every import in the main module must be satisfiable by one of the supplied
-external modules. The match is by export field name; the module name from the
-import entry (`"arith"`, `"crypto"`, …) is not used for matching — it is the
-logical module name emitted by codegen for diagnostic purposes.
+external modules. The match is by **both** the logical module name and the export
+field name: `find_export` (in `src/merge.rs`) only considers externals whose
+`logical_module` equals the import's module, then matches the field. So an import
+`("arith", "sum")` binds to the `sum` export of the external tagged `arith` — not
+to a same-named `sum` exported by a different module.
 
 ## Error Reference
 
