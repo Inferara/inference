@@ -265,9 +265,10 @@
 
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_ast::arena::AstArena;
-use inference_type_checker::typed_context::TypedContext;
+pub use inference_type_checker::typed_context::TypedContext;
 
 pub mod extern_prelude;
+pub mod wasm_link;
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
@@ -278,6 +279,11 @@ pub use rustc_hash::FxHashMap;
 /// LSP, tools) can match on translation failures without taking a direct
 /// dependency on `inference-wasm-to-v-translator`.
 pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
+
+/// Re-export of the static-merge linker's error type so downstream consumers
+/// can match on link failures (e.g. an unsatisfied import or a Tier-C module)
+/// without taking a direct dependency on `inference-wasm-linker`.
+pub use inference_wasm_linker::LinkError;
 
 /// Re-export of the `inference.spec_funcs` custom-section identifiers so
 /// downstream consumers (CLI tools, integration tests) share a single source
@@ -583,6 +589,36 @@ pub fn codegen(
         target.default_opt_level(),
         module_name,
     )
+}
+
+/// Folds external `.wasm` modules into the codegen output, producing a single
+/// self-contained module with no cross-module imports.
+///
+/// This is the post-codegen link step (Phase 4 of Issue #9). When a program
+/// `use`s functions from an external module, [`codegen`] emits those calls as
+/// WASM `(import …)` entries. This function consumes that intermediate module
+/// plus the resolved external module bytes and merges the imported functions'
+/// bodies in, re-indexing so the result imports nothing — the single artifact
+/// the user asked for, ready for [`wasm_to_v`].
+///
+/// `externals` is the set of resolved, validated external module binaries, each
+/// paired with the logical `::`-joined module name it was bound under so the
+/// merge can match an import's recorded `(module, field)` against the right
+/// external. When it is empty the call is a no-op pass-through: a program
+/// without externs links to byte-identical output, so callers can route every
+/// program through this step unconditionally.
+///
+/// # Errors
+///
+/// Returns an error if any module fails to parse, an import is left unsatisfied
+/// by the supplied externals, or a merged function falls into the unsupported
+/// Tier C (own static data / mutable globals). The underlying error downcasts
+/// to [`LinkError`].
+pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
+    if externals.is_empty() {
+        return Ok(main_wasm.to_vec());
+    }
+    Ok(inference_wasm_linker::link(main_wasm, externals)?)
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.

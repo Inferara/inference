@@ -1409,6 +1409,92 @@ mod type_validation_coverage {
     }
 }
 
+/// Validation of `external fn` signatures (issue #9 robustness audit, H6/H7).
+///
+/// An `external fn` is signature-only, but its declared types must still be
+/// real and it must not declare a `self` receiver. Before these checks an
+/// undeclared `Custom` type lowered to `i32` and `todo!()`-panicked codegen
+/// (H6), and a `self` receiver compiled to a silently-invalid `.wasm` (H7).
+#[cfg(test)]
+mod extern_signature_validation {
+    use super::*;
+
+    #[test]
+    fn undeclared_param_type_is_rejected() {
+        let source = r#"external fn f(a: Undeclared) -> i32;"#;
+        let Err(err) = try_type_check(source) else {
+            panic!("extern with an undeclared parameter type must be rejected");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Undeclared") || msg.contains("unknown type"),
+            "error should name the unknown type, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn undeclared_return_type_is_rejected() {
+        let source = r#"external fn f(a: i32) -> Undeclared;"#;
+        let Err(err) = try_type_check(source) else {
+            panic!("extern with an undeclared return type must be rejected");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Undeclared") || msg.contains("unknown type"),
+            "error should name the unknown type, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn declared_struct_type_in_signature_is_accepted() {
+        // A `Custom` type that resolves (here a struct) stays valid: the new
+        // validation only rejects *unknown* types, it does not reject all
+        // `Custom` forms.
+        let source = r#"struct S { x: i32; } external fn f(a: S) -> S;"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_ok(),
+            "extern over a declared struct type should type-check, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn self_receiver_is_rejected() {
+        let source = r#"external fn f(self, a: i32) -> i32;"#;
+        let Err(err) = try_type_check(source) else {
+            panic!("extern declaring a `self` receiver must be rejected");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("self reference"),
+            "error should be a self-reference diagnostic, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_inner_undeclared_param_type_is_rejected() {
+        // Spec-inner externs recurse back through the same collection arm, so
+        // the validation must hold inside a `spec` body too.
+        let source = r#"spec S { external fn f(a: Undeclared) -> i32; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "spec-inner extern with an undeclared parameter type must be rejected"
+        );
+    }
+
+    #[test]
+    fn spec_inner_self_receiver_is_rejected() {
+        let source = r#"spec S { external fn f(self, a: i32) -> i32; }"#;
+        let result = try_type_check(source);
+        assert!(
+            result.is_err(),
+            "spec-inner extern declaring a `self` receiver must be rejected"
+        );
+    }
+}
+
 #[cfg(test)]
 mod function_registration_coverage {
     use super::*;

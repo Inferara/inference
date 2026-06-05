@@ -21,13 +21,18 @@ Typed AST (TypedContext)
 ### Compilation Phases
 
 1. **AST Traversal** - Walk typed AST and visit function definitions
-2. **Function and method name pre-scan** - Build `func_name_to_idx` map from function
-   and method names to WASM function section indices before the main compilation pass. Two
-   sub-steps run: `build_func_name_to_idx` registers top-level functions, then
-   `build_method_name_to_idx` registers struct methods under mangled names
-   (`"{StructName}.{method_name}"`). This enables forward references — a caller defined
-   before its callee in source can still emit a valid `call` instruction. Method indices
-   follow top-level function indices in the WASM function section.
+2. **Import reservation + function index pre-scan** - Build the complete WASM function
+   index space before any body is compiled, in three ordered sub-steps:
+   (a) `register_imports` assigns indices `0..N` to every `external fn` declaration bound
+   via `use … from <module>`, populating `extern_name_to_idx` and recording the
+   `(logical_module, export_field, type_idx)` tuple needed for the import section;
+   (b) `build_func_name_to_idx` assigns indices `N..N+K` to top-level local functions
+   (shifted past the imports by `set_local_func_base(N)`);
+   (c) `build_method_name_to_idx` assigns indices beyond that for struct methods under
+   mangled names (`"{StructName}.{method_name}"`). This three-stage registration ensures
+   all callee indices — imports, locals, and methods — are known before the first `call`
+   instruction is emitted. Extern calls lower to `call <import_idx>` identically to local
+   calls.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
 3. **Compound Frame Layout** - For functions with array- or struct-typed variables or parameters,
    compute a stack frame layout by walking the entire function body and collecting array and struct
@@ -97,10 +102,13 @@ Typed AST (TypedContext)
    Non-void functions emit an `unreachable` instruction before the function `end` to
    satisfy the WASM validator when all paths exit through explicit `return` instructions.
    See [docs/conditionals-lowering.md](docs/conditionals-lowering.md).
-6. **Module Assembly** - Assemble TypeSection, FunctionSection, ExportSection, CodeSection,
-   NameSection, and (if any function uses linear memory) MemorySection and GlobalSection into
-   a complete WASM binary. Memory and globals are only emitted when at least one function uses
-   arrays or structs.
+6. **Module Assembly** - Assemble sections in WASM-required order into a complete binary:
+   TypeSection first, then ImportSection (only if at least one `external fn` is present;
+   sits between Type and Function per WASM spec), FunctionSection, MemorySection and
+   GlobalSection (only when at least one function uses arrays or structs), ExportSection,
+   CodeSection, NameSection, and custom spec sections. The import section placement is
+   mandatory because imported functions occupy the lowest indices and the section ordering
+   is enforced by the binary format.
 
 ## Non-Deterministic Extensions
 
@@ -267,9 +275,10 @@ Detailed design documents live in `docs/`:
 - [docs/assignment-lowering.md](docs/assignment-lowering.md) - How assignment statements
   (`x = expr;`) are lowered to WASM local.set instructions, local index resolution, and
   current limitations on target forms.
-- [docs/function-calls-lowering.md](docs/function-calls-lowering.md) - Forward-reference
-  pre-scan, parameter index interlock with locals, call lowering pipeline, drop emission
-  rules, and known limitations.
+- [docs/function-calls-lowering.md](docs/function-calls-lowering.md) - Three-stage index
+  pre-scan (import reservation, top-level functions, methods), import section emission,
+  extern call lowering, parameter index interlock with locals, the call lowering pipeline,
+  drop emission rules, and known limitations.
 - [docs/conditionals-lowering.md](docs/conditionals-lowering.md) - How `if`/`else`
   statements are lowered to WASM structured control flow and why `unreachable` is emitted
   before the `end` of every non-void function.
@@ -442,6 +451,18 @@ Test data includes:
   array; validated and executed via wasmtime
 - `enum_in_struct.inf` - Enum-typed struct field: struct literal with an enum field,
   reading the field and comparing it to a variant; validated and executed via wasmtime
+- Extern import test fixtures in `tests/test_data/codegen/wasm/extern_import/`
+  (tests in `tests/src/codegen/wasm/extern_import.rs`):
+  - `single_import.inf` - One `external fn` bound to a module via `use … from`; verifies
+    import occupies index 0 and the local function shifts to index 1; golden WAT validates
+    import section content and call target
+  - `multi_import.inf` - Two externs from the same module; both imports at indices 0 and 1;
+    the local function shifts to index 2; verifies nested call order in the body
+  - `import_with_locals.inf` - One import and two local functions; all locals shift past the
+    import; verifies that cross-local calls use local indices and the extern call uses the
+    import index
+  - `import_dedup.inf` - Two externs with an identical `(i32) -> i32` signature share one
+    type entry; verifies import-against-import type deduplication
 - Loop test fixtures in `tests/test_data/codegen/wasm/loops/`:
   - `simple_loop.inf` - Basic conditional loops (`loop COND { body }`) with counter patterns
   - `infinite_loop_break.inf` - Infinite loops (`loop { body }`) with `break` exit

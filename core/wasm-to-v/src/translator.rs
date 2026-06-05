@@ -117,7 +117,8 @@
 //! Generated Rocq identifiers follow these rules:
 //!
 //! - **Named functions**: Use names from custom name section if available
-//! - **Anonymous functions**: Generate unique names using UUID (`func_<uuid>`)
+//! - **Anonymous functions**: Deterministically named `func_<index>` from the
+//!   output function index, so the `.v` is reproducible for identical input
 //! - **Module name**: Use name from custom section, or parameter to `translate_bytes`
 //!
 //! ## Output Format
@@ -158,16 +159,14 @@
 //! |}.
 //! ```
 
-use core::fmt;
-use std::{collections::HashMap, fmt::Display};
+use std::collections::HashMap;
 
 use inf_wasmparser::{
     BlockType, CompositeInnerType, Data, DataKind, Element, ElementItems, ElementKind, Export,
     FunctionBody, Global, Import, MemoryType, Operator, OperatorsIterator, OperatorsReader,
     RecGroup, RefType, Table, TableType, TypeRef, ValType as wpValType,
 };
-use rustc_hash::FxHashMap;
-use uuid::Uuid;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::errors::WasmToVError;
 
@@ -297,9 +296,12 @@ impl WasmParseData<'_> {
     ///
     /// # Error Recovery
     ///
-    /// Unlike the parser, this method uses error recovery: it collects translation
-    /// errors from all sections and returns the first error only if no sections
-    /// succeeded. This provides better diagnostics for complex failures.
+    /// This method collects translation errors from every section so a single
+    /// failure does not mask later ones, but it is fail-closed: if any section
+    /// failed, the assembled module is discarded and the first error is
+    /// returned. The emitted `.v` is a mission-critical proof artifact, so a
+    /// partial translation (e.g. a module missing a function body) must never
+    /// be returned as success.
     ///
     /// # Returns
     ///
@@ -572,21 +574,69 @@ impl WasmParseData<'_> {
         }
         res.push('\n');
         res.push_str("End Host.\n");
+
+        // Fail-closed: any section error means the assembled module is
+        // incomplete (e.g. a function body that hit an unsupported operator).
+        // Returning it as success would emit a corrupt proof artifact, so
+        // surface the first collected error instead.
+        if let Some(first) = errors.into_iter().next() {
+            return Err(first);
+        }
         Ok(res)
+    }
+
+    /// Number of imported functions, which occupy the lowest function indices
+    /// in WASM's index space before any locally-defined (code-section) function.
+    ///
+    /// The static-merge linker removes every import before `-v`, so this is `0`
+    /// for every artifact the pipeline produces (the always-link invariant). It
+    /// is non-zero only when a pre-link or third-party module is translated
+    /// directly; the offset below keeps that case correctly indexed rather than
+    /// relying on the invariant for soundness.
+    fn func_import_count(&self) -> usize {
+        self.imports
+            .iter()
+            .filter(|import| matches!(import.ty, TypeRef::Func(_)))
+            .count()
     }
 
     //Record module_func
     fn translate_functions(&mut self) -> anyhow::Result<()> {
+        // Rocq `Definition`s are not overloadable, so every emitted function
+        // name must be globally unique. A static merge can fold an external
+        // library's private function (carrying its own debug name) next to a
+        // main-module function of the same name. We disambiguate by appending
+        // the WASM function index on collision, deriving the `Definition` and
+        // the matching `mod_funcs` entry from the same per-index name.
+        //
+        // `function_bodies` is indexed 0-based over the *code section*, but the
+        // name section, start/export descriptors, and the
+        // `inference.spec_funcs` map key on the *absolute* WASM function index,
+        // which numbers imported functions first. Offset the body position by
+        // the function-import count to recover the absolute index for those
+        // lookups. `mod_funcs` order itself stays body-relative (it excludes
+        // imports, which appear via `mod_imports`). With no imports — every
+        // post-link artifact — the offset is zero and output is unchanged.
+        let func_import_base = self.func_import_count();
+        let mut used_names: FxHashSet<String> = FxHashSet::default();
         for (index, function_body) in self.function_bodies.iter().enumerate() {
             let modfunc_type = *self.function_type_indexes.get(index).unwrap_or(&0);
-            let func_name = if let Some(func_names_map) = &self.func_names_map {
-                func_names_map
-                    .get(&(index as u32))
-                    .unwrap_or(&format!("func_{}", get_id()))
-                    .to_owned()
-            } else {
-                format!("func_{}", get_id())
+            let abs_index = (func_import_base + index) as u32;
+            // A function with no name-section entry is named deterministically
+            // from its absolute index (`func_<abs_index>`) rather than a
+            // per-process random UUID, so the `.v` is byte-identical across runs
+            // for byte-identical input (reproducible builds, content-addressed
+            // proof caches, CI diffs). The linker fills every merged inner
+            // callee's name, so this fallback fires only for an unnamed function
+            // reaching the translator directly.
+            let base_name = match &self.func_names_map {
+                Some(func_names_map) => func_names_map
+                    .get(&abs_index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("func_{abs_index}")),
+                None => format!("func_{abs_index}"),
             };
+            let func_name = unique_function_name(base_name, abs_index, &mut used_names);
             self.translated_function_names.push(func_name.clone());
 
             let mut modfunc_locals = String::new();
@@ -711,6 +761,27 @@ fn translate_table_type_limits(table_type: &TableType) -> anyhow::Result<String>
 
 //Record limits
 fn translate_memory_type_limits(memory_type: &MemoryType) -> anyhow::Result<String> {
+    // The target model (`Mm {|lim_min; lim_max|}`) has no field for `memory64`,
+    // `shared`, or a custom page size, so any such memory would be silently
+    // re-encoded as a 32-bit, non-shared, default-page-size machine — a `.v`
+    // describing a machine the `.wasm` is not. Reject rather than miscompile the
+    // proof artifact (defense in depth behind the linker's shape guard; audit
+    // C-4/L-1).
+    if memory_type.memory64 {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "memory64 (i64-addressed) linear memory".into(),
+        }));
+    }
+    if memory_type.shared {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "shared linear memory (threads proposal)".into(),
+        }));
+    }
+    if memory_type.page_size_log2.is_some() {
+        return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+            description: "linear memory with a custom page size".into(),
+        }));
+    }
     let lim_min = format!("{}%N", memory_type.initial);
     let lim_max = match memory_type.maximum {
         Some(max) => format!("Some({max}%N)"),
@@ -806,7 +877,19 @@ impl Expression<'_> {
         self.parts.last()
     }
 
-    fn print_with_offset(&self, tabs_count: usize) -> anyhow::Result<String> {
+    /// Renders this expression tree to its Rocq list form, indenting nested
+    /// blocks by `tabs_count` levels.
+    ///
+    /// `depth` bounds the self-recursion independently of the indentation: a
+    /// body nested deeper than [`MAX_EXPRESSION_DEPTH`] is rejected with a
+    /// recoverable [`WasmToVError::UnsupportedFeature`] rather than recursing to
+    /// stack exhaustion (an unrecoverable `abort()`). The bound mirrors the one
+    /// in `translate_expression`, so a body that built its tree without
+    /// overflowing also renders without overflowing.
+    fn print_with_offset(&self, tabs_count: usize, depth: usize) -> anyhow::Result<String> {
+        if depth >= MAX_EXPRESSION_DEPTH {
+            return Err(too_deeply_nested_err());
+        }
         let mut res = String::new();
         let offset = "  ".repeat(tabs_count);
         for part in &self.parts {
@@ -825,7 +908,7 @@ impl Expression<'_> {
                         translate_basic_operator(&block.label, &self.local_name_map)?.as_str(),
                     );
                     res.push_str(" (\n");
-                    res.push_str(block.parts.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(block.parts.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
                     res.push_str(") ");
                     res.push_str("::\n");
                 }
@@ -835,9 +918,9 @@ impl Expression<'_> {
                         translate_basic_operator(&cond.label, &self.local_name_map)?.as_str(),
                     );
                     res.push_str(" (\n");
-                    res.push_str(cond.then_arm.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(cond.then_arm.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
                     res.push_str(") (\n");
-                    res.push_str(cond.else_arm.print_with_offset(tabs_count + 1)?.as_str());
+                    res.push_str(cond.else_arm.print_with_offset(tabs_count + 1, depth + 1)?.as_str());
                     res.push_str(") ");
                     res.push_str("::\n");
                 }
@@ -848,20 +931,35 @@ impl Expression<'_> {
     }
 }
 
-impl Display for Expression<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.print_with_offset(2)
-                .unwrap_or(String::from("Error rendering expression"))
-        )
-    }
+/// Maximum structured-control-flow nesting depth the translator recurses
+/// through before rejecting a body as too deeply nested.
+///
+/// `translate_expression` (tree build) and [`Expression::print_with_offset`]
+/// (render) are mutually-bounded self-recursive: a body of N nested blocks
+/// recurses N deep. A Rust stack overflow is an `abort()` that bypasses every
+/// `?`/`Err` path, so an adversarial external `.wasm` with thousands of nested
+/// blocks would crash the proof path (SIGABRT) instead of failing cleanly.
+/// Capping the depth turns that DoS into a recoverable
+/// [`WasmToVError::UnsupportedFeature`]. The bound is far above any nesting a
+/// real Inference function produces and comfortably below the depth at which
+/// either pass would exhaust even a small (2 MiB) thread stack.
+const MAX_EXPRESSION_DEPTH: usize = 256;
+
+fn too_deeply_nested_err() -> anyhow::Error {
+    anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+        description: format!(
+            "function body nests structured control flow deeper than {MAX_EXPRESSION_DEPTH} levels"
+        ),
+    })
 }
 
 fn translate_expression<'a>(
     operators_reader: &mut OperatorsIterator<'a>,
+    depth: usize,
 ) -> anyhow::Result<Expression<'a>> {
+    if depth >= MAX_EXPRESSION_DEPTH {
+        return Err(too_deeply_nested_err());
+    }
     let mut result = Expression::default();
     while let Some(next_operator) = operators_reader.next() {
         let next_operator = next_operator.as_ref().unwrap();
@@ -872,8 +970,7 @@ fn translate_expression<'a>(
             | inf_wasmparser::Operator::Exists { .. }
             | inf_wasmparser::Operator::Assume { .. }
             | inf_wasmparser::Operator::Unique { .. } => {
-                // operators_reader.next();
-                let block_operations = translate_expression(operators_reader)?;
+                let block_operations = translate_expression(operators_reader, depth + 1)?;
                 let block = BlockExpr {
                     label: next_operator.to_owned(),
                     parts: block_operations,
@@ -881,15 +978,14 @@ fn translate_expression<'a>(
                 result.parts.push(ExpressionPart::Block(block));
             }
             inf_wasmparser::Operator::If { .. } => {
-                // operators_reader.next();
-                let then_arm = translate_expression(operators_reader)?;
+                let then_arm = translate_expression(operators_reader, depth + 1)?;
                 let else_arm = if matches!(
                     then_arm.last_part().unwrap(),
                     ExpressionPart::Operator(Operator::End)
                 ) {
                     Expression::default()
                 } else {
-                    translate_expression(operators_reader)?
+                    translate_expression(operators_reader, depth + 1)?
                 };
 
                 let condition = ConditionExpr {
@@ -918,9 +1014,12 @@ fn translate_expr(
     local_name_map: Option<HashMap<u32, String>>,
 ) -> anyhow::Result<String> {
     let mut peekable_operators_reader = operators_reader.clone().into_iter();
-    let mut expression = translate_expression(&mut peekable_operators_reader)?;
+    let mut expression = translate_expression(&mut peekable_operators_reader, 0)?;
     expression.local_name_map = local_name_map;
-    Ok(expression.to_string())
+    // Render through the fallible `print_with_offset` directly rather than the
+    // `Display` impl, so that an unsupported operator surfaces as a returned
+    // `WasmToVError` instead of being swallowed into placeholder text.
+    expression.print_with_offset(2, 0)
 }
 
 fn translate_block_type(block_type: &BlockType) -> anyhow::Result<String> {
@@ -1459,7 +1558,11 @@ fn translate_basic_operator(
         Operator::ElemDrop { .. } => todo!(),
         Operator::TableCopy { .. } => todo!(),
         Operator::TypedSelect { .. } => todo!(),
-        Operator::RefNull { .. } => todo!(),
+        Operator::RefNull { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "ref.null (typed reference instruction)".into(),
+            }));
+        }
         Operator::RefIsNull => "BI_ref_is_null".to_string(),
         Operator::RefFunc { function_index } => format!("BI_ref_func {function_index}%N"),
         Operator::TableFill { table } => format!("BI_table_fill {table}%N"),
@@ -1895,8 +1998,16 @@ fn translate_basic_operator(
         Operator::I16x8RelaxedQ15mulrS => todo!(),
         Operator::I16x8RelaxedDotI8x16I7x16S => todo!(),
         Operator::I32x4RelaxedDotI8x16I7x16AddS => todo!(),
-        Operator::TryTable { .. } => todo!(),
-        Operator::Throw { .. } => todo!(),
+        Operator::TryTable { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "try_table (exception-handling instruction)".into(),
+            }));
+        }
+        Operator::Throw { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "throw (exception-handling instruction)".into(),
+            }));
+        }
         Operator::ThrowRef => todo!(),
         Operator::Try { .. } => todo!(),
         Operator::Catch { .. } => todo!(),
@@ -2059,8 +2170,16 @@ fn translate_basic_operator(
             }));
         }
         Operator::RefI31Shared => todo!(),
-        Operator::CallRef { .. } => todo!(),
-        Operator::ReturnCallRef { .. } => todo!(),
+        Operator::CallRef { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "call_ref (typed function reference instruction)".into(),
+            }));
+        }
+        Operator::ReturnCallRef { .. } => {
+            return Err(anyhow::anyhow!(WasmToVError::UnsupportedFeature {
+                description: "return_call_ref (typed function reference instruction)".into(),
+            }));
+        }
         Operator::RefAsNonNull => todo!(),
         Operator::BrOnNull { .. } => todo!(),
         Operator::BrOnNonNull { .. } => todo!(),
@@ -2100,8 +2219,72 @@ fn translate_data(data: &Data) -> anyhow::Result<String> {
     Ok(res)
 }
 
-fn get_id() -> String {
-    let uuid = Uuid::new_v4().to_string();
-    let mut parts = uuid.split('-');
-    parts.next().unwrap().to_string()
+/// Returns a Rocq `Definition` name guaranteed not to collide with any name
+/// already in `used_names`, recording the chosen name. On collision the WASM
+/// function `index` is appended (`<base>_<index>`); should that already be
+/// taken, a monotonically increasing suffix is added until the name is free.
+fn unique_function_name(
+    base_name: String,
+    index: u32,
+    used_names: &mut FxHashSet<String>,
+) -> String {
+    if used_names.insert(base_name.clone()) {
+        return base_name;
+    }
+    let mut candidate = format!("{base_name}_{index}");
+    let mut disambiguator = 0u32;
+    while !used_names.insert(candidate.clone()) {
+        candidate = format!("{base_name}_{index}_{disambiguator}");
+        disambiguator += 1;
+    }
+    candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem(memory64: bool, shared: bool, page_size_log2: Option<u32>) -> MemoryType {
+        MemoryType { memory64, shared, initial: 1, maximum: Some(1), page_size_log2 }
+    }
+
+    fn assert_unsupported(result: anyhow::Result<String>, needle: &str) {
+        let err = result.expect_err("a non-32-bit memory must be rejected");
+        let Some(WasmToVError::UnsupportedFeature { description }) =
+            err.downcast_ref::<WasmToVError>()
+        else {
+            panic!("expected UnsupportedFeature, got {err:?}");
+        };
+        assert!(description.contains(needle), "description names the feature: {description}");
+    }
+
+    #[test]
+    fn a_32_bit_memory_translates() {
+        // The default 32-bit, non-shared, default-page-size memory is the only
+        // shape the model encodes; it must still translate cleanly.
+        let limits = translate_memory_type_limits(&mem(false, false, None))
+            .expect("a standard 32-bit memory translates");
+        assert_eq!(limits, "{|lim_min := 1%N; lim_max := Some(1%N)|}");
+    }
+
+    #[test]
+    fn a_memory64_memory_is_rejected() {
+        // C-4: the translator must never silently encode a 64-bit machine as the
+        // 32-bit `Mm` record, which has no memory64 field.
+        assert_unsupported(translate_memory_type_limits(&mem(true, false, None)), "memory64");
+    }
+
+    #[test]
+    fn a_shared_memory_is_rejected() {
+        // L-1: a shared memory has no representable flag in the target model.
+        assert_unsupported(translate_memory_type_limits(&mem(false, true, None)), "shared");
+    }
+
+    #[test]
+    fn a_custom_page_size_memory_is_rejected() {
+        assert_unsupported(
+            translate_memory_type_limits(&mem(false, false, Some(0))),
+            "custom page size",
+        );
+    }
 }

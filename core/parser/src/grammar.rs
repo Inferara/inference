@@ -46,7 +46,16 @@ pub fn source_file(p: &mut Parser) {
     let m = p.start();
     while !p.at_eof() {
         if at_item_start(p) {
+            // Defense-in-depth: if a future `item` handler completes without
+            // consuming any token, the cursor is unchanged and this loop would
+            // spin forever (the fuel guard does not catch it, since completing a
+            // marker refills the fuel). Bump the offending token into an Error
+            // node so any non-advancing handler degrades to a recoverable error.
+            let before = p.pos();
             item(p);
+            if p.pos() == before {
+                p.err_and_bump("expected an item");
+            }
         } else {
             // An unexpected token at item position: consume it into an Error
             // node so the loop always advances, then retry from the next token.
@@ -302,12 +311,23 @@ mod tests {
     }
 
     #[test]
-    fn use_from_literal() {
-        let src = "use { sort, hash } from \"./sort.rs\";";
+    fn use_from_simple_name() {
+        let src = "use { sort, hash } from sorting;";
         assert_clean(src);
         let u = first(src, SyntaxKind::UseDirective);
-        assert!(u.child(SyntaxKind::StringLiteral).is_some());
-        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 2);
+        assert!(u.child(SyntaxKind::StringLiteral).is_none());
+        // two imported types plus one module-ref segment
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 3);
+    }
+
+    #[test]
+    fn use_from_path() {
+        let src = "use { hash } from crypto::sha256;";
+        assert_clean(src);
+        let u = first(src, SyntaxKind::UseDirective);
+        assert!(u.child(SyntaxKind::StringLiteral).is_none());
+        // one imported type plus two module-ref segments
+        assert_eq!(count_kind(&u, SyntaxKind::Identifier), 3);
     }
 
     // ---- types ----
@@ -812,6 +832,56 @@ mod tests {
         let (root, errors) = parse("# fn f() { } );");
         assert!(errors > 0);
         assert!(find(&root, SyntaxKind::FunctionDefinition).is_some());
+    }
+
+    #[test]
+    fn pub_external_fn_terminates_with_diagnostic() {
+        // Regression for C3: `pub external fn …` used to spin the source_file
+        // loop forever because the external handler never consumed the leading
+        // `pub`. The parser must now terminate (reaching this assertion proves
+        // it did) and emit a diagnostic, producing the external node.
+        let (root, errors) = parse("pub external fn f();");
+        assert!(errors > 0, "expected a diagnostic for the stray `pub`");
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+        assert!(
+            find(&root, SyntaxKind::ExternalFunctionDefinition).is_some(),
+            "the external declaration should still be recognised:\n{}",
+            root.debug_tree("pub external fn f();")
+        );
+        let e = first("pub external fn f();", SyntaxKind::ExternalFunctionDefinition);
+        assert!(
+            e.child(SyntaxKind::Visibility).is_some(),
+            "the stray `pub` is consumed as a Visibility node"
+        );
+    }
+
+    #[test]
+    fn pub_external_fn_with_return_terminates() {
+        // The `-> i32` form must also terminate cleanly (it shared the same
+        // non-advancing path before C3 was fixed).
+        let (root, errors) = parse("pub external fn f() -> i32;");
+        assert!(errors > 0);
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+        assert!(find(&root, SyntaxKind::ExternalFunctionDefinition).is_some());
+    }
+
+    #[test]
+    fn spec_pub_external_fn_terminates_with_diagnostic() {
+        // Regression for C3 inside a spec body: the spec loop dispatches through
+        // `definition`, so a `pub external fn` there also has to terminate.
+        let src = "spec S { pub external fn f(); }";
+        let (root, errors) = parse(src);
+        assert!(errors > 0, "expected a diagnostic for the stray `pub`");
+        assert_eq!(root.kind, SyntaxKind::SourceFile);
+        assert!(
+            find(&root, SyntaxKind::SpecDefinition).is_some(),
+            "the spec should still be recognised:\n{}",
+            root.debug_tree(src)
+        );
+        assert!(
+            find(&root, SyntaxKind::ExternalFunctionDefinition).is_some(),
+            "the spec-inner external declaration should still be recognised"
+        );
     }
 
     #[test]

@@ -19,6 +19,9 @@ Cargo.lock
 out
 test_data/**/*.json
 
+# Local end-to-end linker scratchpad (kept locally, never committed)
+scratch/
+
 # Coverage reports
 lcov.info
 *.profraw

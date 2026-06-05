@@ -318,3 +318,399 @@ mod tests {
         );
     }
 }
+
+/// Robustness tests for the external `.wasm` static-linking path through
+/// `wasm-to-v` (Issue #9 robustness audit, work unit 7).
+///
+/// These assemble the kind of module a static merge produces — a merged
+/// external inner function sharing a name with a main-module function, and
+/// bodies bearing typed-reference / exception-handling operators copied
+/// verbatim from an adversarial external — and assert the CLEAN outcome:
+/// globally-unique Rocq `Definition`s, and a recoverable
+/// [`WasmToVError::UnsupportedFeature`] instead of a panic.
+#[cfg(test)]
+mod link_robustness {
+    use super::errors::WasmToVError;
+    use super::wasm_parser::translate_bytes;
+    use rustc_hash::FxHashMap;
+
+    fn translate(wat: &str) -> anyhow::Result<String> {
+        let bytes = wat::parse_str(wat).expect("fixture WAT assembles");
+        translate_bytes("Prog", &bytes, &FxHashMap::default())
+    }
+
+    /// H20: a merged module whose external inner function shares a name with a
+    /// main-module function must yield distinct Rocq `Definition`s (Coq cannot
+    /// overload), and the `mod_funcs` list must reference each unique name.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn duplicate_function_names_are_disambiguated() {
+        // A module whose `name` section maps both function indices to the
+        // identical string `add_three`, modelling a main-module `add_three`
+        // (index 0) next to a merged external `add_three` (index 1).
+        let bytes = duplicate_named_module();
+        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("translation succeeds");
+
+        let definitions = output.matches("Definition add_three :").count();
+        assert_eq!(
+            definitions, 1,
+            "exactly one `Definition add_three` may be emitted; got {definitions}:\n{output}",
+        );
+        // The colliding second function must be emitted under a disambiguated
+        // name derived from its WASM function index.
+        assert!(
+            output.contains("Definition add_three_1 :"),
+            "second `add_three` should be disambiguated to `add_three_1`:\n{output}",
+        );
+        // Both unique names must appear in the `mod_funcs` list so the proof
+        // deliverable references both bodies.
+        assert!(
+            output.contains("add_three ::") && output.contains("add_three_1 ::"),
+            "mod_funcs must list both disambiguated names:\n{output}",
+        );
+    }
+
+    /// Hand-encodes a 2-function module whose `name` section maps both function
+    /// indices to the identical string `add_three`. `wat` cannot express a
+    /// name-section collision from symbolic identifiers, so we emit the bytes
+    /// directly.
+    fn duplicate_named_module() -> Vec<u8> {
+        // Assemble a valid skeleton with `wat`, then append a `name` section
+        // naming both functions `add_three`.
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func (param i32) (result i32) local.get 0 i32.const 100 i32.add)
+              (func (param i32) (result i32) local.get 0 i32.const 3 i32.add))
+            "#,
+        )
+        .expect("skeleton assembles");
+
+        // name section: id=0 (custom), name "name"; subsection id=1 (function
+        // names) with 2 entries, both "add_three".
+        let func_name = b"add_three";
+        let mut func_subsec = Vec::new();
+        func_subsec.push(2u8); // count
+        for idx in 0u8..2 {
+            func_subsec.push(idx); // func index (LEB128, single byte for <128)
+            func_subsec.push(func_name.len() as u8);
+            func_subsec.extend_from_slice(func_name);
+        }
+        let mut name_payload = Vec::new();
+        name_payload.push(0x04); // length of "name"
+        name_payload.extend_from_slice(b"name");
+        name_payload.push(0x01); // subsection id: function names
+        name_payload.push(func_subsec.len() as u8);
+        name_payload.extend_from_slice(&func_subsec);
+
+        let mut bytes = skeleton;
+        bytes.push(0x00); // custom section id
+        bytes.push(name_payload.len() as u8);
+        bytes.extend_from_slice(&name_payload);
+        bytes
+    }
+
+    /// H13: a `ref.null` copied verbatim from an adversarial external must
+    /// surface as a recoverable [`WasmToVError::UnsupportedFeature`], never a
+    /// `todo!()` panic.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ref_null_is_unsupported_feature_not_panic() {
+        let err = translate(
+            r#"
+            (module
+              (func (export "f") (result i32)
+                ref.null func
+                drop
+                i32.const 0))
+            "#,
+        )
+        .expect_err("ref.null must be rejected");
+
+        let downcast = err.downcast_ref::<WasmToVError>();
+        assert!(
+            matches!(downcast, Some(WasmToVError::UnsupportedFeature { .. })),
+            "ref.null should surface as UnsupportedFeature; got: {err:?}",
+        );
+    }
+
+    /// H13: `call_ref` likewise must be a recoverable error rather than a
+    /// panic on the `-v` path.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn call_ref_is_unsupported_feature_not_panic() {
+        let err = translate(
+            r#"
+            (module
+              (type $sig (func (result i32)))
+              (func (export "f") (result i32)
+                ref.null $sig
+                call_ref $sig))
+            "#,
+        )
+        .expect_err("call_ref must be rejected");
+
+        let downcast = err.downcast_ref::<WasmToVError>();
+        assert!(
+            matches!(downcast, Some(WasmToVError::UnsupportedFeature { .. })),
+            "call_ref should surface as UnsupportedFeature; got: {err:?}",
+        );
+    }
+
+    /// Assembles a one-function module whose body nests `depth` empty `block`s,
+    /// mirroring the adversarially deep external the linker would otherwise
+    /// merge before handing it to the translator.
+    fn nested_blocks_module(depth: usize) -> Vec<u8> {
+        let mut body = String::new();
+        for _ in 0..depth {
+            body.push_str("block ");
+        }
+        for _ in 0..depth {
+            body.push_str("end ");
+        }
+        let wat = format!(r#"(module (func (export "f") {body}))"#);
+        wat::parse_str(&wat).expect("nested-blocks WAT assembles")
+    }
+
+    /// H-3: a deeply-nested external body must surface as a recoverable
+    /// [`WasmToVError::UnsupportedFeature`] rather than overflowing the
+    /// translator's stack (an unrecoverable SIGABRT) on the `-v` proof path.
+    ///
+    /// The translator recurses once per nesting level both when building the
+    /// expression tree (`translate_expression`) and when rendering it
+    /// (`print_with_offset`); without a depth bound a body of a few thousand
+    /// nested blocks aborts the process. A depth well past the cap must fail
+    /// cleanly.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn deeply_nested_body_is_unsupported_feature_not_stack_overflow() {
+        let bytes = nested_blocks_module(5_000);
+        let err = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect_err("a deeply-nested body must be rejected, not abort");
+
+        let downcast = err.downcast_ref::<WasmToVError>();
+        assert!(
+            matches!(downcast, Some(WasmToVError::UnsupportedFeature { .. })),
+            "deep nesting should surface as UnsupportedFeature; got: {err:?}",
+        );
+    }
+
+    /// H-3: a body nested *up to* the cap still translates cleanly, so the
+    /// guard rejects only pathological depth, never a legitimately nested
+    /// function.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn body_nested_within_the_cap_translates() {
+        let bytes = nested_blocks_module(16);
+        translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("a modestly-nested body translates");
+    }
+
+    /// Assembles a 2-function module with *no* name section: an exported `sum`
+    /// (index 0) that calls an anonymous inner `func 1`. Models the supply path
+    /// issue #9 serves — a third-party / `wasm-tools`-stripped external whose
+    /// inner callees carry no debug name.
+    fn nameless_two_function_module() -> Vec<u8> {
+        wat::parse_str(
+            r#"
+            (module
+              (func (export "sum") (param i32) (result i32)
+                local.get 0 call 1)
+              (func (param i32) (result i32)
+                local.get 0 i32.const 1 i32.add))
+            "#,
+        )
+        .expect("nameless module assembles")
+    }
+
+    /// H-4: a nameless function must receive a deterministic name derived from
+    /// its output function index (`func_<idx>`), not a per-process random UUID,
+    /// so the `.v` is byte-identical across runs for byte-identical input.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn nameless_functions_get_deterministic_names_and_reproducible_v() {
+        let bytes = nameless_two_function_module();
+
+        let first = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("first translation succeeds");
+        let second = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("second translation succeeds");
+
+        assert_eq!(
+            first, second,
+            "byte-identical input must produce a byte-identical `.v` across runs",
+        );
+        // Every nameless function is named from its output index; no random UUID
+        // name leaks into the proof artifact.
+        assert!(
+            first.contains("Definition func_0 :") && first.contains("Definition func_1 :"),
+            "nameless functions should be named `func_0`/`func_1` from their index:\n{first}",
+        );
+    }
+
+    /// Assembles a 2-function module whose name section names only the exported
+    /// root (`func 0` = `sum`), leaving the inner callee (`func 1`) nameless.
+    /// Mirrors a static-merge output with a named closure root next to a
+    /// nameless inner callee, exercising the translator's index-derived
+    /// fallback in isolation.
+    fn root_named_inner_nameless_module() -> Vec<u8> {
+        let skeleton = wat::parse_str(
+            r#"
+            (module
+              (func (param i32) (result i32) local.get 0 call 1)
+              (func (param i32) (result i32) local.get 0 i32.const 1 i32.add))
+            "#,
+        )
+        .expect("skeleton assembles");
+
+        // name section: id=0 (custom), name "name"; subsection id=1 (function
+        // names) with a single entry naming function 0 `sum`.
+        let func_name = b"sum";
+        let mut func_subsec = Vec::new();
+        func_subsec.push(1u8); // count
+        func_subsec.push(0u8); // func index 0
+        func_subsec.push(func_name.len() as u8);
+        func_subsec.extend_from_slice(func_name);
+
+        let mut name_payload = Vec::new();
+        name_payload.push(0x04); // length of "name"
+        name_payload.extend_from_slice(b"name");
+        name_payload.push(0x01); // subsection id: function names
+        name_payload.push(func_subsec.len() as u8);
+        name_payload.extend_from_slice(&func_subsec);
+
+        let mut bytes = skeleton;
+        bytes.push(0x00); // custom section id
+        bytes.push(name_payload.len() as u8);
+        bytes.extend_from_slice(&name_payload);
+        bytes
+    }
+
+    /// H-4: when only the closure root carries a name, the nameless inner
+    /// callee still gets a deterministic index-derived name and the artifact is
+    /// reproducible — the named root keeps `sum`, the inner callee is `func_1`,
+    /// and no UUID appears.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn nameless_inner_callee_with_named_root_is_deterministic() {
+        let bytes = root_named_inner_nameless_module();
+
+        let first = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("first translation succeeds");
+        let second = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("second translation succeeds");
+
+        assert_eq!(
+            first, second,
+            "byte-identical input must produce a byte-identical `.v` across runs",
+        );
+        // The root keeps its source name (sanitized for Rocq — `sum` collides
+        // with a stdlib name and is suffixed to `sum_`), distinct from the
+        // index-derived fallback the inner callee receives.
+        assert!(
+            first.contains("Definition sum_ :"),
+            "the named root keeps its `sum`-derived name:\n{first}",
+        );
+        assert!(
+            first.contains("Definition func_1 :"),
+            "the nameless inner callee should be `func_1` from its index:\n{first}",
+        );
+    }
+
+    /// D6: `function_bodies` is 0-based over the code section, but the name
+    /// section keys on the *absolute* WASM function index, which numbers
+    /// imported functions first. `translate_functions` offsets the body
+    /// position by the function-import count to recover the absolute index.
+    ///
+    /// This module imports `host` (absolute index 0) and defines `local`
+    /// (absolute index 1). The single code-section body is `local`; its
+    /// name-section entry lives under absolute index 1. Without the offset the
+    /// translator would look up index 0 and emit the body under the *import's*
+    /// name (`host`) — a silently mis-named proof obligation. The offset must
+    /// give it the correct name `local`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn function_import_offsets_the_name_lookup() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (import "env" "host" (func $host (param i32) (result i32)))
+              (func $local (param i32) (result i32) local.get 0 i32.const 1 i32.add))
+            "#,
+        )
+        .expect("import fixture WAT assembles");
+
+        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("an import-bearing module translates");
+
+        assert!(
+            output.contains("Definition local :"),
+            "the sole defined function must be named from its absolute index (1 -> `local`), \
+             not the import's index (0 -> `host`):\n{output}",
+        );
+        assert!(
+            !output.contains("Definition host :"),
+            "the import's name must never be emitted as a defined `module_func`:\n{output}",
+        );
+    }
+
+    /// D6 companion: with no name section, the fallback name is derived from the
+    /// *absolute* index too, so the offset is exercised even without debug
+    /// names. The import occupies absolute index 0, so the single defined body
+    /// is `func_1`, never `func_0`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn function_import_offsets_the_nameless_fallback() {
+        // Assemble a named skeleton, then strip the name section so the
+        // translator falls back to index-derived names.
+        let with_names = wat::parse_str(
+            r#"
+            (module
+              (import "env" "host" (func (param i32) (result i32)))
+              (func (param i32) (result i32) local.get 0 i32.const 1 i32.add))
+            "#,
+        )
+        .expect("import fixture WAT assembles");
+
+        let output = translate_bytes("Prog", &with_names, &FxHashMap::default())
+            .expect("an import-bearing nameless module translates");
+
+        assert!(
+            output.contains("Definition func_1 :"),
+            "the nameless defined body sits at absolute index 1, so it must be `func_1`:\n{output}",
+        );
+        assert!(
+            !output.contains("Definition func_0 :"),
+            "absolute index 0 belongs to the import, so `func_0` must not be a defined \
+             function:\n{output}",
+        );
+    }
+
+    /// D6 companion: a non-function import (a memory) does not occupy a function
+    /// index, so the function-import offset stays 0 and the sole defined body
+    /// keeps absolute index 0. Guards against over-counting non-function
+    /// imports in the offset.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn non_function_import_does_not_offset_function_indices() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (import "env" "mem" (memory 1))
+              (func $only (param i32) (result i32) local.get 0 i32.const 1 i32.add))
+            "#,
+        )
+        .expect("memory-import fixture WAT assembles");
+
+        let output = translate_bytes("Prog", &bytes, &FxHashMap::default())
+            .expect("a module whose only import is a memory translates");
+
+        // The defined function sits at absolute index 0 (no function imports),
+        // so it keeps its source name with no index perturbation.
+        assert!(
+            output.contains("Definition only :"),
+            "a non-function import must not shift the defined function's index:\n{output}",
+        );
+    }
+}

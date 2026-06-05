@@ -22,8 +22,8 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 use inference_ast::nodes::{
     ArgData, ArgKind, BlockData, BlockKind, Def, DefData, Directive, Expr, ExprData, Field, Ident,
-    Location, OperatorKind, SimpleTypeKind, SourceFileData, Stmt, StmtData, TypeData, TypeNode,
-    UnaryOperatorKind, UseDirective, Visibility,
+    Location, ModuleRef, OperatorKind, SimpleTypeKind, SourceFileData, Stmt, StmtData, TypeData,
+    TypeNode, UnaryOperatorKind, UseDirective, Visibility,
 };
 
 use crate::errors::ParseError;
@@ -105,36 +105,49 @@ impl<'s> Lowering<'s> {
         use crate::syntax_tree::SyntaxElement;
         let location = node.loc;
 
-        let from = node
-            .child(SyntaxKind::StringLiteral)
-            .map(|from_literal| self.lower_string_literal_value(from_literal));
-
-        let mut before_brace: Vec<&SyntaxNode> = Vec::new();
-        let mut after_brace: Vec<&SyntaxNode> = Vec::new();
+        // Three identifier buckets, keyed by position relative to the `{ … }`
+        // import list and the `from` keyword:
+        //   * inside braces            → imported types
+        //   * before any brace, no `from` → path-form module segments
+        //   * after `from`, outside braces → `from`-clause module reference
+        let mut path_segments: Vec<&SyntaxNode> = Vec::new();
+        let mut imported: Vec<&SyntaxNode> = Vec::new();
+        let mut from_segments: Vec<&SyntaxNode> = Vec::new();
         let mut in_braces = false;
+        let mut after_from = false;
         for element in &node.children {
             match element {
                 SyntaxElement::Token(t) if t.kind == SyntaxKind::LBrace => in_braces = true,
+                SyntaxElement::Token(t) if t.kind == SyntaxKind::RBrace => in_braces = false,
+                SyntaxElement::Token(t) if t.kind == SyntaxKind::FromKw => after_from = true,
                 SyntaxElement::Node(n) if n.kind == SyntaxKind::Identifier => {
                     if in_braces {
-                        after_brace.push(n);
+                        imported.push(n);
+                    } else if after_from {
+                        from_segments.push(n);
                     } else {
-                        before_brace.push(n);
+                        path_segments.push(n);
                     }
                 }
                 _ => {}
             }
         }
 
-        let segments: Vec<IdentId> = if from.is_some() {
-            Vec::new()
+        let from = if from_segments.is_empty() {
+            None
         } else {
-            before_brace
-                .into_iter()
-                .map(|segment| self.lower_identifier(segment))
-                .collect()
+            Some(ModuleRef {
+                segments: from_segments
+                    .into_iter()
+                    .map(|segment| self.lower_identifier(segment))
+                    .collect(),
+            })
         };
-        let imported_types: Vec<IdentId> = after_brace
+        let segments: Vec<IdentId> = path_segments
+            .into_iter()
+            .map(|segment| self.lower_identifier(segment))
+            .collect();
+        let imported_types: Vec<IdentId> = imported
             .into_iter()
             .map(|imported_type| self.lower_identifier(imported_type))
             .collect();
@@ -1113,12 +1126,6 @@ impl<'s> Lowering<'s> {
         }
     }
 
-    /// Mirrors `Builder::build_string_literal_value`: the literal's raw source
-    /// text, quotes included (used for the `from` of a use directive).
-    fn lower_string_literal_value(&mut self, node: &SyntaxNode) -> String {
-        node.text(self.src).to_string()
-    }
-
     /// Mirrors `Builder::build_type`, dispatching on node kind. Primitive type
     /// keywords map to `SimpleTypeKind`; arrays lower **element then length**;
     /// generics lower the base identifier then the argument identifiers; qualified
@@ -1955,11 +1962,17 @@ mod tests {
     }
 
     #[test]
-    fn lowers_use_directive_from_form() {
-        let arena = lower("use { X, Y } from \"lib\";");
+    fn lowers_use_directive_from_simple_name() {
+        let arena = lower("use { X, Y } from lib;");
         let files: Vec<_> = arena.source_files().collect();
         let Directive::Use(directive) = &files[0].directives[0];
-        assert_eq!(directive.from.as_deref(), Some("\"lib\""));
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["lib"]);
         assert!(directive.segments.is_empty());
         let imported: Vec<&str> = directive
             .imported_types
@@ -1967,6 +1980,27 @@ mod tests {
             .map(|&t| arena.ident_name(t))
             .collect();
         assert_eq!(imported, ["X", "Y"]);
+    }
+
+    #[test]
+    fn lowers_use_directive_from_path() {
+        let arena = lower("use { hash } from crypto::sha256;");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["crypto", "sha256"]);
+        assert!(directive.segments.is_empty());
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["hash"]);
     }
 
     // -- Statements ----------------------------------------------------------

@@ -4,7 +4,7 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
-    symbol_table::{EnumInfo, StructInfo, SymbolTable},
+    symbol_table::{EnumInfo, ExternOrigin, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -172,6 +172,50 @@ impl TypedContext {
             })
     }
 
+    /// Returns the provenance of an `external fn`, or `None` for a local
+    /// function or an unbound extern (one declared without a binding `use`).
+    ///
+    /// The returned [`ExternOrigin`] gives the logical source module and export
+    /// field for the named extern. WASM code generation consumes this per call
+    /// site to emit an import and lower the call to its import index.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn extern_origin(&self, name: &str) -> Option<ExternOrigin> {
+        self.symbol_table
+            .lookup_function_anywhere(name)
+            .and_then(|info| info.extern_origin().cloned())
+    }
+
+    /// Returns the provenance of the **bound** `external fn` declared by
+    /// `decl`, resolved by declaration identity rather than by name.
+    ///
+    /// Analysis uses this to decide whether a specific call resolves to a bound
+    /// or unbound extern when two same-named externs exist (e.g. a top-level
+    /// and a spec-inner `f`): a name keyed query cannot tell them apart, but the
+    /// declaring [`DefId`] can.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn extern_origin_by_decl(&self, decl: DefId) -> Option<ExternOrigin> {
+        self.symbol_table.extern_origin_by_decl(decl)
+    }
+
+    /// Returns true if the named function is an `external fn` (bound or unbound).
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn is_extern_function(&self, name: &str) -> bool {
+        self.symbol_table
+            .lookup_function_anywhere(name)
+            .is_some_and(|info| info.is_extern())
+    }
+
+    /// Returns the provenance of every **bound** `external fn` in the program,
+    /// deduplicated by `(logical_module, export_field)`.
+    ///
+    /// The build driver consumes this to resolve and validate each external
+    /// `.wasm` once before linking. Unbound bare externs carry no origin and do
+    /// not appear here.
+    #[must_use = "this enumeration has no side effects"]
+    pub fn extern_origins(&self) -> Vec<ExternOrigin> {
+        self.symbol_table.extern_origins()
+    }
+
     pub(crate) fn set_node_typeinfo(&mut self, node_id: NodeId, type_info: TypeInfo) {
         self.node_types.insert(node_id, type_info);
     }
@@ -191,7 +235,7 @@ impl TypedContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbol_table::FuncInfo;
+    use crate::symbol_table::{FuncInfo, FuncKind};
     use crate::type_info::{NumberType, TypeInfo, TypeInfoKind};
     use inference_ast::nodes::Visibility;
 
@@ -219,6 +263,7 @@ mod tests {
             return_type,
             visibility: visibility.clone(),
             definition_scope_id: 0,
+            kind: FuncKind::Local,
         };
         ctx.symbol_table
             .register_method(type_name, sig, visibility, has_self)
@@ -330,6 +375,7 @@ mod tests {
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            kind: FuncKind::Local,
         };
         ctx.symbol_table
             .register_method("Point", sig_get_x, Visibility::Public, true)
@@ -345,6 +391,7 @@ mod tests {
             },
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            kind: FuncKind::Local,
         };
         ctx.symbol_table
             .register_method("Point", sig_get_y, Visibility::Public, true)
@@ -381,6 +428,7 @@ mod tests {
             return_type: make_i32_type(),
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            kind: FuncKind::Local,
         };
         ctx.symbol_table
             .register_method("Point", sig_point, Visibility::Public, true)
@@ -396,6 +444,7 @@ mod tests {
             },
             visibility: Visibility::Private,
             definition_scope_id: 0,
+            kind: FuncKind::Local,
         };
         ctx.symbol_table
             .register_method("Vector", sig_vector, Visibility::Private, false)

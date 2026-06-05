@@ -226,12 +226,25 @@ pub enum Directive {
     Use(UseDirective),
 }
 
+/// A logical, platform-independent module reference.
+///
+/// Carries the identifier-path `segments` of a `from` clause (e.g. `crypto::sha256`
+/// lowers to `["crypto", "sha256"]`). It is deliberately *not* a filesystem path:
+/// the driver maps it to a concrete `.wasm` file at resolve time, so source stays
+/// portable across operating systems (no `./`, no OS separators).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ModuleRef {
+    pub segments: Vec<IdentId>,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UseDirective {
     pub location: Location,
     pub imported_types: Vec<IdentId>,
     pub segments: Vec<IdentId>,
-    pub from: Option<String>,
+    /// Logical module reference of a `from` clause, if present. The string-literal
+    /// path form (`from "./sort.wasm"`) was removed in favour of this portable form.
+    pub from: Option<ModuleRef>,
 }
 
 // ---------------------------------------------------------------------------

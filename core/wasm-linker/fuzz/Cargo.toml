@@ -1,0 +1,33 @@
+[package]
+name = "inference-wasm-linker-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Detach this crate from the parent Inference workspace. `cargo fuzz` requires
+# a `cargo-fuzz`/nightly toolchain that is not part of the default build, so the
+# fuzz target must never be pulled into `cargo build`/`cargo test`. The empty
+# `[workspace]` table makes this directory its own workspace root; the parent's
+# `core/*` glob only matches direct children of `core/`, so `core/wasm-linker/fuzz`
+# is already excluded — this is belt-and-braces.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+inference-wasm-linker = { path = ".." }
+inf-wasmparser = { path = "../../../tools/inf-wasmparser" }
+
+# Each fuzz target is its own binary. `test = false`/`doc = false` keep the
+# harness out of the normal test/doc build path.
+[[bin]]
+name = "link"
+path = "fuzz_targets/link.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

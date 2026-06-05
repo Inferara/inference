@@ -44,6 +44,53 @@ pub const SECTION_NAME: &str = "inference.spec_funcs";
 /// `wasm-to-v` decoder so encoder and decoder share a single source of truth.
 pub const SECTION_VERSION: u32 = 1;
 
+/// Upper bound, in bytes, on a single spec name embedded in the
+/// `inference.spec_funcs` payload.
+///
+/// Both decoders reject any longer name: the linker
+/// (`core/wasm-linker/src/spec_funcs.rs`) and the Rocq translator
+/// (`core/wasm-to-v/src/wasm_parser.rs`) each cap at the same value, the
+/// latter inheriting it from `validate_rocq_identifier`'s `TooLong` rule.
+/// Enforcing the cap here keeps codegen from emitting an artifact that would
+/// fail its own downstream link/translate step.
+pub(crate) const MAX_SPEC_NAME_LEN: usize = 255;
+
+/// Verifies that every spec name in `map` fits within [`MAX_SPEC_NAME_LEN`].
+///
+/// The encoder writes names verbatim, so an over-long name would produce a
+/// `.wasm` artifact that both downstream decoders reject. Checking here lets
+/// codegen surface a clean diagnostic instead of deferring the failure to the
+/// linker or translator.
+///
+/// # Errors
+///
+/// Returns the offending name and its byte length when any name exceeds the
+/// cap, sorted-first by name for a deterministic message.
+pub(crate) fn check_spec_name_lengths(
+    map: &FxHashMap<String, Vec<u32>>,
+) -> Result<(), SpecNameTooLong> {
+    let mut over_long: Vec<&str> = map
+        .keys()
+        .filter(|name| name.len() > MAX_SPEC_NAME_LEN)
+        .map(String::as_str)
+        .collect();
+    over_long.sort_unstable();
+    match over_long.first() {
+        Some(name) => Err(SpecNameTooLong {
+            name: (*name).to_string(),
+            len: name.len(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// A spec name exceeded [`MAX_SPEC_NAME_LEN`] bytes during codegen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpecNameTooLong {
+    pub(crate) name: String,
+    pub(crate) len: usize,
+}
+
 /// Encodes the spec map into the canonical payload bytes.
 pub(crate) fn encode_payload(map: &FxHashMap<String, Vec<u32>>) -> Vec<u8> {
     let mut entries: Vec<(&str, &[u32])> = map
@@ -135,6 +182,46 @@ mod tests {
         let payload = encode_payload(&map);
         // version=1, count=2, name_len=1, 'A', idx_count=1, 2, name_len=1, 'B', idx_count=1, 5
         assert_eq!(payload, vec![1, 2, 1, b'A', 1, 2, 1, b'B', 1, 5]);
+    }
+
+    #[test]
+    fn name_within_cap_passes_check() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        map.insert("a".repeat(MAX_SPEC_NAME_LEN), vec![0]);
+        assert_eq!(check_spec_name_lengths(&map), Ok(()));
+    }
+
+    #[test]
+    fn over_long_name_is_rejected() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        let name = "a".repeat(MAX_SPEC_NAME_LEN + 1);
+        map.insert(name.clone(), vec![0]);
+        assert_eq!(
+            check_spec_name_lengths(&map),
+            Err(SpecNameTooLong {
+                name,
+                len: MAX_SPEC_NAME_LEN + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn reports_first_over_long_name_deterministically() {
+        let mut map: FxHashMap<String, Vec<u32>> = FxHashMap::default();
+        // Two names share the over-cap length; the lexicographically smaller
+        // one must be reported so the diagnostic is stable across hash orders.
+        let long_b = format!("b{}", "x".repeat(MAX_SPEC_NAME_LEN));
+        let long_a = format!("a{}", "x".repeat(MAX_SPEC_NAME_LEN));
+        map.insert(long_b, vec![0]);
+        map.insert(long_a.clone(), vec![1]);
+        let err = check_spec_name_lengths(&map).expect_err("over-long names must reject");
+        assert_eq!(err.name, long_a);
+    }
+
+    #[test]
+    fn cap_matches_decoder_contract() {
+        // Mirrors the cap both `inference.spec_funcs` decoders enforce.
+        assert_eq!(MAX_SPEC_NAME_LEN, 255);
     }
 
     #[test]

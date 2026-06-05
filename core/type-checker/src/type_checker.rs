@@ -42,7 +42,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
-    symbol_table::{FuncInfo, Import, ImportItem, ImportKind, ResolvedImport, SymbolTable},
+    symbol_table::{
+        ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind, ResolvedImport,
+        SymbolTable,
+    },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
 };
@@ -57,6 +60,19 @@ pub(crate) struct TypeChecker {
     /// Set before walking the body, cleared after. Used by `infer_statement` to
     /// pass type param context to `validate_type` and `TypeInfo::from_type_id_with_type_params`.
     current_type_params: Vec<String>,
+    /// Declaring extern [`DefId`] → provenance, derived from `use … from`
+    /// directives before externs are registered.
+    ///
+    /// Keyed by the *declaration*, not the bare name: a `use { f } from m;`
+    /// directive is file-global, so it binds only the **top-level** `external fn
+    /// f` and never a same-named extern declared inside a `spec` or `module`.
+    /// Keying by [`DefId`] keeps those scopes' externs unbound (and so
+    /// A024-rejected) even when they share a name with a bound top-level extern.
+    ///
+    /// Holds only unambiguously-bound externs; an extern named by conflicting
+    /// modules is reported as [`TypeCheckError::AmbiguousExternModule`] and
+    /// omitted here so it falls back to an unbound registration.
+    extern_module_bindings: FxHashMap<DefId, ExternOrigin>,
 }
 
 /// RAII guard that enters a spec scope on construction and pops it on drop.
@@ -128,6 +144,7 @@ impl TypeChecker {
     /// 5. Infer variable types in function bodies
     pub fn infer_types(&mut self, ctx: &mut TypedContext) -> anyhow::Result<SymbolTable> {
         self.process_directives(ctx);
+        self.collect_extern_bindings(ctx);
         self.register_types(ctx);
         self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
@@ -311,6 +328,7 @@ impl TypeChecker {
                             return_type,
                             visibility: method_vis.clone(),
                             definition_scope_id,
+                            kind: FuncKind::Local,
                         };
 
                         self.symbol_table
@@ -716,6 +734,31 @@ impl TypeChecker {
                 ..
             } => {
                 let func_name = ctx.arena()[*name].name.clone();
+                // Externs declare no type parameters, so every type in the
+                // signature must resolve against the surrounding scope. Validate
+                // them up front (mirroring `Def::Function`): an undeclared
+                // `Custom` type would otherwise pass the signature-only extern
+                // validator and `todo!()`-panic codegen (H6). A `self` receiver
+                // is meaningless on an extern and is rejected here (H7), matching
+                // how standalone functions reject it.
+                for arg in args {
+                    match &arg.kind {
+                        ArgKind::SelfRef { .. } => {
+                            self.errors.push(TypeCheckError::SelfReferenceInFunction {
+                                function_name: func_name.clone(),
+                                location: arg.location,
+                            });
+                        }
+                        ArgKind::Named { ty, .. }
+                        | ArgKind::Ignored { ty }
+                        | ArgKind::TypeOnly(ty) => {
+                            self.validate_type(ctx.arena(), *ty, &[]);
+                        }
+                    }
+                }
+                if let Some(return_type_id) = returns {
+                    self.validate_type(ctx.arena(), *return_type_id, &[]);
+                }
                 let param_types: Vec<TypeInfo> = args
                     .iter()
                     .filter_map(|a| match &a.kind {
@@ -730,11 +773,12 @@ impl TypeChecker {
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id(ctx.arena(), r))
                     .unwrap_or_default();
-                if let Err(err) = self.symbol_table.register_function(
+                let origin = self.extern_module_bindings.get(&def_id).cloned();
+                if let Err(err) = self.symbol_table.register_extern_function(
                     &func_name,
-                    vec![],
                     param_types,
                     return_type,
+                    origin,
                 ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Function,
@@ -2400,6 +2444,28 @@ impl TypeChecker {
                         ..
                     } => {
                         let fn_name = arena[*ef_name].name.clone();
+                        // Same validation as the top-level extern arm: reject a
+                        // `self` receiver (H7) and check every signature type so
+                        // an undeclared `Custom` cannot reach codegen (H6).
+                        // Externs carry no type parameters, hence the empty slice.
+                        for arg in args {
+                            match &arg.kind {
+                                ArgKind::SelfRef { .. } => {
+                                    self.errors.push(TypeCheckError::SelfReferenceInFunction {
+                                        function_name: fn_name.clone(),
+                                        location: arg.location,
+                                    });
+                                }
+                                ArgKind::Named { ty, .. }
+                                | ArgKind::Ignored { ty }
+                                | ArgKind::TypeOnly(ty) => {
+                                    self.validate_type(arena, *ty, &[]);
+                                }
+                            }
+                        }
+                        if let Some(return_type_id) = returns {
+                            self.validate_type(arena, *return_type_id, &[]);
+                        }
                         let param_types: Vec<TypeInfo> = args
                             .iter()
                             .filter_map(|a| match &a.kind {
@@ -2412,11 +2478,16 @@ impl TypeChecker {
                         let return_type = returns
                             .map(|r| TypeInfo::from_type_id(arena, r))
                             .unwrap_or_default();
-                        if let Err(err) = self.symbol_table.register_function(
+                        // Module-inner externs are never bound by a (file-global)
+                        // `use … from` clause: the binding map is keyed by
+                        // top-level declaration only, so this lookup correctly
+                        // misses, leaving the module-inner extern unbound.
+                        let origin = self.extern_module_bindings.get(&inner_def_id).cloned();
+                        if let Err(err) = self.symbol_table.register_extern_function(
                             &fn_name,
-                            vec![],
                             param_types,
                             return_type,
+                            origin,
                         ) {
                             self.errors.push(TypeCheckError::RegistrationFailed {
                                 kind: RegistrationKind::Function,
@@ -2463,13 +2534,126 @@ impl TypeChecker {
         }
     }
 
+    /// Binds each `external fn` to the source module named by a `use … from`
+    /// clause, populating [`Self::extern_module_bindings`].
+    ///
+    /// For every `use { fields } from module;` directive, each field is paired
+    /// with `module`. The resulting bindings are validated:
+    ///
+    /// - A field imported from two or more distinct modules is reported as
+    ///   [`TypeCheckError::AmbiguousExternModule`] and left unbound.
+    /// - A field imported from a module but never declared as an `external fn`
+    ///   is reported as [`TypeCheckError::ExternImportNotDeclared`].
+    /// - A field imported from exactly one module and declared as an extern is
+    ///   recorded as a bound [`ExternOrigin`].
+    ///
+    /// An `external fn` with no binding `use` is left unbound (no error): a bare
+    /// extern declaration is valid; analysis rule A024 governs whether *calling*
+    /// an unlinked extern is allowed.
+    fn collect_extern_bindings(&mut self, ctx: &TypedContext) {
+        let arena = ctx.arena();
+
+        let extern_decls = Self::collect_top_level_extern_decls(arena);
+
+        // field name → (distinct modules in first-seen order, first import location)
+        let mut imports: FxHashMap<String, (Vec<String>, Location)> = FxHashMap::default();
+        for sf in arena.source_files() {
+            for directive in &sf.directives {
+                let Directive::Use(use_dir) = directive;
+                let Some(module_ref) = &use_dir.from else {
+                    continue;
+                };
+                let module = module_ref
+                    .segments
+                    .iter()
+                    .map(|s| arena[*s].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                for &field_id in &use_dir.imported_types {
+                    let field = arena[field_id].name.clone();
+                    let entry = imports
+                        .entry(field)
+                        .or_insert_with(|| (Vec::new(), use_dir.location));
+                    if !entry.0.contains(&module) {
+                        entry.0.push(module.clone());
+                    }
+                }
+            }
+        }
+
+        for (field, (modules, location)) in imports {
+            let Some(&decl) = extern_decls.get(&field) else {
+                self.errors.push(TypeCheckError::ExternImportNotDeclared {
+                    name: field,
+                    module: modules.join(", "),
+                    location,
+                });
+                continue;
+            };
+            if modules.len() > 1 {
+                let module_list = modules
+                    .iter()
+                    .map(|m| format!("`{m}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.errors.push(TypeCheckError::AmbiguousExternModule {
+                    name: field,
+                    modules: module_list,
+                    location,
+                });
+                continue;
+            }
+            let logical_module = modules.into_iter().next().expect("one module");
+            self.extern_module_bindings.insert(
+                decl,
+                ExternOrigin {
+                    logical_module,
+                    export_field: field,
+                    decl,
+                    resolved_path: None,
+                },
+            );
+        }
+    }
+
+    /// Collects every **top-level** `external fn` declaration, mapping its name
+    /// to its declaring [`DefId`].
+    ///
+    /// A `use … from` clause is file-global and binds only top-level externs,
+    /// so this deliberately does **not** descend into `spec` or `module` bodies:
+    /// a same-named extern declared in a spec or module is left out, stays
+    /// unbound, and remains A024-rejected when called. Descending here (the prior
+    /// behavior) let a top-level `use` silently bind a spec-inner extern,
+    /// suppressing A024 and miscompiling proof-mode codegen.
+    fn collect_top_level_extern_decls(arena: &AstArena) -> FxHashMap<String, DefId> {
+        let mut decls = FxHashMap::default();
+        for sf in arena.source_files() {
+            for &def_id in &sf.defs {
+                if let Def::ExternFunction { name, .. } = &arena[def_id].kind {
+                    decls.insert(arena[*name].name.clone(), def_id);
+                }
+            }
+        }
+        decls
+    }
+
     /// Process a use statement (Phase A: registration only).
     /// Converts UseDirective AST to Import and registers in current scope.
+    ///
+    /// A `use … from <module>` clause binds an `external fn` to its source
+    /// module; it is not a symbol import to resolve against the local scope
+    /// tree. Such directives are handled by [`Self::collect_extern_bindings`]
+    /// and skipped here, so their imported names are not mistaken for dangling
+    /// path imports.
     fn process_use_statement(
         &mut self,
         arena: &AstArena,
         use_stmt: &inference_ast::nodes::UseDirective,
     ) -> anyhow::Result<()> {
+        if use_stmt.from.is_some() {
+            return Ok(());
+        }
+
         let path: Vec<String> = use_stmt
             .segments
             .iter()

@@ -1,0 +1,7 @@
+external fn sum(a: i32, b: i32) -> i32;
+external fn neg(a: i32) -> i32;
+use { sum, neg } from arith;
+
+pub fn compute(x: i32) -> i32 {
+    return sum(neg(x), 3);
+}

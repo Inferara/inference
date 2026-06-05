@@ -1,0 +1,6 @@
+external fn sum(a: i32, b: i32) -> i32;
+use { sum } from arith;
+
+pub fn add_three(x: i32) -> i32 {
+    return sum(x, 3);
+}

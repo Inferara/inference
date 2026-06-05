@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Language
 
+- `external fn` + `use { … } from <module>` — declare and call functions from external
+  `.wasm` libraries using logical (platform-independent) module references. The compiler
+  emits a WASM import section with one entry per bound extern; a separate link step
+  (`inference-wasm-linker`) produces a single self-contained `.wasm` and `.v` with no
+  dangling imports. Tier-A (pure) and Tier-B (caller-pointer memory) closures merge
+  automatically; Tier-C (own static data/globals/tables) produces a clear error with a
+  relocatable-build recommendation ([#9])
 - Add struct definition and parsing support ([#14])
 - Add division operator (`/`) support ([#86])
 - Add unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
@@ -45,6 +52,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compiler
 
+- wasm-linker: New `core/wasm-linker` crate (`inference-wasm-linker`) implementing the
+  static-merge link pass. `link(main_wasm, &[external_wasm])` folds satisfied imports'
+  transitive closures into the main module, rewrites all index-bearing operators into a
+  unified index space, deduplicates function types, preserves the `name` custom section for
+  Rocq translation, and emits the unified WASM binary ([#9])
+- wasm-codegen: Emit WASM import section for `external fn` declarations. The three-stage
+  index pre-scan now runs `register_imports` before local functions, so every
+  `Def::ExternFunction` bound via `use … from` is assigned a function import index (lowest
+  indices, `0..N`), the local-function base is shifted to `N`, and extern calls lower to
+  `call <import_idx>` identically to local calls. The import section is emitted between the
+  Type and Function sections per the WASM binary format; it is omitted when there are no
+  externs. Function type deduplication (`intern_type`) ensures imports with identical
+  signatures share one type entry ([#9])
+- type-checker: `ExternOrigin { logical_module, export_field }` binds each `external fn`
+  declaration to its source module; `extern_origins()` on `SymbolTable` collects all bound
+  externs for use by codegen ([#9])
 - ast: Remove dead `OperatorKind::BitNot` variant — `~x` is always parsed as `UnaryOperatorKind::BitNot` in a `PrefixUnaryExpression`; the binary enum variant was never produced by the AST builder ([#142])
 - parser: Replace the `tree-sitter` + `tree-sitter-inference` front end with a resilient recursive-descent parser in the new `inference-parser` crate (`core/parser`). The parser lexes, parses, and lowers directly into the same `inference_ast::arena::AstArena`, producing byte-identical ASTs for all previously valid inputs, so the type-checker, analysis, codegen, and wasm-to-v phases are unchanged. The `tree-sitter`/`tree-sitter-inference` dependencies are removed from the default build, eliminating the C toolchain requirement. Parsing is now resilient (collects every syntax error instead of aborting on the first) and never panics on malformed input. `parse_external_module` moves from `inference_ast::extern_prelude` to `inference::extern_prelude` so that `inference-ast` no longer depends on the parser ([#62])
 - ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])

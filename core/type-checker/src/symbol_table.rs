@@ -31,6 +31,8 @@
 //! represented as `TypeInfo { kind: TypeInfoKind::Unit, type_params: vec![] }`.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Weak;
 
 use std::sync::Arc;
@@ -46,6 +48,53 @@ use rustc_hash::FxHashMap;
 pub(crate) type ScopeRef = Arc<RefCell<Scope>>;
 pub(crate) type WeakScopeRef = Weak<RefCell<Scope>>;
 
+/// Provenance of an `external fn` declaration: the logical module that exports
+/// it, the export field name to bind against, and (once the driver resolves it)
+/// the concrete `.wasm` path.
+///
+/// `logical_module` and `export_field` are platform-independent: they come from
+/// the `use { field } from logical::module;` clause that names the extern, not
+/// from any filesystem path. `resolved_path` stays `None` until the driver maps
+/// the logical module to a file; later phases populate it for the linker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternOrigin {
+    /// Logical, `::`-joined module reference from the binding `use` clause
+    /// (e.g. `"crypto::sha256"`). Never a filesystem path.
+    pub logical_module: String,
+    /// Export field name to bind against in the resolved module. Equals the
+    /// extern's declared name; carried explicitly so renaming-on-import can
+    /// diverge the two in a later phase without changing the data model.
+    pub export_field: String,
+    /// The `external fn` declaration this binding attaches to.
+    ///
+    /// Two same-named externs (e.g. a top-level and a spec-inner `sort` with
+    /// divergent signatures) would otherwise collapse together when keyed by
+    /// bare name. Carrying the declaring [`DefId`] lets the driver recover the
+    /// exact declared signature to validate against — never a same-named
+    /// sibling — and lets analysis resolve each call to the specific extern it
+    /// names.
+    pub decl: DefId,
+    /// Concrete `.wasm` path once the driver resolves `logical_module`.
+    /// `None` during type checking; populated downstream.
+    pub resolved_path: Option<PathBuf>,
+}
+
+/// Whether a registered function is local or an `external fn`, and — for an
+/// extern — whether it was bound to a source module via a `use … from` clause.
+///
+/// This discriminates the three states that otherwise collapse together: a
+/// local function, an unbound extern (declared without a binding `use`), and a
+/// bound extern (carrying its [`ExternOrigin`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum FuncKind {
+    /// An ordinary function defined in this program.
+    #[default]
+    Local,
+    /// An `external fn`. `Some` once bound to a source module via a
+    /// `use … from` clause; `None` while unbound.
+    Extern(Option<ExternOrigin>),
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FuncInfo {
     pub(crate) name: String,
@@ -54,6 +103,25 @@ pub(crate) struct FuncInfo {
     pub(crate) return_type: TypeInfo,
     pub(crate) visibility: Visibility,
     pub(crate) definition_scope_id: u32,
+    /// Local function, unbound extern, or bound extern. See [`FuncKind`].
+    pub(crate) kind: FuncKind,
+}
+
+impl FuncInfo {
+    /// Returns true if this is an `external fn`, bound or unbound.
+    #[must_use = "this is a pure check with no side effects"]
+    pub(crate) fn is_extern(&self) -> bool {
+        matches!(self.kind, FuncKind::Extern(_))
+    }
+
+    /// Returns the provenance of this function if it is a *bound* extern.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn extern_origin(&self) -> Option<&ExternOrigin> {
+        match &self.kind {
+            FuncKind::Extern(origin) => origin.as_ref(),
+            FuncKind::Local => None,
+        }
+    }
 }
 
 /// Information about a struct field.
@@ -686,6 +754,49 @@ impl SymbolTable {
         return_type: TypeInfo,
         visibility: Visibility,
     ) -> Result<(), String> {
+        self.insert_func_symbol(
+            name,
+            type_params,
+            param_types,
+            return_type,
+            visibility,
+            FuncKind::Local,
+        )
+    }
+
+    /// Registers an `external fn`, discriminating it from a local function.
+    ///
+    /// `origin` carries the binding module and export field when the extern is
+    /// named by a `use … from` clause; it is `None` for an extern declared
+    /// without a binding `use`. Either way the function is recorded as
+    /// [`FuncKind::Extern`], so an unbound extern stays distinguishable from a
+    /// local function.
+    pub(crate) fn register_extern_function(
+        &mut self,
+        name: &str,
+        param_types: Vec<TypeInfo>,
+        return_type: TypeInfo,
+        origin: Option<ExternOrigin>,
+    ) -> Result<(), String> {
+        self.insert_func_symbol(
+            name,
+            vec![],
+            param_types,
+            return_type,
+            Visibility::Private,
+            FuncKind::Extern(origin),
+        )
+    }
+
+    fn insert_func_symbol(
+        &mut self,
+        name: &str,
+        type_params: Vec<String>,
+        param_types: Vec<TypeInfo>,
+        return_type: TypeInfo,
+        visibility: Visibility,
+        kind: FuncKind,
+    ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
             let sig = FuncInfo {
@@ -698,6 +809,7 @@ impl SymbolTable {
                 return_type: self.resolve_custom_type(return_type),
                 visibility,
                 definition_scope_id: scope_id,
+                kind,
             };
             scope
                 .borrow_mut()
@@ -828,6 +940,87 @@ impl SymbolTable {
             if let Some(scope) = self.scopes.get(&id)
                 && let Some(symbol) = scope.borrow().lookup_symbol_local(name)
                 && let Some(info) = symbol.as_enum()
+            {
+                return Some(info.clone());
+            }
+        }
+        None
+    }
+
+    /// Collects the provenance of every **bound** `external fn` across all
+    /// scopes, deduplicated by `(logical_module, export_field)`.
+    ///
+    /// The driver consumes this to resolve and validate each external `.wasm`
+    /// before linking. Unbound bare externs (declared without a binding `use`)
+    /// carry no origin and are skipped — they never reach the linker.
+    #[must_use = "this enumeration has no side effects"]
+    pub(crate) fn extern_origins(&self) -> Vec<ExternOrigin> {
+        let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut origins = Vec::new();
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(scope) = self.scopes.get(&id) else {
+                continue;
+            };
+            for symbol in scope.borrow().symbols.values() {
+                let Some(info) = symbol.as_function() else {
+                    continue;
+                };
+                let Some(origin) = info.extern_origin() else {
+                    continue;
+                };
+                let key = (origin.logical_module.clone(), origin.export_field.clone());
+                if seen.insert(key) {
+                    origins.push(origin.clone());
+                }
+            }
+        }
+        origins
+    }
+
+    /// Returns the provenance of the **bound** `external fn` declared by
+    /// `decl`, resolving strictly by declaration identity rather than by name.
+    ///
+    /// Two same-named externs (a top-level and a spec-inner `f`) register under
+    /// the same bare name in different scopes; a name keyed lookup would return
+    /// whichever the scope walk reaches first, masking which declaration is
+    /// actually bound. Keying on the declaring [`DefId`] lets a caller ask the
+    /// precise question "is *this* extern bound?" — the basis for resolving each
+    /// call site to the specific extern it names.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn extern_origin_by_decl(&self, decl: DefId) -> Option<ExternOrigin> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(scope) = self.scopes.get(&id) else {
+                continue;
+            };
+            for symbol in scope.borrow().symbols.values() {
+                let Some(info) = symbol.as_function() else {
+                    continue;
+                };
+                if let Some(origin) = info.extern_origin()
+                    && origin.decl == decl
+                {
+                    return Some(origin.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Looks up a function by name across **all** registered scopes. Mirrors
+    /// [`Self::lookup_struct_anywhere`]; the returned [`FuncInfo`] carries the
+    /// extern provenance, so post-type-check phases can read it scope-agnostically.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_function_anywhere(&self, name: &str) -> Option<FuncInfo> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(scope) = self.scopes.get(&id)
+                && let Some(symbol) = scope.borrow().lookup_symbol_local(name)
+                && let Some(info) = symbol.as_function()
             {
                 return Some(info.clone());
             }
@@ -1019,7 +1212,7 @@ impl SymbolTable {
 
         for sf in arena.source_files() {
             for &def_id in &sf.defs {
-                self.register_definition_from_external(arena, def_id)?;
+                self.register_definition_from_external(module_name, arena, def_id)?;
             }
         }
 
@@ -1029,9 +1222,14 @@ impl SymbolTable {
     }
 
     /// Register a definition from an external module into the current scope.
+    ///
+    /// `module_name` is the logical name of the module being loaded; an
+    /// `external fn` registered here is bound to it by construction, so its
+    /// [`ExternOrigin`] names this module.
     #[allow(dead_code)]
     fn register_definition_from_external(
         &mut self,
+        module_name: &str,
         arena: &AstArena,
         def_id: DefId,
     ) -> anyhow::Result<()> {
@@ -1105,7 +1303,40 @@ impl SymbolTable {
             Def::TypeAlias { name, ty, .. } => {
                 self.register_type(&arena[*name].name, Some(TypeInfo::from_type_id(arena, *ty)))?;
             }
-            Def::Constant { .. } | Def::ExternFunction { .. } | Def::Module { .. } => {}
+            Def::ExternFunction {
+                name,
+                args,
+                returns,
+                ..
+            } => {
+                let extern_name = arena[*name].name.clone();
+                let param_types: Vec<TypeInfo> = args
+                    .iter()
+                    .filter_map(|a| match &a.kind {
+                        ArgKind::SelfRef { .. } => None,
+                        ArgKind::Named { ty, .. }
+                        | ArgKind::Ignored { ty }
+                        | ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id(arena, *ty)),
+                    })
+                    .collect();
+                let return_type = returns
+                    .map(|r| TypeInfo::from_type_id(arena, r))
+                    .unwrap_or_default();
+                let origin = ExternOrigin {
+                    logical_module: module_name.to_string(),
+                    export_field: extern_name.clone(),
+                    decl: def_id,
+                    resolved_path: None,
+                };
+                self.register_extern_function(
+                    &extern_name,
+                    param_types,
+                    return_type,
+                    Some(origin),
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+            }
+            Def::Constant { .. } | Def::Module { .. } => {}
         }
         Ok(())
     }
@@ -1492,6 +1723,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
                 scope_id: 0,
@@ -1510,6 +1742,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Public,
                     definition_scope_id: 0,
+                    kind: FuncKind::Local,
                 },
                 visibility: Visibility::Public,
                 scope_id: 0,
@@ -1529,6 +1762,7 @@ mod tests {
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                kind: FuncKind::Local,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, true);
             assert!(result.is_ok());
@@ -1550,6 +1784,7 @@ mod tests {
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                kind: FuncKind::Local,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, false);
             assert!(result.is_ok());
@@ -1570,6 +1805,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
                 scope_id: 0,
@@ -1583,6 +1819,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
                 scope_id: 0,
@@ -1622,6 +1859,140 @@ mod tests {
                 definition_scope_id: 0,
             };
             assert_eq!(info.variant_index("Yellow"), None);
+        }
+    }
+
+    mod extern_registration {
+        use super::*;
+
+        fn i32_type() -> TypeInfo {
+            TypeInfo {
+                kind: TypeInfoKind::Number(NumberType::I32),
+                type_params: vec![],
+            }
+        }
+
+        fn origin(module: &str, field: &str) -> ExternOrigin {
+            ExternOrigin {
+                logical_module: module.to_string(),
+                export_field: field.to_string(),
+                decl: inference_ast::ids::idx_from_u32(0),
+                resolved_path: None,
+            }
+        }
+
+        #[test]
+        fn bound_extern_carries_origin_and_is_discriminated() {
+            let mut table = SymbolTable::default();
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i32_type()],
+                    i32_type(),
+                    Some(origin("collections", "sort")),
+                )
+                .expect("registering a bound extern should succeed");
+
+            let info = table
+                .lookup_function_anywhere("sort")
+                .expect("sort should be registered");
+            assert!(info.is_extern(), "a registered extern must be discriminated");
+            let found = info.extern_origin().expect("bound extern carries origin");
+            assert_eq!(found.logical_module, "collections");
+            assert_eq!(found.export_field, "sort");
+        }
+
+        #[test]
+        fn unbound_extern_is_extern_without_origin() {
+            let mut table = SymbolTable::default();
+            table
+                .register_extern_function("add", vec![i32_type()], i32_type(), None)
+                .expect("registering an unbound extern should succeed");
+
+            let info = table
+                .lookup_function_anywhere("add")
+                .expect("add should be registered");
+            assert!(
+                info.is_extern(),
+                "an unbound extern stays distinguishable from a local function"
+            );
+            assert!(
+                info.extern_origin().is_none(),
+                "an unbound extern has no provenance"
+            );
+        }
+
+        #[test]
+        fn local_function_is_not_extern() {
+            let mut table = SymbolTable::default();
+            table
+                .register_function("helper", vec![], vec![], i32_type())
+                .expect("registering a local function should succeed");
+
+            let info = table
+                .lookup_function_anywhere("helper")
+                .expect("helper should be registered");
+            assert!(!info.is_extern());
+            assert!(info.extern_origin().is_none());
+        }
+
+        #[test]
+        fn extern_origins_collects_only_bound_externs() {
+            let mut table = SymbolTable::default();
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i32_type()],
+                    i32_type(),
+                    Some(origin("collections", "sort")),
+                )
+                .unwrap();
+            table
+                .register_extern_function("unbound", vec![], i32_type(), None)
+                .unwrap();
+            table
+                .register_function("helper", vec![], vec![], i32_type())
+                .unwrap();
+
+            let origins = table.extern_origins();
+            assert_eq!(
+                origins.len(),
+                1,
+                "only the bound extern contributes an origin, got {origins:?}"
+            );
+            assert_eq!(origins[0].logical_module, "collections");
+            assert_eq!(origins[0].export_field, "sort");
+        }
+
+        #[test]
+        fn extern_origins_dedups_repeated_module_field_pairs() {
+            // Two distinct externs that name the same module+field collapse to a
+            // single resolution unit; the driver should resolve that `.wasm` once.
+            let mut table = SymbolTable::default();
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i32_type()],
+                    i32_type(),
+                    Some(origin("collections", "sort")),
+                )
+                .unwrap();
+            let _ = table.enter_module("nested", Visibility::Public);
+            table
+                .register_extern_function(
+                    "sort",
+                    vec![i32_type()],
+                    i32_type(),
+                    Some(origin("collections", "sort")),
+                )
+                .unwrap();
+
+            let origins = table.extern_origins();
+            assert_eq!(
+                origins.len(),
+                1,
+                "identical (module, field) pairs dedup to one origin, got {origins:?}"
+            );
         }
     }
 }

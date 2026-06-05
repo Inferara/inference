@@ -160,11 +160,10 @@ Import statement for bringing external symbols into scope.
 
 ```rust
 pub struct UseDirective {
-    pub id: u32,
     pub location: Location,
-    pub imported_types: Option<Vec<Rc<Identifier>>>,
-    pub segments: Option<Vec<Rc<Identifier>>>,
-    pub from: Option<String>,
+    pub imported_types: Vec<IdentId>,
+    pub segments: Vec<IdentId>,
+    pub from: Option<ModuleRef>,
 }
 ```
 
@@ -172,12 +171,16 @@ pub struct UseDirective {
 ```inference
 use std::{io, fs};
 use core::option::Option;
+use { sort } from sorting;
+use { hash } from crypto::sha256;
 ```
 
 **Fields:**
 - `imported_types`: Specific types to import (e.g., `{io, fs}`)
-- `segments`: Module path segments (e.g., `std`, `core`)
-- `from`: Optional source path
+- `segments`: Path-form module segments (e.g., `std`, `core`)
+- `from`: Optional logical module reference of a `from` clause. A `ModuleRef`
+  carries identifier-path segments (e.g. `crypto::sha256`), not a filesystem
+  path — the driver resolves it to a `.wasm` file, keeping source portable.
 
 ## Definitions
 

@@ -13,6 +13,5 @@ inference-wasm-codegen.workspace = true
 rustc-hash.workspace = true
 thiserror.workspace = true
 
-[dependencies.uuid]
-version = "1.10.0"
-features = ["v4", "fast-rng", "macro-diagnostics"]
+[dev-dependencies]
+wat = "1.225.0"

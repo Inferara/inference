@@ -1,0 +1,20 @@
+[package]
+name = "inference-wasm-linker"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+description = "Static-merge linker: folds external `.wasm` function bodies into the main module so no cross-module imports remain"
+keywords = ["compiler", "webassembly", "linker", "wasm"]
+categories = ["compilers", "wasm"]
+
+[dependencies]
+wasm-encoder = "0.249.0"
+inf-wasmparser.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+wat = "1.225.0"
+wasm-encoder = "0.249.0"
+inf-wasmparser = { workspace = true }

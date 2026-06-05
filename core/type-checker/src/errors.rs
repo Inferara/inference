@@ -559,6 +559,36 @@ pub enum TypeCheckError {
         variant_name: String,
         location: Location,
     },
+
+    /// An `external fn` is named by more than one `use … from <module>` clause,
+    /// each referring to a different module.
+    ///
+    /// Extern provenance must be unambiguous: the linker needs exactly one
+    /// source module per extern. List the offending modules and rename or
+    /// remove the conflicting `use` clauses to disambiguate.
+    #[error(
+        "{location}: external function `{name}` is bound to multiple modules ({modules}); each extern must come from exactly one module"
+    )]
+    AmbiguousExternModule {
+        name: String,
+        modules: String,
+        location: Location,
+    },
+
+    /// A `use { name } from <module>` clause names an import that has no
+    /// matching `external fn` declaration.
+    ///
+    /// A `from` import binds an extern to its source module; without a
+    /// corresponding `external fn name(...)` declaration there is nothing to
+    /// bind, so the import is dangling. Declare the extern or drop the import.
+    #[error(
+        "{location}: `use` imports `{name}` from module `{module}`, but no `external fn {name}` is declared"
+    )]
+    ExternImportNotDeclared {
+        name: String,
+        module: String,
+        location: Location,
+    },
 }
 
 impl TypeCheckError {
@@ -611,6 +641,8 @@ impl TypeCheckError {
             | TypeCheckError::ArrayLiteralSizeMismatch { location, .. }
             | TypeCheckError::DivisionByZero { location, .. }
             | TypeCheckError::DuplicateEnumVariant { location, .. }
+            | TypeCheckError::AmbiguousExternModule { location, .. }
+            | TypeCheckError::ExternImportNotDeclared { location, .. }
             | TypeCheckError::SpecFunctionShadowsTopLevel { location, .. } => location,
         }
     }
@@ -1386,6 +1418,32 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "1:5: duplicate variant `Red` in enum definition `Color`"
+        );
+    }
+
+    #[test]
+    fn display_ambiguous_extern_module() {
+        let err = TypeCheckError::AmbiguousExternModule {
+            name: "sort".to_string(),
+            modules: "`sorting`, `collections`".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: external function `sort` is bound to multiple modules (`sorting`, `collections`); each extern must come from exactly one module"
+        );
+    }
+
+    #[test]
+    fn display_extern_import_not_declared() {
+        let err = TypeCheckError::ExternImportNotDeclared {
+            name: "hash".to_string(),
+            module: "crypto".to_string(),
+            location: test_location(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: `use` imports `hash` from module `crypto`, but no `external fn hash` is declared"
         );
     }
 

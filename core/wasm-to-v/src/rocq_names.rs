@@ -164,3 +164,158 @@ pub fn validate_rocq_identifier(name: &str) -> Result<(), WasmToVError> {
 
     Ok(())
 }
+
+/// Rewrites an arbitrary WASM name-section symbol into a syntactically legal
+/// Rocq identifier, returning a name that always satisfies
+/// [`validate_rocq_identifier`].
+///
+/// This is the decode-boundary defense for function names copied verbatim
+/// from a WASM `name` section. Such names are not constrained to Rocq's
+/// identifier grammar: Inference's own codegen emits struct-method names like
+/// `Point.sum_coords` (illegal `.`), and an adversarial external `.wasm` can
+/// name an inner function with a Coq keyword (`fun`, `match`) or otherwise
+/// illegal characters. Emitting any of these verbatim as `Definition <name>`
+/// produces invalid Gallina with exit 0 — a silent miscompile of the proof
+/// artifact. Sanitizing here guarantees every emitted `Definition` name is
+/// well-formed; the emitter additionally de-duplicates the sanitized names so
+/// distinct functions never collide on one Rocq `Definition`.
+///
+/// Rewrite rules (each chosen to map the legal grammar to itself, so already
+/// valid names are returned unchanged):
+/// - Characters outside `[A-Za-z0-9_]` become `_`.
+/// - A leading non-letter is prefixed with `f_` (Rocq reserves `_`-leading and
+///   digit-leading identifiers).
+/// - A `__` run is collapsed to `_` (the module/spec separator is reserved).
+/// - A name colliding with a reserved keyword or stdlib name is suffixed `_`.
+/// - An over-length name is truncated to the 255-character cap.
+///
+/// The result is never guaranteed globally unique on its own — that is the
+/// caller's responsibility — but it is always individually well-formed.
+#[must_use]
+pub fn sanitize_rocq_identifier(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(255));
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+
+    // Enforce a letter-leading identifier first; an empty or non-alpha start
+    // is prefixed rather than dropped so distinct inputs stay distinguishable.
+    // Done before the `__` collapse so the `f_` prefix joined to a leading `_`
+    // (`f_` + `_priv`) does not leave a `__` run behind.
+    let needs_prefix = out
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphabetic());
+    if needs_prefix {
+        out.insert_str(0, "f_");
+    }
+
+    // Collapse `__` runs so the sanitized name cannot collide with the
+    // `<module>__<spec>` separator grammar.
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+
+    if out.len() > 255 {
+        out.truncate(255);
+        // Truncation may leave a trailing `_` adjacent to the cap; that is
+        // still a legal identifier, so no further fix-up is needed.
+    }
+
+    while REJECTED_ROCQ_KEYWORDS.contains(&out.as_str())
+        || REJECTED_ROCQ_STDLIB_NAMES.contains(&out.as_str())
+    {
+        out.push('_');
+    }
+
+    debug_assert!(
+        validate_rocq_identifier(&out).is_ok(),
+        "sanitized identifier `{out}` (from `{name}`) is still invalid",
+    );
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_rocq_identifier, validate_rocq_identifier};
+
+    /// Every sanitized name must satisfy the validator — the sanitizer's core
+    /// contract.
+    fn assert_sanitized_is_valid(input: &str) -> String {
+        let out = sanitize_rocq_identifier(input);
+        assert!(
+            validate_rocq_identifier(&out).is_ok(),
+            "sanitized `{out}` (from `{input}`) failed validation",
+        );
+        out
+    }
+
+    #[test]
+    fn already_valid_names_are_unchanged() {
+        for name in ["add_three", "main", "Geometry", "f0", "x_y_z"] {
+            assert_eq!(sanitize_rocq_identifier(name), name);
+        }
+    }
+
+    #[test]
+    fn dotted_method_name_becomes_valid_identifier() {
+        // Inference emits struct-method names like `Point.sum_coords`.
+        let out = assert_sanitized_is_valid("Point.sum_coords");
+        assert_eq!(out, "Point_sum_coords");
+    }
+
+    #[test]
+    fn illegal_characters_become_underscores() {
+        let out = assert_sanitized_is_valid("a-b/c:d");
+        assert_eq!(out, "a_b_c_d");
+    }
+
+    #[test]
+    fn leading_non_letter_is_prefixed() {
+        assert_eq!(assert_sanitized_is_valid("0abc"), "f_0abc");
+        assert_eq!(assert_sanitized_is_valid("_priv"), "f_priv");
+        // A digit-only name is prefixed, not emptied.
+        assert_eq!(assert_sanitized_is_valid("123"), "f_123");
+    }
+
+    #[test]
+    fn empty_name_is_prefixed_to_a_legal_identifier() {
+        assert_eq!(assert_sanitized_is_valid(""), "f_");
+    }
+
+    #[test]
+    fn double_underscore_runs_are_collapsed() {
+        // `__` is the reserved module/spec separator.
+        let out = assert_sanitized_is_valid("a__b");
+        assert!(!out.contains("__"), "must not retain `__`: {out}");
+        assert_eq!(out, "a_b");
+        // A run of illegal chars collapsing to many underscores still collapses.
+        assert_eq!(assert_sanitized_is_valid("a...b"), "a_b");
+    }
+
+    #[test]
+    fn coq_keywords_are_escaped() {
+        for kw in ["fun", "match", "Definition", "forall"] {
+            let out = assert_sanitized_is_valid(kw);
+            assert_ne!(out, kw, "keyword `{kw}` must be escaped");
+        }
+    }
+
+    #[test]
+    fn stdlib_names_are_escaped() {
+        for name in ["nat", "Nat", "list", "Some"] {
+            let out = assert_sanitized_is_valid(name);
+            assert_ne!(out, name, "stdlib name `{name}` must be escaped");
+        }
+    }
+
+    #[test]
+    fn over_length_names_are_truncated() {
+        let out = assert_sanitized_is_valid(&"a".repeat(400));
+        assert!(out.len() <= 255, "must respect the 255-char cap: {}", out.len());
+    }
+}

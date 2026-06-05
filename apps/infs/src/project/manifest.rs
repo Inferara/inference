@@ -16,6 +16,11 @@
 //! [dependencies]
 //! # Future: package dependencies
 //!
+//! [wasm-dependencies]
+//! # Logical module name -> location of a compiled `.wasm` module.
+//! # The logical name is what source refers to via `use { f } from <name>;`.
+//! arith = { path = "libs/arith.wasm" }
+//!
 //! [build]
 //! target = "wasm32"
 //! optimize = "release"
@@ -95,6 +100,14 @@ pub struct InferenceToml {
     #[serde(default, skip_serializing_if = "Dependencies::is_empty")]
     pub dependencies: Dependencies,
 
+    /// External `.wasm` module dependencies, keyed by logical module name.
+    #[serde(
+        rename = "wasm-dependencies",
+        default,
+        skip_serializing_if = "WasmDependencies::is_empty"
+    )]
+    pub wasm_dependencies: WasmDependencies,
+
     /// Build configuration.
     #[serde(default, skip_serializing_if = "BuildConfig::is_default")]
     pub build: BuildConfig,
@@ -146,6 +159,86 @@ impl Dependencies {
     pub fn is_empty(&self) -> bool {
         self.packages.is_empty()
     }
+}
+
+/// External `.wasm` module dependencies, keyed by logical module name.
+///
+/// Each entry maps a logical name — the identifier source refers to in
+/// `use { f } from <name>;` — to the location of a compiled `.wasm` module.
+/// These declarations are the highest-priority source feeding the compiler's
+/// module resolver; `-L` search directories and `INFERENCE_*` environment
+/// directories act as overrides only when a logical name is *not* declared here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WasmDependencies {
+    /// Map of logical module name to its location entry.
+    #[serde(flatten)]
+    pub modules: HashMap<String, WasmDependency>,
+}
+
+impl WasmDependencies {
+    /// Returns true if no `.wasm` dependencies are declared.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+}
+
+/// Validates a `[wasm-dependencies]` key against the logical-module-name grammar.
+///
+/// A logical name is one or more `::`-joined segments, each a non-empty ASCII
+/// identifier (`[A-Za-z_][A-Za-z0-9_]*`). This is the same name source refers to
+/// in `use { f } from <name>;`. Rejecting any other shape — in particular a key
+/// containing `=` — keeps the `infs build` → `infc --wasm-dep <name>=<path>`
+/// forwarding unambiguous, since the receiver splits on the first `=`.
+///
+/// # Errors
+///
+/// Returns an error naming the offending key when it is not a well-formed
+/// logical name.
+pub fn validate_wasm_dependency_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        bail!("invalid [wasm-dependencies] key: the module name is empty");
+    }
+    if key.contains('=') {
+        bail!(
+            "invalid [wasm-dependencies] key `{key}`: a module name cannot contain `=`"
+        );
+    }
+
+    let segments: Vec<&str> = key.split("::").collect();
+    for segment in &segments {
+        if !is_logical_name_segment(segment) {
+            bail!(
+                "invalid [wasm-dependencies] key `{key}`: `{segment}` is not a valid \
+                 module-name segment (expected `::`-joined ASCII identifiers)"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Returns true when `segment` is a non-empty ASCII identifier:
+/// the first character is a letter or `_`, the rest are alphanumeric or `_`.
+fn is_logical_name_segment(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// The location of a single external `.wasm` module dependency.
+///
+/// Only a filesystem `path` is supported today. The entry is a table — not a
+/// bare string — so future producers (version pins, registries) can add fields
+/// without a breaking change to the manifest format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WasmDependency {
+    /// Filesystem path to the compiled `.wasm` module, relative to the manifest.
+    pub path: String,
 }
 
 /// Build configuration section.
@@ -394,9 +487,54 @@ impl InferenceToml {
                 license: None,
             },
             dependencies: Dependencies::default(),
+            wasm_dependencies: WasmDependencies::default(),
             build: BuildConfig::default(),
             verification: VerificationConfig::default(),
         }
+    }
+
+    /// Loads and parses a manifest from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or is not valid
+    /// `Inference.toml`.
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
+        Self::from_toml(&content)
+    }
+
+    /// Resolves every `[wasm-dependencies]` entry to an absolute path.
+    ///
+    /// Each entry's `path` is interpreted relative to `base_dir` (the directory
+    /// containing the manifest), then made absolute via [`Path::join`]. Entries
+    /// already absolute are returned unchanged. The result preserves the logical
+    /// name so the resolver can key on it.
+    ///
+    /// Each key is validated against the logical-module-name grammar
+    /// ([`validate_wasm_dependency_key`]) so a malformed name — in particular one
+    /// containing `=` — never silently corrupts the `--wasm-dep <name>=<path>`
+    /// forwarding to `infc`.
+    ///
+    /// The returned order is sorted by logical name for determinism.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any `[wasm-dependencies]` key is not a well-formed
+    /// logical module name.
+    pub fn resolved_wasm_dependencies(
+        &self,
+        base_dir: &Path,
+    ) -> Result<Vec<(String, std::path::PathBuf)>> {
+        let mut resolved: Vec<(String, std::path::PathBuf)> =
+            Vec::with_capacity(self.wasm_dependencies.modules.len());
+        for (name, dep) in &self.wasm_dependencies.modules {
+            validate_wasm_dependency_key(name)?;
+            resolved.push((name.clone(), base_dir.join(&dep.path)));
+        }
+        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(resolved)
     }
 
     /// Serializes the manifest to TOML format.
@@ -487,6 +625,29 @@ pub fn discover_manifest(start: &Path) -> Result<PathBuf> {
     )
 }
 
+/// Locates the nearest `Inference.toml` by walking up from `start`.
+///
+/// `start` may be a file (e.g. the source being compiled) or a directory; the
+/// search begins at `start`'s directory and ascends to the filesystem root,
+/// returning the first directory that contains an `Inference.toml`. Returns
+/// `None` when no manifest is found — a bare file compiled outside any project
+/// is a valid, manifest-free build.
+#[must_use]
+pub fn find_manifest_dir(start: &Path) -> Option<std::path::PathBuf> {
+    let mut dir = if start.is_dir() {
+        Some(start)
+    } else {
+        start.parent()
+    };
+    while let Some(current) = dir {
+        if current.join(MANIFEST_FILE_NAME).is_file() {
+            return Some(current.to_path_buf());
+        }
+        dir = current.parent();
+    }
+    None
+}
+
 /// Validates a project name for use in Inference projects.
 ///
 /// # Rules
@@ -531,6 +692,7 @@ pub fn validate_project_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_fs::prelude::*;
     use semver::Version;
 
     #[test]
@@ -723,6 +885,24 @@ mod tests {
     }
 
     #[test]
+    fn test_new_manifest_has_no_wasm_dependencies() {
+        let manifest = InferenceToml::new("myproject");
+        assert!(manifest.wasm_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_wasm_dependencies_default_is_omitted_from_toml() {
+        // An empty `[wasm-dependencies]` table must not be serialized — a fresh
+        // manifest stays minimal.
+        let manifest = InferenceToml::new("myproject");
+        let output = manifest.to_toml().unwrap();
+        assert!(
+            !output.contains("wasm-dependencies"),
+            "empty wasm-dependencies should be skipped, got:\n{output}"
+        );
+    }
+
+    #[test]
     fn from_toml_parses_explicit_compile_mode() {
         let src = r#"
 [package]
@@ -778,6 +958,31 @@ infc_version = "0.1.0"
         assert_eq!(
             InferenceToml::from_toml(no_build).unwrap().build.mode,
             "compile"
+        );
+    }
+
+    #[test]
+    fn test_parse_wasm_dependencies_table() {
+        let content = r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            infc_version = "0.1.0"
+
+            [wasm-dependencies]
+            arith = { path = "libs/arith.wasm" }
+            crypto = { path = "vendor/sha256.wasm" }
+        "#;
+        let manifest = InferenceToml::from_toml(content).expect("should parse");
+
+        assert_eq!(manifest.wasm_dependencies.modules.len(), 2);
+        assert_eq!(
+            manifest.wasm_dependencies.modules["arith"].path,
+            "libs/arith.wasm"
+        );
+        assert_eq!(
+            manifest.wasm_dependencies.modules["crypto"].path,
+            "vendor/sha256.wasm"
         );
     }
 
@@ -1184,5 +1389,153 @@ target = "wasm32"
             result.is_err(),
             "a non-existent start directory cannot be canonicalized"
         );
+    }
+
+    #[test]
+    fn test_parse_manifest_without_wasm_dependencies() {
+        // A manifest that predates the feature must still parse, with an empty
+        // dependency set.
+        let content = r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            infc_version = "0.1.0"
+        "#;
+        let manifest = InferenceToml::from_toml(content).expect("should parse");
+        assert!(manifest.wasm_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_wasm_dependencies_round_trip() {
+        let content = r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            infc_version = "0.1.0"
+
+            [wasm-dependencies]
+            arith = { path = "libs/arith.wasm" }
+        "#;
+        let manifest = InferenceToml::from_toml(content).expect("should parse");
+        let serialized = manifest.to_toml().expect("should serialize");
+        let reparsed = InferenceToml::from_toml(&serialized).expect("should reparse");
+        assert_eq!(manifest, reparsed);
+        assert!(serialized.contains("wasm-dependencies"));
+    }
+
+    #[test]
+    fn test_resolved_wasm_dependencies_joins_against_base_dir() {
+        let content = r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            infc_version = "0.1.0"
+
+            [wasm-dependencies]
+            arith = { path = "libs/arith.wasm" }
+            beta = { path = "vendor/beta.wasm" }
+        "#;
+        let manifest = InferenceToml::from_toml(content).expect("should parse");
+        let base = Path::new("/projects/demo");
+
+        let resolved = manifest
+            .resolved_wasm_dependencies(base)
+            .expect("valid keys resolve");
+
+        // Sorted by logical name for determinism.
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].0, "arith");
+        assert_eq!(resolved[0].1, base.join("libs/arith.wasm"));
+        assert_eq!(resolved[1].0, "beta");
+        assert_eq!(resolved[1].1, base.join("vendor/beta.wasm"));
+    }
+
+    #[test]
+    fn validate_wasm_dependency_key_accepts_logical_names() {
+        for key in ["arith", "crypto", "_priv", "a1", "crypto::sha256", "a::b::c"] {
+            assert!(
+                validate_wasm_dependency_key(key).is_ok(),
+                "`{key}` should be a valid logical name"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_wasm_dependency_key_rejects_equals_bearing_keys() {
+        // L1: a `=` in a key would corrupt the `--wasm-dep <name>=<path>`
+        // forwarding, which splits on the first `=`. Reject it outright.
+        let err = validate_wasm_dependency_key("arith=evil").unwrap_err();
+        assert!(err.to_string().contains("cannot contain `=`"), "{err}");
+    }
+
+    #[test]
+    fn validate_wasm_dependency_key_rejects_malformed_segments() {
+        for bad in ["", "1arith", "a-b", "a/b", "a::", "::a", "a..b", "a b"] {
+            assert!(
+                validate_wasm_dependency_key(bad).is_err(),
+                "`{bad}` should be rejected as an invalid logical name"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_wasm_dependencies_rejects_an_invalid_key() {
+        let content = r#"
+            [package]
+            name = "demo"
+            version = "0.1.0"
+            infc_version = "0.1.0"
+
+            [wasm-dependencies]
+            "bad=key" = { path = "libs/x.wasm" }
+        "#;
+        let manifest = InferenceToml::from_toml(content).expect("manifest parses");
+        let err = manifest
+            .resolved_wasm_dependencies(Path::new("/projects/demo"))
+            .expect_err("an `=`-bearing key must be rejected");
+        assert!(err.to_string().contains("bad=key"), "{err}");
+    }
+
+    #[test]
+    fn test_resolved_wasm_dependencies_empty_when_none_declared() {
+        let manifest = InferenceToml::new("demo");
+        let resolved = manifest
+            .resolved_wasm_dependencies(Path::new("/projects/demo"))
+            .expect("no keys to validate");
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_find_manifest_dir_in_same_directory() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let manifest = temp.child(MANIFEST_FILE_NAME);
+        manifest.write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        let source = temp.child("main.inf");
+        source.write_str("").unwrap();
+
+        let found = find_manifest_dir(source.path()).expect("manifest should be found");
+        assert_eq!(found, temp.path());
+    }
+
+    #[test]
+    fn test_find_manifest_dir_walks_up_from_nested_source() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let manifest = temp.child(MANIFEST_FILE_NAME);
+        manifest.write_str("[package]\nname = \"x\"\nversion = \"0.1.0\"\n").unwrap();
+        let nested = temp.child("src").child("deep");
+        nested.create_dir_all().unwrap();
+        let source = nested.child("main.inf");
+        source.write_str("").unwrap();
+
+        let found = find_manifest_dir(source.path()).expect("manifest should be found");
+        assert_eq!(found, temp.path());
+    }
+
+    #[test]
+    fn test_find_manifest_dir_returns_none_without_manifest() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = temp.child("main.inf");
+        source.write_str("").unwrap();
+        assert!(find_manifest_dir(source.path()).is_none());
     }
 }

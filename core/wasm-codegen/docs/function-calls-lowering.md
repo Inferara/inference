@@ -27,39 +27,69 @@ Inference allows forward references: a caller can appear before its callee in th
 file. A single-pass compiler that emits `call` instructions as it encounters calls would
 not yet know the index of a callee defined later.
 
-The compiler solves this with a two-stage pre-scan in `lib.rs`: first top-level functions
-are indexed, then struct methods are indexed with mangled names.
+The compiler solves this with a three-stage index registration pass in `lib.rs`
+(`register_function_indices`). Importantly, **imported functions occupy the lowest indices
+first**, so all local-function indices must be offset by the import count.
 
-Stage 1 registers all top-level functions:
+### Stage 0 — Import reservation (`register_imports`)
+
+`external fn` declarations bound to a source module via `use … from <module>` are
+emitted as WASM function imports. They are registered before any local function so
+they occupy indices `0..N`. `set_local_func_base(N)` then seeds the local-function
+index counter past the imports.
 
 ```text
-build_func_name_to_idx(arena, func_def_ids, ctx)
-    func_name_to_idx["foo"] = 0, ["bar"] = 1, ...
+register_imports(arena, extern_def_ids, ctx)
+    extern_name_to_idx["sum"] = 0   (import at index 0)
+    extern_name_to_idx["neg"] = 1   (import at index 1)
+    returns N = 2  (import count)
+
+set_local_func_base(2)              (locals now start at 2)
 ```
 
-Stage 2 registers methods under mangled names (`"{StructName}.{method_name}"`):
+### Stage 1 — Top-level function registration (`build_func_name_to_idx`)
+
+Local top-level functions are assigned indices starting at `N` (the import count
+returned by Stage 0, passed as `base_idx`):
 
 ```text
-build_method_name_to_idx(arena, method_defs, ctx, base_idx)
-    func_name_to_idx["Point.new"]       = base_idx + 0
-    func_name_to_idx["Point.translate"] = base_idx + 1
+build_func_name_to_idx(arena, func_def_ids, ctx, base_idx=N)
+    func_name_to_idx["foo"] = N+0, ["bar"] = N+1, ...
+```
+
+### Stage 2 — Method registration (`build_method_name_to_idx`)
+
+Struct methods are indexed under mangled names (`"{StructName}.{method_name}"`) starting
+after all top-level functions:
+
+```text
+build_method_name_to_idx(arena, method_defs, ctx, base_idx=N+toplevel_count)
+    func_name_to_idx["Point.new"]       = N + toplevel + 0
+    func_name_to_idx["Point.translate"] = N + toplevel + 1
     method_mangled_names[("Point", "new")]       = "Point.new"
     method_mangled_names[("Point", "translate")] = "Point.translate"
 ```
 
-Both stages run before any body is compiled, so all callee names resolve correctly
-regardless of definition order in the source file.
+All three stages run before any body is compiled, so all callee names resolve correctly
+regardless of definition order in the source file and regardless of whether the callee
+is an import or a local.
 
 ### Diagram
 
 ```text
-traverse_t_ast_with_compiler
+register_function_indices
         |
-        +---> build_func_name_to_idx(func_def_ids)
-        |         func_name_to_idx["foo"] = 0, ["bar"] = 1, ...
+        +---> register_imports(extern_def_ids)         // Stage 0
+        |         extern_name_to_idx["sum"] = 0, ...
+        |         returns N = import_count
         |
-        +---> build_method_name_to_idx(method_defs, base_idx=N)
-        |         func_name_to_idx["Point.new"] = N+0, ...
+        +---> set_local_func_base(N)                   // seeds func_idx = N
+        |
+        +---> build_func_name_to_idx(func_def_ids, base_idx=N)   // Stage 1
+        |         func_name_to_idx["foo"] = N+0, ["bar"] = N+1, ...
+        |
+        +---> build_method_name_to_idx(method_defs, base_idx=N+toplevel)  // Stage 2
+        |         func_name_to_idx["Point.new"] = N+toplevel+0, ...
         |         method_mangled_names[("Point","new")] = "Point.new"
         |
         +---> visit_function_definition(func_def_ids[0], None)  // "foo"
@@ -67,8 +97,8 @@ traverse_t_ast_with_compiler
         +---> ...
         +---> visit_function_definition(method_def_ids[0], Some("Point"))  // "Point.new"
                   |
-                  | lower_function_call can look up any index
-                  | regardless of definition order
+                  | lower_function_call / lower_extern_call can look up any index
+                  | regardless of definition order or import vs local
 ```
 
 ## How Parameter Indices Interlock with Local Indices
@@ -207,14 +237,72 @@ Statement::Expression(expression) => {
 | non-void | RHS of `let` | No | `local.set` consumes the value (different code path) |
 | non-void | RHS of `return` | No | `return` consumes the value |
 
-## Supported vs Unsupported Callee Kinds
+## Extern Function Calls
 
-Three callee forms are now supported:
+An `external fn` declaration bound to a source module is an import: it has no
+local body to compile, but it does have a WASM function index (assigned by Stage
+0) and a WASM type signature derived from the declared Inference parameter and
+return types.
+
+When `lower_function_call` resolves the callee and finds it in
+`extern_name_to_idx`, it emits `call <import_idx>` via the same
+`Instruction::Call` path used for local functions. The only difference is which
+index table the lookup hits.
+
+### Example
 
 ```inference
-// Supported: plain identifier
+external fn sum(a: i32, b: i32) -> i32;
+use { sum } from arith;
+
+pub fn add_three(x: i32) -> i32 {
+    return sum(x, 3);
+}
+```
+
+After Stage 0, `sum` is at import index `0`; after Stage 1, `add_three` is at
+local index `1`. The generated WAT:
+
+```wat
+(module
+  (type (;0;) (func (param i32 i32) (result i32)))
+  (type (;1;) (func (param i32) (result i32)))
+  (import "arith" "sum" (func (;0;) (type 0)))
+  (func $add_three (;1;) (type 1) (param $x i32) (result i32)
+    local.get $x
+    i32.const 3
+    call 0
+    return
+    unreachable)
+  (export "add_three" (func 1)))
+```
+
+### Import Section Emission
+
+The import section is emitted in `finish_and_take` between the Type section and
+the Function section (the WASM section ordering mandate). It is guarded by
+`cov_mark::hit!(wasm_codegen_emit_import_section)` and omitted entirely when
+there are no externs. Each entry carries the logical module name, the export
+field name, and the type index from `intern_type`.
+
+### Type Deduplication
+
+`intern_type` deduplicates function signatures before assigning a type index: an
+import and a local function (or two imports) with the same parameter and result
+types share one type entry in the type section. This keeps the type section
+compact even when multiple externs share a common signature.
+
+## Supported vs Unsupported Callee Kinds
+
+Four callee forms are now supported:
+
+```inference
+// Supported: plain identifier (local)
 let x = foo(1, 2);
 return bar();
+
+// Supported: extern call
+let y = sum(x, 3);  // sum is an external fn
 
 // Supported: associated function call
 let p = Point::new(1, 2);
@@ -289,18 +377,27 @@ resolved until multi-file compilation is implemented (currently `todo!()` in `co
 | `wasm_codegen_emit_function_params` | 7 | 7 parameters across all functions in `fn_params.inf` |
 | `wasm_codegen_emit_function_call` | 5 | 5 call sites in `fn_calls.inf` |
 | `wasm_codegen_emit_self_copy_on_entry` | varies | `mut self` frame copy emitted for each method with mutable receiver |
+| `wasm_codegen_emit_import_section` | 1+ | Import section emitted (fires whenever at least one `external fn` is present) |
+| `wasm_codegen_emit_extern_call` | 1+ | Extern call lowered to `call <import_idx>` (fires in `single_import_test`) |
 
 The `fn_params_test` verifies `wasm_codegen_emit_function_params` fires exactly 7 times
 (matching `fn_params.inf`: 1+1+1+2+2 params). The `fn_calls_test` verifies
-`wasm_codegen_emit_function_call` fires exactly 5 times.
+`wasm_codegen_emit_function_call` fires exactly 5 times. The `single_import_test` checks
+both import-section marks together.
 
 ## Related Files
 
-- `core/wasm-codegen/src/compiler.rs` — `build_func_name_to_idx`, `build_method_name_to_idx`, `resolve_function_callee`, `lower_function_call`
+- `core/wasm-codegen/src/compiler.rs` — `register_imports`, `build_func_name_to_idx`, `build_method_name_to_idx`, `resolve_function_callee`, `lower_function_call`, `finish_and_take` (import section emission)
+- `core/wasm-codegen/src/lib.rs` — `register_function_indices`, `traverse_t_ast_with_compiler`, `collect_emittable_functions` (extern fn routed to imports bucket)
 - `core/wasm-codegen/src/errors.rs` — `CodegenError` enum
-- `core/wasm-codegen/src/lib.rs` — `traverse_t_ast_with_compiler` (where pre-scan is called)
 - `core/wasm-codegen/README.md` — Crate-level overview and compilation phases
 - `core/wasm-codegen/docs/local-variables-lowering.md` — Local variable lowering (prerequisite)
+- `core/wasm-linker/README.md` — How the linked output is produced from the import-bearing intermediate module
+- `tests/test_data/codegen/wasm/extern_import/single_import/single_import.inf` — Minimal one-import fixture
+- `tests/test_data/codegen/wasm/extern_import/multi_import/multi_import.inf` — Two imports, index shift
+- `tests/test_data/codegen/wasm/extern_import/import_with_locals/import_with_locals.inf` — Import plus two local functions
+- `tests/test_data/codegen/wasm/extern_import/import_dedup/import_dedup.inf` — Two same-signature imports sharing one type
+- `tests/src/codegen/wasm/extern_import.rs` — Structural and golden tests for import emission
 - `tests/test_data/codegen/wasm/base/fn_params/fn_params.inf` — Parameter test fixture
 - `tests/test_data/codegen/wasm/base/fn_calls/fn_calls.inf` — Function call test fixture
 - `tests/test_data/codegen/wasm/base/method_assoc/method_assoc.inf` — Associated function call fixture

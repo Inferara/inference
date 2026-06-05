@@ -10,6 +10,7 @@
 - [Arithmetic Overflow in WASM Codegen](arithmetic-overflow-in-wasm-codegen.md)
 - [Unreachable Emission in Codegen](unreachable-emission-in-codegen.md)
 - [Compilation Targets](compilation_targets.md)
+- [External Functions and WASM Linking](external-functions-and-wasm-linking.md)
 
 # Appendix
 

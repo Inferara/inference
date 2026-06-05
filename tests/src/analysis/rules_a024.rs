@@ -168,6 +168,171 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a024_call_to_bound_extern_accepted() {
+        // An extern bound to a source module via `use … from` lowers to a
+        // linker-satisfied import (issue #9, Phase 4), so calling it must NOT
+        // trigger A024 — only unbound bare externs remain uncompilable.
+        let source = r#"
+            external fn sum(a: i32, b: i32) -> i32;
+            use { sum } from arith;
+            fn main() -> i32 { return sum(1, 2); }
+        "#;
+        let result = analyze(source);
+        if let Err(ref e) = result {
+            let has_a024 = e
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::ExternFunctionCall { .. }));
+            assert!(
+                !has_a024,
+                "a bound extern call must not trigger A024, got: {:?}",
+                e.errors()
+            );
+        }
+    }
+
+    #[test]
+    fn a024_unbound_extern_rejected_when_other_extern_is_bound() {
+        // With one bound extern and one unbound bare extern, only the call to
+        // the unbound one is rejected.
+        let source = r#"
+            external fn sum(a: i32, b: i32) -> i32;
+            use { sum } from arith;
+            external fn raw(x: i32) -> i32;
+            fn main() -> i32 { return sum(1, 2) + raw(3); }
+        "#;
+        let errors = expect_errors(source);
+        let offending: Vec<&str> = errors
+            .iter()
+            .filter_map(|e| match e {
+                AnalysisDiagnostic::ExternFunctionCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offending,
+            vec!["raw"],
+            "only the unbound extern `raw` should be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a024_top_level_use_does_not_bind_spec_inner_extern() {
+        // H8: a top-level `use { sort } from sorting;` is file-global but binds
+        // only top-level externs. With no top-level `sort` declared, the `use`
+        // names an undeclared top-level extern, so the type checker reports
+        // ExternImportNotDeclared rather than silently binding the spec-inner
+        // `sort` (which previously suppressed A024 and crashed proof-mode
+        // codegen).
+        let source = r#"
+            use { sort } from sorting;
+            spec Ms {
+                external fn sort(a: i32) -> i32;
+                fn run(x: i32) -> i32 { return sort(x); }
+            }
+        "#;
+        let arena = build_ast(source.to_string());
+        let rendered = match inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
+        {
+            Ok(_) => panic!("a top-level use of an undeclared top-level extern must be rejected"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(
+            rendered.contains("sort") && rendered.contains("no `external fn"),
+            "expected ExternImportNotDeclared for `sort`, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a024_spec_inner_extern_unbound_despite_same_named_bound_top_level() {
+        // H9/H10: a bound top-level `external fn sort` and a same-named, distinct
+        // spec-inner `external fn sort`. The `use` binds only the top-level
+        // declaration (resolution is by DefId, not name), so the spec-inner
+        // `sort` stays unbound and its call is A024-rejected — preventing the
+        // proof-mode miscompile where the spec body would call the merged
+        // top-level `sort` with a mismatched signature.
+        let source = r#"
+            external fn sort(a: i32) -> i32;
+            use { sort } from sorting;
+            spec Ms {
+                external fn sort(a: i64, b: i64) -> i64;
+                fn run(x: i64, y: i64) -> i64 { return sort(x, y); }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let has_sort_rejection = errors.iter().any(|e| {
+            matches!(e, AnalysisDiagnostic::ExternFunctionCall { name, .. } if name == "sort")
+        });
+        assert!(
+            has_sort_rejection,
+            "the unbound spec-inner `sort` must be A024-rejected even though a same-named top-level extern is bound, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a024_bound_top_level_extern_call_not_flagged_when_unbound_spec_inner_shadows_it() {
+        // H1 (round-2 regression): a bound top-level `external fn sort` (via
+        // `use … from`) called from a top-level function MUST NOT be flagged
+        // just because a same-named, distinct, unbound spec-inner
+        // `external fn sort` exists. Resolution is scope-aware: the top-level
+        // call binds to the bound top-level declaration, the spec-inner call
+        // binds to the unbound spec-inner one. Only the latter is A024-rejected.
+        // A name-keyed check let the unbound spec-inner declaration poison the
+        // valid top-level call site (the round-2 H-1 false positive).
+        let source = r#"
+            external fn sort(a: i32) -> i32;
+            use { sort } from sorting;
+            fn main() -> i32 { return sort(7); }
+            spec Ms {
+                external fn sort(a: i64, b: i64) -> i64;
+                fn run(x: i64, y: i64) -> i64 { return sort(x, y); }
+            }
+        "#;
+        let errors = expect_errors(source);
+        let sort_rejections = errors
+            .iter()
+            .filter(
+                |e| matches!(e, AnalysisDiagnostic::ExternFunctionCall { name, .. } if name == "sort"),
+            )
+            .count();
+        assert_eq!(
+            sort_rejections, 1,
+            "exactly the unbound spec-inner `sort` call must be A024-rejected; the bound \
+             top-level `sort(7)` call must NOT be flagged, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a024_bound_top_level_extern_call_accepted_despite_unbound_spec_inner_same_name() {
+        // H1 (round-2 regression), positive form: with ONLY the bound top-level
+        // `sort` called (the spec-inner `sort` is declared but never called),
+        // analysis must succeed — the uncalled unbound spec-inner declaration
+        // must not poison the valid top-level call.
+        let source = r#"
+            external fn sort(a: i32) -> i32;
+            use { sort } from sorting;
+            fn main() -> i32 { return sort(7); }
+            spec Ms {
+                external fn sort(a: i64, b: i64) -> i64;
+                fn pure_run(x: i64) -> i64 { return x; }
+            }
+        "#;
+        let result = analyze(source);
+        if let Err(ref e) = result {
+            let has_a024 = e
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::ExternFunctionCall { .. }));
+            assert!(
+                !has_a024,
+                "a bound top-level extern call must compile even when a same-named unbound \
+                 spec-inner extern is declared but uncalled, got: {:?}",
+                e.errors()
+            );
+        }
+    }
+
+    #[test]
     fn a024_extern_function_call_in_const_array_inside_function() {
         let source = r#"
             external fn ext_func() -> i32;

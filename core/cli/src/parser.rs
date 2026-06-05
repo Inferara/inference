@@ -207,6 +207,25 @@ pub(crate) struct Cli {
     #[clap(long = "mode", value_enum)]
     pub(crate) mode: Option<CliMode>,
 
+    /// Directory to search for external `.wasm` modules referenced by
+    /// `use { … } from <module>;`.
+    ///
+    /// Repeatable; directories are searched in the order given, ahead of any
+    /// `INFERENCE_WASM_LIB_PATH` environment directories. A logical module
+    /// `a::b` resolves to `<dir>/a/b.wasm` under each directory.
+    #[clap(short = 'L', long = "wasm-lib-dir", value_name = "DIR")]
+    pub(crate) wasm_lib_dirs: Vec<std::path::PathBuf>,
+
+    /// A manifest-declared external `.wasm` module, as `<name>=<path>`.
+    ///
+    /// Repeatable; binds the logical module `<name>` directly to the `.wasm`
+    /// file at `<path>`, taking precedence over every `-L` / `INFERENCE_*`
+    /// search directory. `infs build` forwards one entry per
+    /// `Inference.toml [wasm-dependencies]` declaration; direct `infc` callers
+    /// may pass them by hand.
+    #[clap(long = "wasm-dep", value_name = "NAME=PATH")]
+    pub(crate) wasm_deps: Vec<String>,
+
     /// Print the git commit hash embedded at build time and exit 0.
     ///
     /// Used by `infs build` to detect version drift between paired `infs` and
