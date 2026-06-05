@@ -615,10 +615,40 @@ pub fn codegen(
 /// Tier C (own static data / mutable globals). The underlying error downcasts
 /// to [`LinkError`].
 pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
-    if externals.is_empty() {
+    // Byte-identical fast path *only* for a module that is provably import-free —
+    // it is already the self-contained artifact this step would produce. A module
+    // that still carries imports (e.g. a caller that passed no resolved externals
+    // for a program that actually uses them), or one that does not parse, must go
+    // through the linker so the unsatisfied-import / parse failure surfaces as an
+    // error instead of being silently passed through. Keying the fast path on the
+    // *module's own imports* rather than merely on `externals.is_empty()` keeps it
+    // fail-closed and honours the documented error contract above.
+    if externals.is_empty() && module_is_import_free(main_wasm) {
         return Ok(main_wasm.to_vec());
     }
     Ok(inference_wasm_linker::link(main_wasm, externals)?)
+}
+
+/// Whether `wasm` parses and declares no imports. Returns `false` on any parse
+/// failure or on the first surviving import, so [`link`] routes such a module
+/// through the linker — which validates it and reports the precise error —
+/// rather than taking the byte-identical no-op path.
+fn module_is_import_free(wasm: &[u8]) -> bool {
+    use inf_wasmparser::{Parser, Payload};
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload {
+            Ok(Payload::ImportSection(reader)) => {
+                // Any entry (well-formed or not) means the module is not yet
+                // self-contained, so it must not take the no-op path.
+                if reader.into_iter().next().is_some() {
+                    return false;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.

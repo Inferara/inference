@@ -224,6 +224,33 @@ mod extern_link_tests {
     }
 
     #[test]
+    fn link_with_no_externals_does_not_silently_pass_through_dangling_imports() {
+        // Fail-closed: the empty-externals fast path is keyed on the module being
+        // import-free, not merely on the externals slice being empty. A module
+        // that still carries an import but is given no externals to satisfy it
+        // must error (unsatisfied import), never pass through with the import
+        // intact. (In the CLI flow externals are always resolved first; this
+        // guards the public `inference::link` contract against misuse.)
+        let import_bearing = wat::parse_str(
+            r#"(module
+                 (import "arith" "sum" (func (param i32 i32) (result i32)))
+                 (func (export "run") (result i32)
+                   i32.const 1 i32.const 2 call 0))"#,
+        )
+        .expect("fixture assembles");
+        assert!(
+            link(&import_bearing, &[]).is_err(),
+            "a module with an unsatisfied import must not pass through as Ok"
+        );
+
+        // And malformed bytes must surface a parse error, not Ok(garbage).
+        assert!(
+            link(&[0x00, 0x61, 0x73, 0x6d, 0xff], &[]).is_err(),
+            "malformed main bytes must be a link error, not a silent pass-through"
+        );
+    }
+
+    #[test]
     fn proof_mode_spec_indices_name_the_spec_function_not_the_merged_extern() {
         // C1: a proof-mode program that binds an extern AND declares a spec.
         // Codegen records the spec function's index in the *pre-link* space,
