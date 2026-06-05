@@ -75,18 +75,21 @@ pub(crate) fn decode(data: &[u8]) -> Result<Vec<(String, Vec<u32>)>, LinkError> 
 
     let mut out: Vec<(String, Vec<u32>)> = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let name = reader
-            .read_string()
-            .map_err(|e| {
-                LinkError::Parse(format!("spec_funcs section: invalid spec name: {e}"))
-            })?
-            .to_string();
+        // `read_string` returns a borrowed `&str` into the payload (no
+        // allocation). Enforce the length cap on that borrow *before* copying it
+        // into an owned `String`, so a hand-crafted payload advertising a large
+        // in-bounds name cannot force a large transient allocation ahead of the
+        // cap — keeping the decoder's "bounded allocation" guarantee intact.
+        let name = reader.read_string().map_err(|e| {
+            LinkError::Parse(format!("spec_funcs section: invalid spec name: {e}"))
+        })?;
         if name.len() > MAX_SPEC_NAME_LEN {
             return Err(LinkError::Parse(format!(
                 "spec_funcs section: spec name length {} exceeds cap {MAX_SPEC_NAME_LEN}",
                 name.len()
             )));
         }
+        let name = name.to_string();
 
         let idx_count = reader.read_var_u32().map_err(|e| {
             LinkError::Parse(format!("spec_funcs section: truncated indices count: {e}"))
