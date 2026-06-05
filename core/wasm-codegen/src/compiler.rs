@@ -624,7 +624,13 @@ impl Compiler {
                 continue;
             };
             let extern_name = arena[*name].name.clone();
-            let Some(origin) = ctx.extern_origin(&extern_name) else {
+            // Resolve provenance by the declaring `DefId`, not by name. Two
+            // same-named externs can coexist (a bound top-level `f` and an
+            // unbound spec-inner `f`); a name-keyed lookup cannot tell them apart
+            // and would bind the unbound declaration to the bound one's origin,
+            // registering a spurious/duplicate import. The decl-keyed query
+            // returns `None` for the unbound one, so it is correctly skipped.
+            let Some(origin) = ctx.extern_origin_by_decl(def_id) else {
                 continue;
             };
 

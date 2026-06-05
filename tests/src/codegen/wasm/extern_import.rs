@@ -69,7 +69,10 @@ mod extern_import_tests {
                     let mut calls = Vec::new();
                     let reader = body.get_operators_reader().expect("operators reader");
                     for op in reader {
-                        if let Ok(Operator::Call { function_index }) = op {
+                        // Fail fast on a malformed operator stream: silently
+                        // skipping decode errors could mask broken codegen output
+                        // and let a structural assertion pass on garbage.
+                        if let Operator::Call { function_index } = op.expect("operator decodes") {
                             calls.push(function_index);
                         }
                     }
