@@ -33,7 +33,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// The conventional manifest file name for an Inference project.
@@ -236,18 +236,34 @@ impl VerificationConfig {
     }
 
     /// Normalizes the configured `output-dir` into a relative [`PathBuf`]
-    /// suitable for forwarding to `infc --out-dir`.
+    /// confined to the project root, suitable for forwarding to
+    /// `infc --out-dir`.
     ///
     /// The raw manifest string (e.g. `"proofs/"`) is parsed through `PathBuf`
-    /// so the path separator is platform-correct and any trailing separator is
-    /// dropped (`"proofs/"` → `proofs`). Absolute paths are **rejected**: the
-    /// `output-dir` is a project-relative configuration, and an absolute path
-    /// would let artifacts escape the project root, breaking the
-    /// `<root>/out`-style contract and polluting locations outside VCS control.
+    /// and validated component-by-component so that only ordinary, project-
+    /// relative subdirectories are accepted. A trailing separator is dropped
+    /// (`"proofs/"` → `proofs`) and `.` segments are skipped (`"./proofs"` →
+    /// `proofs`).
+    ///
+    /// The `output-dir` is a project-relative configuration: artifacts must
+    /// land inside the project root so the `<root>/out`-style contract holds and
+    /// nothing is written to locations outside VCS control. Anything that could
+    /// point elsewhere is rejected:
+    ///
+    /// - **Root / absolute** (`/proofs`, `C:\proofs`): escapes the root.
+    /// - **`..` parent traversal** (`../proofs`, `a/../b`): could climb out of
+    ///   the root. Even a `..` that happens to resolve back inside is rejected —
+    ///   resolving it would be symlink-unsound and buys nothing.
+    /// - **Drive/UNC prefix** (`C:proofs`, `\\server\share`): on Windows these
+    ///   are drive-relative or network paths that escape the project root. Such
+    ///   prefixes only parse as a `Prefix` component on Windows; on unix
+    ///   `C:proofs` is simply an ordinary directory name and is accepted as-is.
     ///
     /// # Errors
     ///
-    /// Returns a remediation-style error if `output-dir` is empty or absolute.
+    /// Returns a remediation-style error (naming the offending value) when
+    /// `output-dir` is empty, normalizes to an empty path, or contains a root,
+    /// absolute, `..`, or drive/UNC component.
     pub fn normalized_output_dir(&self) -> Result<PathBuf> {
         let raw = self.output_dir.trim();
         if raw.is_empty() {
@@ -255,17 +271,29 @@ impl VerificationConfig {
         }
 
         let path = PathBuf::from(raw);
-        if path.is_absolute() {
-            bail!(
-                "`[verification] output-dir` must be a relative path (got `{}`); \
-                 absolute paths would place artifacts outside the project root.",
-                self.output_dir
-            );
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => normalized.push(part),
+                Component::CurDir => {}
+                Component::ParentDir => bail!(
+                    "`[verification] output-dir` must not contain `..` (got `{}`); \
+                     it must stay inside the project root.",
+                    self.output_dir
+                ),
+                Component::RootDir => bail!(
+                    "`[verification] output-dir` must be a relative path (got `{}`); \
+                     absolute paths would place artifacts outside the project root.",
+                    self.output_dir
+                ),
+                Component::Prefix(_) => bail!(
+                    "`[verification] output-dir` must not contain a drive or network \
+                     prefix (got `{}`); it must stay inside the project root.",
+                    self.output_dir
+                ),
+            }
         }
 
-        // Re-collect components to strip a trailing separator and any redundant
-        // `.` segments while preserving relative semantics.
-        let normalized: PathBuf = path.components().collect();
         if normalized.as_os_str().is_empty() {
             bail!(
                 "`[verification] output-dir` `{}` normalizes to an empty path.",
@@ -815,7 +843,10 @@ mode = "Proof"
 
     #[test]
     fn normalized_output_dir_rejects_absolute() {
-        // Use a platform-appropriate absolute path.
+        // Use a platform-appropriate absolute path. On unix this is a RootDir
+        // component ("relative" remediation); on Windows it is a drive Prefix
+        // component ("prefix" remediation). Either way it must be rejected and
+        // name the offending value.
         let abs = if cfg!(windows) {
             r"C:\proofs"
         } else {
@@ -825,9 +856,11 @@ mode = "Proof"
             output_dir: String::from(abs),
         };
         let err = config.normalized_output_dir().unwrap_err();
+        let msg = err.to_string();
+        let expected_remediation = if cfg!(windows) { "prefix" } else { "relative" };
         assert!(
-            err.to_string().contains("relative"),
-            "absolute output-dir must be rejected with a relative-path remediation"
+            msg.contains(expected_remediation) && msg.contains(abs),
+            "absolute output-dir must be rejected naming the value, got: {msg}"
         );
     }
 
@@ -839,6 +872,97 @@ mode = "Proof"
         assert!(
             config.normalized_output_dir().is_err(),
             "blank output-dir must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_accepts_curdir_prefix() {
+        let config = VerificationConfig {
+            output_dir: String::from("./proofs"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("proofs"),
+            "a leading `./` must be tolerated and stripped"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_leading_parent_traversal() {
+        let config = VerificationConfig {
+            output_dir: String::from("../proofs"),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("..") && err.to_string().contains("../proofs"),
+            "leading `..` must be rejected naming the value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_trailing_parent_traversal() {
+        let config = VerificationConfig {
+            output_dir: String::from("proofs/../.."),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "`proofs/../..` climbs out of the root and must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_interior_parent_even_if_resolving_inside() {
+        // `a/../b` resolves to `b` (inside the root), but we reject ANY `..`
+        // rather than resolve it: resolution is symlink-unsound.
+        let config = VerificationConfig {
+            output_dir: String::from("a/../b"),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "any `..` must be rejected, even one that resolves inside the root"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_output_dir_rejects_drive_relative_prefix() {
+        // `C:proofs` is drive-relative (NOT absolute by Rust's definition) but
+        // escapes the project root on Windows: it parses as a Prefix component.
+        let config = VerificationConfig {
+            output_dir: String::from("C:proofs"),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("prefix") && err.to_string().contains("C:proofs"),
+            "drive-relative prefix must be rejected naming the value, got: {err}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_output_dir_rejects_unc_path() {
+        let config = VerificationConfig {
+            output_dir: String::from(r"\\server\share\x"),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "a UNC network path must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalized_output_dir_treats_drive_letter_as_plain_dirname_on_unix() {
+        // On unix there is no Prefix component: `C:proofs` is a single ordinary
+        // directory name (a colon is a legal filename character) and is kept
+        // verbatim. This documents the platform difference.
+        let config = VerificationConfig {
+            output_dir: String::from("C:proofs"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("C:proofs"),
+            "on unix `C:proofs` is a valid plain directory name"
         );
     }
 
