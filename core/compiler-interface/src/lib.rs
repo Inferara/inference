@@ -14,4 +14,10 @@
 pub const COMPILER_ABI_MAJOR: u32 = 1;
 
 /// Additive changes: new flags, new stdout fields, new exit codes.
-pub const COMPILER_ABI_MINOR: u32 = 0;
+///
+/// Minor 1 adds the additive `--out-dir <path>` flag to `infc`, letting callers
+/// redirect the `out/` artifact directory. It is backward compatible: omitting
+/// the flag preserves the prior `out/`-relative-to-CWD behavior, so an `infs`
+/// built against minor 0 still pairs with a minor-1 `infc` and vice versa
+/// (the older side simply never sends/sees the flag).
+pub const COMPILER_ABI_MINOR: u32 = 1;

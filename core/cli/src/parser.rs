@@ -54,9 +54,11 @@ impl From<CliMode> for inference_wasm_codegen::CompilationMode {
 ///
 /// ## Output Flags
 ///
-/// - `-o`: Generate WASM binary file in `out/` directory
-/// - `-v`: Generate Rocq (.v) translation in `out/` directory; when used without
-///   any explicit phase flag, implies full pipeline + `-o`
+/// - `-o`: Generate WASM binary file in the output directory
+/// - `-v`: Generate Rocq (.v) translation in the output directory; when used
+///   without any explicit phase flag, implies full pipeline + `-o`
+/// - `--out-dir <path>`: Override the output directory (default `out/`, relative
+///   to the current working directory). Applies to both `.wasm` and `.v`.
 ///
 /// Output flags only take effect when `--codegen` is active (explicitly or via default).
 ///
@@ -113,6 +115,18 @@ pub(crate) struct Cli {
     /// a source file argument. Regular compilation still requires a path and
     /// exits with an error if one is not supplied.
     pub(crate) path: Option<std::path::PathBuf>,
+
+    /// Directory for output artifacts (`.wasm` and `.v`).
+    ///
+    /// When omitted, artifacts are written to `out/` relative to the current
+    /// working directory, preserving the historical behavior. When supplied,
+    /// both the `.wasm` and the `.v` (if requested) land under this directory
+    /// instead. The directory is created automatically if it does not exist.
+    ///
+    /// This is pure output plumbing: `infc` gains no project awareness from it.
+    /// `infs` uses it in project mode to honor `[verification] output-dir`.
+    #[clap(long = "out-dir")]
+    pub(crate) out_dir: Option<std::path::PathBuf>,
 
     /// Run the parse phase to build the typed AST.
     ///

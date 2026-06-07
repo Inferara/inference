@@ -279,13 +279,50 @@ mod tests {
     #[test]
     fn abi_minor_difference_warns_only() {
         let dir = assert_fs::TempDir::new().unwrap();
-        // Exercise only the "infc minor newer than infs" path; the reverse
-        // path is covered by a simple construction — the current embedded
-        // minor is 0, so any non-zero minor is "newer". A stub of "1.5"
-        // therefore produces a warning when COMPILER_ABI_MINOR is 0.
+        // Exercise the "infc minor newer than infs" path. The stub reports a
+        // far-future minor ("1.5") so the comparison resolves to Greater for
+        // any plausible local COMPILER_ABI_MINOR; the branch warns but does not
+        // hard-error.
         let stub = write_stub(&dir, "nottherightcommit", "1.5", false);
         let result = check_compiler_compatibility(&stub);
         assert!(result.is_ok(), "minor mismatch should not hard-error");
+    }
+
+    #[test]
+    fn abi_minor_infs_newer_than_infc_warns_only() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        // Reverse branch: infs newer than infc. This path only became reachable
+        // once COMPILER_ABI_MINOR was bumped above 0. A stub reporting the same
+        // major but minor "0" (one below the local minor of 1) exercises the
+        // Less arm — it must warn, not hard-error. Constructed against the live
+        // major constant so it stays valid across future major bumps.
+        let abi = format!("{COMPILER_ABI_MAJOR}.0");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let result = check_compiler_compatibility(&stub);
+        assert!(
+            result.is_ok(),
+            "infs-newer-than-infc minor mismatch must warn, not hard-error; got: {:?}",
+            result.err().map(|e| e.to_string()),
+        );
+    }
+
+    #[test]
+    fn exact_abi_match_with_differing_commit_is_silent_ok() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        // Commit hashes differ (so the short-circuit in step 1 does NOT fire),
+        // forcing the ABI comparison to run. The stub reports EXACTLY the local
+        // major.minor, so the comparison resolves to `Ordering::Equal` — the
+        // arm that neither warns nor errors. Constructed from the live
+        // constants so it tracks future bumps. This is the only direct test of
+        // the equal-minor branch; the warn-only tests cover Greater and Less.
+        let abi = format!("{COMPILER_ABI_MAJOR}.{COMPILER_ABI_MINOR}");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let result = check_compiler_compatibility(&stub);
+        assert!(
+            result.is_ok(),
+            "exact ABI match (differing commit) must be a silent Ok via the Equal arm; got: {:?}",
+            result.err().map(|e| e.to_string()),
+        );
     }
 
     #[test]

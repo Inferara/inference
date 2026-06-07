@@ -354,3 +354,501 @@ fn abi_version_flag_prints_and_exits() {
     );
     assert_eq!(version, expected);
 }
+
+/// Pins the ABI version string to the literal value introduced for the
+/// `--out-dir` flag. The `abi_version_flag_prints_and_exits` test above checks
+/// the binary against the shared constant; this one additionally asserts the
+/// concrete `1.1` so an accidental constant change is caught here too.
+///
+/// Uses an exact trimmed equality (not `contains`) so a near-miss such as
+/// "11.1" or "1.10" — which would satisfy a substring match — cannot pass.
+#[test]
+fn abi_version_is_one_dot_one() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.arg("--abi-version");
+    let assert = cmd.assert().success();
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "1.1",
+        "ABI version must be exactly 1.1, not merely contain it"
+    );
+}
+
+/// Verifies that `--out-dir <path>` redirects the `.wasm` artifact to the given
+/// directory instead of the default `out/`.
+#[test]
+fn out_dir_redirects_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("build").child("trivial.wasm").path().exists(),
+        "expected build/trivial.wasm under --out-dir"
+    );
+    assert!(
+        !temp.child("out").child("trivial.wasm").path().exists(),
+        "--out-dir must not also write to the default out/ directory"
+    );
+}
+
+/// Verifies that `--out-dir <path>` combined with `-v` redirects both the
+/// `.wasm` and the `.v` to the given directory.
+#[test]
+fn out_dir_with_v_redirects_both_artifacts() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("-v")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("build").child("trivial.wasm").path().exists(),
+        "expected build/trivial.wasm under --out-dir"
+    );
+    assert!(
+        temp.child("build").child("trivial.v").path().exists(),
+        "expected build/trivial.v under --out-dir"
+    );
+    assert!(
+        !temp.child("out").path().exists(),
+        "--out-dir must not create the default out/ directory"
+    );
+}
+
+/// Regression guard: omitting `--out-dir` keeps the historical `out/` behavior.
+#[test]
+fn no_out_dir_keeps_default_out_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("out").child("trivial.wasm").path().exists(),
+        "default output directory must remain out/ when --out-dir is omitted"
+    );
+}
+
+/// Verifies that a multi-level `--out-dir` (e.g. `a/b/c`) is created at full
+/// depth via a single `fs::create_dir_all`, with the artifact landing in the
+/// leaf directory.
+///
+/// The path is assembled with `PathBuf` joins rather than a literal slash
+/// string so the test is correct on every target platform (Linux, Windows,
+/// macOS) and conforms to the repo rule against slash separators.
+#[test]
+fn out_dir_nested_path_is_created_at_full_depth() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let nested = std::path::PathBuf::from("a").join("b").join("c");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg(&nested);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let leaf = temp.child("a").child("b").child("c");
+    assert!(
+        leaf.child("trivial.wasm").path().exists(),
+        "expected a/b/c/trivial.wasm — nested out-dir must be created at full depth"
+    );
+    assert!(
+        !temp.child("out").path().exists(),
+        "nested --out-dir must not also create the default out/ directory"
+    );
+}
+
+/// Verifies that an absolute `--out-dir` writes the artifact to that absolute
+/// location, independent of the working directory, and does not create any
+/// `out/` directory in the CWD.
+///
+/// A second `TempDir` provides the absolute destination so the test never
+/// touches a real location outside the sandbox.
+#[test]
+fn out_dir_absolute_path_writes_there_and_no_cwd_out() {
+    let cwd = assert_fs::TempDir::new().unwrap();
+    let out = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = cwd.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(cwd.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg(out.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        out.child("trivial.wasm").path().exists(),
+        "expected the artifact under the absolute --out-dir destination"
+    );
+    assert!(
+        !cwd.child("out").path().exists(),
+        "an absolute --out-dir must not create a default out/ in the CWD"
+    );
+}
+
+/// Verifies that a `--out-dir` argument carrying a trailing path separator
+/// (a common shell-completion artifact, e.g. `build/`) is tolerated: the
+/// artifact still lands inside `build/`.
+///
+/// The trailing separator is appended with the platform's
+/// `std::path::MAIN_SEPARATOR` so the literal-slash rule is respected and the
+/// case is meaningful on Windows (`build\`) as well as Unix (`build/`).
+#[test]
+fn out_dir_trailing_separator_is_tolerated() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let with_trailing = format!("build{}", std::path::MAIN_SEPARATOR);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg(&with_trailing);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("build").child("trivial.wasm").path().exists(),
+        "a trailing path separator on --out-dir must still resolve to build/"
+    );
+}
+
+/// Verifies that building into a pre-existing out-dir that already holds a
+/// stale artifact of the same name succeeds and overwrites that artifact.
+///
+/// The directory and a sentinel file are created up front; after the build the
+/// file must exist and its contents must no longer be the sentinel (i.e. it was
+/// genuinely rewritten by codegen, not merely left in place).
+#[test]
+fn out_dir_overwrites_stale_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let build = temp.child("build");
+    build.create_dir_all().unwrap();
+    let stale = build.child("trivial.wasm");
+    let sentinel = b"STALE NOT A WASM";
+    std::fs::write(stale.path(), sentinel).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        stale.path().exists(),
+        "the artifact must still exist after rebuilding into a populated out-dir"
+    );
+    let new_bytes = std::fs::read(stale.path()).unwrap();
+    assert_ne!(
+        new_bytes.as_slice(),
+        sentinel.as_slice(),
+        "the stale artifact must be overwritten by fresh codegen output"
+    );
+    assert_eq!(
+        &new_bytes[..4],
+        b"\0asm",
+        "the overwritten file must be a real WASM module (magic bytes)"
+    );
+}
+
+/// Verifies that `--out-dir out` (explicitly naming the historical default)
+/// behaves identically to omitting the flag: the artifact lands in `out/`.
+#[test]
+fn out_dir_explicit_default_matches_default_behavior() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg("out");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("out").child("trivial.wasm").path().exists(),
+        "--out-dir out must place the artifact in out/, same as the default"
+    );
+}
+
+/// Verifies that `--out-dir .` writes artifacts directly into the current
+/// working directory (the temp root) with no subdirectory.
+#[test]
+fn out_dir_dot_writes_into_cwd() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg(".");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("trivial.wasm").path().exists(),
+        "--out-dir . must write the artifact directly into the CWD"
+    );
+    assert!(
+        !temp.child("out").path().exists(),
+        "--out-dir . must not also create an out/ directory"
+    );
+}
+
+/// Verifies the collision error path: when a regular *file* already occupies
+/// the requested out-dir name, directory creation fails and the build aborts.
+///
+/// **Expected behavior**: non-zero exit with "Failed to create output
+/// directory" on stderr, and no `.wasm` artifact is produced. The pre-existing
+/// path must remain a file (the build must not have clobbered it).
+#[test]
+fn out_dir_collides_with_existing_file_fails() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let blocker = temp.child("build");
+    std::fs::write(blocker.path(), b"i am a file, not a directory").unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to create output directory"));
+
+    assert!(
+        blocker.path().is_file(),
+        "the colliding path must remain the original file"
+    );
+    assert!(
+        !temp.child("build").child("trivial.wasm").path().exists(),
+        "no artifact may be written when out-dir creation fails"
+    );
+}
+
+/// Verifies that `--out-dir` together with `--mode proof` (which implies `-v`)
+/// places both the `.wasm` and the `.v` under the requested directory.
+#[test]
+fn out_dir_with_mode_proof_redirects_both_artifacts() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--mode")
+        .arg("proof")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("build").child("trivial.wasm").path().exists(),
+        "expected build/trivial.wasm under --out-dir in proof mode"
+    );
+    assert!(
+        temp.child("build").child("trivial.v").path().exists(),
+        "proof mode implies -v, so build/trivial.v must also be present"
+    );
+    assert!(
+        !temp.child("out").path().exists(),
+        "--out-dir must not create the default out/ directory"
+    );
+}
+
+/// Verifies that `--out-dir` with an explicit `--mode compile -v` redirects
+/// both artifacts under the directory (the compile-mode escape hatch for V).
+#[test]
+fn out_dir_with_mode_compile_v_redirects_both_artifacts() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--mode")
+        .arg("compile")
+        .arg("-v")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("build").child("trivial.wasm").path().exists(),
+        "expected build/trivial.wasm under --out-dir in compile -v mode"
+    );
+    assert!(
+        temp.child("build").child("trivial.v").path().exists(),
+        "explicit compile -v must still emit the .v under --out-dir"
+    );
+    assert!(
+        !temp.child("out").path().exists(),
+        "--out-dir must not create the default out/ directory"
+    );
+}
+
+/// Verifies that `--out-dir` combined with `--parse` only succeeds without ever
+/// creating the output directory: the parse phase writes no artifacts, so the
+/// directory must remain absent afterward.
+#[test]
+fn out_dir_with_parse_only_creates_no_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--parse")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Parsed:"));
+
+    assert!(
+        !temp.child("build").path().exists(),
+        "--parse writes no artifacts, so --out-dir must not be created"
+    );
+}
+
+/// Verifies that `--out-dir` combined with `--analyze` only succeeds without
+/// creating the output directory: analyze writes no artifacts.
+#[test]
+fn out_dir_with_analyze_only_creates_no_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--analyze")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Analyzed:"));
+
+    assert!(
+        !temp.child("build").path().exists(),
+        "--analyze writes no artifacts, so --out-dir must not be created"
+    );
+}
+
+/// Verifies that `--out-dir` combined with `--codegen` but neither `-o` nor
+/// `-v` runs codegen yet writes no files: the directory is created lazily only
+/// when an artifact is actually emitted, so it must not exist afterward.
+#[test]
+fn out_dir_with_codegen_no_output_flags_creates_no_directory() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(dest.path())
+        .arg("--codegen")
+        .arg("--out-dir")
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Codegen complete"));
+
+    assert!(
+        !temp.child("build").path().exists(),
+        "--codegen without -o/-v writes nothing, so --out-dir must not be created"
+    );
+}
