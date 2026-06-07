@@ -42,11 +42,19 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// matching the CWD-relativity contract between `infs` and `infc`: `infc`
 /// resolves both its source argument and `out/` against the inherited CWD.
 ///
-/// The forwarded flags (`generate_v_output`, `mode`) are passed explicitly
-/// rather than as a `BuildArgs` so `run` need not depend on `build`'s argument
-/// struct. Only what the caller explicitly passed is forwarded;
-/// `infc::normalize_args` owns the `-v` ↔ `--mode proof` implication, so
-/// mirroring it here would create a second source of truth that could drift.
+/// The forwarded flags are passed explicitly rather than as a `BuildArgs` so
+/// `run` need not depend on `build`'s argument struct. Only what the caller
+/// resolved is forwarded; `infc::normalize_args` owns the `-v` ↔ `--mode proof`
+/// implication, so mirroring it here would create a second source of truth that
+/// could drift. The single forwarding/spawn site lives here so the ABI gate on
+/// `--out-dir` (AD-13) sits next to the spawn.
+///
+/// `out_dir`, when `Some`, is forwarded as `--out-dir <dir>`; this is only ever
+/// supplied by `build`'s effective-proof-mode path. The shared helper gates the
+/// forward on the resolved `infc` actually supporting the flag (AD-13) and
+/// hard-errors with remediation otherwise — it never emits the flag blind.
+/// `infs run` always passes `out_dir = None` (and `mode = None`), so project
+/// `run` always builds an executable in `out/`.
 ///
 /// ## Errors
 ///
@@ -54,11 +62,13 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// - The entry point `<root>/src/main.inf` does not exist
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
+/// - `out_dir` is requested but the resolved `infc` does not support `--out-dir`
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
 pub(crate) fn run_project_build(
     ctx: &ProjectContext,
     generate_v_output: bool,
     mode: Option<BuildMode>,
+    out_dir: Option<&Path>,
 ) -> Result<()> {
     if !ctx.entry_point.exists() {
         bail!(
@@ -72,7 +82,7 @@ pub(crate) fn run_project_build(
     warn_extra_src_files(ctx);
 
     let infc_path = find_infc()?;
-    check_compiler_compatibility(&infc_path)?;
+    let compat = probe_compiler_compatibility(&infc_path)?;
 
     let entry_relative = ProjectContext::entry_relative();
 
@@ -83,9 +93,21 @@ pub(crate) fn run_project_build(
         cmd.arg("-v");
     }
 
-    // Forward only what the caller explicitly passed (see module docs).
+    // Forward only what the caller resolved (see module docs).
     if let Some(mode) = mode {
         cmd.arg("--mode").arg(mode_flag(mode));
+    }
+
+    // AD-13: forward `--out-dir` only to an infc known to support it; never blind.
+    if let Some(dir) = out_dir {
+        if !compat.supports_out_dir() {
+            bail!(
+                "the resolved infc does not support `--out-dir` (requires infc \
+                 ABI ≥ 1.1); update the toolchain or remove `[verification] \
+                 output-dir` from Inference.toml."
+            );
+        }
+        cmd.arg("--out-dir").arg(dir);
     }
 
     let status = cmd
@@ -152,21 +174,71 @@ pub(crate) fn mode_flag(mode: BuildMode) -> &'static str {
     }
 }
 
+/// The capability of a resolved `infc`, as established by the handshake.
+///
+/// Distinguishes *tolerated* drift (which the handshake only warns about) from
+/// *actively used* features such as `--out-dir`, which must only be sent to an
+/// `infc` known to support them (AD-13). `commit_matched` is the strongest
+/// signal — the binaries were built from the same tree — and short-circuits the
+/// ABI probe entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompilerCompat {
+    /// `infc --commit-hash` matched `infs`'s build commit.
+    pub commit_matched: bool,
+
+    /// The probed `(major, minor)` ABI, or `None` if the binary does not
+    /// understand `--abi-version` (old/unknown).
+    pub abi: Option<(u32, u32)>,
+}
+
+impl CompilerCompat {
+    /// Whether the resolved `infc` is known to support the additive `--out-dir`
+    /// flag: either it is the same build (`commit_matched`) or it advertises an
+    /// ABI minor ≥ 1 within the supported major (AD-13). An unknown/old ABI is
+    /// treated as unsupported.
+    pub fn supports_out_dir(self) -> bool {
+        if self.commit_matched {
+            return true;
+        }
+        matches!(self.abi, Some((major, minor)) if major == COMPILER_ABI_MAJOR && minor >= 1)
+    }
+}
+
 /// Runs a compatibility handshake against the resolved `infc` binary.
 ///
-/// Sequence:
+/// This is the boolean-result face of [`probe_compiler_compatibility`]: it runs
+/// the same handshake (identical warnings and the major-mismatch hard error)
+/// and discards the probed capability. Callers that need the capability (to gate
+/// `--out-dir` forwarding) call [`probe_compiler_compatibility`] directly.
+///
+/// # Errors
+///
+/// Hard-errors only on a *major* ABI mismatch (with remediation); minor
+/// mismatch warns, exact/unknown is silent.
+pub(crate) fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
+    probe_compiler_compatibility(infc_path).map(|_| ())
+}
+
+/// Runs the `infc` compatibility handshake and returns its capability.
+///
+/// Sequence (unchanged from the original boolean handshake — same messages):
 /// 1. Query `infc --commit-hash`. If it equals `INFS_GIT_COMMIT`, short-circuit —
 ///    the two binaries were built from the same source tree and the ABI is
-///    guaranteed compatible.
+///    guaranteed compatible (`commit_matched = true`).
 /// 2. Otherwise query `infc --abi-version` and compare against the major/minor
 ///    constants from `inference-compiler-interface`. Major mismatch is a hard
 ///    error; minor mismatch is a warning; exact match is silent.
 ///
 /// Old binaries that do not understand the flags (non-zero exit, empty output,
 /// or the literal `unknown`) are treated as graceful skips — we neither warn
-/// nor error on them. The L1/L2 resolver fixes remain the correctness
-/// guarantee; this handshake is a safety net against residual drift.
-pub(crate) fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
+/// nor error on them, and the returned `abi` is `None`. The L1/L2 resolver
+/// fixes remain the correctness guarantee; this handshake is a safety net
+/// against residual drift.
+///
+/// # Errors
+///
+/// Hard-errors only on a *major* ABI mismatch (with remediation).
+pub(crate) fn probe_compiler_compatibility(infc_path: &Path) -> Result<CompilerCompat> {
     // --commit-hash / --abi-version print and exit 0 immediately; no timeout needed.
     let local_commit = env!("INFS_GIT_COMMIT");
     let remote_commit = probe_flag(infc_path, "--commit-hash");
@@ -174,15 +246,24 @@ pub(crate) fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
     if let Some(hash) = &remote_commit
         && hash == local_commit
     {
-        return Ok(());
+        return Ok(CompilerCompat {
+            commit_matched: true,
+            abi: None,
+        });
     }
 
     let Some(abi_raw) = probe_flag(infc_path, "--abi-version") else {
-        return Ok(());
+        return Ok(CompilerCompat {
+            commit_matched: false,
+            abi: None,
+        });
     };
 
     let Some((infc_major, infc_minor)) = parse_abi_version(&abi_raw) else {
-        return Ok(());
+        return Ok(CompilerCompat {
+            commit_matched: false,
+            abi: None,
+        });
     };
 
     let local_major = COMPILER_ABI_MAJOR;
@@ -214,7 +295,10 @@ pub(crate) fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
         std::cmp::Ordering::Equal => {}
     }
 
-    Ok(())
+    Ok(CompilerCompat {
+        commit_matched: false,
+        abi: Some((infc_major, infc_minor)),
+    })
 }
 
 /// Runs `<infc_path> <flag>` with stdin/stderr suppressed and returns the
@@ -267,11 +351,69 @@ mod project_tests {
             entry_point: root.join("src").join("main.inf"),
         };
 
-        let err = run_project_build(&ctx, false, None).unwrap_err();
+        let err = run_project_build(&ctx, false, None, None).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
             "expected missing-entry remediation, got: {msg}"
+        );
+    }
+
+    /// `CompilerCompat::supports_out_dir` is the AD-13 capability predicate:
+    /// commit match OR same-major ABI minor ≥ 1. Unknown/old ABIs are
+    /// unsupported. Pure logic — no subprocess needed.
+    #[test]
+    fn supports_out_dir_capability_matrix() {
+        // Commit match alone is sufficient (ABI not even probed).
+        assert!(
+            CompilerCompat {
+                commit_matched: true,
+                abi: None,
+            }
+            .supports_out_dir()
+        );
+
+        // Same major, minor >= 1 → supported.
+        assert!(
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, 1)),
+            }
+            .supports_out_dir()
+        );
+        assert!(
+            CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, 5)),
+            }
+            .supports_out_dir()
+        );
+
+        // Same major, minor 0 → not supported (the flag landed at minor 1).
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR, 0)),
+            }
+            .supports_out_dir()
+        );
+
+        // Different major → not supported even at minor >= 1.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: Some((COMPILER_ABI_MAJOR + 1, 9)),
+            }
+            .supports_out_dir()
+        );
+
+        // Unknown ABI → not supported.
+        assert!(
+            !CompilerCompat {
+                commit_matched: false,
+                abi: None,
+            }
+            .supports_out_dir()
         );
     }
 
@@ -427,6 +569,61 @@ mod tests {
             "non-zero exit from flag probes must be graceful"
         );
     }
+
+    #[test]
+    fn probe_capability_commit_match_sets_commit_matched() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        // ABI "9.9" would major-mismatch if probed; commit match must short-circuit.
+        let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert!(compat.commit_matched, "matching commit must set commit_matched");
+        assert_eq!(compat.abi, None, "commit match short-circuits the ABI probe");
+        assert!(compat.supports_out_dir());
+    }
+
+    #[test]
+    fn probe_capability_minor_1_supports_out_dir() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let abi = format!("{COMPILER_ABI_MAJOR}.1");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert!(!compat.commit_matched);
+        assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 1)));
+        assert!(
+            compat.supports_out_dir(),
+            "ABI minor 1 with matching major must support --out-dir"
+        );
+    }
+
+    #[test]
+    fn probe_capability_minor_0_rejects_out_dir() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let abi = format!("{COMPILER_ABI_MAJOR}.0");
+        let stub = write_stub(&dir, "nottherightcommit", &abi, false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 0)));
+        assert!(
+            !compat.supports_out_dir(),
+            "ABI minor 0 must not advertise --out-dir support (AD-13)"
+        );
+    }
+
+    #[test]
+    fn probe_capability_unknown_abi_rejects_out_dir() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let stub = write_stub(&dir, "unknown", "unknown", false);
+        let compat = probe_compiler_compatibility(&stub).unwrap();
+        assert!(!compat.commit_matched);
+        assert_eq!(compat.abi, None);
+        assert!(
+            !compat.supports_out_dir(),
+            "an old/unknown infc must not be sent --out-dir"
+        );
+    }
+
+    // The end-to-end AD-13 gate (old infc + out_dir → hard error) is covered by
+    // the `cli_integration` test using INFC_PATH in a subprocess, which avoids
+    // mutating this process's environment (find_infc reads INFC_PATH globally).
 
     #[test]
     fn parse_abi_version_accepts_valid() {

@@ -19,20 +19,26 @@
 //! infs run program.inf --entry-point helper   # single-file: invoke helper()
 //! ```
 //!
-//! ## Project-mode conventions (issue #222)
+//! ## Project-mode conventions
 //!
-//! - **Always invokes `main`** (AD-8). Project mode has no notion of an
-//!   alternate entry point yet; a non-`main` `--entry-point` is rejected with
-//!   guidance to use single-file mode rather than silently ignored.
-//! - **Trailing var-args are ignored** (AD-8): `main` is always invoked with
+//! - **Always invokes `main`**. Project mode has no notion of an alternate
+//!   entry point yet; a non-`main` `--entry-point` is rejected with guidance to
+//!   use single-file mode rather than silently ignored.
+//! - **Trailing var-args are ignored**: `main` is always invoked with
 //!   `argc=0, argv=0`. Note that project mode is structurally arg-free: the
 //!   first bare token on the command line binds to the positional `path` and
 //!   therefore selects *single-file* mode, so trailing args cannot actually
 //!   reach project mode through the CLI. The warning below is retained as a
 //!   defensive, self-documenting guard should the argument layout ever change.
 //! - **Gains the `infc` compatibility handshake** for free via the shared
-//!   project-build helper (AD-7). Single-file `run` deliberately keeps its prior
+//!   project-build helper. Single-file `run` deliberately keeps its prior
 //!   no-handshake behavior to avoid an unrelated behavior change.
+//! - **Always builds in compile mode**, regardless of the manifest's
+//!   `[build] mode`. `run` executes the WASM, and proof-mode WASM embeds the
+//!   custom non-deterministic opcodes (the `0xfc` family) that wasmtime cannot
+//!   execute. So project `run` ignores `[build] mode` and
+//!   `[verification] output-dir` entirely: the artifact is always an executable
+//!   under `<root>/out/`. Use `infs build` to produce proof artifacts.
 //! - **Missing-WASM guard:** if the build reports success but
 //!   `<root>/out/main.wasm` is absent, `run` errors before invoking wasmtime,
 //!   mirroring the single-file `compile_to_wasm` guard.
@@ -119,7 +125,8 @@ pub fn execute(args: &RunArgs) -> Result<()> {
 /// 1. Validates source file exists
 /// 2. Checks for wasmtime availability
 /// 3. Locates the infc compiler
-/// 4. Compiles source to WASM via infc subprocess (no ABI handshake — AD-7)
+/// 4. Compiles source to WASM via infc subprocess (no ABI handshake — single-file
+///    `run` deliberately keeps its prior no-handshake behavior)
 /// 5. Executes WASM with wasmtime, invoking `--entry-point`
 /// 6. Propagates exit code from wasmtime
 ///
@@ -148,11 +155,11 @@ fn execute_single_file(path: &Path, args: &RunArgs) -> Result<()> {
 /// Builds and runs a discovered project (project mode).
 ///
 /// Resolves the project from the current directory, performs the shared project
-/// build (which runs the `infc` compatibility handshake — AD-7), then invokes
-/// `main` on `<root>/out/main.wasm` via wasmtime. Project mode always invokes
-/// `main` (AD-8); a non-`main` `--entry-point` is rejected. Trailing var-args
-/// cannot reach this path (the first token binds to `path`); the warning is a
-/// defensive guard documenting the ignore-args policy.
+/// build (which runs the `infc` compatibility handshake), then invokes `main` on
+/// `<root>/out/main.wasm` via wasmtime. Project mode always invokes `main`; a
+/// non-`main` `--entry-point` is rejected. Trailing var-args cannot reach this
+/// path (the first token binds to `path`); the warning is a defensive guard
+/// documenting the ignore-args policy.
 ///
 /// wasmtime availability is checked *first* — before any compilation — so an
 /// environment lacking the runtime fails fast, matching single-file mode.
@@ -190,7 +197,12 @@ fn execute_project(args: &RunArgs) -> Result<()> {
         std::env::current_dir().context("Failed to determine the current working directory")?;
     let ctx = project::discover_and_load(&cwd)?;
 
-    run_project_build(&ctx, false, None)?;
+    // Project `run` always builds an executable (compile mode) in `out/`,
+    // regardless of `[build] mode` in the manifest: proof-mode WASM embeds the
+    // custom non-deterministic opcodes (0xfc family) that wasmtime cannot
+    // execute. Hence `mode = None` and `out_dir = None` here — manifest
+    // mode/output-dir resolution lives only in `build`'s project path.
+    run_project_build(&ctx, false, None, None)?;
 
     let wasm_path = project_wasm_path(&ctx);
     if !wasm_path.exists() {

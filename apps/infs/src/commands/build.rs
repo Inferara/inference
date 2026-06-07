@@ -32,6 +32,30 @@
 //! infs build example.inf --mode proof    # proof mode; writes both .wasm and .v
 //! infs build example.inf --mode compile -v   # compile mode + .v (specs stripped)
 //! ```
+//!
+//! ## Project-mode manifest semantics
+//!
+//! In project mode the manifest's `[build] mode` and `[verification]
+//! output-dir` become consumed configuration, with CLI flags overriding:
+//!
+//! - **Effective mode** = CLI `--mode` if present, else manifest `[build]
+//!   mode`. Manifest `proof` forwards `--mode proof`; manifest `compile`
+//!   (explicit or defaulted) forwards *nothing* so that `infc`'s `-v` ⇄ proof
+//!   implication stays the single source of truth in `infc::normalize_args`.
+//!   `infs` never forwards `--mode compile`.
+//! - **`output-dir`** is honored *only in effective-proof mode* and is
+//!   normalized (relative-only, trailing separator stripped) before forwarding
+//!   as `--out-dir`, which moves both `.wasm` and `.v`. In compile mode it is
+//!   ignored entirely — the default `proofs/` must never relocate
+//!   `out/main.wasm`. The default proof-mode `output-dir` is `proofs/`, so a
+//!   default proof build writes both artifacts under `<root>/proofs/`.
+//! - **`-v` alone** (no `--mode`, compile-mode manifest) is *not* treated as
+//!   proof by `infs`: only the explicitly-owned mode signal triggers
+//!   effective-proof mode. `infs build -v` forwards just `-v`; `infc` derives
+//!   proof internally and writes both artifacts to `out/` (no `--out-dir`).
+//! - **`--out-dir` is forwarded only to an `infc` that supports it**;
+//!   pairing a non-default `output-dir` with an older `infc` hard-errors with
+//!   remediation rather than failing opaquely in the subprocess.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -166,16 +190,162 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
 
 /// Compiles the entry point of a discovered project (project mode).
 ///
-/// A thin wrapper over [`run_project_build`], which owns the shared
-/// project-build logic (entry-point resolution, extra-file warnings, the `infc`
-/// handshake, spawning `infc` with `current_dir(root)`, and exit-code
-/// propagation) so that `infs run` can reuse it. This function only forwards
-/// the `build`-specific CLI flags.
+/// Resolves the *effective* build configuration from the CLI flags and the
+/// manifest's `[build] mode` / `[verification] output-dir`, then delegates to
+/// [`run_project_build`] (which owns the shared spawn, handshake, and exit-code
+/// propagation). The forwarding rules are documented on
+/// [`resolve_effective_mode`] and [`resolve_out_dir`].
 ///
 /// ## Errors
 ///
 /// Propagates every error [`run_project_build`] can return (missing entry
-/// point, compiler lookup, ABI handshake, non-zero infc exit).
+/// point, compiler lookup, ABI handshake, `--out-dir` capability gate, non-zero
+/// infc exit), plus `output-dir` normalization failures.
 fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
-    run_project_build(ctx, args.generate_v_output, args.mode)
+    let effective_mode = resolve_effective_mode(args.mode, &ctx.manifest.build.mode);
+    let out_dir = resolve_out_dir(effective_mode, &ctx.manifest.verification)?;
+
+    run_project_build(ctx, args.generate_v_output, effective_mode, out_dir.as_deref())
+}
+
+/// Resolves the effective `--mode` to forward to `infc`, or `None` to forward
+/// nothing.
+///
+/// Precedence (AD-3/AD-4):
+/// - CLI `--mode` always wins when present (`compile` or `proof`).
+/// - Otherwise, manifest `[build] mode = "proof"` forwards `--mode proof`.
+/// - Manifest `"compile"` (explicit or defaulted) forwards **nothing**.
+///
+/// Why never forward `--mode compile`: `infs` does not own the `-v` ⇄ `--mode
+/// proof` implication — `infc::normalize_args` does (AD-4, single source of
+/// truth). Forwarding an explicit `--mode compile` when the user passed only
+/// `-v` would suppress that implication inside `infc` (turning `-v`-alone into a
+/// spec-stripped `.v`), which is exactly the drift AD-4 avoids. Forwarding
+/// nothing for the compile case leaves `infc` free to derive proof from `-v`.
+///
+/// The manifest string is already validated to `compile`/`proof` on load, so
+/// the fallback maps any non-`proof` value to "forward nothing".
+fn resolve_effective_mode(cli_mode: Option<BuildMode>, manifest_mode: &str) -> Option<BuildMode> {
+    if let Some(mode) = cli_mode {
+        return Some(mode);
+    }
+    if manifest_mode == "proof" {
+        return Some(BuildMode::Proof);
+    }
+    None
+}
+
+/// Resolves the `--out-dir` to forward, honoring `[verification] output-dir`
+/// **only in effective-proof mode** (AD-12).
+///
+/// In compile mode (or when no explicit proof mode is in effect) the manifest
+/// `output-dir` is ignored entirely and `None` is returned — a default-manifest
+/// build must never relocate `out/main.wasm` into the `proofs/` default, and
+/// `--out-dir` cannot isolate the `.v` from the `.wasm` anyway (AD-9).
+///
+/// In effective-proof mode the manifest string is normalized through `PathBuf`
+/// (relative-only, trailing separator stripped) and returned for forwarding.
+/// The default `"proofs/"` normalizes to `proofs`, so a default proof-mode
+/// build writes both artifacts under `<root>/proofs/`.
+///
+/// Note: this keys off the mode `infs` explicitly owns (CLI `--mode proof` or
+/// manifest `mode = "proof"`). It deliberately does **not** treat `-v`-alone as
+/// proof: that implication is `infc`'s (AD-4), so `infs build -v` on a
+/// compile-mode manifest forwards only `-v` and lets `infc` write both
+/// artifacts to `out/` — `output-dir` is not consulted.
+///
+/// # Errors
+///
+/// Returns an error if the manifest `output-dir` is empty or absolute.
+fn resolve_out_dir(
+    effective_mode: Option<BuildMode>,
+    verification: &crate::project::manifest::VerificationConfig,
+) -> Result<Option<PathBuf>> {
+    if effective_mode == Some(BuildMode::Proof) {
+        Ok(Some(verification.normalized_output_dir()?))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::manifest::VerificationConfig;
+
+    #[test]
+    fn cli_mode_overrides_manifest() {
+        // CLI proof wins over manifest compile, and CLI compile wins over
+        // manifest proof — the CLI is always authoritative when present.
+        assert_eq!(
+            resolve_effective_mode(Some(BuildMode::Proof), "compile"),
+            Some(BuildMode::Proof)
+        );
+        assert_eq!(
+            resolve_effective_mode(Some(BuildMode::Compile), "proof"),
+            Some(BuildMode::Compile)
+        );
+    }
+
+    #[test]
+    fn manifest_proof_forwards_proof() {
+        assert_eq!(resolve_effective_mode(None, "proof"), Some(BuildMode::Proof));
+    }
+
+    #[test]
+    fn manifest_compile_forwards_nothing() {
+        // Compile (explicit or defaulted) must forward nothing so infc's
+        // `-v` ⇄ proof implication stays the single source of truth (AD-4).
+        assert_eq!(resolve_effective_mode(None, "compile"), None);
+    }
+
+    #[test]
+    fn compile_mode_ignores_output_dir() {
+        // Even a non-default output-dir must be ignored in compile mode (AD-12),
+        // so out/main.wasm is never relocated into proofs/.
+        let verification = VerificationConfig {
+            output_dir: String::from("artifacts"),
+        };
+        assert_eq!(resolve_out_dir(None, &verification).unwrap(), None);
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Compile), &verification).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn proof_mode_forwards_default_output_dir_normalized() {
+        // The default "proofs/" must normalize to `proofs` and be forwarded.
+        let verification = VerificationConfig::default();
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Proof), &verification).unwrap(),
+            Some(PathBuf::from("proofs"))
+        );
+    }
+
+    #[test]
+    fn proof_mode_forwards_custom_output_dir() {
+        let verification = VerificationConfig {
+            output_dir: String::from("artifacts/"),
+        };
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Proof), &verification).unwrap(),
+            Some(PathBuf::from("artifacts"))
+        );
+    }
+
+    #[test]
+    fn proof_mode_propagates_output_dir_validation_error() {
+        // An absolute output-dir is rejected — but only when proof mode actually
+        // consults it (in compile mode the bad value is never read).
+        let abs = if cfg!(windows) { r"C:\x" } else { "/x" };
+        let verification = VerificationConfig {
+            output_dir: String::from(abs),
+        };
+        assert!(resolve_out_dir(Some(BuildMode::Proof), &verification).is_err());
+        assert!(
+            resolve_out_dir(None, &verification).is_ok(),
+            "compile mode must not even read a malformed output-dir"
+        );
+    }
 }

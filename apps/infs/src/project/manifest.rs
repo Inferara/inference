@@ -19,9 +19,10 @@
 //! [build]
 //! target = "wasm32"
 //! optimize = "release"
+//! mode = "compile"        # "compile" (executable) or "proof" (Rocq specs)
 //!
 //! [verification]
-//! output-dir = "proofs/"
+//! output-dir = "proofs/"  # honored only in proof mode
 //! ```
 //!
 //! ## Reserved Names
@@ -157,6 +158,19 @@ pub struct BuildConfig {
     /// Optimization level.
     #[serde(default = "default_optimize")]
     pub optimize: String,
+
+    /// Compilation mode: `"compile"` (executable WASM) or `"proof"` (specs
+    /// preserved for Rocq translation). Defaults to `"compile"`.
+    ///
+    /// This is an independent axis from [`optimize`](Self::optimize) (artifact
+    /// kind vs optimization level) and is deliberately a validated `String`
+    /// rather than a serde enum: the two-value axis is already modelled by
+    /// `commands::build::BuildMode` (infs) and `CliMode` (infc), and a third
+    /// representation would be a fourth source of truth. The string is mapped
+    /// to `BuildMode` at the single forwarding site in `commands::build`.
+    /// Validated case-sensitively on load (see [`InferenceToml::from_toml`]).
+    #[serde(default = "default_mode")]
+    pub mode: String,
 }
 
 impl Default for BuildConfig {
@@ -164,6 +178,7 @@ impl Default for BuildConfig {
         Self {
             target: default_target(),
             optimize: default_optimize(),
+            mode: default_mode(),
         }
     }
 }
@@ -172,7 +187,28 @@ impl BuildConfig {
     /// Returns true if this is the default configuration.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.target == default_target() && self.optimize == default_optimize()
+        self.target == default_target()
+            && self.optimize == default_optimize()
+            && self.mode == default_mode()
+    }
+
+    /// Validates the `mode` field, accepting only `"compile"` or `"proof"`
+    /// (case-sensitive — TOML config values are conventionally lowercase, and
+    /// matching the exact `infc --mode` flag spelling avoids surprising
+    /// near-misses like `"Proof"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the field and the allowed values when `mode` is
+    /// neither `"compile"` nor `"proof"`.
+    fn validate(&self) -> Result<()> {
+        if self.mode != "compile" && self.mode != "proof" {
+            bail!(
+                "Invalid `[build] mode` value `{}`: expected `compile` or `proof`.",
+                self.mode
+            );
+        }
+        Ok(())
     }
 }
 
@@ -197,6 +233,46 @@ impl VerificationConfig {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.output_dir == default_output_dir()
+    }
+
+    /// Normalizes the configured `output-dir` into a relative [`PathBuf`]
+    /// suitable for forwarding to `infc --out-dir`.
+    ///
+    /// The raw manifest string (e.g. `"proofs/"`) is parsed through `PathBuf`
+    /// so the path separator is platform-correct and any trailing separator is
+    /// dropped (`"proofs/"` → `proofs`). Absolute paths are **rejected**: the
+    /// `output-dir` is a project-relative configuration, and an absolute path
+    /// would let artifacts escape the project root, breaking the
+    /// `<root>/out`-style contract and polluting locations outside VCS control.
+    ///
+    /// # Errors
+    ///
+    /// Returns a remediation-style error if `output-dir` is empty or absolute.
+    pub fn normalized_output_dir(&self) -> Result<PathBuf> {
+        let raw = self.output_dir.trim();
+        if raw.is_empty() {
+            bail!("`[verification] output-dir` must not be empty.");
+        }
+
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            bail!(
+                "`[verification] output-dir` must be a relative path (got `{}`); \
+                 absolute paths would place artifacts outside the project root.",
+                self.output_dir
+            );
+        }
+
+        // Re-collect components to strip a trailing separator and any redundant
+        // `.` segments while preserving relative semantics.
+        let normalized: PathBuf = path.components().collect();
+        if normalized.as_os_str().is_empty() {
+            bail!(
+                "`[verification] output-dir` `{}` normalizes to an empty path.",
+                self.output_dir
+            );
+        }
+        Ok(normalized)
     }
 }
 
@@ -266,6 +342,10 @@ fn default_optimize() -> String {
     String::from("debug")
 }
 
+fn default_mode() -> String {
+    String::from("compile")
+}
+
 fn default_output_dir() -> String {
     String::from("proofs/")
 }
@@ -316,14 +396,18 @@ impl InferenceToml {
     /// Missing optional sections (`[dependencies]`, `[build]`,
     /// `[verification]`) are filled in with their defaults; absent fields
     /// within present sections likewise default. Only `[package]` (with at
-    /// least `name` and `version`) is required.
+    /// least `name` and `version`) is required. After structural parsing, the
+    /// `[build] mode` value is validated against its allowed set.
     ///
     /// # Errors
     ///
-    /// Returns an error if the input is not valid TOML or does not match the
-    /// manifest schema (e.g. `[package]` is missing).
+    /// Returns an error if the input is not valid TOML, does not match the
+    /// manifest schema (e.g. `[package]` is missing), or carries an invalid
+    /// `[build] mode` value.
     pub fn from_toml(s: &str) -> Result<Self> {
-        toml::from_str(s).context("Failed to parse Inference.toml")
+        let manifest: Self = toml::from_str(s).context("Failed to parse Inference.toml")?;
+        manifest.build.validate()?;
+        Ok(manifest)
     }
 
     /// Reads and parses a manifest from a file on disk.
@@ -465,6 +549,7 @@ mod tests {
         let config = BuildConfig {
             target: String::from("wasm64"),
             optimize: String::from("debug"),
+            mode: default_mode(),
         };
         assert!(!config.is_default());
     }
@@ -590,6 +675,185 @@ mod tests {
             version.chars().next().unwrap().is_ascii_digit(),
             "Version should start with a digit: {version}"
         );
+    }
+
+    #[test]
+    fn build_config_default_mode_is_compile() {
+        assert_eq!(BuildConfig::default().mode, "compile");
+        assert_eq!(default_mode(), "compile");
+    }
+
+    #[test]
+    fn is_default_requires_compile_mode() {
+        let mut config = BuildConfig::default();
+        assert!(config.is_default());
+        config.mode = String::from("proof");
+        assert!(
+            !config.is_default(),
+            "proof mode must not be reported as the default config"
+        );
+    }
+
+    #[test]
+    fn from_toml_parses_explicit_compile_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "compile"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.mode, "compile");
+    }
+
+    #[test]
+    fn from_toml_parses_explicit_proof_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "proof"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.mode, "proof");
+    }
+
+    #[test]
+    fn from_toml_defaults_absent_mode_to_compile() {
+        // [build] present but no `mode` key; and [build] entirely absent.
+        let with_build = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+optimize = "release"
+"#;
+        assert_eq!(
+            InferenceToml::from_toml(with_build).unwrap().build.mode,
+            "compile"
+        );
+
+        let no_build = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+"#;
+        assert_eq!(
+            InferenceToml::from_toml(no_build).unwrap().build.mode,
+            "compile"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_invalid_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "release"
+"#;
+        let err = InferenceToml::from_toml(src).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mode")
+                && msg.contains("compile")
+                && msg.contains("proof")
+                && msg.contains("release"),
+            "error must name the field, the offending value, and the allowed set, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_toml_mode_is_case_sensitive() {
+        // `"Proof"` is a near-miss: rejected, not silently accepted. This pins
+        // the documented case-sensitivity decision.
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "Proof"
+"#;
+        assert!(
+            InferenceToml::from_toml(src).is_err(),
+            "mode validation is case-sensitive; `Proof` must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_strips_trailing_separator() {
+        let config = VerificationConfig {
+            output_dir: String::from("proofs/"),
+        };
+        assert_eq!(config.normalized_output_dir().unwrap(), PathBuf::from("proofs"));
+    }
+
+    #[test]
+    fn normalized_output_dir_accepts_nested_relative() {
+        let config = VerificationConfig {
+            output_dir: String::from("build/artifacts"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("build").join("artifacts")
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_absolute() {
+        // Use a platform-appropriate absolute path.
+        let abs = if cfg!(windows) {
+            r"C:\proofs"
+        } else {
+            "/var/proofs"
+        };
+        let config = VerificationConfig {
+            output_dir: String::from(abs),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("relative"),
+            "absolute output-dir must be rejected with a relative-path remediation"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_empty() {
+        let config = VerificationConfig {
+            output_dir: String::from("   "),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "blank output-dir must be rejected"
+        );
+    }
+
+    #[test]
+    fn scaffolded_default_manifest_roundtrips_mode_compile() {
+        // The typed model the scaffold writes (via InferenceToml::new) must load
+        // back with mode == "compile". (The string scaffold template is covered
+        // separately in scaffold.rs.)
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(MANIFEST_FILE_NAME);
+        InferenceToml::new("scaffolded").write_to_file(&path).unwrap();
+
+        let loaded = InferenceToml::load(&path).unwrap();
+        assert_eq!(loaded.build.mode, "compile");
+        assert!(loaded.build.is_default());
     }
 
     #[test]
