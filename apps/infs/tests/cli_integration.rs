@@ -438,7 +438,7 @@ fn build_produces_identical_wasm_as_infc() {
 }
 
 // =============================================================================
-// Project-mode Build Tests (#222 Phase 2)
+// Project-mode Build Tests
 // =============================================================================
 
 /// Source used as `src/main.inf` for project-mode tests. Must define a `main`
@@ -658,7 +658,7 @@ fn project_build_wasm_byte_identical_to_infc() {
 }
 
 // =============================================================================
-// Project-mode Run Tests (#222 Phase 3)
+// Project-mode Run Tests
 // =============================================================================
 
 /// A `main` returning a nonzero constant, used to assert wasmtime surfaces the
@@ -801,8 +801,8 @@ fn project_run_missing_entry_point_errors() {
 }
 
 /// `--entry-point` with a non-`main` value in project mode is rejected with
-/// guidance to use single-file mode (AD-8). This is an argument-validation
-/// error, so it fires before the wasmtime check and needs no external tools.
+/// guidance to use single-file mode. This is an argument-validation error, so
+/// it fires before the wasmtime check and needs no external tools.
 #[test]
 fn project_run_rejects_non_main_entry_point() {
     let temp = assert_fs::TempDir::new().unwrap();
@@ -841,9 +841,9 @@ fn project_run_allows_explicit_main_entry_point() {
     cmd.assert().success();
 }
 
-/// Project mode is structurally arg-free (AD-8): the first bare token on the
-/// command line binds to the positional `path`, which selects *single-file*
-/// mode. So `infs run -- ignored-arg` is not "project mode with trailing args"
+/// Project mode is structurally arg-free: the first bare token on the command
+/// line binds to the positional `path`, which selects *single-file* mode. So
+/// `infs run -- ignored-arg` is not "project mode with trailing args"
 /// — it is single-file mode with `path = ignored-arg`, which does not exist.
 /// This pins the parsing contract that makes the in-code trailing-args warning
 /// unreachable through the CLI (the warning is retained as a defensive guard).
@@ -892,7 +892,7 @@ fn project_run_propagates_compile_error() {
 }
 
 // =============================================================================
-// Project-mode Manifest Semantics Tests (#222 Phase 4)
+// Project-mode Manifest Semantics Tests
 // =============================================================================
 
 /// Scaffolds a project whose `Inference.toml` embeds the given `[build]` /
@@ -913,7 +913,7 @@ fn scaffold_project_with_manifest(
 
 /// Default-manifest (compile) build writes `<root>/out/main.wasm` and creates
 /// NO `proofs/` directory — the `proofs/` manifest default must never be
-/// forwarded as `--out-dir` in compile mode (AD-12 regression).
+/// forwarded as `--out-dir` in compile mode.
 #[test]
 fn project_build_default_manifest_no_proofs_dir() {
     let Some(infc_path) = require_infc() else {
@@ -945,7 +945,7 @@ fn project_build_default_manifest_no_proofs_dir() {
 
 /// Manifest `[build] mode = "proof"` (default output-dir) produces BOTH the
 /// `.wasm` and `.v` under `<root>/proofs/` (the default output-dir is honored
-/// in proof mode and `--out-dir` moves both artifacts — AD-9/AD-12).
+/// in proof mode and `--out-dir` moves both artifacts).
 #[test]
 fn project_build_manifest_proof_writes_under_proofs() {
     let Some(infc_path) = require_infc() else {
@@ -963,7 +963,7 @@ fn project_build_manifest_proof_writes_under_proofs() {
 
     assert!(
         temp.child("proofs").child("main.wasm").path().exists(),
-        "proof build: .wasm must land under proofs/ (AD-9)"
+        "proof build: .wasm must land under proofs/"
     );
     assert!(
         temp.child("proofs").child("main.v").path().exists(),
@@ -1079,7 +1079,7 @@ fn project_build_cli_proof_on_default_manifest_uses_proofs() {
 /// `-v` alone on a default (compile) manifest is NOT treated as effective-proof
 /// by `infs`: it forwards only `-v`, no `--out-dir`. `infc` derives proof
 /// internally and writes BOTH artifacts to `out/` (output-dir is not consulted
-/// — the `-v` ⇄ proof implication is infc's, per AD-4).
+/// — the `-v` ⇄ proof implication belongs to `infc::normalize_args`).
 #[test]
 fn project_build_v_alone_writes_both_to_out_not_proofs() {
     let Some(infc_path) = require_infc() else {
@@ -1103,7 +1103,7 @@ fn project_build_v_alone_writes_both_to_out_not_proofs() {
     );
     assert!(
         !temp.child("proofs").path().exists(),
-        "`-v` alone must NOT trigger output-dir forwarding (AD-4)"
+        "`-v` alone must NOT trigger output-dir forwarding"
     );
 }
 
@@ -1135,11 +1135,11 @@ fn project_run_forces_compile_ignoring_manifest_proof() {
     );
 }
 
-/// `infs new` scaffolds a manifest with an explicit `[build] mode = "compile"`
-/// (AD-10). The full parse+validate round-trip through `from_toml` is unit-
-/// tested in `scaffold.rs`; here we assert the user-facing CLI emits the
-/// load-bearing field, and that a subsequent project `build` from the scaffold
-/// succeeds (proving the loader accepts it end-to-end).
+/// `infs new` scaffolds a manifest with an explicit `[build] mode = "compile"`.
+/// The full parse+validate round-trip through `from_toml` is unit-tested in
+/// `scaffold.rs`; here we assert the user-facing CLI emits the load-bearing
+/// field, and that a subsequent project `build` from the scaffold succeeds
+/// (proving the loader accepts it end-to-end).
 #[test]
 fn scaffolded_project_manifest_has_compile_mode() {
     let Some(infc_path) = require_infc() else {
@@ -1176,7 +1176,7 @@ fn scaffolded_project_manifest_has_compile_mode() {
     assert!(project.child("out").child("main.wasm").path().exists());
 }
 
-/// Old-infc AD-13 gate: a stub `infc` reporting ABI `1.0` (no `--out-dir`)
+/// Old-infc out-dir gate: a stub `infc` reporting ABI `1.0` (no `--out-dir`)
 /// paired with a manifest that needs `output-dir` (proof mode) must hard-error
 /// with remediation mentioning the required ABI — never emit the flag blind.
 ///
@@ -2213,13 +2213,13 @@ fn run_help_shows_options() {
         .stdout(predicate::str::contains("Run").or(predicate::str::contains("run")));
 }
 
-/// Verifies that `infs run` with no path enters project mode (#222 Phase 3).
+/// Verifies that `infs run` with no path enters project mode.
 ///
-/// Before Phase 3 a missing path was a clap "PATH required" usage error. Now an
-/// absent path selects project mode (AD-1), so it must reach the runtime
-/// pipeline instead of being rejected by the argument parser. From a directory
-/// with no `Inference.toml`, the project pipeline fails — either at the
-/// fail-fast wasmtime check (`wasmtime not found`) or at manifest discovery
+/// Before the path became optional, a missing path was a clap "PATH required"
+/// usage error. Now an absent path selects project mode, so it must reach the
+/// runtime pipeline instead of being rejected by the argument parser. From a
+/// directory with no `Inference.toml`, the project pipeline fails — either at
+/// the fail-fast wasmtime check (`wasmtime not found`) or at manifest discovery
 /// (`Inference.toml`), depending on whether wasmtime is installed. The
 /// regression guard is that it is *not* a clap usage error.
 #[test]

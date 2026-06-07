@@ -6,7 +6,7 @@
 //! `infc` compatibility handshake, and spawn `infc` with its working directory
 //! set to the project root so `out/` lands at the root. This module owns that
 //! shared logic so the two command modules do not duplicate it (and so `run`
-//! inherits the handshake "for free" — issue #222, AD-7/AD-11).
+//! inherits the handshake "for free").
 //!
 //! It lives under `commands/` rather than `project/` because it is
 //! command-execution logic (subprocess spawning, exit-code propagation, the
@@ -47,12 +47,12 @@ use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 /// resolved is forwarded; `infc::normalize_args` owns the `-v` ↔ `--mode proof`
 /// implication, so mirroring it here would create a second source of truth that
 /// could drift. The single forwarding/spawn site lives here so the ABI gate on
-/// `--out-dir` (AD-13) sits next to the spawn.
+/// `--out-dir` sits next to the spawn.
 ///
 /// `out_dir`, when `Some`, is forwarded as `--out-dir <dir>`; this is only ever
 /// supplied by `build`'s effective-proof-mode path. The shared helper gates the
-/// forward on the resolved `infc` actually supporting the flag (AD-13) and
-/// hard-errors with remediation otherwise — it never emits the flag blind.
+/// forward on the resolved `infc` actually supporting the flag and hard-errors
+/// with remediation otherwise — it never emits the flag blind.
 /// `infs run` always passes `out_dir = None` (and `mode = None`), so project
 /// `run` always builds an executable in `out/`.
 ///
@@ -98,7 +98,7 @@ pub(crate) fn run_project_build(
         cmd.arg("--mode").arg(mode_flag(mode));
     }
 
-    // AD-13: forward `--out-dir` only to an infc known to support it; never blind.
+    // Forward `--out-dir` only to an infc known to support it; never blind.
     if let Some(dir) = out_dir {
         if !compat.supports_out_dir() {
             bail!(
@@ -178,9 +178,9 @@ pub(crate) fn mode_flag(mode: BuildMode) -> &'static str {
 ///
 /// Distinguishes *tolerated* drift (which the handshake only warns about) from
 /// *actively used* features such as `--out-dir`, which must only be sent to an
-/// `infc` known to support them (AD-13). `commit_matched` is the strongest
-/// signal — the binaries were built from the same tree — and short-circuits the
-/// ABI probe entirely.
+/// `infc` known to support them. `commit_matched` is the strongest signal — the
+/// binaries were built from the same tree — and short-circuits the ABI probe
+/// entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompilerCompat {
     /// `infc --commit-hash` matched `infs`'s build commit.
@@ -194,8 +194,8 @@ pub(crate) struct CompilerCompat {
 impl CompilerCompat {
     /// Whether the resolved `infc` is known to support the additive `--out-dir`
     /// flag: either it is the same build (`commit_matched`) or it advertises an
-    /// ABI minor ≥ 1 within the supported major (AD-13). An unknown/old ABI is
-    /// treated as unsupported.
+    /// ABI minor ≥ 1 within the supported major. An unknown/old ABI is treated
+    /// as unsupported.
     pub fn supports_out_dir(self) -> bool {
         if self.commit_matched {
             return true;
@@ -359,8 +359,8 @@ mod project_tests {
         );
     }
 
-    /// `CompilerCompat::supports_out_dir` is the AD-13 capability predicate:
-    /// commit match OR same-major ABI minor ≥ 1. Unknown/old ABIs are
+    /// `CompilerCompat::supports_out_dir` is the `--out-dir` capability
+    /// predicate: commit match OR same-major ABI minor ≥ 1. Unknown/old ABIs are
     /// unsupported. Pure logic — no subprocess needed.
     #[test]
     fn supports_out_dir_capability_matrix() {
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(compat.abi, Some((COMPILER_ABI_MAJOR, 0)));
         assert!(
             !compat.supports_out_dir(),
-            "ABI minor 0 must not advertise --out-dir support (AD-13)"
+            "ABI minor 0 must not advertise --out-dir support"
         );
     }
 
@@ -621,9 +621,10 @@ mod tests {
         );
     }
 
-    // The end-to-end AD-13 gate (old infc + out_dir → hard error) is covered by
-    // the `cli_integration` test using INFC_PATH in a subprocess, which avoids
-    // mutating this process's environment (find_infc reads INFC_PATH globally).
+    // The end-to-end out-dir capability gate (old infc + out_dir → hard error)
+    // is covered by the `cli_integration` test using INFC_PATH in a subprocess,
+    // which avoids mutating this process's environment (find_infc reads
+    // INFC_PATH globally).
 
     #[test]
     fn parse_abi_version_accepts_valid() {

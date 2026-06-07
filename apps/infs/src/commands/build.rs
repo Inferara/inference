@@ -211,17 +211,18 @@ fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
 /// Resolves the effective `--mode` to forward to `infc`, or `None` to forward
 /// nothing.
 ///
-/// Precedence (AD-3/AD-4):
+/// Precedence:
 /// - CLI `--mode` always wins when present (`compile` or `proof`).
 /// - Otherwise, manifest `[build] mode = "proof"` forwards `--mode proof`.
 /// - Manifest `"compile"` (explicit or defaulted) forwards **nothing**.
 ///
 /// Why never forward `--mode compile`: `infs` does not own the `-v` ⇄ `--mode
-/// proof` implication — `infc::normalize_args` does (AD-4, single source of
-/// truth). Forwarding an explicit `--mode compile` when the user passed only
-/// `-v` would suppress that implication inside `infc` (turning `-v`-alone into a
-/// spec-stripped `.v`), which is exactly the drift AD-4 avoids. Forwarding
-/// nothing for the compile case leaves `infc` free to derive proof from `-v`.
+/// proof` implication — `infc::normalize_args` does, and it is the single
+/// source of truth. Forwarding an explicit `--mode compile` when the user
+/// passed only `-v` would suppress that implication inside `infc` (turning
+/// `-v`-alone into a spec-stripped `.v`), reintroducing exactly the drift that
+/// single source of truth avoids. Forwarding nothing for the compile case
+/// leaves `infc` free to derive proof from `-v`.
 ///
 /// The manifest string is already validated to `compile`/`proof` on load, so
 /// the fallback maps any non-`proof` value to "forward nothing".
@@ -236,12 +237,12 @@ fn resolve_effective_mode(cli_mode: Option<BuildMode>, manifest_mode: &str) -> O
 }
 
 /// Resolves the `--out-dir` to forward, honoring `[verification] output-dir`
-/// **only in effective-proof mode** (AD-12).
+/// **only in effective-proof mode**.
 ///
 /// In compile mode (or when no explicit proof mode is in effect) the manifest
 /// `output-dir` is ignored entirely and `None` is returned — a default-manifest
 /// build must never relocate `out/main.wasm` into the `proofs/` default, and
-/// `--out-dir` cannot isolate the `.v` from the `.wasm` anyway (AD-9).
+/// `--out-dir` cannot isolate the `.v` from the `.wasm` anyway (it moves both).
 ///
 /// In effective-proof mode the manifest string is normalized through `PathBuf`
 /// (relative-only, trailing separator stripped) and returned for forwarding.
@@ -250,8 +251,8 @@ fn resolve_effective_mode(cli_mode: Option<BuildMode>, manifest_mode: &str) -> O
 ///
 /// Note: this keys off the mode `infs` explicitly owns (CLI `--mode proof` or
 /// manifest `mode = "proof"`). It deliberately does **not** treat `-v`-alone as
-/// proof: that implication is `infc`'s (AD-4), so `infs build -v` on a
-/// compile-mode manifest forwards only `-v` and lets `infc` write both
+/// proof: that implication belongs to `infc::normalize_args`, so `infs build -v`
+/// on a compile-mode manifest forwards only `-v` and lets `infc` write both
 /// artifacts to `out/` — `output-dir` is not consulted.
 ///
 /// # Errors
@@ -295,13 +296,13 @@ mod tests {
     #[test]
     fn manifest_compile_forwards_nothing() {
         // Compile (explicit or defaulted) must forward nothing so infc's
-        // `-v` ⇄ proof implication stays the single source of truth (AD-4).
+        // `-v` ⇄ proof implication stays the single source of truth.
         assert_eq!(resolve_effective_mode(None, "compile"), None);
     }
 
     #[test]
     fn compile_mode_ignores_output_dir() {
-        // Even a non-default output-dir must be ignored in compile mode (AD-12),
+        // Even a non-default output-dir must be ignored in compile mode,
         // so out/main.wasm is never relocated into proofs/.
         let verification = VerificationConfig {
             output_dir: String::from("artifacts"),

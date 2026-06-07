@@ -46,11 +46,8 @@ pub struct ProjectContext {
 
     /// The parsed `Inference.toml` manifest.
     ///
-    /// Carried by the context but not yet consumed: project-mode `build`
-    /// currently forwards only the CLI flags. The manifest's `[build] mode`
-    /// and `[verification] output-dir` semantics are wired through in a later
-    /// phase (#222 Phase 4).
-    #[allow(dead_code)]
+    /// Consumed by project-mode `build` to resolve the effective `[build] mode`
+    /// and `[verification] output-dir` when forwarding to `infc`.
     pub manifest: InferenceToml,
 
     /// Absolute path to the conventional entry point, `<root>/src/main.inf`.
