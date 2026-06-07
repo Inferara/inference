@@ -32,8 +32,11 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The conventional manifest file name for an Inference project.
+pub const MANIFEST_FILE_NAME: &str = "Inference.toml";
 
 /// Reserved words that cannot be used as project names.
 ///
@@ -307,6 +310,69 @@ impl InferenceToml {
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write manifest: {}", path.display()))
     }
+
+    /// Parses a manifest from a TOML string.
+    ///
+    /// Missing optional sections (`[dependencies]`, `[build]`,
+    /// `[verification]`) are filled in with their defaults; absent fields
+    /// within present sections likewise default. Only `[package]` (with at
+    /// least `name` and `version`) is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is not valid TOML or does not match the
+    /// manifest schema (e.g. `[package]` is missing).
+    pub fn from_toml(s: &str) -> Result<Self> {
+        toml::from_str(s).context("Failed to parse Inference.toml")
+    }
+
+    /// Reads and parses a manifest from a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or its contents do not
+    /// parse as a valid manifest. The error context names the offending path.
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
+        Self::from_toml(&content)
+            .with_context(|| format!("Invalid manifest: {}", path.display()))
+    }
+}
+
+/// Walks `start` and its ancestors looking for an `Inference.toml`.
+///
+/// The start directory is canonicalized once (for symlink stability and
+/// reliable termination), then each ancestor is checked in order. The
+/// **nearest** ancestor containing a manifest wins (cargo convention: a nested
+/// project's manifest shadows an outer one by design). The walk stops at the
+/// filesystem root.
+///
+/// Returns the absolute path to the discovered `Inference.toml`.
+///
+/// # Errors
+///
+/// Returns a remediation-style error if `start` cannot be canonicalized or no
+/// manifest exists in `start` or any ancestor.
+pub fn discover_manifest(start: &Path) -> Result<PathBuf> {
+    let canonical = start
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve directory: {}", start.display()))?;
+
+    for dir in canonical.ancestors() {
+        let candidate = dir.join(MANIFEST_FILE_NAME);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "No {MANIFEST_FILE_NAME} found in {} or any parent directory. \
+         Run `infs new <name>` to create a project, or `infs init` to \
+         initialize the current directory, or pass a source file path \
+         (`infs build path/to/file.inf`).",
+        canonical.display()
+    )
 }
 
 /// Validates a project name for use in Inference projects.
@@ -523,6 +589,212 @@ mod tests {
         assert!(
             version.chars().next().unwrap().is_ascii_digit(),
             "Version should start with a digit: {version}"
+        );
+    }
+
+    #[test]
+    fn from_toml_parses_full_manifest() {
+        let src = r#"
+[package]
+name = "demo"
+version = "1.2.3"
+infc_version = "0.1.0"
+
+[build]
+target = "wasm32"
+optimize = "release"
+
+[verification]
+output-dir = "custom/"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.package.name, "demo");
+        assert_eq!(manifest.package.version, "1.2.3");
+        assert_eq!(manifest.package.infc_version, "0.1.0");
+        assert_eq!(manifest.build.target, "wasm32");
+        assert_eq!(manifest.build.optimize, "release");
+        assert_eq!(manifest.verification.output_dir, "custom/");
+    }
+
+    #[test]
+    fn from_toml_defaults_missing_sections() {
+        // Only [package] is present; [build] and [verification] must default.
+        let src = r#"
+[package]
+name = "minimal"
+version = "0.1.0"
+infc_version = "0.1.0"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.package.name, "minimal");
+        assert!(manifest.dependencies.is_empty());
+        assert!(
+            manifest.build.is_default(),
+            "absent [build] must yield the default BuildConfig"
+        );
+        assert!(
+            manifest.verification.is_default(),
+            "absent [verification] must yield the default VerificationConfig"
+        );
+        assert_eq!(manifest.build.target, default_target());
+        assert_eq!(manifest.build.optimize, default_optimize());
+        assert_eq!(manifest.verification.output_dir, default_output_dir());
+    }
+
+    #[test]
+    fn from_toml_defaults_missing_keys_within_sections() {
+        // Present-but-partial [build]/[verification]: absent keys still default.
+        let src = r#"
+[package]
+name = "partial"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+optimize = "release"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.optimize, "release");
+        assert_eq!(
+            manifest.build.target,
+            default_target(),
+            "absent build.target must default"
+        );
+        assert_eq!(manifest.verification.output_dir, default_output_dir());
+    }
+
+    #[test]
+    fn from_toml_rejects_malformed_toml() {
+        let result = InferenceToml::from_toml("this is = = not valid toml");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Inference.toml"),
+            "error should mention the manifest"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_missing_package() {
+        // [package] (and its required name/version) is mandatory.
+        let src = r#"
+[build]
+target = "wasm32"
+"#;
+        let result = InferenceToml::from_toml(src);
+        assert!(result.is_err(), "missing [package] must be rejected");
+    }
+
+    #[test]
+    fn load_reads_manifest_from_disk() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        let manifest = InferenceToml::new("roundtrip");
+        manifest.write_to_file(&manifest_path).unwrap();
+
+        let loaded = InferenceToml::load(&manifest_path).unwrap();
+        assert_eq!(loaded.package.name, "roundtrip");
+        assert_eq!(loaded.package.version, "0.1.0");
+    }
+
+    #[test]
+    fn load_errors_on_missing_file() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        let result = InferenceToml::load(&missing);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("read manifest"),
+            "error should report the read failure"
+        );
+    }
+
+    #[test]
+    fn load_errors_on_invalid_contents() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "not = = valid").unwrap();
+        let result = InferenceToml::load(&manifest_path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Invalid manifest"),
+            "error context should name the invalid manifest, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_finds_at_start_dir() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "").unwrap();
+
+        let found = discover_manifest(dir.path()).unwrap();
+        assert_eq!(found.file_name().unwrap(), MANIFEST_FILE_NAME);
+        // Canonicalize both sides: discover_manifest canonicalizes the start.
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            manifest_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn discover_manifest_finds_in_ancestor() {
+        let root = assert_fs::TempDir::new().unwrap();
+        let manifest_path = root.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "").unwrap();
+
+        let nested = root.path().join("src").join("deep").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = discover_manifest(&nested).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            manifest_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn discover_manifest_nearest_ancestor_wins() {
+        // Outer project contains an inner project; from inside the inner
+        // project the inner manifest must shadow the outer one.
+        let outer = assert_fs::TempDir::new().unwrap();
+        std::fs::write(outer.path().join(MANIFEST_FILE_NAME), "").unwrap();
+
+        let inner = outer.path().join("vendor").join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let inner_manifest = inner.join(MANIFEST_FILE_NAME);
+        std::fs::write(&inner_manifest, "").unwrap();
+
+        let found = discover_manifest(&inner).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            inner_manifest.canonicalize().unwrap(),
+            "nearest ancestor manifest must win"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_errors_when_absent() {
+        // A fresh temp dir with no manifest in it or (realistically) any
+        // ancestor up to the temp root.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let result = discover_manifest(dir.path());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(MANIFEST_FILE_NAME) && msg.contains("infs new"),
+            "error should mention the manifest and remediation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_errors_on_nonexistent_start() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let result = discover_manifest(&missing);
+        assert!(
+            result.is_err(),
+            "a non-existent start directory cannot be canonicalized"
         );
     }
 }

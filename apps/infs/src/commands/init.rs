@@ -53,7 +53,7 @@ pub fn execute(args: &InitArgs) -> Result<()> {
     println!("Initialized Inference project in {display_name}");
     println!();
     println!("Next steps:");
-    println!("  infs build src/main.inf");
+    println!("  infs build");
     println!();
     println!("To learn more about Inference, visit:");
     println!("  https://inference-lang.org");

@@ -14,8 +14,20 @@
 //! with no explicit `--mode` forwards `--mode proof` to `infc` so the emitted
 //! `.v` contains per-spec definitions (`compile` mode strips them).
 //!
+//! ## Single-file vs. project mode
+//!
+//! The positional path is optional. When a path is given, `build` operates in
+//! **single-file mode** (the historical behavior): it compiles exactly that
+//! file with `infc` inheriting the current working directory. When the path is
+//! omitted, `build` operates in **project mode**: it discovers the project's
+//! `Inference.toml` by walking up from the current directory, compiles
+//! `<root>/src/main.inf` with `infc`'s working directory set to the project
+//! root (so `out/` always lands at the root), and warns about any other
+//! `src/*.inf` files (multi-file compilation is gated on #63).
+//!
 //! ```bash
-//! infs build example.inf                 # parse -> codegen -> write out/example.wasm
+//! infs build                             # project mode: build <root>/src/main.inf
+//! infs build example.inf                 # single-file: parse -> codegen -> out/example.wasm
 //! infs build example.inf -v              # also writes out/example.v (proof mode)
 //! infs build example.inf --mode proof    # proof mode; writes both .wasm and .v
 //! infs build example.inf --mode compile -v   # compile mode + .v (specs stripped)
@@ -27,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::errors::InfsError;
+use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
 use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 
@@ -52,7 +65,11 @@ pub enum BuildMode {
 #[derive(Args, Clone)]
 pub struct BuildArgs {
     /// Path to the source file to compile.
-    pub path: PathBuf,
+    ///
+    /// When omitted, `build` runs in project mode: it discovers the project's
+    /// `Inference.toml` by walking up from the current directory and compiles
+    /// `<root>/src/main.inf`. Provide a path to compile a single file directly.
+    pub path: Option<PathBuf>,
 
     /// Generate Rocq (.v) translation file in addition to the WASM binary.
     ///
@@ -72,6 +89,29 @@ pub struct BuildArgs {
 
 /// Executes the build command with the given arguments.
 ///
+/// Dispatches on the presence of a positional path:
+/// - `Some(path)` → [`execute_single_file`] (the historical behavior).
+/// - `None` → [`execute_project`]: discover `Inference.toml` from the current
+///   directory upward and build `<root>/src/main.inf`.
+///
+/// ## Errors
+///
+/// Propagates errors from the selected mode (missing file, compiler lookup,
+/// ABI handshake, non-zero infc exit, or — in project mode — discovery and
+/// entry-point resolution failures).
+pub fn execute(args: &BuildArgs) -> Result<()> {
+    if let Some(path) = &args.path {
+        return execute_single_file(path, args);
+    }
+
+    let cwd =
+        std::env::current_dir().context("Failed to determine the current working directory")?;
+    let ctx = project::discover_and_load(&cwd)?;
+    execute_project(&ctx, args)
+}
+
+/// Compiles a single explicit source file (single-file mode).
+///
 /// ## Execution Flow
 ///
 /// 1. Validates that the source file exists
@@ -87,16 +127,16 @@ pub struct BuildArgs {
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
-pub fn execute(args: &BuildArgs) -> Result<()> {
-    if !args.path.exists() {
-        bail!("Path not found: {}", args.path.display());
+fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
+    if !path.exists() {
+        bail!("Path not found: {}", path.display());
     }
 
     let infc_path = find_infc()?;
     check_compiler_compatibility(&infc_path)?;
 
     let mut cmd = Command::new(&infc_path);
-    cmd.arg(&args.path);
+    cmd.arg(path);
 
     if args.generate_v_output {
         cmd.arg("-v");
@@ -106,11 +146,7 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
     // owns the `-v` ↔ `--mode proof` implication; mirroring it here would
     // create a second source of truth that could silently drift.
     if let Some(mode) = args.mode {
-        let flag = match mode {
-            BuildMode::Proof => "proof",
-            BuildMode::Compile => "compile",
-        };
-        cmd.arg("--mode").arg(flag);
+        cmd.arg("--mode").arg(mode_flag(mode));
     }
 
     let status = cmd
@@ -125,6 +161,114 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
     } else {
         let code = status.code().unwrap_or(1);
         Err(InfsError::process_exit_code(code).into())
+    }
+}
+
+/// Compiles the entry point of a discovered project (project mode).
+///
+/// Resolves the conventional `src/main.inf` entry point, warns about any other
+/// `src/*.inf` files (multi-file compilation is gated on #63), then spawns
+/// `infc` with its working directory set to the project root so that `out/`
+/// lands at the root regardless of where `infs build` was invoked.
+///
+/// The entry-point source is passed *relative to the root* (`src/main.inf`),
+/// matching the CWD-relativity contract between `infs` and `infc`: `infc`
+/// resolves both its source argument and `out/` against the inherited CWD.
+///
+/// ## Errors
+///
+/// Returns an error if:
+/// - The entry point `<root>/src/main.inf` does not exist
+/// - infc compiler cannot be found
+/// - infc reports a *major* ABI version mismatch (hard error with remediation)
+/// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
+fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
+    if !ctx.entry_point.exists() {
+        bail!(
+            "Missing entry point: expected `{}`. Project mode compiles \
+             `src/main.inf` by convention; create it, or pass a source file \
+             path (`infs build path/to/file.inf`).",
+            ctx.entry_point.display()
+        );
+    }
+
+    warn_extra_src_files(ctx);
+
+    let infc_path = find_infc()?;
+    check_compiler_compatibility(&infc_path)?;
+
+    let entry_relative = ProjectContext::entry_relative();
+
+    let mut cmd = Command::new(&infc_path);
+    cmd.current_dir(&ctx.root).arg(&entry_relative);
+
+    if args.generate_v_output {
+        cmd.arg("-v");
+    }
+
+    // Forward only what the user explicitly passed (see `execute_single_file`).
+    if let Some(mode) = args.mode {
+        cmd.arg("--mode").arg(mode_flag(mode));
+    }
+
+    let status = cmd
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .with_context(|| format!("Failed to execute infc at {}", infc_path.display()))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(1);
+        Err(InfsError::process_exit_code(code).into())
+    }
+}
+
+/// Emits a stderr warning for each `src/*.inf` file other than `main.inf`.
+///
+/// Project mode compiles only `src/main.inf` until multi-file support lands
+/// (#63). Silently dropping helper files would be a debugging footgun, so each
+/// excluded file is named. A missing or unreadable `src/` directory is not an
+/// error here — the missing-entry-point check in `execute_project` already
+/// reports the meaningful failure.
+fn warn_extra_src_files(ctx: &ProjectContext) {
+    let src_dir = ctx.root.join("src");
+    let Ok(entries) = std::fs::read_dir(&src_dir) else {
+        return;
+    };
+
+    let mut extras: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "inf")
+                && path.file_name().is_some_and(|name| name != "main.inf")
+            {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect();
+    extras.sort();
+
+    for name in extras {
+        eprintln!(
+            "warning: `src/{name}` is not part of the build; project mode \
+             compiles only `src/main.inf` (multi-file support is pending)."
+        );
+    }
+}
+
+/// Maps a [`BuildMode`] to the `infc --mode` flag value.
+fn mode_flag(mode: BuildMode) -> &'static str {
+    match mode {
+        BuildMode::Proof => "proof",
+        BuildMode::Compile => "compile",
     }
 }
 
@@ -222,6 +366,59 @@ fn parse_abi_version(raw: &str) -> Option<(u32, u32)> {
     let major: u32 = major.parse().ok()?;
     let minor: u32 = minor.parse().ok()?;
     Some((major, minor))
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+    use crate::project::manifest::InferenceToml;
+
+    fn build_args() -> BuildArgs {
+        BuildArgs {
+            path: None,
+            generate_v_output: false,
+            mode: None,
+        }
+    }
+
+    /// `execute_project` must fail with a remediation error before doing any
+    /// compiler lookup when `src/main.inf` is absent. This is platform
+    /// independent — it errors before spawning `infc`.
+    #[test]
+    fn execute_project_errors_when_entry_missing() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        // Manifest present, but no src/main.inf.
+        let ctx = ProjectContext {
+            root: root.clone(),
+            manifest: InferenceToml::new("demo"),
+            entry_point: root.join("src").join("main.inf"),
+        };
+
+        let err = execute_project(&ctx, &build_args()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Missing entry point") && msg.contains("main.inf"),
+            "expected missing-entry remediation, got: {msg}"
+        );
+    }
+
+    /// The entry point is resolved as `<root>/src/main.inf` using path joins,
+    /// so the resolved path always ends in the platform-correct components.
+    #[test]
+    fn entry_point_resolves_to_src_main_inf() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        InferenceToml::new("demo")
+            .write_to_file(&dir.path().join(crate::project::manifest::MANIFEST_FILE_NAME))
+            .unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.inf"), "pub fn main() -> i32 { return 0; }\n").unwrap();
+
+        let ctx = crate::project::discover_and_load(dir.path()).unwrap();
+        assert_eq!(ctx.entry_point, ctx.root.join("src").join("main.inf"));
+        assert!(ctx.entry_point.exists());
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -438,6 +438,226 @@ fn build_produces_identical_wasm_as_infc() {
 }
 
 // =============================================================================
+// Project-mode Build Tests (#222 Phase 2)
+// =============================================================================
+
+/// Source used as `src/main.inf` for project-mode tests. Must define a `main`
+/// entry point so it compiles cleanly and (for the run tests later) is
+/// invokable.
+const PROJECT_MAIN_SRC: &str = "pub fn main() -> i32 {\n    return 0;\n}\n";
+
+/// Scaffolds a minimal project under `dir`: an `Inference.toml` manifest and a
+/// `src/main.inf` with the given source. Returns nothing; `dir` is mutated in
+/// place. Paths are built with `join` so they are platform-correct.
+fn scaffold_project(dir: &assert_fs::TempDir, name: &str, main_src: &str) {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n"
+    );
+    dir.child("Inference.toml").write_str(&manifest).unwrap();
+    dir.child("src").child("main.inf").write_str(main_src).unwrap();
+}
+
+/// Project mode: `infs build` (no path) invoked from the project root discovers
+/// the manifest and writes `<root>/out/main.wasm`.
+#[test]
+fn project_build_from_root_produces_wasm() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "expected project build to produce {:?}",
+        wasm.path()
+    );
+}
+
+/// Project mode: `infs build` invoked from a nested subdirectory still walks up
+/// to the manifest and lands `out/` at the project root, not the subdir.
+#[test]
+fn project_build_from_subdir_lands_out_at_root() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    // Invoke from <root>/src (a directory that exists below the manifest).
+    let subdir = temp.child("src");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(subdir.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    // out/ must be at the root, regardless of the invocation CWD.
+    let wasm_at_root = temp.child("out").child("main.wasm");
+    assert!(
+        wasm_at_root.path().exists(),
+        "out/main.wasm should land at the project root: {:?}",
+        wasm_at_root.path()
+    );
+    // And NOT under the subdirectory we invoked from.
+    let wasm_in_subdir = subdir.child("out").child("main.wasm");
+    assert!(
+        !wasm_in_subdir.path().exists(),
+        "out/ must not land in the invocation subdir: {:?}",
+        wasm_in_subdir.path()
+    );
+}
+
+/// Project mode with no `Inference.toml` anywhere up the tree must fail with a
+/// clear, remediation-style message naming the manifest file.
+#[test]
+fn project_build_without_manifest_errors() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Inference.toml"));
+}
+
+/// Project mode whose manifest exists but `src/main.inf` is missing must fail
+/// with a remediation message naming the expected entry point.
+#[test]
+fn project_build_missing_entry_point_errors() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("Inference.toml")
+        .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+        .unwrap();
+    // No src/main.inf created.
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
+    );
+}
+
+/// Extra `src/*.inf` files (besides `main.inf`) must be warned about by name,
+/// not silently dropped and not a hard error — the build still succeeds.
+#[test]
+fn project_build_warns_about_extra_src_files() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    temp.child("src")
+        .child("helper.inf")
+        .write_str("pub fn helper() -> i32 { return 1; }\n")
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("helper.inf"));
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(wasm.path().exists(), "build should still succeed");
+}
+
+/// Single-file `infs build file.inf` must behave exactly as before the
+/// project-mode addition (regression guard for the optional-path change).
+#[test]
+fn single_file_build_still_works() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let wasm = temp.child("out").child("trivial.wasm");
+    assert!(wasm.path().exists());
+}
+
+/// Four-tier byte comparison: project-mode WASM must be byte-identical to what
+/// single-file `infc` produces for the same source. The control is critical —
+/// `infc src/main.inf` is run with CWD = project root so the `main` stem (and
+/// therefore the WASM name section) matches; comparing against a differently
+/// named source would diverge in the name section even with identical codegen.
+#[test]
+fn project_build_wasm_byte_identical_to_infc() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp_project = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp_project, "demo", PROJECT_MAIN_SRC);
+
+    // Project-mode build.
+    let mut cmd_project = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd_project
+        .env("INFC_PATH", &infc_path)
+        .current_dir(temp_project.path())
+        .arg("build");
+    cmd_project.assert().success();
+
+    // Reference: infc compiling src/main.inf with CWD = the project root, so
+    // the source stem ("main") and out/ location match the project build.
+    let temp_ref = assert_fs::TempDir::new().unwrap();
+    temp_ref
+        .child("src")
+        .child("main.inf")
+        .write_str(PROJECT_MAIN_SRC)
+        .unwrap();
+
+    let mut cmd_ref = Command::new(&infc_path);
+    cmd_ref
+        .current_dir(temp_ref.path())
+        .arg(std::path::Path::new("src").join("main.inf"));
+    cmd_ref.assert().success();
+
+    let project_wasm = temp_project.child("out").child("main.wasm");
+    let ref_wasm = temp_ref.child("out").child("main.wasm");
+    assert!(project_wasm.path().exists(), "project build produced no WASM");
+    assert!(ref_wasm.path().exists(), "reference infc produced no WASM");
+
+    let project_bytes = std::fs::read(project_wasm.path()).unwrap();
+    let ref_bytes = std::fs::read(ref_wasm.path()).unwrap();
+    assert_eq!(
+        project_bytes, ref_bytes,
+        "project-mode WASM must be byte-identical to single-file infc output"
+    );
+}
+
+// =============================================================================
 // Phase 2: Toolchain Management Command Tests
 // =============================================================================
 
