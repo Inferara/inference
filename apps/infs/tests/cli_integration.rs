@@ -658,6 +658,240 @@ fn project_build_wasm_byte_identical_to_infc() {
 }
 
 // =============================================================================
+// Project-mode Run Tests (#222 Phase 3)
+// =============================================================================
+
+/// A `main` returning a nonzero constant, used to assert wasmtime surfaces the
+/// return value (printed to stdout by `--invoke`).
+const PROJECT_MAIN_NONZERO_SRC: &str = "pub fn main() -> i32 {\n    return 42;\n}\n";
+
+/// `main.inf` that fails to compile (undefined identifier), used to assert a
+/// compile error propagates as a non-zero exit before wasmtime is invoked.
+const PROJECT_MAIN_BROKEN_SRC: &str = "pub fn main() -> i32 {\n    return nope;\n}\n";
+
+/// Both `infc` and `wasmtime` are required to execute a project end-to-end.
+/// Returns the `infc` path when both are present; otherwise prints a skip
+/// notice and returns `None`, mirroring the existing conditional-test pattern.
+fn require_infc_and_wasmtime() -> Option<std::path::PathBuf> {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return None;
+    }
+    require_infc()
+}
+
+/// Project `run` from the project root: builds `<root>/out/main.wasm` and
+/// invokes `main`, which returns 0 → exit 0.
+#[test]
+fn project_run_from_root_invokes_main() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert().success();
+
+    // The build must have landed the WASM at the project root.
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "project run should have produced {:?}",
+        wasm.path()
+    );
+}
+
+/// Project `run` surfaces `main`'s return value: wasmtime `--invoke` prints the
+/// returned i32 to stdout. A `main` returning 42 prints `42` with exit 0.
+#[test]
+fn project_run_prints_main_return_value() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_NONZERO_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+}
+
+/// Project `run` invoked from a nested subdir still builds at the root and runs
+/// `<root>/out/main.wasm`.
+#[test]
+fn project_run_from_subdir_runs_root_wasm() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    let subdir = temp.child("src");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(subdir.path())
+        .arg("run");
+
+    cmd.assert().success();
+
+    let wasm_at_root = temp.child("out").child("main.wasm");
+    assert!(
+        wasm_at_root.path().exists(),
+        "out/main.wasm should land at the project root: {:?}",
+        wasm_at_root.path()
+    );
+}
+
+/// `infs run` with no manifest anywhere up the tree fails with the remediation
+/// error naming `Inference.toml`.
+///
+/// wasmtime availability is checked first (fail-fast parity with single-file
+/// mode), so the discovery error is only reachable when wasmtime is present.
+#[test]
+fn project_run_without_manifest_errors() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Inference.toml"));
+}
+
+/// A project whose manifest exists but `src/main.inf` is missing fails with the
+/// entry-point remediation error. Gated on wasmtime (checked before discovery).
+#[test]
+fn project_run_missing_entry_point_errors() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("Inference.toml")
+        .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+        .unwrap();
+    // No src/main.inf created.
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
+    );
+}
+
+/// `--entry-point` with a non-`main` value in project mode is rejected with
+/// guidance to use single-file mode (AD-8). This is an argument-validation
+/// error, so it fires before the wasmtime check and needs no external tools.
+#[test]
+fn project_run_rejects_non_main_entry_point() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("run")
+        .arg("--entry-point")
+        .arg("helper");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("Project mode always invokes `main`")
+            .and(predicate::str::contains("infs run path/to/file.inf")),
+    );
+}
+
+/// `--entry-point main` (the explicit default) in project mode is allowed — it
+/// must not be treated as a custom entry point. Full run, so gated on tools.
+#[test]
+fn project_run_allows_explicit_main_entry_point() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--entry-point")
+        .arg("main");
+
+    cmd.assert().success();
+}
+
+/// Project mode is structurally arg-free (AD-8): the first bare token on the
+/// command line binds to the positional `path`, which selects *single-file*
+/// mode. So `infs run -- ignored-arg` is not "project mode with trailing args"
+/// — it is single-file mode with `path = ignored-arg`, which does not exist.
+/// This pins the parsing contract that makes the in-code trailing-args warning
+/// unreachable through the CLI (the warning is retained as a defensive guard).
+#[test]
+fn project_run_token_selects_single_file_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("run")
+        .arg("--")
+        .arg("ignored-arg");
+
+    // Single-file mode: the token is treated as the source path, which is
+    // missing -> "Path not found", proving it never entered project mode.
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Path not found: ignored-arg"));
+}
+
+/// A compile error in `main.inf` propagates as a non-zero exit, and wasmtime is
+/// never invoked (no "Invoking 'main'" line on stdout).
+#[test]
+fn project_run_propagates_compile_error() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_BROKEN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("Invoking 'main'").not());
+}
+
+// =============================================================================
 // Phase 2: Toolchain Management Command Tests
 // =============================================================================
 
@@ -1651,17 +1885,29 @@ fn run_help_shows_options() {
         .stdout(predicate::str::contains("Run").or(predicate::str::contains("run")));
 }
 
-/// Verifies that `infs run` requires a path argument.
+/// Verifies that `infs run` with no path enters project mode (#222 Phase 3).
 ///
-/// **Expected behavior**: Exit with non-zero code when no path is provided.
+/// Before Phase 3 a missing path was a clap "PATH required" usage error. Now an
+/// absent path selects project mode (AD-1), so it must reach the runtime
+/// pipeline instead of being rejected by the argument parser. From a directory
+/// with no `Inference.toml`, the project pipeline fails — either at the
+/// fail-fast wasmtime check (`wasmtime not found`) or at manifest discovery
+/// (`Inference.toml`), depending on whether wasmtime is installed. The
+/// regression guard is that it is *not* a clap usage error.
 #[test]
-fn run_requires_path_argument() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.arg("run");
+fn run_without_path_enters_project_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("PATH").or(predicate::str::contains("required")));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert().failure().stderr(
+        // Reached the runtime pipeline (one of these two), not clap's parser.
+        predicate::str::contains("Inference.toml")
+            .or(predicate::str::contains("wasmtime not found"))
+            // And explicitly NOT a clap "required argument" usage error.
+            .and(predicate::str::contains("required arguments").not()),
+    );
 }
 
 /// Verifies that `infs run` fails when source file doesn't exist.
