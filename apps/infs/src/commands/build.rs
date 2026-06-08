@@ -8,27 +8,66 @@
 //!
 //! `infs build` always performs full compilation (parse, analyze, codegen)
 //! and writes the WASM binary to disk. The `-v` flag additionally generates
-//! a Rocq (.v) translation file. `--mode proof` selects proof mode (specs
-//! preserved unoptimized for Rocq translation) and implicitly enables `-v`
-//! since the `.v` artifact is the proof-mode deliverable. Symmetrically, `-v`
-//! with no explicit `--mode` forwards `--mode proof` to `infc` so the emitted
-//! `.v` contains per-spec definitions (`compile` mode strips them).
+//! a Rocq (.v) translation file. `infs` forwards `-v` and `--mode` to `infc`
+//! exactly as the user passed them; it does not synthesize one flag from the
+//! other. The `-v` ⇄ `--mode proof` implication lives in
+//! `infc::normalize_args`: `--mode proof` makes `infc` enable `-v`, and `-v`
+//! alone makes `infc` derive proof mode (so the `.v` keeps the per-spec
+//! definitions that `compile` mode strips). Keeping the implication in one
+//! place avoids a second source of truth that could drift.
+//!
+//! ## Single-file vs. project mode
+//!
+//! The positional path is optional. When a path is given, `build` operates in
+//! **single-file mode** (the historical behavior): it compiles exactly that
+//! file with `infc` inheriting the current working directory. When the path is
+//! omitted, `build` operates in **project mode**: it discovers the project's
+//! `Inference.toml` by walking up from the current directory, compiles
+//! `<root>/src/main.inf` with `infc`'s working directory set to the project
+//! root (so `out/` always lands at the root), and warns about any other
+//! `src/*.inf` files (multi-file compilation is gated on #63).
 //!
 //! ```bash
-//! infs build example.inf                 # parse -> codegen -> write out/example.wasm
+//! infs build                             # project mode: build <root>/src/main.inf
+//! infs build example.inf                 # single-file: parse -> codegen -> out/example.wasm
 //! infs build example.inf -v              # also writes out/example.v (proof mode)
 //! infs build example.inf --mode proof    # proof mode; writes both .wasm and .v
 //! infs build example.inf --mode compile -v   # compile mode + .v (specs stripped)
 //! ```
+//!
+//! ## Project-mode manifest semantics
+//!
+//! In project mode the manifest's `[build] mode` and `[verification]
+//! output-dir` become consumed configuration, with CLI flags overriding:
+//!
+//! - **Effective mode** = CLI `--mode` if present, else manifest `[build]
+//!   mode`. Manifest `proof` forwards `--mode proof`; manifest `compile`
+//!   (explicit or defaulted) forwards *nothing* so that `infc`'s `-v` ⇄ proof
+//!   implication stays the single source of truth in `infc::normalize_args`.
+//!   `infs` never forwards `--mode compile`.
+//! - **`output-dir`** is honored *only in effective-proof mode* and is
+//!   normalized (relative-only, trailing separator stripped) before forwarding
+//!   as `--out-dir`, which moves both `.wasm` and `.v`. In compile mode it is
+//!   ignored entirely — the default `proofs/` must never relocate
+//!   `out/main.wasm`. The default proof-mode `output-dir` is `proofs/`, so a
+//!   default proof build writes both artifacts under `<root>/proofs/`.
+//! - **`-v` alone** (no `--mode`, compile-mode manifest) is *not* treated as
+//!   proof by `infs`: only the explicitly-owned mode signal triggers
+//!   effective-proof mode. `infs build -v` forwards just `-v`; `infc` derives
+//!   proof internally and writes both artifacts to `out/` (no `--out-dir`).
+//! - **`--out-dir` is forwarded only to an `infc` that supports it**;
+//!   pairing a non-default `output-dir` with an older `infc` hard-errors with
+//!   remediation rather than failing opaquely in the subprocess.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
+use crate::commands::project_build::{check_compiler_compatibility, mode_flag, run_project_build};
 use crate::errors::InfsError;
+use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
-use inference_compiler_interface::{COMPILER_ABI_MAJOR, COMPILER_ABI_MINOR};
 
 /// Compilation mode forwarded to `infc --mode <…>`.
 ///
@@ -52,7 +91,11 @@ pub enum BuildMode {
 #[derive(Args, Clone)]
 pub struct BuildArgs {
     /// Path to the source file to compile.
-    pub path: PathBuf,
+    ///
+    /// When omitted, `build` runs in project mode: it discovers the project's
+    /// `Inference.toml` by walking up from the current directory and compiles
+    /// `<root>/src/main.inf`. Provide a path to compile a single file directly.
+    pub path: Option<PathBuf>,
 
     /// Generate Rocq (.v) translation file in addition to the WASM binary.
     ///
@@ -72,6 +115,29 @@ pub struct BuildArgs {
 
 /// Executes the build command with the given arguments.
 ///
+/// Dispatches on the presence of a positional path:
+/// - `Some(path)` → [`execute_single_file`] (the historical behavior).
+/// - `None` → [`execute_project`]: discover `Inference.toml` from the current
+///   directory upward and build `<root>/src/main.inf`.
+///
+/// ## Errors
+///
+/// Propagates errors from the selected mode (missing file, compiler lookup,
+/// ABI handshake, non-zero infc exit, or — in project mode — discovery and
+/// entry-point resolution failures).
+pub fn execute(args: &BuildArgs) -> Result<()> {
+    if let Some(path) = &args.path {
+        return execute_single_file(path, args);
+    }
+
+    let cwd =
+        std::env::current_dir().context("Failed to determine the current working directory")?;
+    let ctx = project::discover_and_load(&cwd)?;
+    execute_project(&ctx, args)
+}
+
+/// Compiles a single explicit source file (single-file mode).
+///
 /// ## Execution Flow
 ///
 /// 1. Validates that the source file exists
@@ -87,16 +153,16 @@ pub struct BuildArgs {
 /// - infc compiler cannot be found
 /// - infc reports a *major* ABI version mismatch (hard error with remediation)
 /// - infc exits with non-zero code (as `InfsError::ProcessExitCode`)
-pub fn execute(args: &BuildArgs) -> Result<()> {
-    if !args.path.exists() {
-        bail!("Path not found: {}", args.path.display());
+fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
+    if !path.exists() {
+        bail!("Path not found: {}", path.display());
     }
 
     let infc_path = find_infc()?;
     check_compiler_compatibility(&infc_path)?;
 
     let mut cmd = Command::new(&infc_path);
-    cmd.arg(&args.path);
+    cmd.arg(path);
 
     if args.generate_v_output {
         cmd.arg("-v");
@@ -106,11 +172,7 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
     // owns the `-v` ↔ `--mode proof` implication; mirroring it here would
     // create a second source of truth that could silently drift.
     if let Some(mode) = args.mode {
-        let flag = match mode {
-            BuildMode::Proof => "proof",
-            BuildMode::Compile => "compile",
-        };
-        cmd.arg("--mode").arg(flag);
+        cmd.arg("--mode").arg(mode_flag(mode));
     }
 
     let status = cmd
@@ -128,211 +190,165 @@ pub fn execute(args: &BuildArgs) -> Result<()> {
     }
 }
 
-/// Runs a compatibility handshake against the resolved `infc` binary.
+/// Compiles the entry point of a discovered project (project mode).
 ///
-/// Sequence:
-/// 1. Query `infc --commit-hash`. If it equals `INFS_GIT_COMMIT`, short-circuit —
-///    the two binaries were built from the same source tree and the ABI is
-///    guaranteed compatible.
-/// 2. Otherwise query `infc --abi-version` and compare against the major/minor
-///    constants from `inference-compiler-interface`. Major mismatch is a hard
-///    error; minor mismatch is a warning; exact match is silent.
+/// Resolves the *effective* build configuration from the CLI flags and the
+/// manifest's `[build] mode` / `[verification] output-dir`, then delegates to
+/// [`run_project_build`] (which owns the shared spawn, handshake, and exit-code
+/// propagation). The forwarding rules are documented on
+/// [`resolve_effective_mode`] and [`resolve_out_dir`].
 ///
-/// Old binaries that do not understand the flags (non-zero exit, empty output,
-/// or the literal `unknown`) are treated as graceful skips — we neither warn
-/// nor error on them. The L1/L2 resolver fixes remain the correctness
-/// guarantee; this handshake is a safety net against residual drift.
-fn check_compiler_compatibility(infc_path: &Path) -> Result<()> {
-    // --commit-hash / --abi-version print and exit 0 immediately; no timeout needed.
-    let local_commit = env!("INFS_GIT_COMMIT");
-    let remote_commit = probe_flag(infc_path, "--commit-hash");
+/// ## Errors
+///
+/// Propagates every error [`run_project_build`] can return (missing entry
+/// point, compiler lookup, ABI handshake, `--out-dir` capability gate, non-zero
+/// infc exit), plus `output-dir` normalization failures.
+fn execute_project(ctx: &ProjectContext, args: &BuildArgs) -> Result<()> {
+    let effective_mode = resolve_effective_mode(args.mode, &ctx.manifest.build.mode);
+    let out_dir = resolve_out_dir(effective_mode, &ctx.manifest.verification)?;
 
-    if let Some(hash) = &remote_commit
-        && hash == local_commit
-    {
-        return Ok(());
-    }
-
-    let Some(abi_raw) = probe_flag(infc_path, "--abi-version") else {
-        return Ok(());
-    };
-
-    let Some((infc_major, infc_minor)) = parse_abi_version(&abi_raw) else {
-        return Ok(());
-    };
-
-    let local_major = COMPILER_ABI_MAJOR;
-    let local_minor = COMPILER_ABI_MINOR;
-
-    if infc_major != local_major {
-        bail!(
-            "infs ABI {local_major}.{local_minor} but infc reported ABI \
-             {infc_major}.{infc_minor}; rebuild the workspace or set \
-             INFC_PATH to a matching binary."
-        );
-    }
-
-    match infc_minor.cmp(&local_minor) {
-        std::cmp::Ordering::Greater => {
-            eprintln!(
-                "warning: infc ABI {infc_major}.{infc_minor} is newer than \
-                 infs ABI {local_major}.{local_minor}; infs may not \
-                 recognize features emitted by infc."
-            );
-        }
-        std::cmp::Ordering::Less => {
-            eprintln!(
-                "warning: infs ABI {local_major}.{local_minor} is newer \
-                 than infc ABI {infc_major}.{infc_minor}; infs may request \
-                 features infc does not provide."
-            );
-        }
-        std::cmp::Ordering::Equal => {}
-    }
-
-    Ok(())
+    run_project_build(ctx, args.generate_v_output, effective_mode, out_dir.as_deref())
 }
 
-/// Runs `<infc_path> <flag>` with stdin/stderr suppressed and returns the
-/// trimmed stdout on success. Returns `None` for any failure mode that an old
-/// `infc` lacking the flag would produce: spawn error, non-zero exit, empty
-/// stdout, or the literal `unknown`.
-fn probe_flag(infc_path: &Path, flag: &str) -> Option<String> {
-    let output = Command::new(infc_path)
-        .arg(flag)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Resolves the effective `--mode` to forward to `infc`, or `None` to forward
+/// nothing.
+///
+/// Precedence:
+/// - CLI `--mode` always wins when present (`compile` or `proof`).
+/// - Otherwise, manifest `[build] mode = "proof"` forwards `--mode proof`.
+/// - Manifest `"compile"` (explicit or defaulted) forwards **nothing**.
+///
+/// Why never forward `--mode compile`: `infs` does not own the `-v` ⇄ `--mode
+/// proof` implication — `infc::normalize_args` does, and it is the single
+/// source of truth. Forwarding an explicit `--mode compile` when the user
+/// passed only `-v` would suppress that implication inside `infc` (turning
+/// `-v`-alone into a spec-stripped `.v`), reintroducing exactly the drift that
+/// single source of truth avoids. Forwarding nothing for the compile case
+/// leaves `infc` free to derive proof from `-v`.
+///
+/// The manifest string is already validated to `compile`/`proof` on load, so
+/// the fallback maps any non-`proof` value to "forward nothing".
+fn resolve_effective_mode(cli_mode: Option<BuildMode>, manifest_mode: &str) -> Option<BuildMode> {
+    if let Some(mode) = cli_mode {
+        return Some(mode);
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() || value == "unknown" {
-        return None;
+    if manifest_mode == "proof" {
+        return Some(BuildMode::Proof);
     }
-    Some(value)
+    None
 }
 
-/// Parses a `"<major>.<minor>"` string into `(major, minor)`. Returns `None`
-/// on any parse failure — callers treat that as "skip the ABI check".
-fn parse_abi_version(raw: &str) -> Option<(u32, u32)> {
-    let (major, minor) = raw.split_once('.')?;
-    let major: u32 = major.parse().ok()?;
-    let minor: u32 = minor.parse().ok()?;
-    Some((major, minor))
+/// Resolves the `--out-dir` to forward, honoring `[verification] output-dir`
+/// **only in effective-proof mode**.
+///
+/// In compile mode (or when no explicit proof mode is in effect) the manifest
+/// `output-dir` is ignored entirely and `None` is returned — a default-manifest
+/// build must never relocate `out/main.wasm` into the `proofs/` default, and
+/// `--out-dir` cannot isolate the `.v` from the `.wasm` anyway (it moves both).
+///
+/// In effective-proof mode the manifest string is normalized through `PathBuf`
+/// (relative-only, trailing separator stripped) and returned for forwarding.
+/// The default `"proofs/"` normalizes to `proofs`, so a default proof-mode
+/// build writes both artifacts under `<root>/proofs/`.
+///
+/// Note: this keys off the mode `infs` explicitly owns (CLI `--mode proof` or
+/// manifest `mode = "proof"`). It deliberately does **not** treat `-v`-alone as
+/// proof: that implication belongs to `infc::normalize_args`, so `infs build -v`
+/// on a compile-mode manifest forwards only `-v` and lets `infc` write both
+/// artifacts to `out/` — `output-dir` is not consulted.
+///
+/// # Errors
+///
+/// Returns an error if the manifest `output-dir` is empty or absolute.
+fn resolve_out_dir(
+    effective_mode: Option<BuildMode>,
+    verification: &crate::project::manifest::VerificationConfig,
+) -> Result<Option<PathBuf>> {
+    if effective_mode == Some(BuildMode::Proof) {
+        Ok(Some(verification.normalized_output_dir()?))
+    } else {
+        Ok(None)
+    }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use assert_fs::prelude::*;
-    use std::os::unix::fs::PermissionsExt;
+    use crate::project::manifest::VerificationConfig;
 
-    /// Writes an executable `infc` stub that prints fixed strings for
-    /// `--commit-hash` and `--abi-version`. The stub exits 0 by default but
-    /// can be configured to exit 1 instead.
-    fn write_stub(
-        dir: &assert_fs::TempDir,
-        commit_stdout: &str,
-        abi_stdout: &str,
-        exit_nonzero: bool,
-    ) -> PathBuf {
-        let stub = dir.child("infc");
-        let exit_code = i32::from(exit_nonzero);
-        let script = format!(
-            "#!/bin/sh\n\
-             case \"$1\" in\n\
-               --commit-hash)\n\
-                 printf '%s\\n' \"{commit_stdout}\"\n\
-                 exit {exit_code}\n\
-                 ;;\n\
-               --abi-version)\n\
-                 printf '%s\\n' \"{abi_stdout}\"\n\
-                 exit {exit_code}\n\
-                 ;;\n\
-               *)\n\
-                 exit 0\n\
-                 ;;\n\
-             esac\n",
+    #[test]
+    fn cli_mode_overrides_manifest() {
+        // CLI proof wins over manifest compile, and CLI compile wins over
+        // manifest proof — the CLI is always authoritative when present.
+        assert_eq!(
+            resolve_effective_mode(Some(BuildMode::Proof), "compile"),
+            Some(BuildMode::Proof)
         );
-        stub.write_str(&script).unwrap();
-        let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(stub.path(), perms).unwrap();
-        stub.path().to_path_buf()
+        assert_eq!(
+            resolve_effective_mode(Some(BuildMode::Compile), "proof"),
+            Some(BuildMode::Compile)
+        );
     }
 
     #[test]
-    fn abi_major_mismatch_is_hard_error() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        let stub = write_stub(&dir, "nottherightcommit", "2.0", false);
-        let err = check_compiler_compatibility(&stub).unwrap_err();
-        let msg = format!("{err}");
+    fn manifest_proof_forwards_proof() {
+        assert_eq!(resolve_effective_mode(None, "proof"), Some(BuildMode::Proof));
+    }
+
+    #[test]
+    fn manifest_compile_forwards_nothing() {
+        // Compile (explicit or defaulted) must forward nothing so infc's
+        // `-v` ⇄ proof implication stays the single source of truth.
+        assert_eq!(resolve_effective_mode(None, "compile"), None);
+    }
+
+    #[test]
+    fn compile_mode_ignores_output_dir() {
+        // Even a non-default output-dir must be ignored in compile mode,
+        // so out/main.wasm is never relocated into proofs/.
+        let verification = VerificationConfig {
+            output_dir: String::from("artifacts"),
+        };
+        assert_eq!(resolve_out_dir(None, &verification).unwrap(), None);
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Compile), &verification).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn proof_mode_forwards_default_output_dir_normalized() {
+        // The default "proofs/" must normalize to `proofs` and be forwarded.
+        let verification = VerificationConfig::default();
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Proof), &verification).unwrap(),
+            Some(PathBuf::from("proofs"))
+        );
+    }
+
+    #[test]
+    fn proof_mode_forwards_custom_output_dir() {
+        let verification = VerificationConfig {
+            output_dir: String::from("artifacts/"),
+        };
+        assert_eq!(
+            resolve_out_dir(Some(BuildMode::Proof), &verification).unwrap(),
+            Some(PathBuf::from("artifacts"))
+        );
+    }
+
+    #[test]
+    fn proof_mode_propagates_output_dir_validation_error() {
+        // An absolute output-dir is rejected — but only when proof mode actually
+        // consults it (in compile mode the bad value is never read).
+        let abs = if cfg!(windows) { r"C:\x" } else { "/x" };
+        let verification = VerificationConfig {
+            output_dir: String::from(abs),
+        };
+        assert!(resolve_out_dir(Some(BuildMode::Proof), &verification).is_err());
         assert!(
-            msg.contains("ABI") && msg.contains("rebuild"),
-            "expected remediation message, got: {msg}"
+            resolve_out_dir(None, &verification).is_ok(),
+            "compile mode must not even read a malformed output-dir"
         );
-    }
-
-    #[test]
-    fn abi_minor_difference_warns_only() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        // Exercise only the "infc minor newer than infs" path; the reverse
-        // path is covered by a simple construction — the current embedded
-        // minor is 0, so any non-zero minor is "newer". A stub of "1.5"
-        // therefore produces a warning when COMPILER_ABI_MINOR is 0.
-        let stub = write_stub(&dir, "nottherightcommit", "1.5", false);
-        let result = check_compiler_compatibility(&stub);
-        assert!(result.is_ok(), "minor mismatch should not hard-error");
-    }
-
-    #[test]
-    fn matching_commit_hash_skips_abi_check() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        // ABI "9.9" would trigger a major mismatch if the ABI check ran.
-        // A matching commit hash must short-circuit before that.
-        let stub = write_stub(&dir, env!("INFS_GIT_COMMIT"), "9.9", false);
-        let result = check_compiler_compatibility(&stub);
-        assert!(
-            result.is_ok(),
-            "matching commit hash must short-circuit ABI check, got: {:?}",
-            result.err().map(|e| e.to_string()),
-        );
-    }
-
-    #[test]
-    fn unknown_commit_and_unknown_abi_is_silent() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        let stub = write_stub(&dir, "unknown", "unknown", false);
-        let result = check_compiler_compatibility(&stub);
-        assert!(result.is_ok(), "unknown outputs must be graceful");
-    }
-
-    #[test]
-    fn old_infc_returns_nonzero_for_flags_is_graceful() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        let stub = write_stub(&dir, "anything", "anything", true);
-        let result = check_compiler_compatibility(&stub);
-        assert!(
-            result.is_ok(),
-            "non-zero exit from flag probes must be graceful"
-        );
-    }
-
-    #[test]
-    fn parse_abi_version_accepts_valid() {
-        assert_eq!(parse_abi_version("1.0"), Some((1, 0)));
-        assert_eq!(parse_abi_version("2.7"), Some((2, 7)));
-    }
-
-    #[test]
-    fn parse_abi_version_rejects_garbage() {
-        assert_eq!(parse_abi_version(""), None);
-        assert_eq!(parse_abi_version("1"), None);
-        assert_eq!(parse_abi_version("1.x"), None);
-        assert_eq!(parse_abi_version("x.1"), None);
-        assert_eq!(parse_abi_version("1.0.0"), None);
     }
 }

@@ -6,6 +6,7 @@
 //!
 //! - [`build`] - Compile Inference source files
 //! - [`run`] - Build and execute WASM with wasmtime
+//! - [`project_build`] - Shared project-build helper used by `build` and `run`
 //! - [`version`] - Display version information
 //!
 //! ## Project Management Commands
@@ -30,6 +31,7 @@ pub mod init;
 pub mod install;
 pub mod list;
 pub mod new;
+pub(crate) mod project_build;
 pub mod run;
 pub mod self_cmd;
 pub mod uninstall;

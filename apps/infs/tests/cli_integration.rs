@@ -438,6 +438,788 @@ fn build_produces_identical_wasm_as_infc() {
 }
 
 // =============================================================================
+// Project-mode Build Tests
+// =============================================================================
+
+/// Source used as `src/main.inf` for project-mode tests. Must define a `main`
+/// entry point so it compiles cleanly and (for the run tests later) is
+/// invokable.
+const PROJECT_MAIN_SRC: &str = "pub fn main() -> i32 {\n    return 0;\n}\n";
+
+/// Scaffolds a minimal project under `dir`: an `Inference.toml` manifest and a
+/// `src/main.inf` with the given source. Returns nothing; `dir` is mutated in
+/// place. Paths are built with `join` so they are platform-correct.
+fn scaffold_project(dir: &assert_fs::TempDir, name: &str, main_src: &str) {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n"
+    );
+    dir.child("Inference.toml").write_str(&manifest).unwrap();
+    dir.child("src").child("main.inf").write_str(main_src).unwrap();
+}
+
+/// Project mode: `infs build` (no path) invoked from the project root discovers
+/// the manifest and writes `<root>/out/main.wasm`.
+#[test]
+fn project_build_from_root_produces_wasm() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "expected project build to produce {:?}",
+        wasm.path()
+    );
+}
+
+/// Project mode: `infs build` invoked from a nested subdirectory still walks up
+/// to the manifest and lands `out/` at the project root, not the subdir.
+#[test]
+fn project_build_from_subdir_lands_out_at_root() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    // Invoke from <root>/src (a directory that exists below the manifest).
+    let subdir = temp.child("src");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(subdir.path())
+        .arg("build");
+
+    cmd.assert().success();
+
+    // out/ must be at the root, regardless of the invocation CWD.
+    let wasm_at_root = temp.child("out").child("main.wasm");
+    assert!(
+        wasm_at_root.path().exists(),
+        "out/main.wasm should land at the project root: {:?}",
+        wasm_at_root.path()
+    );
+    // And NOT under the subdirectory we invoked from.
+    let wasm_in_subdir = subdir.child("out").child("main.wasm");
+    assert!(
+        !wasm_in_subdir.path().exists(),
+        "out/ must not land in the invocation subdir: {:?}",
+        wasm_in_subdir.path()
+    );
+}
+
+/// Project mode with no `Inference.toml` anywhere up the tree must fail with a
+/// clear, remediation-style message naming the manifest file.
+#[test]
+fn project_build_without_manifest_errors() {
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Inference.toml"));
+}
+
+/// Project mode whose manifest exists but `src/main.inf` is missing must fail
+/// with a remediation message naming the expected entry point.
+#[test]
+fn project_build_missing_entry_point_errors() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("Inference.toml")
+        .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+        .unwrap();
+    // No src/main.inf created.
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
+    );
+}
+
+/// Extra `src/*.inf` files (besides `main.inf`) must be warned about by name,
+/// not silently dropped and not a hard error — the build still succeeds.
+#[test]
+fn project_build_warns_about_extra_src_files() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    temp.child("src")
+        .child("helper.inf")
+        .write_str("pub fn helper() -> i32 { return 1; }\n")
+        .unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("helper.inf"));
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(wasm.path().exists(), "build should still succeed");
+}
+
+/// Single-file `infs build file.inf` must behave exactly as before the
+/// project-mode addition (regression guard for the optional-path change).
+#[test]
+fn single_file_build_still_works() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = codegen_test_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg(dest.path());
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    let wasm = temp.child("out").child("trivial.wasm");
+    assert!(wasm.path().exists());
+}
+
+/// Four-tier byte comparison: project-mode WASM must be byte-identical to what
+/// single-file `infc` produces for the same source. The control is critical —
+/// `infc src/main.inf` is run with CWD = project root so the `main` stem (and
+/// therefore the WASM name section) matches; comparing against a differently
+/// named source would diverge in the name section even with identical codegen.
+#[test]
+fn project_build_wasm_byte_identical_to_infc() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp_project = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp_project, "demo", PROJECT_MAIN_SRC);
+
+    // Project-mode build.
+    let mut cmd_project = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd_project
+        .env("INFC_PATH", &infc_path)
+        .current_dir(temp_project.path())
+        .arg("build");
+    cmd_project.assert().success();
+
+    // Reference: infc compiling src/main.inf with CWD = the project root, so
+    // the source stem ("main") and out/ location match the project build.
+    let temp_ref = assert_fs::TempDir::new().unwrap();
+    temp_ref
+        .child("src")
+        .child("main.inf")
+        .write_str(PROJECT_MAIN_SRC)
+        .unwrap();
+
+    let mut cmd_ref = Command::new(&infc_path);
+    cmd_ref
+        .current_dir(temp_ref.path())
+        .arg(std::path::Path::new("src").join("main.inf"));
+    cmd_ref.assert().success();
+
+    let project_wasm = temp_project.child("out").child("main.wasm");
+    let ref_wasm = temp_ref.child("out").child("main.wasm");
+    assert!(project_wasm.path().exists(), "project build produced no WASM");
+    assert!(ref_wasm.path().exists(), "reference infc produced no WASM");
+
+    let project_bytes = std::fs::read(project_wasm.path()).unwrap();
+    let ref_bytes = std::fs::read(ref_wasm.path()).unwrap();
+    assert_eq!(
+        project_bytes, ref_bytes,
+        "project-mode WASM must be byte-identical to single-file infc output"
+    );
+}
+
+// =============================================================================
+// Project-mode Run Tests
+// =============================================================================
+
+/// A `main` returning a nonzero constant, used to assert wasmtime surfaces the
+/// return value (printed to stdout by `--invoke`).
+const PROJECT_MAIN_NONZERO_SRC: &str = "pub fn main() -> i32 {\n    return 42;\n}\n";
+
+/// `main.inf` that fails to compile (undefined identifier), used to assert a
+/// compile error propagates as a non-zero exit before wasmtime is invoked.
+const PROJECT_MAIN_BROKEN_SRC: &str = "pub fn main() -> i32 {\n    return nope;\n}\n";
+
+/// Both `infc` and `wasmtime` are required to execute a project end-to-end.
+/// Returns the `infc` path when both are present; otherwise prints a skip
+/// notice and returns `None`, mirroring the existing conditional-test pattern.
+fn require_infc_and_wasmtime() -> Option<std::path::PathBuf> {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return None;
+    }
+    require_infc()
+}
+
+/// Project `run` from the project root: builds `<root>/out/main.wasm` and
+/// invokes `main`, which returns 0 → exit 0.
+#[test]
+fn project_run_from_root_invokes_main() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert().success();
+
+    // The build must have landed the WASM at the project root.
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "project run should have produced {:?}",
+        wasm.path()
+    );
+}
+
+/// Project `run` surfaces `main`'s return value: wasmtime `--invoke` prints the
+/// returned i32 to stdout. A `main` returning 42 prints `42` with exit 0.
+#[test]
+fn project_run_prints_main_return_value() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_NONZERO_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("42"));
+}
+
+/// Project `run` invoked from a nested subdir still builds at the root and runs
+/// `<root>/out/main.wasm`.
+#[test]
+fn project_run_from_subdir_runs_root_wasm() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    let subdir = temp.child("src");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(subdir.path())
+        .arg("run");
+
+    cmd.assert().success();
+
+    let wasm_at_root = temp.child("out").child("main.wasm");
+    assert!(
+        wasm_at_root.path().exists(),
+        "out/main.wasm should land at the project root: {:?}",
+        wasm_at_root.path()
+    );
+}
+
+/// `infs run` with no manifest anywhere up the tree fails with the remediation
+/// error naming `Inference.toml`.
+///
+/// wasmtime availability is checked first (fail-fast parity with single-file
+/// mode), so the discovery error is only reachable when wasmtime is present.
+#[test]
+fn project_run_without_manifest_errors() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Inference.toml"));
+}
+
+/// A project whose manifest exists but `src/main.inf` is missing fails with the
+/// entry-point remediation error. Gated on wasmtime (checked before discovery).
+#[test]
+fn project_run_missing_entry_point_errors() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    temp.child("Inference.toml")
+        .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+        .unwrap();
+    // No src/main.inf created.
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("entry point").and(predicate::str::contains("main.inf")),
+    );
+}
+
+/// `--entry-point` with a non-`main` value in project mode is rejected with
+/// guidance to use single-file mode. This is an argument-validation error, so
+/// it fires before the wasmtime check and needs no external tools.
+#[test]
+fn project_run_rejects_non_main_entry_point() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("run")
+        .arg("--entry-point")
+        .arg("helper");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("Project mode always invokes `main`")
+            .and(predicate::str::contains("infs run path/to/file.inf")),
+    );
+}
+
+/// `--entry-point main` (the explicit default) in project mode is allowed — it
+/// must not be treated as a custom entry point. Full run, so gated on tools.
+#[test]
+fn project_run_allows_explicit_main_entry_point() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run")
+        .arg("--entry-point")
+        .arg("main");
+
+    cmd.assert().success();
+}
+
+/// Project mode is structurally arg-free: the first bare token on the command
+/// line binds to the positional `path`, which selects *single-file* mode. So
+/// `infs run -- ignored-arg` is not "project mode with trailing args"
+/// — it is single-file mode with `path = ignored-arg`, which does not exist.
+/// This pins the parsing contract that makes the in-code trailing-args warning
+/// unreachable through the CLI (the warning is retained as a defensive guard).
+#[test]
+fn project_run_token_selects_single_file_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path())
+        .arg("run")
+        .arg("--")
+        .arg("ignored-arg");
+
+    // Single-file mode: the token is treated as the source path, which is
+    // missing -> "Path not found", proving it never entered project mode.
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Path not found: ignored-arg"));
+}
+
+/// A compile error in `main.inf` propagates as a non-zero exit, and wasmtime is
+/// never invoked (no "Invoking 'main'" line on stdout).
+#[test]
+fn project_run_propagates_compile_error() {
+    if !is_wasmtime_available() {
+        eprintln!("Skipping test: wasmtime not available");
+        return;
+    }
+
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_BROKEN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+
+    cmd.assert()
+        .failure()
+        .stdout(predicate::str::contains("Invoking 'main'").not());
+}
+
+// =============================================================================
+// Project-mode Manifest Semantics Tests
+// =============================================================================
+
+/// Scaffolds a project whose `Inference.toml` embeds the given `[build]` /
+/// `[verification]` body (appended after `[package]`). `manifest_extra` is raw
+/// TOML, e.g. `"[build]\nmode = \"proof\"\n"`.
+fn scaffold_project_with_manifest(
+    dir: &assert_fs::TempDir,
+    name: &str,
+    main_src: &str,
+    manifest_extra: &str,
+) {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n\n{manifest_extra}"
+    );
+    dir.child("Inference.toml").write_str(&manifest).unwrap();
+    dir.child("src").child("main.inf").write_str(main_src).unwrap();
+}
+
+/// Default-manifest (compile) build writes `<root>/out/main.wasm` and creates
+/// NO `proofs/` directory — the `proofs/` manifest default must never be
+/// forwarded as `--out-dir` in compile mode.
+#[test]
+fn project_build_default_manifest_no_proofs_dir() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "compile build must write out/main.wasm"
+    );
+    assert!(
+        !temp.child("proofs").path().exists(),
+        "compile build must NOT create proofs/ (no --out-dir forwarded)"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "compile build must not emit a .v"
+    );
+}
+
+/// Manifest `[build] mode = "proof"` (default output-dir) produces BOTH the
+/// `.wasm` and `.v` under `<root>/proofs/` (the default output-dir is honored
+/// in proof mode and `--out-dir` moves both artifacts).
+#[test]
+fn project_build_manifest_proof_writes_under_proofs() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("proofs").child("main.wasm").path().exists(),
+        "proof build: .wasm must land under proofs/"
+    );
+    assert!(
+        temp.child("proofs").child("main.v").path().exists(),
+        "proof build: .v must land under proofs/"
+    );
+    // And NOT in out/ (the default location for compile mode).
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "proof build must not also write out/main.wasm"
+    );
+}
+
+/// Manifest `[verification] output-dir = "artifacts"` in proof mode redirects
+/// BOTH artifacts under `<root>/artifacts/`.
+#[test]
+fn project_build_proof_honors_custom_output_dir() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n\n[verification]\noutput-dir = \"artifacts\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("artifacts").child("main.wasm").path().exists(),
+        "custom output-dir: .wasm must land under artifacts/"
+    );
+    assert!(
+        temp.child("artifacts").child("main.v").path().exists(),
+        "custom output-dir: .v must land under artifacts/"
+    );
+    assert!(
+        !temp.child("proofs").path().exists(),
+        "custom output-dir must not also create the default proofs/"
+    );
+}
+
+/// CLI `--mode compile` overrides a manifest `mode = "proof"` AND ignores
+/// `output-dir`: the build writes only `out/main.wasm`, no proofs/, no .v.
+#[test]
+fn project_build_cli_compile_overrides_manifest_proof() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(
+        &temp,
+        "demo",
+        PROJECT_MAIN_SRC,
+        "[build]\nmode = \"proof\"\n\n[verification]\noutput-dir = \"artifacts\"\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--mode")
+        .arg("compile");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "CLI compile override must write out/main.wasm"
+    );
+    assert!(
+        !temp.child("proofs").path().exists() && !temp.child("artifacts").path().exists(),
+        "CLI compile override must ignore output-dir entirely"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "CLI compile override must not emit a .v"
+    );
+}
+
+/// CLI `--mode proof` on a DEFAULT (compile) manifest uses the default
+/// `output-dir` (`proofs/`): both artifacts land under `<root>/proofs/`.
+#[test]
+fn project_build_cli_proof_on_default_manifest_uses_proofs() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("--mode")
+        .arg("proof");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("proofs").child("main.wasm").path().exists()
+            && temp.child("proofs").child("main.v").path().exists(),
+        "CLI --mode proof must honor the default output-dir (proofs/)"
+    );
+}
+
+/// `-v` alone on a default (compile) manifest is NOT treated as effective-proof
+/// by `infs`: it forwards only `-v`, no `--out-dir`. `infc` derives proof
+/// internally and writes BOTH artifacts to `out/` (output-dir is not consulted
+/// — the `-v` ⇄ proof implication belongs to `infc::normalize_args`).
+#[test]
+fn project_build_v_alone_writes_both_to_out_not_proofs() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists()
+            && temp.child("out").child("main.v").path().exists(),
+        "`-v` alone must write both .wasm and .v to out/ (infc's implication)"
+    );
+    assert!(
+        !temp.child("proofs").path().exists(),
+        "`-v` alone must NOT trigger output-dir forwarding"
+    );
+}
+
+/// Project `run` always builds in compile mode regardless of `[build] mode =
+/// "proof"`: it executes fine, the wasm is in `out/`, and no `proofs/` dir is
+/// created (proof-mode wasm would carry non-executable custom opcodes).
+#[test]
+fn project_run_forces_compile_ignoring_manifest_proof() {
+    let Some(infc_path) = require_infc_and_wasmtime() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("run");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "project run must build an executable in out/ even with manifest proof mode"
+    );
+    assert!(
+        !temp.child("proofs").path().exists(),
+        "project run must ignore [build] mode/output-dir (no proofs/)"
+    );
+}
+
+/// `infs new` scaffolds a manifest with an explicit `[build] mode = "compile"`.
+/// The full parse+validate round-trip through `from_toml` is unit-tested in
+/// `scaffold.rs`; here we assert the user-facing CLI emits the load-bearing
+/// field, and that a subsequent project `build` from the scaffold succeeds
+/// (proving the loader accepts it end-to-end).
+#[test]
+fn scaffolded_project_manifest_has_compile_mode() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+
+    let mut new_cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    new_cmd
+        .current_dir(temp.path())
+        .arg("new")
+        .arg("demo")
+        .arg("--no-git");
+    new_cmd.assert().success();
+
+    let project = temp.child("demo");
+    let manifest_path = project.child("Inference.toml");
+    assert!(manifest_path.path().exists(), "new must scaffold a manifest");
+
+    let content = std::fs::read_to_string(manifest_path.path()).unwrap();
+    assert!(
+        content.contains("[build]") && content.contains("mode = \"compile\""),
+        "scaffolded manifest must carry an explicit [build] mode = compile"
+    );
+
+    // End-to-end: the scaffolded project must build (the loader accepts it).
+    let mut build_cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    build_cmd
+        .env("INFC_PATH", &infc_path)
+        .current_dir(project.path())
+        .arg("build");
+    build_cmd.assert().success();
+    assert!(project.child("out").child("main.wasm").path().exists());
+}
+
+/// Old-infc out-dir gate: a stub `infc` reporting ABI `1.0` (no `--out-dir`)
+/// paired with a manifest that needs `output-dir` (proof mode) must hard-error
+/// with remediation mentioning the required ABI — never emit the flag blind.
+///
+/// Unix-only: relies on an executable shell stub. The stub cannot actually
+/// compile, but the gate fires *before* the spawn, so the hard error is
+/// reached deterministically.
+#[cfg(unix)]
+#[test]
+fn project_build_old_infc_with_output_dir_hard_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project_with_manifest(&temp, "demo", PROJECT_MAIN_SRC, "[build]\nmode = \"proof\"\n");
+
+    // Stub infc: reports a non-matching commit and ABI "1.0" (minor 0 → no
+    // --out-dir support), exits 0 for the probes.
+    let stub = temp.child("infc_stub");
+    stub.write_str(
+        "#!/bin/sh\n\
+         case \"$1\" in\n\
+           --commit-hash) printf 'nope\\n'; exit 0 ;;\n\
+           --abi-version) printf '1.0\\n'; exit 0 ;;\n\
+           *) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(stub.path()).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(stub.path(), perms).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", stub.path())
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("--out-dir")
+            .and(predicate::str::contains("ABI"))
+            .and(predicate::str::contains("output-dir")),
+    );
+}
+
+// =============================================================================
 // Phase 2: Toolchain Management Command Tests
 // =============================================================================
 
@@ -1431,17 +2213,29 @@ fn run_help_shows_options() {
         .stdout(predicate::str::contains("Run").or(predicate::str::contains("run")));
 }
 
-/// Verifies that `infs run` requires a path argument.
+/// Verifies that `infs run` with no path enters project mode.
 ///
-/// **Expected behavior**: Exit with non-zero code when no path is provided.
+/// Before the path became optional, a missing path was a clap "PATH required"
+/// usage error. Now an absent path selects project mode, so it must reach the
+/// runtime pipeline instead of being rejected by the argument parser. From a
+/// directory with no `Inference.toml`, the project pipeline fails — either at
+/// the fail-fast wasmtime check (`wasmtime not found`) or at manifest discovery
+/// (`Inference.toml`), depending on whether wasmtime is installed. The
+/// regression guard is that it is *not* a clap usage error.
 #[test]
-fn run_requires_path_argument() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
-    cmd.arg("run");
+fn run_without_path_enters_project_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("PATH").or(predicate::str::contains("required")));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.current_dir(temp.path()).arg("run");
+
+    cmd.assert().failure().stderr(
+        // Reached the runtime pipeline (one of these two), not clap's parser.
+        predicate::str::contains("Inference.toml")
+            .or(predicate::str::contains("wasmtime not found"))
+            // And explicitly NOT a clap "required argument" usage error.
+            .and(predicate::str::contains("required arguments").not()),
+    );
 }
 
 /// Verifies that `infs run` fails when source file doesn't exist.
@@ -1506,8 +2300,7 @@ fn is_wasmtime_available() -> bool {
     std::process::Command::new("wasmtime")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Verifies full `infs run` workflow with wasmtime.

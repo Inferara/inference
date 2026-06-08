@@ -32,9 +32,10 @@ infc_version = "0.1.0"
 [build]
 target = "wasm32"
 optimize = "debug"
+mode = "compile"    # "compile" (executable WASM) or "proof" (Rocq translation)
 
 [verification]
-output-dir = "proofs/"
+output-dir = "proofs/"   # honored only in proof mode
 ```
 
 ## Section Reference
@@ -109,12 +110,24 @@ The `[build]` section configures compilation settings.
   - `"debug"`: No optimizations, faster compilation
   - `"release"`: Full optimizations, slower compilation
 
+- **`mode`** (string, default: `"compile"`): The compilation mode
+  - `"compile"`: Strips non-deterministic specs; produces executable WASM
+  - `"proof"`: Preserves specs for Rocq translation; enables `-v` inside `infc`
+
+  In project mode (`infs build` with no path), this field determines whether
+  `infs` forwards `--mode proof` to `infc` and whether `[verification]
+  output-dir` is consulted. A CLI `--mode` flag always overrides this setting.
+  `infs run` ignores this field entirely and always builds in compile mode.
+
+  The value is case-sensitive: `"Proof"` is rejected.
+
 #### Example
 
 ```toml
 [build]
 target = "wasm32"
 optimize = "release"
+mode = "proof"
 ```
 
 ### [verification]
@@ -125,12 +138,20 @@ The `[verification]` section configures Rocq (Coq) proof generation.
 
 - **`output-dir`** (string, default: `"proofs/"`): The directory for generated Rocq proofs
   - Path is relative to the project root
+  - Honored only when the effective build mode is `proof` (either via `[build]
+    mode = "proof"` or `--mode proof` on the CLI). In compile mode this field
+    is ignored entirely.
+  - In proof mode, `infs build` forwards the normalized path to `infc` as
+    `--out-dir`, which moves both the `.wasm` and `.v` artifacts. With the
+    default `"proofs/"` a proof build writes both files under `<root>/proofs/`.
+  - Must be a relative path inside the project root. Absolute paths, `..`
+    traversals, and drive/UNC prefixes are rejected.
 
 #### Example
 
 ```toml
 [verification]
-output-dir = "custom-proofs/"
+output-dir = "artifacts/"
 ```
 
 ## Complete Example
@@ -153,6 +174,7 @@ license = "MIT"
 [build]
 target = "wasm32"
 optimize = "release"
+mode = "proof"
 
 [verification]
 output-dir = "proofs/"

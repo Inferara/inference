@@ -79,7 +79,7 @@ pub fn execute(args: &NewArgs) -> Result<()> {
     println!();
     println!("Next steps:");
     println!("  cd {}", project_path.display());
-    println!("  infs build src/main.inf");
+    println!("  infs build");
     println!();
     println!("To learn more about Inference, visit:");
     println!("  https://inference-lang.org");

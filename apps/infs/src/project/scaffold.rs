@@ -203,6 +203,14 @@ fn write_git_files(project_path: &Path) -> Result<()> {
 }
 
 /// Generates the content for `Inference.toml`.
+///
+/// The `[build] mode` field is emitted explicitly because it is load-bearing
+/// in project mode (`infs build`/`run` consume it), so the scaffolded file must
+/// produce a value the loader reads back consistently — the round-trip is
+/// covered by a test. `target`/`optimize` stay commented because they are not
+/// yet consumed (writing them would imply they work). `[verification]
+/// output-dir` stays commented because its default (`proofs/`) lives in code
+/// and is honored only in proof mode.
 fn manifest_content(project_name: &str) -> String {
     let infc_version = detect_infc_version();
     format!(
@@ -220,11 +228,16 @@ infc_version = "{infc_version}"
 # Future: package dependencies
 # std = "0.1"
 
-# [build]
+[build]
+# Compilation mode: "compile" (executable WASM) or "proof" (Rocq specs).
+mode = "compile"
+# Not yet consumed:
 # target = "wasm32"
 # optimize = "release"
 
 # [verification]
+# Output directory for proof artifacts (honored only in proof mode).
+# Defaults to "proofs/".
 # output-dir = "proofs/"
 "#
     )
@@ -243,11 +256,23 @@ pub fn main() -> i32 {
 }
 
 /// Generates the content for `.gitignore`.
+///
+/// `proofs/` is a tracked directory (via `proofs/.gitkeep`), but proof-mode
+/// builds with the default `[verification] output-dir = "proofs/"` write
+/// generated `.wasm`/`.v` artifacts there. We ignore those generated artifacts
+/// by extension while keeping the directory (and any hand-authored files)
+/// tracked — rather than ignoring all of `/proofs/`, which would drop
+/// `.gitkeep` and any curated proof sources.
 fn gitignore_content() -> String {
     String::from(
         r"# Build outputs
 /out/
 /target/
+
+# Generated proof artifacts (proof-mode output-dir defaults to proofs/).
+# Keep proofs/ and curated sources tracked; ignore only generated files.
+/proofs/*.wasm
+/proofs/*.v
 
 # IDE and editor files
 .idea/
@@ -485,5 +510,38 @@ mod tests {
         let content = gitignore_content();
         assert!(content.contains("/out/"));
         assert!(content.contains("/target/"));
+    }
+
+    #[test]
+    fn test_gitignore_ignores_generated_proof_artifacts_but_keeps_dir() {
+        // The proofs/ directory stays tracked (.gitkeep), only generated
+        // artifacts are ignored.
+        let content = gitignore_content();
+        assert!(content.contains("/proofs/*.wasm"));
+        assert!(content.contains("/proofs/*.v"));
+        assert!(
+            !content.contains("/proofs/\n") && !content.contains("/proofs/ "),
+            "must not ignore the whole proofs/ directory (would drop .gitkeep)"
+        );
+    }
+
+    #[test]
+    fn test_scaffolded_manifest_roundtrips_through_load() {
+        // The scaffolded string template must parse + validate and load back
+        // with the load-bearing `[build] mode` == "compile".
+        let content = manifest_content("roundtrip_demo");
+        let manifest = InferenceToml::from_toml(&content)
+            .expect("scaffolded manifest must parse and validate");
+        assert_eq!(manifest.package.name, "roundtrip_demo");
+        assert_eq!(manifest.build.mode, "compile");
+    }
+
+    #[test]
+    fn test_scaffolded_manifest_emits_explicit_build_mode() {
+        let content = manifest_content("demo");
+        assert!(
+            content.contains("[build]") && content.contains("mode = \"compile\""),
+            "scaffold must emit an explicit [build] mode"
+        );
     }
 }

@@ -61,13 +61,15 @@
 //!
 //! ## Output Artifacts
 //!
-//! All output files are written to an `out/` directory relative to the current
-//! working directory:
+//! By default, all output files are written to an `out/` directory relative to
+//! the current working directory:
 //!
 //! - `out/<source_name>.wasm` – WebAssembly binary (when `-o` is specified)
 //! - `out/<source_name>.v` – Rocq translation (when `-v` is specified)
 //!
-//! The output directory is created automatically if it doesn't exist.
+//! The `--out-dir <path>` flag overrides the directory (still relative to CWD
+//! unless an absolute path is given); it applies to both the `.wasm` and the
+//! `.v`. The output directory is created automatically if it doesn't exist.
 //!
 //! ## Error Handling
 //!
@@ -131,7 +133,8 @@
 //! ## Current Limitations
 //!
 //! - Single-file compilation only (multi-file projects not yet supported)
-//! - Output directory is relative to CWD, not source file location
+//! - Output directory defaults to `out/` relative to CWD (not the source file
+//!   location); override with `--out-dir <path>`
 //! - Analysis phase is work-in-progress
 //!
 //! ## Tests
@@ -327,10 +330,12 @@ fn eprint_translation_error(e: &anyhow::Error) {
 ///
 /// ## Output Management
 ///
-/// Output files are written to `out/` directory relative to CWD:
+/// Output files are written to the output directory (`out/` by default, relative
+/// to CWD; overridable via `--out-dir <path>`):
 /// - Directory is created if it doesn't exist
 /// - File names are derived from source file stem
 /// - Both `-o` and `-v` flags can be used simultaneously
+/// - `--out-dir` redirects both the `.wasm` and the `.v`
 ///
 /// ## Implementation Notes
 ///
@@ -367,7 +372,10 @@ fn main() {
 
     normalize_args(&mut args);
 
-    let output_path = PathBuf::from("out");
+    let output_path = args
+        .out_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("out"));
     let need_parse = args.parse;
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
@@ -497,6 +505,7 @@ mod tests {
     fn make_args(parse: bool, analyze: bool, codegen: bool) -> Cli {
         Cli {
             path: Some(PathBuf::from("test.inf")),
+            out_dir: None,
             parse,
             analyze,
             codegen,

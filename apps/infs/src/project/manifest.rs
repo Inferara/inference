@@ -19,9 +19,10 @@
 //! [build]
 //! target = "wasm32"
 //! optimize = "release"
+//! mode = "compile"        # "compile" (executable) or "proof" (Rocq specs)
 //!
 //! [verification]
-//! output-dir = "proofs/"
+//! output-dir = "proofs/"  # honored only in proof mode
 //! ```
 //!
 //! ## Reserved Names
@@ -32,8 +33,11 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+/// The conventional manifest file name for an Inference project.
+pub const MANIFEST_FILE_NAME: &str = "Inference.toml";
 
 /// Reserved words that cannot be used as project names.
 ///
@@ -154,6 +158,19 @@ pub struct BuildConfig {
     /// Optimization level.
     #[serde(default = "default_optimize")]
     pub optimize: String,
+
+    /// Compilation mode: `"compile"` (executable WASM) or `"proof"` (specs
+    /// preserved for Rocq translation). Defaults to `"compile"`.
+    ///
+    /// This is an independent axis from [`optimize`](Self::optimize) (artifact
+    /// kind vs optimization level) and is deliberately a validated `String`
+    /// rather than a serde enum: the two-value axis is already modelled by
+    /// `commands::build::BuildMode` (infs) and `CliMode` (infc), and a third
+    /// representation would be a fourth source of truth. The string is mapped
+    /// to `BuildMode` at the single forwarding site in `commands::build`.
+    /// Validated case-sensitively on load (see [`InferenceToml::from_toml`]).
+    #[serde(default = "default_mode")]
+    pub mode: String,
 }
 
 impl Default for BuildConfig {
@@ -161,6 +178,7 @@ impl Default for BuildConfig {
         Self {
             target: default_target(),
             optimize: default_optimize(),
+            mode: default_mode(),
         }
     }
 }
@@ -169,7 +187,28 @@ impl BuildConfig {
     /// Returns true if this is the default configuration.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.target == default_target() && self.optimize == default_optimize()
+        self.target == default_target()
+            && self.optimize == default_optimize()
+            && self.mode == default_mode()
+    }
+
+    /// Validates the `mode` field, accepting only `"compile"` or `"proof"`
+    /// (case-sensitive — TOML config values are conventionally lowercase, and
+    /// matching the exact `infc --mode` flag spelling avoids surprising
+    /// near-misses like `"Proof"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the field and the allowed values when `mode` is
+    /// neither `"compile"` nor `"proof"`.
+    fn validate(&self) -> Result<()> {
+        if self.mode != "compile" && self.mode != "proof" {
+            bail!(
+                "Invalid `[build] mode` value `{}`: expected `compile` or `proof`.",
+                self.mode
+            );
+        }
+        Ok(())
     }
 }
 
@@ -194,6 +233,74 @@ impl VerificationConfig {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.output_dir == default_output_dir()
+    }
+
+    /// Normalizes the configured `output-dir` into a relative [`PathBuf`]
+    /// confined to the project root, suitable for forwarding to
+    /// `infc --out-dir`.
+    ///
+    /// The raw manifest string (e.g. `"proofs/"`) is parsed through `PathBuf`
+    /// and validated component-by-component so that only ordinary, project-
+    /// relative subdirectories are accepted. A trailing separator is dropped
+    /// (`"proofs/"` → `proofs`) and `.` segments are skipped (`"./proofs"` →
+    /// `proofs`).
+    ///
+    /// The `output-dir` is a project-relative configuration: artifacts must
+    /// land inside the project root so the `<root>/out`-style contract holds and
+    /// nothing is written to locations outside VCS control. Anything that could
+    /// point elsewhere is rejected:
+    ///
+    /// - **Root / absolute** (`/proofs`, `C:\proofs`): escapes the root.
+    /// - **`..` parent traversal** (`../proofs`, `a/../b`): could climb out of
+    ///   the root. Even a `..` that happens to resolve back inside is rejected —
+    ///   resolving it would be symlink-unsound and buys nothing.
+    /// - **Drive/UNC prefix** (`C:proofs`, `\\server\share`): on Windows these
+    ///   are drive-relative or network paths that escape the project root. Such
+    ///   prefixes only parse as a `Prefix` component on Windows; on unix
+    ///   `C:proofs` is simply an ordinary directory name and is accepted as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns a remediation-style error (naming the offending value) when
+    /// `output-dir` is empty, normalizes to an empty path, or contains a root,
+    /// absolute, `..`, or drive/UNC component.
+    pub fn normalized_output_dir(&self) -> Result<PathBuf> {
+        let raw = self.output_dir.trim();
+        if raw.is_empty() {
+            bail!("`[verification] output-dir` must not be empty.");
+        }
+
+        let path = PathBuf::from(raw);
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(part) => normalized.push(part),
+                Component::CurDir => {}
+                Component::ParentDir => bail!(
+                    "`[verification] output-dir` must not contain `..` (got `{}`); \
+                     it must stay inside the project root.",
+                    self.output_dir
+                ),
+                Component::RootDir => bail!(
+                    "`[verification] output-dir` must be a relative path (got `{}`); \
+                     absolute paths would place artifacts outside the project root.",
+                    self.output_dir
+                ),
+                Component::Prefix(_) => bail!(
+                    "`[verification] output-dir` must not contain a drive or network \
+                     prefix (got `{}`); it must stay inside the project root.",
+                    self.output_dir
+                ),
+            }
+        }
+
+        if normalized.as_os_str().is_empty() {
+            bail!(
+                "`[verification] output-dir` `{}` normalizes to an empty path.",
+                self.output_dir
+            );
+        }
+        Ok(normalized)
     }
 }
 
@@ -263,6 +370,10 @@ fn default_optimize() -> String {
     String::from("debug")
 }
 
+fn default_mode() -> String {
+    String::from("compile")
+}
+
 fn default_output_dir() -> String {
     String::from("proofs/")
 }
@@ -307,6 +418,73 @@ impl InferenceToml {
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write manifest: {}", path.display()))
     }
+
+    /// Parses a manifest from a TOML string.
+    ///
+    /// Missing optional sections (`[dependencies]`, `[build]`,
+    /// `[verification]`) are filled in with their defaults; absent fields
+    /// within present sections likewise default. Only `[package]` (with at
+    /// least `name` and `version`) is required. After structural parsing, the
+    /// `[build] mode` value is validated against its allowed set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is not valid TOML, does not match the
+    /// manifest schema (e.g. `[package]` is missing), or carries an invalid
+    /// `[build] mode` value.
+    pub fn from_toml(s: &str) -> Result<Self> {
+        let manifest: Self = toml::from_str(s).context("Failed to parse Inference.toml")?;
+        manifest.build.validate()?;
+        Ok(manifest)
+    }
+
+    /// Reads and parses a manifest from a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or its contents do not
+    /// parse as a valid manifest. The error context names the offending path.
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read manifest: {}", path.display()))?;
+        Self::from_toml(&content)
+            .with_context(|| format!("Invalid manifest: {}", path.display()))
+    }
+}
+
+/// Walks `start` and its ancestors looking for an `Inference.toml`.
+///
+/// The start directory is canonicalized once (for symlink stability and
+/// reliable termination), then each ancestor is checked in order. The
+/// **nearest** ancestor containing a manifest wins (cargo convention: a nested
+/// project's manifest shadows an outer one by design). The walk stops at the
+/// filesystem root.
+///
+/// Returns the absolute path to the discovered `Inference.toml`.
+///
+/// # Errors
+///
+/// Returns a remediation-style error if `start` cannot be canonicalized or no
+/// manifest exists in `start` or any ancestor.
+pub fn discover_manifest(start: &Path) -> Result<PathBuf> {
+    let canonical = start
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve directory: {}", start.display()))?;
+
+    for dir in canonical.ancestors() {
+        let candidate = dir.join(MANIFEST_FILE_NAME);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    bail!(
+        "No {MANIFEST_FILE_NAME} found in {} or any parent directory. \
+         Run `infs new <name>` to create a project, or `infs init` to \
+         initialize the current directory, or pass a source file path \
+         (`infs build path/to/file.inf`).",
+        canonical.display()
+    )
 }
 
 /// Validates a project name for use in Inference projects.
@@ -399,6 +577,7 @@ mod tests {
         let config = BuildConfig {
             target: String::from("wasm64"),
             optimize: String::from("debug"),
+            mode: default_mode(),
         };
         assert!(!config.is_default());
     }
@@ -523,6 +702,487 @@ mod tests {
         assert!(
             version.chars().next().unwrap().is_ascii_digit(),
             "Version should start with a digit: {version}"
+        );
+    }
+
+    #[test]
+    fn build_config_default_mode_is_compile() {
+        assert_eq!(BuildConfig::default().mode, "compile");
+        assert_eq!(default_mode(), "compile");
+    }
+
+    #[test]
+    fn is_default_requires_compile_mode() {
+        let mut config = BuildConfig::default();
+        assert!(config.is_default());
+        config.mode = String::from("proof");
+        assert!(
+            !config.is_default(),
+            "proof mode must not be reported as the default config"
+        );
+    }
+
+    #[test]
+    fn from_toml_parses_explicit_compile_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "compile"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.mode, "compile");
+    }
+
+    #[test]
+    fn from_toml_parses_explicit_proof_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "proof"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.mode, "proof");
+    }
+
+    #[test]
+    fn from_toml_defaults_absent_mode_to_compile() {
+        // [build] present but no `mode` key; and [build] entirely absent.
+        let with_build = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+optimize = "release"
+"#;
+        assert_eq!(
+            InferenceToml::from_toml(with_build).unwrap().build.mode,
+            "compile"
+        );
+
+        let no_build = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+"#;
+        assert_eq!(
+            InferenceToml::from_toml(no_build).unwrap().build.mode,
+            "compile"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_invalid_mode() {
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "release"
+"#;
+        let err = InferenceToml::from_toml(src).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mode")
+                && msg.contains("compile")
+                && msg.contains("proof")
+                && msg.contains("release"),
+            "error must name the field, the offending value, and the allowed set, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_toml_mode_is_case_sensitive() {
+        // `"Proof"` is a near-miss: rejected, not silently accepted. This pins
+        // the documented case-sensitivity decision.
+        let src = r#"
+[package]
+name = "demo"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+mode = "Proof"
+"#;
+        assert!(
+            InferenceToml::from_toml(src).is_err(),
+            "mode validation is case-sensitive; `Proof` must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_strips_trailing_separator() {
+        let config = VerificationConfig {
+            output_dir: String::from("proofs/"),
+        };
+        assert_eq!(config.normalized_output_dir().unwrap(), PathBuf::from("proofs"));
+    }
+
+    #[test]
+    fn normalized_output_dir_accepts_nested_relative() {
+        let config = VerificationConfig {
+            output_dir: String::from("build/artifacts"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("build").join("artifacts")
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_absolute() {
+        // Use a platform-appropriate absolute path. On unix this is a RootDir
+        // component ("relative" remediation); on Windows it is a drive Prefix
+        // component ("prefix" remediation). Either way it must be rejected and
+        // name the offending value.
+        let abs = if cfg!(windows) {
+            r"C:\proofs"
+        } else {
+            "/var/proofs"
+        };
+        let config = VerificationConfig {
+            output_dir: String::from(abs),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        let msg = err.to_string();
+        let expected_remediation = if cfg!(windows) { "prefix" } else { "relative" };
+        assert!(
+            msg.contains(expected_remediation) && msg.contains(abs),
+            "absolute output-dir must be rejected naming the value, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_empty() {
+        let config = VerificationConfig {
+            output_dir: String::from("   "),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "blank output-dir must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_accepts_curdir_prefix() {
+        let config = VerificationConfig {
+            output_dir: String::from("./proofs"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("proofs"),
+            "a leading `./` must be tolerated and stripped"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_leading_parent_traversal() {
+        let config = VerificationConfig {
+            output_dir: String::from("../proofs"),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("..") && err.to_string().contains("../proofs"),
+            "leading `..` must be rejected naming the value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_trailing_parent_traversal() {
+        let config = VerificationConfig {
+            output_dir: String::from("proofs/../.."),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "`proofs/../..` climbs out of the root and must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalized_output_dir_rejects_interior_parent_even_if_resolving_inside() {
+        // `a/../b` resolves to `b` (inside the root), but we reject ANY `..`
+        // rather than resolve it: resolution is symlink-unsound.
+        let config = VerificationConfig {
+            output_dir: String::from("a/../b"),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "any `..` must be rejected, even one that resolves inside the root"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_output_dir_rejects_drive_relative_prefix() {
+        // `C:proofs` is drive-relative (NOT absolute by Rust's definition) but
+        // escapes the project root on Windows: it parses as a Prefix component.
+        let config = VerificationConfig {
+            output_dir: String::from("C:proofs"),
+        };
+        let err = config.normalized_output_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("prefix") && err.to_string().contains("C:proofs"),
+            "drive-relative prefix must be rejected naming the value, got: {err}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalized_output_dir_rejects_unc_path() {
+        let config = VerificationConfig {
+            output_dir: String::from(r"\\server\share\x"),
+        };
+        assert!(
+            config.normalized_output_dir().is_err(),
+            "a UNC network path must be rejected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalized_output_dir_treats_drive_letter_as_plain_dirname_on_unix() {
+        // On unix there is no Prefix component: `C:proofs` is a single ordinary
+        // directory name (a colon is a legal filename character) and is kept
+        // verbatim. This documents the platform difference.
+        let config = VerificationConfig {
+            output_dir: String::from("C:proofs"),
+        };
+        assert_eq!(
+            config.normalized_output_dir().unwrap(),
+            PathBuf::from("C:proofs"),
+            "on unix `C:proofs` is a valid plain directory name"
+        );
+    }
+
+    #[test]
+    fn scaffolded_default_manifest_roundtrips_mode_compile() {
+        // The typed model the scaffold writes (via InferenceToml::new) must load
+        // back with mode == "compile". (The string scaffold template is covered
+        // separately in scaffold.rs.)
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(MANIFEST_FILE_NAME);
+        InferenceToml::new("scaffolded").write_to_file(&path).unwrap();
+
+        let loaded = InferenceToml::load(&path).unwrap();
+        assert_eq!(loaded.build.mode, "compile");
+        assert!(loaded.build.is_default());
+    }
+
+    #[test]
+    fn from_toml_parses_full_manifest() {
+        let src = r#"
+[package]
+name = "demo"
+version = "1.2.3"
+infc_version = "0.1.0"
+
+[build]
+target = "wasm32"
+optimize = "release"
+
+[verification]
+output-dir = "custom/"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.package.name, "demo");
+        assert_eq!(manifest.package.version, "1.2.3");
+        assert_eq!(manifest.package.infc_version, "0.1.0");
+        assert_eq!(manifest.build.target, "wasm32");
+        assert_eq!(manifest.build.optimize, "release");
+        assert_eq!(manifest.verification.output_dir, "custom/");
+    }
+
+    #[test]
+    fn from_toml_defaults_missing_sections() {
+        // Only [package] is present; [build] and [verification] must default.
+        let src = r#"
+[package]
+name = "minimal"
+version = "0.1.0"
+infc_version = "0.1.0"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.package.name, "minimal");
+        assert!(manifest.dependencies.is_empty());
+        assert!(
+            manifest.build.is_default(),
+            "absent [build] must yield the default BuildConfig"
+        );
+        assert!(
+            manifest.verification.is_default(),
+            "absent [verification] must yield the default VerificationConfig"
+        );
+        assert_eq!(manifest.build.target, default_target());
+        assert_eq!(manifest.build.optimize, default_optimize());
+        assert_eq!(manifest.verification.output_dir, default_output_dir());
+    }
+
+    #[test]
+    fn from_toml_defaults_missing_keys_within_sections() {
+        // Present-but-partial [build]/[verification]: absent keys still default.
+        let src = r#"
+[package]
+name = "partial"
+version = "0.1.0"
+infc_version = "0.1.0"
+
+[build]
+optimize = "release"
+"#;
+        let manifest = InferenceToml::from_toml(src).unwrap();
+        assert_eq!(manifest.build.optimize, "release");
+        assert_eq!(
+            manifest.build.target,
+            default_target(),
+            "absent build.target must default"
+        );
+        assert_eq!(manifest.verification.output_dir, default_output_dir());
+    }
+
+    #[test]
+    fn from_toml_rejects_malformed_toml() {
+        let result = InferenceToml::from_toml("this is = = not valid toml");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Inference.toml"),
+            "error should mention the manifest"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_missing_package() {
+        // [package] (and its required name/version) is mandatory.
+        let src = r#"
+[build]
+target = "wasm32"
+"#;
+        let result = InferenceToml::from_toml(src);
+        assert!(result.is_err(), "missing [package] must be rejected");
+    }
+
+    #[test]
+    fn load_reads_manifest_from_disk() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        let manifest = InferenceToml::new("roundtrip");
+        manifest.write_to_file(&manifest_path).unwrap();
+
+        let loaded = InferenceToml::load(&manifest_path).unwrap();
+        assert_eq!(loaded.package.name, "roundtrip");
+        assert_eq!(loaded.package.version, "0.1.0");
+    }
+
+    #[test]
+    fn load_errors_on_missing_file() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        let result = InferenceToml::load(&missing);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("read manifest"),
+            "error should report the read failure"
+        );
+    }
+
+    #[test]
+    fn load_errors_on_invalid_contents() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "not = = valid").unwrap();
+        let result = InferenceToml::load(&manifest_path);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Invalid manifest"),
+            "error context should name the invalid manifest, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_finds_at_start_dir() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "").unwrap();
+
+        let found = discover_manifest(dir.path()).unwrap();
+        assert_eq!(found.file_name().unwrap(), MANIFEST_FILE_NAME);
+        // Canonicalize both sides: discover_manifest canonicalizes the start.
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            manifest_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn discover_manifest_finds_in_ancestor() {
+        let root = assert_fs::TempDir::new().unwrap();
+        let manifest_path = root.path().join(MANIFEST_FILE_NAME);
+        std::fs::write(&manifest_path, "").unwrap();
+
+        let nested = root.path().join("src").join("deep").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let found = discover_manifest(&nested).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            manifest_path.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn discover_manifest_nearest_ancestor_wins() {
+        // Outer project contains an inner project; from inside the inner
+        // project the inner manifest must shadow the outer one.
+        let outer = assert_fs::TempDir::new().unwrap();
+        std::fs::write(outer.path().join(MANIFEST_FILE_NAME), "").unwrap();
+
+        let inner = outer.path().join("vendor").join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let inner_manifest = inner.join(MANIFEST_FILE_NAME);
+        std::fs::write(&inner_manifest, "").unwrap();
+
+        let found = discover_manifest(&inner).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            inner_manifest.canonicalize().unwrap(),
+            "nearest ancestor manifest must win"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_errors_when_absent() {
+        // A fresh temp dir with no manifest in it or (realistically) any
+        // ancestor up to the temp root.
+        let dir = assert_fs::TempDir::new().unwrap();
+        let result = discover_manifest(dir.path());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains(MANIFEST_FILE_NAME) && msg.contains("infs new"),
+            "error should mention the manifest and remediation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn discover_manifest_errors_on_nonexistent_start() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let result = discover_manifest(&missing);
+        assert!(
+            result.is_err(),
+            "a non-existent start directory cannot be canonicalized"
         );
     }
 }

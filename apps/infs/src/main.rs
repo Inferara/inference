@@ -128,10 +128,14 @@ pub enum Commands {
     /// codegen.
     Build(build::BuildArgs),
 
-    /// Build and run a source file.
+    /// Build and run an Inference program.
     ///
-    /// Compiles the source file to WASM and executes it with wasmtime.
-    /// Arguments after the path are passed to the program.
+    /// With a path, compiles that source file to WASM and executes it with
+    /// wasmtime, invoking `--entry-point` (default `main`); arguments after the
+    /// path are passed to the invoked function. With no path, runs in project
+    /// mode: discovers `Inference.toml`, builds `<root>/out/main.wasm`, and
+    /// invokes `main` (trailing arguments and `--entry-point` overrides are not
+    /// honored in project mode).
     Run(run::RunArgs),
 
     /// Display version information.
