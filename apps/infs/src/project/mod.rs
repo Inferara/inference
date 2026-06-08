@@ -85,7 +85,14 @@ pub fn discover_and_load(cwd: &Path) -> Result<ProjectContext> {
 
     let root = manifest_path
         .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Discovered manifest `{}` has no parent directory; cannot \
+                 determine the project root.",
+                manifest_path.display()
+            )
+        })?
+        .to_path_buf();
 
     let entry_point = root.join(ProjectContext::entry_relative());
 

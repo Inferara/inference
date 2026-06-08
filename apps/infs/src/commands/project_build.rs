@@ -70,7 +70,7 @@ pub(crate) fn run_project_build(
     mode: Option<BuildMode>,
     out_dir: Option<&Path>,
 ) -> Result<()> {
-    if !ctx.entry_point.exists() {
+    if !ctx.entry_point.is_file() {
         bail!(
             "Missing entry point: expected `{}`. Project mode compiles \
              `src/main.inf` by convention; create it, or pass a source file \
@@ -356,6 +356,30 @@ mod project_tests {
         assert!(
             msg.contains("Missing entry point") && msg.contains("main.inf"),
             "expected missing-entry remediation, got: {msg}"
+        );
+    }
+
+    /// A *directory* named `main.inf` must not satisfy the entry-point guard:
+    /// `is_file` rejects it with the same remediation rather than letting `infc`
+    /// fail opaquely on a directory argument.
+    #[test]
+    fn run_project_build_errors_when_entry_is_a_directory() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        // Create src/main.inf as a directory, not a file.
+        let entry = root.join("src").join("main.inf");
+        std::fs::create_dir_all(&entry).unwrap();
+        let ctx = ProjectContext {
+            root: root.clone(),
+            manifest: InferenceToml::new("demo"),
+            entry_point: entry,
+        };
+
+        let err = run_project_build(&ctx, false, None, None).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Missing entry point") && msg.contains("main.inf"),
+            "a directory at the entry-point path must be rejected, got: {msg}"
         );
     }
 

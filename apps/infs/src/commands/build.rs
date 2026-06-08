@@ -8,11 +8,13 @@
 //!
 //! `infs build` always performs full compilation (parse, analyze, codegen)
 //! and writes the WASM binary to disk. The `-v` flag additionally generates
-//! a Rocq (.v) translation file. `--mode proof` selects proof mode (specs
-//! preserved unoptimized for Rocq translation) and implicitly enables `-v`
-//! since the `.v` artifact is the proof-mode deliverable. Symmetrically, `-v`
-//! with no explicit `--mode` forwards `--mode proof` to `infc` so the emitted
-//! `.v` contains per-spec definitions (`compile` mode strips them).
+//! a Rocq (.v) translation file. `infs` forwards `-v` and `--mode` to `infc`
+//! exactly as the user passed them; it does not synthesize one flag from the
+//! other. The `-v` ⇄ `--mode proof` implication lives in
+//! `infc::normalize_args`: `--mode proof` makes `infc` enable `-v`, and `-v`
+//! alone makes `infc` derive proof mode (so the `.v` keeps the per-spec
+//! definitions that `compile` mode strips). Keeping the implication in one
+//! place avoids a second source of truth that could drift.
 //!
 //! ## Single-file vs. project mode
 //!
