@@ -266,7 +266,6 @@ pub(crate) fn check_operator(op: &Operator) -> Result<OpEffect, LinkError> {
         }
         DataDrop { .. } => OpEffect {
             uses_data_segments: true,
-            uses_memory: true,
             ..OpEffect::default()
         },
         TableInit { .. } | ElemDrop { .. } | TableCopy { .. } | TableGet { .. }

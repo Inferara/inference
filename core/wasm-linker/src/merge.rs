@@ -1101,8 +1101,9 @@ fn reconcile_pair(
         return Err(LinkError::IncompatibleMemory {
             field: field.to_string(),
             reason: format!(
-                "the reconciled minimum ({minimum} pages) exceeds the main module's declared \
-                 maximum ({anchor_max} pages); the host's memory bound is not relaxed"
+                "the reconciled minimum ({minimum} pages) exceeds the declared maximum \
+                 ({anchor_max} pages) of the memory it is merged into; the kept memory bound \
+                 is not relaxed"
             ),
         });
     }
