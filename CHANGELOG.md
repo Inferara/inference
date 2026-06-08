@@ -277,6 +277,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### CLI
 
+- Add `infc --out-dir <path>` flag to redirect compilation artifacts ([#223])
+  - Default remains `out/` relative to the current working directory, preserving prior behavior
+  - When supplied, both the `.wasm` and the `.v` (if requested) are written under the given directory
+  - Pure output plumbing — `infc` gains no project awareness; `infs` uses it in project mode to honor `[verification] output-dir`
+  - Compiler ABI minor version bumped 0 → 1 to advertise the additive flag; the `infs`↔`infc` handshake treats the bump as backward compatible (an older binary on either side simply never sends or sees the flag)
 - `infc -v` (and `infs build -v`) now implies `--mode proof` when no explicit `--mode` is passed. Users wanting the prior behavior (V output from compile-mode WASM, stripped specs) can pass `--mode compile -v` explicitly. Closes a UX trap where `-v` alone produced a near-useless empty-specs `.v` file. ([issue#22])
 - `infc --mode proof` and `infs build --mode proof` flags enable Rocq translation output. By default both tools run in `compile` mode (existing behavior, stripped specs). `--mode proof` keeps spec functions and writes the `.v` proof artifact alongside the `.wasm`. ([issue#22])
 - `infc` now surfaces `WasmToVError::RocqStdlibShadow` and `WasmToVError::InvalidRocqIdentifier` with the dedicated user-facing messages from the plan (no `--module-name` flag mentioned — that flag does not exist yet) ([issue#20])
@@ -504,6 +509,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### infs CLI
 
+- Make `infs build` and `infs run` project-aware ([#223])
+  - Invoked with no path, both commands discover the project's `Inference.toml` by walking up from the current directory (nearest ancestor wins; the start directory is canonicalized once for symlink stability), then compile `<root>/src/main.inf` with the compiler's working directory set to the project root so `out/` always lands at the root regardless of where the command was invoked
+  - The existing single-file forms (`infs build path/to/file.inf`, `infs run path/to/file.inf`) are preserved unchanged
+  - `infs new` / `infs init` "Next steps" hint updated from `infs build src/main.inf` to `infs build`
+  - Other `src/*.inf` files besides `main.inf` emit a warning (each named) and are excluded from the build — multi-file compilation is pending ([#63])
+  - Project-mode `infs run` always builds in compile mode and invokes `main`; a non-`main` `--entry-point` is rejected with guidance to use single-file mode (proof-mode WASM embeds non-deterministic opcodes wasmtime cannot execute)
+  - Discovery and entry-point failures produce remediation-style errors (suggesting `infs new`, `infs init`, or an explicit file path)
 - Add automatic PATH configuration on first install ([#96])
   - Unix: Modifies shell profile (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`)
   - Windows: Modifies user PATH in registry (`HKCU\Environment\Path`)
@@ -581,6 +593,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Project Manifest
 
+- Consume `[build]` and `[verification]` configuration in project-mode builds ([#223])
+  - New `[build] mode = "compile" | "proof"` field (default `"compile"`), validated on load; an invalid value is a clear error naming the field and allowed values
+  - `[verification] output-dir` is honored only in effective-proof builds, where it redirects artifacts via `infc --out-dir`; in compile mode it is ignored so the default `proofs/` never relocates `out/main.wasm`
+  - `output-dir` is validated relative-only: absolute paths, `..` traversal (even self-cancelling like `a/../b`), and Windows drive/UNC prefixes are rejected so artifacts cannot escape the project root
+  - CLI flags override the manifest; `infs` forwards `--mode`/`-v` verbatim and never re-derives the `-v` ⇄ proof implication (that remains owned by `infc`)
+  - `infs new`/`infs init` scaffold an explicit `[build] mode = "compile"` and ignore generated `proofs/*.wasm` and `proofs/*.v`
+  - A non-default `output-dir` requires an `infc` advertising ABI ≥ 1.1; pairing one with an older compiler hard-errors with remediation rather than failing opaquely in the subprocess
 - Replace `manifest_version` field with `infc_version` in Inference.toml ([#96])
   - `infc_version` is a String (semver format) that records the compiler version used to create the project
   - Automatically detected from `infc --version` when running `infs new` or `infs init`
@@ -719,3 +738,5 @@ Initial tagged release.
 [#166]: https://github.com/Inferara/inference/issues/166
 [#164]: https://github.com/Inferara/inference/issues/164
 [#212]: https://github.com/Inferara/inference/issues/212
+[#63]: https://github.com/Inferara/inference/issues/63
+[#223]: https://github.com/Inferara/inference/pull/223

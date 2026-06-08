@@ -85,7 +85,7 @@ this default.
 
 ### `-o` - Generate WASM Binary
 
-Writes the compiled WebAssembly binary to `out/<source_name>.wasm` relative to the current working directory.
+Writes the compiled WebAssembly binary to `<out-dir>/<source_name>.wasm`.
 
 Only takes effect when `--codegen` is specified.
 
@@ -97,7 +97,7 @@ infc example.inf --codegen -o
 
 ### `-v` - Generate Rocq Translation
 
-Writes the Rocq (Coq) translation to `out/<source_name>.v` relative to the current working directory.
+Writes the Rocq (Coq) translation to `<out-dir>/<source_name>.v`.
 
 This enables formal verification of the compiled program using the Rocq proof assistant.
 
@@ -119,13 +119,34 @@ infc example.inf -v
 infc example.inf --codegen -o -v
 ```
 
+### `--out-dir <path>` - Override Output Directory
+
+Redirects all output artifacts (`.wasm` and `.v`) to the given directory instead of the default `out/`. The directory is created automatically at full depth if it does not exist.
+
+```bash
+# Write artifacts to build/ instead of out/
+infc example.inf --out-dir build
+# Creates: build/example.wasm
+
+# Both artifacts under a custom directory
+infc example.inf -v --out-dir build
+# Creates: build/example.wasm and build/example.v
+
+# Absolute path (artifacts land there regardless of CWD)
+infc example.inf --out-dir /tmp/inf-out
+
+# Write directly into CWD (no subdirectory)
+infc example.inf --out-dir .
+# Creates: ./example.wasm
+```
+
+`--out-dir` applies to both `-o` and `-v` simultaneously. It has no effect when the active phase produces no artifacts (e.g., `--parse` or `--analyze` only).
+
 ## Output Directory
 
-All output files are written to an `out/` directory relative to the current working directory.
+By default, all output files are written to an `out/` directory relative to the current working directory. The directory is created automatically if it does not exist.
 
-The output directory is created automatically if it doesn't exist.
-
-**Current limitation**: Output directory is relative to CWD, not source file location.
+Use `--out-dir <path>` to override this location. The path may be relative (resolved against CWD) or absolute. Nested paths such as `a/b/c` are created in full via a single `fs::create_dir_all` call.
 
 ## Usage Examples
 
@@ -170,6 +191,16 @@ Explicit equivalent:
 
 ```bash
 infc example.inf --codegen -o
+```
+
+### Full Compilation to a Custom Output Directory
+
+```bash
+infc example.inf --out-dir build
+# Creates: build/example.wasm
+
+infc example.inf -v --out-dir build
+# Creates: build/example.wasm and build/example.v
 ```
 
 ### Generate Only Rocq (No WASM File)
@@ -236,7 +267,7 @@ All errors cause the process to exit with code 1.
 ## Current Limitations
 
 - **Single-file compilation only**: Multi-file projects not yet supported
-- **Output directory**: Relative to CWD, not source file location
+- **Output directory**: Defaults to `out/` relative to CWD (not source file location); use `--out-dir <path>` to override
 - **Analysis phase**: Work-in-progress, not fully implemented
 
 ## Building
@@ -268,8 +299,9 @@ cargo test -p inference-cli
 Tests verify:
 - Flag validation and error handling
 - Phase execution correctness
-- Output file generation
+- Output file generation (default `out/` and custom `--out-dir`)
 - Error message formatting
+- `--out-dir` behavior: relative paths, absolute paths, nested paths, trailing separators, overwrite of stale artifacts, and collision with an existing file
 
 ### Test Data
 

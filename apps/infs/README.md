@@ -28,8 +28,10 @@ cargo build -p infs --release
 
 | Command | Description |
 |---------|-------------|
-| `infs build <file>` | Compile Inference source files to WASM |
-| `infs run <file>` | Build and execute with wasmtime |
+| `infs build` | Compile project entry point (`src/main.inf`) to WASM (project mode) |
+| `infs build <file>` | Compile a single source file to WASM (single-file mode) |
+| `infs run` | Build project entry point and execute with wasmtime (project mode) |
+| `infs run <file>` | Build and execute a single source file with wasmtime |
 
 ### Project Management
 
@@ -61,6 +63,24 @@ cargo build -p infs --release
 
 ### Build Command
 
+`infs build` supports two modes:
+
+**Project mode** (no path): discovers `Inference.toml` by walking up from the current directory and compiles `src/main.inf`. The manifest's `[build] mode` and `[verification] output-dir` are consumed as configuration (CLI flags override).
+
+```bash
+# Project mode: compile <root>/src/main.inf -> <root>/out/main.wasm
+infs build
+
+# Project mode: proof build using [build] mode = "proof" from Inference.toml
+# Both .wasm and .v land under <root>/proofs/ (the default output-dir)
+infs build --mode proof
+
+# CLI override: --mode compile wins over any manifest setting
+infs build --mode compile
+```
+
+**Single-file mode** (path provided): the historical behavior — compiles exactly the given file.
+
 ```bash
 # Full compilation with WASM output (default — no flags needed)
 infs build example.inf
@@ -84,16 +104,40 @@ infs build example.inf --analyze
 | `--codegen` | Run the codegen phase to emit WebAssembly |
 | `-o` | Generate WASM binary file in `out/` directory |
 | `-v` | Generate Rocq (.v) translation file |
+| `--mode proof` | Proof mode: preserve non-det specs; implies `-v` inside `infc` |
+| `--mode compile` | Compile mode: strip specs for executable WASM |
 
 When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk — equivalent to `--codegen -o`.
 
+### Project-mode Manifest Semantics
+
+When `infs build` runs in project mode, it reads two fields from `Inference.toml` to resolve the build configuration:
+
+| Manifest field | Effect |
+|----------------|--------|
+| `[build] mode = "proof"` | Forwards `--mode proof` to `infc`; activates `output-dir` |
+| `[build] mode = "compile"` (default) | Forwards nothing; `infc` defaults to compile mode |
+| `[verification] output-dir` | Honored only in effective-proof mode; relocates both `.wasm` and `.v` |
+
+CLI flags always override manifest settings. `infs run` ignores `[build] mode` entirely and always builds an executable in `out/` (proof-mode WASM contains non-deterministic opcodes that `wasmtime` cannot execute).
+
 ### Run Command
 
+`infs run` supports the same two modes as `build`:
+
+**Project mode** (no path): builds `src/main.inf` in compile mode and invokes `main`.
+
 ```bash
-# Build and execute
+# Project mode: build + invoke main
+infs run
+
+# Single-file mode: build and invoke main
 infs run example.inf
 
-# Pass arguments to the program
+# Single-file mode: invoke a custom entry point
+infs run example.inf --entry-point helper
+
+# Pass arguments to the program (single-file only)
 infs run example.inf -- arg1 arg2
 ```
 
@@ -220,6 +264,19 @@ This crate is the unified CLI that orchestrates:
 - **Toolchain management** - Version installation and switching
 - **Project scaffolding** - Project creation and initialization
 
+### Module Organization
+
+| Module | Description |
+|--------|-------------|
+| `commands::build` | `infs build`: single-file and project-mode compilation |
+| `commands::run` | `infs run`: compile + execute via wasmtime |
+| `commands::project_build` | Shared project-build helper (spawn, ABI handshake, `--out-dir` gate) |
+| `commands::new` | `infs new`: scaffold a project in a new directory |
+| `commands::init` | `infs init`: initialize the current directory as a project |
+| `project::manifest` | `Inference.toml` parsing, validation, and discovery |
+| `project::scaffold` | File/directory creation for new projects |
+| `toolchain` | Toolchain version management and `infc` resolution |
+
 ### External Dependencies
 
 Some commands require external tools:
@@ -325,11 +382,12 @@ cargo build -p infs
 cargo test -p infs
 ```
 
-390 tests (321 unit + 69 integration) cover:
+415 tests (321 unit + 94 integration) cover:
 - Command argument parsing
 - Build phases (parse, analyze, codegen)
 - Output generation (WASM, Rocq)
 - Project scaffolding
+- Project-mode build and run (manifest semantics, output-dir, mode override)
 - Toolchain management operations
 - TUI navigation and command execution
 - TUI rendering with TestBackend

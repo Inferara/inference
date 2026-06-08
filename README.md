@@ -35,13 +35,15 @@ Install the official VS Code extension for syntax highlighting:
 
 ### Build Command
 
-The `infs build` command compiles a single `.inf` source file through three phases:
+The `infs build` command compiles Inference source through three phases:
 
 1. **Parse** (`--parse`) – Build the typed AST with the `inference-parser`
 2. **Analyze** (`--analyze`) – Perform type checking, static analysis, and semantic validation
 3. **Codegen** (`--codegen`) – Emit WebAssembly binary with optional Rocq translation
 
 Phases run in canonical order (parse → analyze → codegen). When no phase flag is given, `infs build` defaults to full compilation and writes the WASM binary to disk.
+
+`infs build` operates in two modes. Given a path, it compiles that single file. With no path, it runs in **project mode**: it discovers the project's `Inference.toml` by walking up from the current directory and compiles `src/main.inf`, with output rooted at the project directory. `infs run` mirrors the same two modes.
 
 ### Basic Usage
 
