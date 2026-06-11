@@ -257,6 +257,51 @@ fn contains_break_in_stmt(arena: &AstArena, stmt_id: StmtId) -> bool {
     }
 }
 
+/// Recursively visits every statement in a single block, calling `visitor`
+/// for each one. Unlike [`walk_function_bodies`], this walks one body in
+/// isolation and tracks no loop/non-det depth — for rules that maintain their
+/// own per-body context (e.g. an enclosing-scope stack) across the traversal.
+pub(crate) fn walk_block_stmts(
+    arena: &AstArena,
+    block_id: BlockId,
+    visitor: &mut dyn FnMut(StmtId),
+) {
+    for &stmt_id in &arena[block_id].stmts {
+        walk_stmt_recursive(arena, stmt_id, visitor);
+    }
+}
+
+fn walk_stmt_recursive(
+    arena: &AstArena,
+    stmt_id: StmtId,
+    visitor: &mut dyn FnMut(StmtId),
+) {
+    visitor(stmt_id);
+    match &arena[stmt_id].kind {
+        Stmt::Loop { body, .. } | Stmt::Block(body) => {
+            walk_block_stmts(arena, *body, visitor);
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            walk_block_stmts(arena, *then_block, visitor);
+            if let Some(else_id) = else_block {
+                walk_block_stmts(arena, *else_id, visitor);
+            }
+        }
+        Stmt::Assign { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break
+        | Stmt::Expr(_)
+        | Stmt::VarDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Assert { .. }
+        | Stmt::ConstDef(_) => {}
+    }
+}
+
 /// Recursively walks all `Def` variants and calls `callback` for each
 /// function body found. Handles struct methods, spec definitions (recursive),
 /// and module definitions (recursive).

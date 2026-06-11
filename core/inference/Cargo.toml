@@ -12,9 +12,14 @@ categories = ["compilers", "wasm"]
 [dependencies]
 anyhow.workspace = true
 rustc-hash.workspace = true
+inf-wasmparser.workspace = true
 inference-ast.workspace = true
 inference-parser.workspace = true
 inference-wasm-codegen.workspace = true
 inference-wasm-to-v-translator.workspace = true
+inference-wasm-linker.workspace = true
 inference-type-checker.workspace = true
 inference-analysis.workspace = true
+
+[dev-dependencies]
+wasm-encoder = "0.249.0"

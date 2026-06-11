@@ -144,6 +144,20 @@ pub fn codegen(
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
+    // Reject any spec name that would overflow the byte cap both
+    // `inference.spec_funcs` decoders enforce, before the section is emitted.
+    // Surfacing it here yields a clean codegen diagnostic instead of an
+    // artifact that fails its own downstream link/translate step.
+    if let Err(too_long) = spec_section::check_spec_name_lengths(compiler.spec_func_indices()) {
+        cov_mark::hit!(wasm_codegen_spec_name_too_long);
+        return Err(CodegenError::SpecNameTooLong {
+            name: too_long.name,
+            len: too_long.len,
+            max: spec_section::MAX_SPEC_NAME_LEN,
+        }
+        .into());
+    }
+
     // Snapshot `has_main` before `finish_and_take` consumes the compiler:
     // the section is emitted in a single pass that moves out the recorded
     // spec map alongside the WASM bytes.
@@ -239,19 +253,27 @@ fn traverse_t_ast_with_compiler(
 
 /// Stage 1: register every WASM function index up front so forward references
 /// resolve correctly during body compilation. Index order:
-///   regular fns (base 0) → regular methods → spec fns → spec methods.
+///   imports (base 0) → regular fns → regular methods → spec fns → spec methods.
+///
+/// Imported `external fn`s occupy the lowest WASM function indices, so every
+/// local function is shifted by the import count. `set_local_func_base` seeds the
+/// body-compilation index counter past the imports to keep it in lockstep with
+/// the `func_name_to_idx` entries.
 fn register_function_indices(
     arena: &AstArena,
     compiler: &mut Compiler,
     typed_context: &TypedContext,
     buckets: &EmittableFunctions,
 ) -> Result<(), CodegenError> {
+    let import_count = compiler.register_imports(arena, &buckets.imports, typed_context)?;
+    compiler.set_local_func_base(import_count);
+
     let toplevel_count =
         u32::try_from(buckets.funcs.len()).expect("more than u32::MAX top-level functions");
     let method_count =
         u32::try_from(buckets.methods.len()).expect("more than u32::MAX top-level methods");
 
-    compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, 0)?;
+    compiler.build_func_name_to_idx(arena, &buckets.funcs, typed_context, import_count)?;
     let method_base_idx = compiler.func_idx_after_toplevel(toplevel_count);
     compiler.build_method_name_to_idx(
         arena,
@@ -260,7 +282,7 @@ fn register_function_indices(
         method_base_idx,
     )?;
 
-    let spec_func_base = toplevel_count + method_count;
+    let spec_func_base = import_count + toplevel_count + method_count;
     let spec_func_indices = compiler.build_func_name_to_idx_with_spec_names(
         arena,
         &buckets.spec_funcs,
@@ -322,6 +344,10 @@ fn register_function_indices(
 }
 
 struct EmittableFunctions {
+    /// Top-level `external fn` declarations, emitted as WASM function imports
+    /// at indices `0..N` ahead of every local function (see
+    /// [`Compiler::register_imports`]).
+    imports: Vec<DefId>,
     funcs: Vec<DefId>,
     methods: Vec<(String, DefId)>,
     /// Each entry: `(spec_name, def_id)`.
@@ -335,12 +361,13 @@ struct EmittableFunctions {
     visited_spec_names: Vec<String>,
 }
 
-/// Sorts top-level defs into the four buckets used by Stage 1 registration.
+/// Sorts top-level defs into the five buckets used by Stage 1 registration.
 ///
-/// `Def::ExternFunction` is intentionally skipped — extern functions are not currently
-/// emitted to the WASM import section (top-level or spec-inner). When extern-fn
-/// emission lands, spec-inner externs will need to either join `spec_funcs` or be
-/// surfaced in a sibling `<mod>_spec_imports` list in the Rocq output.
+/// Top-level `Def::ExternFunction` declarations land in the `imports` bucket and
+/// are emitted as WASM function imports at indices `0..N` ahead of every local
+/// function. Spec-inner externs are still skipped — when they are wired through,
+/// they will need to either join `spec_funcs` or be surfaced in a sibling
+/// `<mod>_spec_imports` list in the Rocq output.
 ///
 /// In `compile` mode the spec buckets stay empty (specs are stripped). In `proof`
 /// mode, top-level `Def::Spec.defs` is recursed one level deep to surface inner
@@ -352,6 +379,7 @@ fn collect_emittable_functions(
     mode: CompilationMode,
 ) -> Result<EmittableFunctions, CodegenError> {
     let mut buckets = EmittableFunctions {
+        imports: Vec::new(),
         funcs: Vec::new(),
         methods: Vec::new(),
         spec_funcs: Vec::new(),
@@ -361,6 +389,7 @@ fn collect_emittable_functions(
 
     for &def_id in defs {
         match &arena[def_id].kind {
+            Def::ExternFunction { .. } => buckets.imports.push(def_id),
             Def::Function { .. } => buckets.funcs.push(def_id),
             Def::Struct { name, methods, .. } => {
                 let struct_name = arena[*name].name.clone();

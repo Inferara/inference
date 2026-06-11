@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Language
 
+- `external fn` + `use { … } from <module>` — declare and call functions from external
+  `.wasm` libraries using logical (platform-independent) module references. The compiler
+  emits a WASM import section with one entry per bound extern; a separate link step
+  (`inference-wasm-linker`) produces a single self-contained `.wasm` and `.v` with no
+  dangling imports. Tier-A (pure) and Tier-B (caller-pointer memory) closures merge
+  automatically; Tier-C (own static data/globals/tables) produces a clear error with a
+  relocatable-build recommendation ([#9])
 - Add struct definition and parsing support ([#14])
 - Add division operator (`/`) support ([#86])
 - Add unary negation (`-`) and bitwise NOT (`~`) operators ([#86])
@@ -45,6 +52,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compiler
 
+- wasm-linker: New `core/wasm-linker` crate (`inference-wasm-linker`) implementing the
+  static-merge link pass. `link(main_wasm, &[external_wasm])` folds satisfied imports'
+  transitive closures into the main module, rewrites all index-bearing operators into a
+  unified index space, deduplicates function types, preserves the `name` custom section for
+  Rocq translation, and emits the unified WASM binary ([#9])
+- wasm-linker: External modules using **floating-point** (any `f32`/`f64` value type in a
+  signature, local, or global, or any float instruction) are now rejected by the linker. The
+  Inference language has no `f32`/`f64` types and the Rocq translator models none; floats were
+  previously admitted at the feature gate via `WASM1` but are now excluded. The feature gate
+  (`SUPPORTED_WASM_FEATURES`) is `GC_TYPES | MUTABLE_GLOBAL | BULK_MEMORY`; the safety
+  allow-list provides a second, independent backstop that rejects every float opcode with a
+  diagnostic naming the exact mnemonic (e.g. `floating-point instruction 'f32.add' is not
+  supported by the static merge`). **Sign-extension** and **saturating float-to-int** are
+  also removed from the supported set: the Rocq translator has no lowering for either, and
+  Inference codegen emits neither ([#9])
+- wasm-linker: **Tail calls** (`return_call`/`return_call_indirect`) and **segment-indexed
+  table ops** (`table.init`/`elem.drop`/`table.copy`) are rejected by the safety allow-list
+  (`UnsupportedConstruct`). The Rocq translator has no lowering for either; Inference codegen
+  never emits them, so the rejection applies only to third-party externals ([#9])
+- wasm-linker: The main-module rebuild is now fail-closed on constructs the merge cannot
+  preserve: a main module that declares a **start function**, imports **non-function
+  entities** (globals/memories/tables) from its environment, or declares a **table section**
+  is rejected up front with `UnsupportedConstruct`. Previously the start section and
+  non-function imports were silently dropped — the latter shifting the global index space so
+  `global.get` could read the wrong global — and table-using mains failed after the merge
+  with a misleading `InvalidMergedModule`. **v128** value types are likewise rejected in
+  merged signatures, locals, and block types: the Inference language has no SIMD types and
+  every SIMD operator is already rejected ([#9])
+- wasm-linker: Fixed an unsound Tier-B provenance rule. Pointer subtraction classified
+  `Param - NotParam` as still parameter-derived; because `NotParam` only means *not provably
+  parameter-derived*, the subtrahend could itself be `p - C`, so `p - (p - C) == C` fabricated
+  a fixed absolute address that the analysis accepted as caller-relative — letting a Tier-B
+  external read or write host memory outside the caller's buffer. Subtraction now preserves
+  parameter-derivation only when subtracting a provable constant (`Param - Const`), mirroring
+  the existing `add` cancellation guard. The main-module rebuild also now enforces the same
+  256-level control-flow nesting cap as the external scan and the Rocq translator, rejects a
+  duplicate `inference.spec_funcs` section instead of silently keeping only the last, rejects
+  a multi-memory main, and rejects trailing bytes in a `spec_funcs` payload ([#9])
+- wasm-linker: Merged external function names in the output name section are now
+  **module-prefixed** using a `module.field` dot convention. A closure root satisfying import
+  `sum` from logical module `mathlib` is recorded as `mathlib.sum`; an inner callee the
+  source named `helper` becomes `mathlib.helper`; a nameless callee receives a deterministic
+  fallback `mathlib.func_<idx>`. The prefix is collision-free by construction (two externals
+  bound under different logical modules can export the same field without colliding in the
+  name section). The Rocq translator sanitizes `.` to `_`, so `mathlib.sum` translates to
+  `Definition mathlib_sum` in the `.v` ([#9])
+- wasm-codegen: Emit WASM import section for `external fn` declarations. The three-stage
+  index pre-scan now runs `register_imports` before local functions, so every
+  `Def::ExternFunction` bound via `use … from` is assigned a function import index (lowest
+  indices, `0..N`), the local-function base is shifted to `N`, and extern calls lower to
+  `call <import_idx>` identically to local calls. The import section is emitted between the
+  Type and Function sections per the WASM binary format; it is omitted when there are no
+  externs. Function type deduplication (`intern_type`) ensures imports with identical
+  signatures share one type entry ([#9])
+- type-checker: `ExternOrigin { logical_module, export_field }` binds each `external fn`
+  declaration to its source module; `extern_origins()` on `SymbolTable` collects all bound
+  externs for use by codegen ([#9])
 - ast: Remove dead `OperatorKind::BitNot` variant — `~x` is always parsed as `UnaryOperatorKind::BitNot` in a `PrefixUnaryExpression`; the binary enum variant was never produced by the AST builder ([#142])
 - parser: Replace the `tree-sitter` + `tree-sitter-inference` front end with a resilient recursive-descent parser in the new `inference-parser` crate (`core/parser`). The parser lexes, parses, and lowers directly into the same `inference_ast::arena::AstArena`, producing byte-identical ASTs for all previously valid inputs, so the type-checker, analysis, codegen, and wasm-to-v phases are unchanged. The `tree-sitter`/`tree-sitter-inference` dependencies are removed from the default build, eliminating the C toolchain requirement. Parsing is now resilient (collects every syntax error instead of aborting on the first) and never panics on malformed input. `parse_external_module` moves from `inference_ast::extern_prelude` to `inference::extern_prelude` so that `inference-ast` no longer depends on the parser ([#62])
 - ast: Introduce `SimpleTypeKind` enum for primitive types, replacing string-based type matching ([#50])

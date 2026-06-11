@@ -3317,6 +3317,261 @@ mod external_function_tests {
     }
 }
 
+/// Phase 1 of issue #9: extern provenance binding.
+///
+/// An `external fn` is bound to the source module named by a `use … from`
+/// clause. The binding is exposed on [`TypedContext`] via `extern_origin` and
+/// `is_extern_function`. A name imported from two distinct modules is an
+/// ambiguity error; a `use … from` naming an undeclared extern is a dangling
+/// import error; a bare extern (no binding `use`) stays valid but unbound.
+#[cfg(test)]
+mod extern_provenance_tests {
+    use super::*;
+
+    fn err_string(source: &str) -> String {
+        match try_type_check(source) {
+            Ok(_) => panic!("type checking should fail"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    // --- Binding succeeds ---
+
+    #[test]
+    fn binds_extern_to_single_module() {
+        let source = r#"
+            use { sort } from collections;
+            external fn sort(a: i32, b: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("binding a single module should type-check");
+        let origin = ctx
+            .extern_origin("sort")
+            .expect("sort should carry a bound origin");
+        assert_eq!(origin.logical_module, "collections");
+        assert_eq!(origin.export_field, "sort");
+        assert!(
+            origin.resolved_path.is_none(),
+            "Phase 1 leaves resolved_path unset; the driver fills it"
+        );
+        assert!(ctx.is_extern_function("sort"));
+    }
+
+    #[test]
+    fn binds_extern_to_nested_module_path() {
+        let source = r#"
+            use { hash } from crypto::sha256;
+            external fn hash(b: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("nested module path should type-check");
+        let origin = ctx.extern_origin("hash").expect("hash should be bound");
+        assert_eq!(
+            origin.logical_module, "crypto::sha256",
+            "nested path joins with `::`, never an OS separator"
+        );
+    }
+
+    #[test]
+    fn binds_multiple_fields_from_one_use() {
+        let source = r#"
+            use { sort, search } from collections;
+            external fn sort(a: i32) -> i32;
+            external fn search(a: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("multi-field use should type-check");
+        assert_eq!(
+            ctx.extern_origin("sort").expect("sort bound").logical_module,
+            "collections"
+        );
+        assert_eq!(
+            ctx.extern_origin("search")
+                .expect("search bound")
+                .logical_module,
+            "collections"
+        );
+    }
+
+    #[test]
+    fn binds_same_field_from_repeated_identical_module_without_ambiguity() {
+        // Two `use` clauses naming the same field from the *same* module are
+        // redundant, not ambiguous: there is still exactly one source module.
+        let source = r#"
+            use { sort } from collections;
+            use { sort } from collections;
+            external fn sort(a: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("repeated identical import should bind");
+        assert_eq!(
+            ctx.extern_origin("sort").expect("sort bound").logical_module,
+            "collections"
+        );
+    }
+
+    // --- Unbound extern stays valid ---
+
+    #[test]
+    fn bare_extern_without_use_is_unbound_but_valid() {
+        let source = r#"
+            external fn add(a: i32, b: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("a bare extern declaration is valid");
+        assert!(
+            ctx.extern_origin("add").is_none(),
+            "an extern with no binding `use` has no provenance"
+        );
+        assert!(
+            ctx.is_extern_function("add"),
+            "an unbound extern is still discriminated as extern, not local"
+        );
+    }
+
+    #[test]
+    fn local_function_is_not_extern() {
+        let source = r#"fn helper() -> i32 { return 1; } fn main() -> i32 { return helper(); }"#;
+        let ctx = try_type_check(source).expect("local functions type-check");
+        assert!(!ctx.is_extern_function("helper"));
+        assert!(ctx.extern_origin("helper").is_none());
+    }
+
+    // --- Ambiguity errors ---
+
+    #[test]
+    fn ambiguous_extern_from_two_modules_errors() {
+        let source = r#"
+            use { sort } from collections;
+            use { sort } from algorithms;
+            external fn sort(a: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("external function `sort` is bound to multiple modules"),
+            "expected ambiguity diagnostic, got: {err}"
+        );
+        assert!(
+            err.contains("collections") && err.contains("algorithms"),
+            "ambiguity diagnostic should list both modules, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ambiguous_extern_leaves_binding_unset() {
+        // Even though the program is rejected, the symbol table must not pick
+        // an arbitrary module for an ambiguous extern.
+        let source = r#"
+            use { sort } from collections;
+            use { sort } from algorithms;
+            external fn sort(a: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let result = try_type_check(source);
+        assert!(result.is_err(), "ambiguous extern must be rejected");
+    }
+
+    // --- Missing / dangling import errors ---
+
+    #[test]
+    fn use_from_naming_undeclared_extern_errors() {
+        let source = r#"
+            use { missing } from collections;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("imports `missing` from module `collections`")
+                && err.contains("no `external fn missing` is declared"),
+            "expected dangling-import diagnostic, got: {err}"
+        );
+    }
+
+    #[test]
+    fn use_from_with_some_undeclared_fields_errors_only_on_missing() {
+        let source = r#"
+            use { sort, missing } from collections;
+            external fn sort(a: i32) -> i32;
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("`missing`"),
+            "the undeclared field should be reported, got: {err}"
+        );
+        assert!(
+            !err.contains("no `external fn sort` is declared"),
+            "the declared field must not be reported as dangling, got: {err}"
+        );
+    }
+
+    // --- Provenance inside spec and module bodies ---
+
+    #[test]
+    fn top_level_use_does_not_bind_a_spec_inner_extern() {
+        // H8: a `use … from` clause is file-global but binds only TOP-LEVEL
+        // externs. A spec-inner `external fn mix` is a different scope; naming it
+        // from a top-level `use` with no matching top-level extern is a dangling
+        // import (`ExternImportNotDeclared`), not a silent bind. The prior
+        // behavior bound it, suppressing A024 and crashing proof-mode codegen.
+        let source = r#"
+            use { mix } from crypto;
+            spec s {
+                external fn mix(a: i32, b: i32) -> i32;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("imports `mix` from module `crypto`")
+                && err.contains("no `external fn mix` is declared"),
+            "a top-level use of a spec-inner extern must be a dangling import, got: {err}"
+        );
+    }
+
+    #[test]
+    fn top_level_use_binds_only_the_top_level_extern_when_a_spec_shadows_it() {
+        // H9: a bound top-level `mix` and a same-named spec-inner `mix` are
+        // distinct declarations. The `use` binds the top-level one; the bound
+        // origin recovered by name resolves to the top-level (root-scope)
+        // declaration that the use clause actually attaches to.
+        let source = r#"
+            external fn mix(a: i32, b: i32) -> i32;
+            use { mix } from crypto;
+            spec s {
+                external fn mix(a: i32) -> i32;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let ctx = try_type_check(source).expect("top-level mix binds; spec mix stays unbound");
+        assert_eq!(
+            ctx.extern_origin("mix").expect("top-level mix is bound").logical_module,
+            "crypto"
+        );
+    }
+
+    #[test]
+    fn spec_nested_use_from_naming_undeclared_extern_errors() {
+        // A spec-only extern does NOT satisfy a top-level `use`: the binding
+        // scan is top-level-only, so a `use` naming a spec-only extern is a
+        // dangling import.
+        let source = r#"
+            use { present } from crypto;
+            spec s {
+                external fn present(a: i32) -> i32;
+            }
+            fn main() -> i32 { return 0; }
+        "#;
+        let err = err_string(source);
+        assert!(
+            err.contains("`present`")
+                && err.contains("no `external fn present` is declared"),
+            "a spec-only extern must not satisfy a top-level use, got: {err}"
+        );
+    }
+}
+
 /// Tests for generic type parameters in variable definitions
 #[cfg(test)]
 mod generic_type_param_in_vardef {

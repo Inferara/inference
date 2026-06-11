@@ -150,7 +150,10 @@
 mod parser;
 pub(crate) mod toolchain;
 use clap::Parser;
-use inference::{analyze, parse, type_check, wasm_to_v};
+use inference::wasm_link::{
+    resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
+};
+use inference::{analyze, link, parse, type_check, wasm_to_v};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -158,6 +161,74 @@ use std::{
     process::{self},
 };
 use toolchain::BuildProfile;
+
+/// Environment variable holding a `PATH`-style list of directories to search
+/// for external `.wasm` modules, after any `-L` directories.
+const WASM_LIB_PATH_ENV: &str = "INFERENCE_WASM_LIB_PATH";
+
+/// Builds the manifest-declared dependency map from `--wasm-dep <name>=<path>`
+/// entries.
+///
+/// `infs build` forwards one entry per `Inference.toml [wasm-dependencies]`
+/// declaration; these bind a logical module name directly to a `.wasm` file and
+/// take precedence over every search directory. A malformed entry (no `=`, or an
+/// empty name) is a hard error so a typo never silently falls through to the
+/// search path.
+fn parse_manifest_deps(entries: &[String]) -> anyhow::Result<ManifestDeps> {
+    let mut deps = ManifestDeps::new();
+    for entry in entries {
+        let (name, path) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid --wasm-dep `{entry}`: expected `<name>=<path>`")
+        })?;
+        if name.is_empty() {
+            anyhow::bail!("invalid --wasm-dep `{entry}`: module name is empty");
+        }
+        deps.insert(name, PathBuf::from(path));
+    }
+    Ok(deps)
+}
+
+/// Resolves and validates every external `.wasm` module the program binds.
+///
+/// Resolution priority, highest first:
+/// 1. manifest dependencies (`--wasm-dep`, forwarded from
+///    `Inference.toml [wasm-dependencies]`),
+/// 2. `-L` / `--wasm-lib-dir` directories,
+/// 3. `INFERENCE_WASM_LIB_PATH` environment directories.
+fn resolve_externals(
+    typed_context: &inference::TypedContext,
+    lib_dirs: &[PathBuf],
+    manifest_deps: &ManifestDeps,
+) -> anyhow::Result<Vec<ResolvedExternalModule>> {
+    let mut search_path = SearchPath::new();
+    for dir in lib_dirs {
+        search_path.push_lib_dir(dir.clone());
+    }
+    if let Some(env_path) = std::env::var_os(WASM_LIB_PATH_ENV) {
+        for dir in env_search_dirs(&env_path) {
+            search_path.push_env_dir(dir);
+        }
+    }
+    Ok(resolve_external_modules(
+        typed_context,
+        &search_path,
+        Some(manifest_deps),
+    )?)
+}
+
+/// Splits an `INFERENCE_WASM_LIB_PATH`-style value into search directories,
+/// dropping empty entries.
+///
+/// An empty entry (a leading/trailing/interior separator, or a wholly-empty
+/// value) would otherwise yield an empty `PathBuf` whose `join(relative)`
+/// resolves against the process CWD — silently turning the build directory into
+/// a `.wasm` search root. Dropping it makes `""` and `":"` behave exactly like
+/// the variable being unset.
+fn env_search_dirs(env_path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(env_path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
+}
 
 /// Applies default phase normalization to parsed CLI arguments.
 ///
@@ -431,6 +502,28 @@ fn main() {
             }
         }
     }
+
+    // Resolve every external `.wasm` the program binds, ahead of codegen, so a
+    // resolution or validation failure aborts before any output is produced.
+    let manifest_deps = match parse_manifest_deps(&args.wasm_deps) {
+        Ok(deps) => deps,
+        Err(e) => {
+            eprintln!("External module resolution failed: {e}");
+            process::exit(1);
+        }
+    };
+    let external_modules = match &typed_context {
+        Some(tctx) if need_codegen => {
+            match resolve_externals(tctx, &args.wasm_lib_dirs, &manifest_deps) {
+                Ok(modules) => modules,
+                Err(e) => {
+                    eprintln!("External module resolution failed: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
     if need_codegen {
         let Some(tctx) = typed_context else {
             eprintln!("Internal error: type check phase did not produce typed context");
@@ -455,7 +548,26 @@ fn main() {
             };
         println!("Codegen complete");
 
-        let wasm_bytes = codegen_output.wasm();
+        // Fold the resolved external modules into the codegen output: a single
+        // self-contained module with no cross-module imports. Each external is
+        // paired with the logical module it was bound under, so the merge
+        // matches each import's recorded `(module, field)` against the right
+        // external. With no externs this is a byte-identical pass-through.
+        let external_bytes: Vec<(&str, &[u8])> = external_modules
+            .iter()
+            .map(|m| (m.logical_module.as_str(), m.bytes.as_slice()))
+            .collect();
+        let wasm_owned = match link(codegen_output.wasm(), &external_bytes) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("Linking external modules failed: {e}");
+                process::exit(1);
+            }
+        };
+        if !external_modules.is_empty() {
+            println!("Linked {} external module(s)", external_modules.len());
+        }
+        let wasm_bytes = wasm_owned.as_slice();
 
         if args.generate_wasm_output {
             let wasm_file_path = output_path.join(format!("{source_fname}.wasm"));
@@ -470,11 +582,20 @@ fn main() {
             println!("WASM generated at: {}", wasm_file_path.to_string_lossy());
         }
         if args.generate_v_output {
-            match wasm_to_v(
-                source_fname,
-                wasm_bytes,
-                codegen_output.spec_func_indices_by_spec(),
-            ) {
+            // The spec-function indices codegen records are in the *pre-link*
+            // space; the linker rewrote the embedded `inference.spec_funcs`
+            // section into the post-link space. When externals were merged the
+            // pre-link map is stale, so defer entirely to the embedded post-link
+            // section (an empty explicit map makes the translator adopt it).
+            // With no externals the merge is a byte-identical pass-through and
+            // the explicit map still cross-checks against the embedded one.
+            let empty_spec_funcs = inference::FxHashMap::default();
+            let explicit_spec_funcs = if external_modules.is_empty() {
+                codegen_output.spec_func_indices_by_spec()
+            } else {
+                &empty_spec_funcs
+            };
+            match wasm_to_v(source_fname, wasm_bytes, explicit_spec_funcs) {
                 Ok(v_output) => {
                     let v_file_path = output_path.join(format!("{source_fname}.v"));
                     if let Err(e) = fs::create_dir_all(&output_path) {
@@ -500,7 +621,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn make_args(parse: bool, analyze: bool, codegen: bool) -> Cli {
         Cli {
@@ -512,6 +633,8 @@ mod tests {
             generate_wasm_output: false,
             generate_v_output: false,
             mode: None,
+            wasm_lib_dirs: Vec::new(),
+            wasm_deps: Vec::new(),
             commit_hash: false,
             abi_version: false,
         }
@@ -629,5 +752,79 @@ mod tests {
     #[allow(dead_code)]
     fn get_out_path() -> std::path::PathBuf {
         get_test_data_path().parent().unwrap().join("out")
+    }
+
+    #[test]
+    fn parse_manifest_deps_binds_name_to_path() {
+        let deps =
+            parse_manifest_deps(&["arith=/libs/arith.wasm".to_string()]).expect("should parse");
+        assert_eq!(deps.get("arith"), Some(Path::new("/libs/arith.wasm")));
+    }
+
+    #[test]
+    fn parse_manifest_deps_accepts_multiple_entries() {
+        let deps = parse_manifest_deps(&[
+            "arith=/libs/arith.wasm".to_string(),
+            "crypto=/vendor/sha256.wasm".to_string(),
+        ])
+        .expect("should parse");
+        assert_eq!(deps.get("arith"), Some(Path::new("/libs/arith.wasm")));
+        assert_eq!(deps.get("crypto"), Some(Path::new("/vendor/sha256.wasm")));
+    }
+
+    #[test]
+    fn parse_manifest_deps_preserves_path_with_equals() {
+        // Only the first `=` separates name from path; later ones belong to the
+        // path so values like `a=b=c` survive intact.
+        let deps = parse_manifest_deps(&["arith=/odd=dir/arith.wasm".to_string()])
+            .expect("should parse");
+        assert_eq!(deps.get("arith"), Some(Path::new("/odd=dir/arith.wasm")));
+    }
+
+    #[test]
+    fn parse_manifest_deps_rejects_missing_separator() {
+        let err = parse_manifest_deps(&["arith".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("expected `<name>=<path>`"));
+    }
+
+    #[test]
+    fn parse_manifest_deps_rejects_empty_name() {
+        let err = parse_manifest_deps(&["=/libs/arith.wasm".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("module name is empty"));
+    }
+
+    #[test]
+    fn parse_manifest_deps_empty_input_yields_empty_map() {
+        let deps = parse_manifest_deps(&[]).expect("should parse");
+        assert!(deps.get("anything").is_none());
+    }
+
+    #[test]
+    fn empty_wasm_lib_path_resolves_like_unset() {
+        // H5: a wholly-empty value, and a lone separator, must each yield zero
+        // search directories — identical to the variable being unset — rather
+        // than injecting the process CWD as a silent `.wasm` search root.
+        use std::ffi::OsString;
+
+        let empty = env_search_dirs(&OsString::from(""));
+        assert!(empty.is_empty(), "empty value yields no dirs: {empty:?}");
+
+        // A lone PATH list separator (`:` on Unix, `;` on Windows) splits into
+        // two empty entries; both must be dropped.
+        let list_sep = if cfg!(windows) { ";" } else { ":" };
+        let bare = env_search_dirs(&OsString::from(list_sep));
+        assert!(bare.is_empty(), "a lone list separator yields no dirs: {bare:?}");
+    }
+
+    #[test]
+    fn wasm_lib_path_keeps_real_dirs_and_drops_empties() {
+        // `"/real/dir<sep>"` (a trailing separator) must keep the real directory
+        // and drop only the empty trailing entry.
+        use std::ffi::OsString;
+
+        let list_sep = if cfg!(windows) { ";" } else { ":" };
+        let value = OsString::from(format!("real{list_sep}"));
+        let dirs = env_search_dirs(&value);
+        assert_eq!(dirs, [PathBuf::from("real")]);
     }
 }

@@ -1,7 +1,7 @@
 use inference::std;
 use inference::std::collections::{ Array, Set };
 use inference::std::types::Address;
-use { sorting_function } from "./sort.rs";
+use { sorting_function } from sorting;
 
 ///this is the sort function Inference spec
 context sort_function_context {

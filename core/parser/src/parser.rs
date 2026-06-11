@@ -123,6 +123,16 @@ impl<'i> Parser<'i> {
         self.at(SyntaxKind::Eof)
     }
 
+    /// The current meaningful-token position.
+    ///
+    /// Used by item loops to assert forward progress: a handler that completes
+    /// without consuming a token leaves this unchanged, which the loop detects
+    /// and recovers from rather than spinning forever.
+    #[must_use]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     /// Consumes the current token if it is `kind`, reporting whether it did.
     pub fn eat(&mut self, kind: SyntaxKind) -> bool {
         if self.at(kind) {

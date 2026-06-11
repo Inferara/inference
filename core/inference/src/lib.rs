@@ -265,9 +265,10 @@
 
 pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_ast::arena::AstArena;
-use inference_type_checker::typed_context::TypedContext;
+pub use inference_type_checker::typed_context::TypedContext;
 
 pub mod extern_prelude;
+pub mod wasm_link;
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a
@@ -278,6 +279,11 @@ pub use rustc_hash::FxHashMap;
 /// LSP, tools) can match on translation failures without taking a direct
 /// dependency on `inference-wasm-to-v-translator`.
 pub use inference_wasm_to_v_translator::errors::{InvalidIdentifierReason, WasmToVError};
+
+/// Re-export of the static-merge linker's error type so downstream consumers
+/// can match on link failures (e.g. an unsatisfied import or a Tier-C module)
+/// without taking a direct dependency on `inference-wasm-linker`.
+pub use inference_wasm_linker::LinkError;
 
 /// Re-export of the `inference.spec_funcs` custom-section identifiers so
 /// downstream consumers (CLI tools, integration tests) share a single source
@@ -583,6 +589,66 @@ pub fn codegen(
         target.default_opt_level(),
         module_name,
     )
+}
+
+/// Folds external `.wasm` modules into the codegen output, producing a single
+/// self-contained module with no cross-module imports.
+///
+/// This is the post-codegen link step (Phase 4 of Issue #9). When a program
+/// `use`s functions from an external module, [`codegen`] emits those calls as
+/// WASM `(import …)` entries. This function consumes that intermediate module
+/// plus the resolved external module bytes and merges the imported functions'
+/// bodies in, re-indexing so the result imports nothing — the single artifact
+/// the user asked for, ready for [`wasm_to_v`].
+///
+/// `externals` is the set of resolved, validated external module binaries, each
+/// paired with the logical `::`-joined module name it was bound under so the
+/// merge can match an import's recorded `(module, field)` against the right
+/// external. When it is empty the call is a no-op pass-through: a program
+/// without externs links to byte-identical output, so callers can route every
+/// program through this step unconditionally.
+///
+/// # Errors
+///
+/// Returns an error if any module fails to parse, an import is left unsatisfied
+/// by the supplied externals, or a merged function falls into the unsupported
+/// Tier C (own static data / mutable globals). The underlying error downcasts
+/// to [`LinkError`].
+pub fn link(main_wasm: &[u8], externals: &[(&str, &[u8])]) -> anyhow::Result<Vec<u8>> {
+    // Byte-identical fast path *only* for a module that is provably import-free —
+    // it is already the self-contained artifact this step would produce. A module
+    // that still carries imports (e.g. a caller that passed no resolved externals
+    // for a program that actually uses them), or one that does not parse, must go
+    // through the linker so the unsatisfied-import / parse failure surfaces as an
+    // error instead of being silently passed through. Keying the fast path on the
+    // *module's own imports* rather than merely on `externals.is_empty()` keeps it
+    // fail-closed and honours the documented error contract above.
+    if externals.is_empty() && module_is_import_free(main_wasm) {
+        return Ok(main_wasm.to_vec());
+    }
+    Ok(inference_wasm_linker::link(main_wasm, externals)?)
+}
+
+/// Whether `wasm` parses and declares no imports. Returns `false` on any parse
+/// failure or on the first surviving import, so [`link`] routes such a module
+/// through the linker — which validates it and reports the precise error —
+/// rather than taking the byte-identical no-op path.
+fn module_is_import_free(wasm: &[u8]) -> bool {
+    use inf_wasmparser::{Parser, Payload};
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload {
+            Ok(Payload::ImportSection(reader)) => {
+                // Any entry (well-formed or not) means the module is not yet
+                // self-contained, so it must not take the no-op path.
+                if reader.into_iter().next().is_some() {
+                    return false;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Translates WebAssembly binary to Rocq (Coq) verification code.

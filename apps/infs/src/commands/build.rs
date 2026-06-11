@@ -66,6 +66,7 @@ use std::process::Command;
 
 use crate::commands::project_build::{check_compiler_compatibility, mode_flag, run_project_build};
 use crate::errors::InfsError;
+use crate::project::manifest::{find_manifest_dir, InferenceToml, MANIFEST_FILE_NAME};
 use crate::project::{self, ProjectContext};
 use crate::toolchain::find_infc;
 
@@ -111,6 +112,11 @@ pub struct BuildArgs {
     /// and implies `-v`.
     #[clap(long = "mode", value_enum)]
     pub mode: Option<BuildMode>,
+
+    /// Directory to search for external `.wasm` modules referenced by
+    /// `use { … } from <module>;`. Repeatable; forwarded verbatim to `infc`.
+    #[clap(short = 'L', long = "wasm-lib-dir", value_name = "DIR")]
+    pub wasm_lib_dirs: Vec<PathBuf>,
 }
 
 /// Executes the build command with the given arguments.
@@ -175,6 +181,14 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
         cmd.arg("--mode").arg(mode_flag(mode));
     }
 
+    for dir in &args.wasm_lib_dirs {
+        cmd.arg("--wasm-lib-dir").arg(dir);
+    }
+
+    for (name, path) in manifest_wasm_dependencies(path)? {
+        cmd.arg("--wasm-dep").arg(format_wasm_dep_arg(&name, &path)?);
+    }
+
     let status = cmd
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
@@ -188,6 +202,59 @@ fn execute_single_file(path: &Path, args: &BuildArgs) -> Result<()> {
         let code = status.code().unwrap_or(1);
         Err(InfsError::process_exit_code(code).into())
     }
+}
+
+/// Formats one resolved manifest dependency as the `<name>=<path>` argument
+/// forwarded to `infc --wasm-dep`.
+///
+/// `name` is already validated against the logical-name grammar in
+/// [`crate::project::manifest::validate_wasm_dependency_key`], so it never
+/// contains `=`. The receiver splits on the FIRST `=`, which is therefore always
+/// the name/path boundary — a path that itself contains `=` is preserved intact.
+///
+/// The argument is a single UTF-8 `String`, so the path must round-trip through
+/// UTF-8. Using `Path::display()` would lossily substitute U+FFFD for any
+/// non-UTF-8 component and silently forward a corrupted path that resolves to the
+/// wrong file (or none). The manifest declares its paths as UTF-8 strings, so a
+/// non-UTF-8 *resolved* path can only come from a non-UTF-8 manifest directory.
+/// Reject it with an actionable error instead of corrupting it. (An
+/// OsString-preserving argument channel would lift this restriction, but is out
+/// of scope for this pass.)
+///
+/// ## Errors
+///
+/// Returns an error when `path` is not valid UTF-8.
+fn format_wasm_dep_arg(name: &str, path: &Path) -> Result<String> {
+    let Some(path) = path.to_str() else {
+        bail!(
+            "wasm dependency `{name}` resolves to a path that is not valid UTF-8 ({}); \
+             rename the containing directory to a UTF-8 path so it can be forwarded to \
+             the compiler",
+            path.display()
+        );
+    };
+    Ok(format!("{name}={path}"))
+}
+
+/// Resolves the `[wasm-dependencies]` of the project enclosing `source_path`.
+///
+/// Walks up from the source file to the nearest `Inference.toml`, loads it, and
+/// returns each declared dependency's logical name paired with its absolute
+/// `.wasm` path (relative entries resolved against the manifest directory).
+/// A source compiled outside any project (no manifest found) yields an empty
+/// list — a manifest-free build is valid and simply has no manifest deps.
+///
+/// ## Errors
+///
+/// Returns an error only if a manifest exists but cannot be read or parsed; a
+/// missing manifest is not an error.
+fn manifest_wasm_dependencies(source_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let Some(manifest_dir) = find_manifest_dir(source_path) else {
+        return Ok(Vec::new());
+    };
+    let manifest_path = manifest_dir.join(MANIFEST_FILE_NAME);
+    let manifest = InferenceToml::from_file(&manifest_path)?;
+    manifest.resolved_wasm_dependencies(&manifest_dir)
 }
 
 /// Compiles the entry point of a discovered project (project mode).
@@ -268,6 +335,95 @@ fn resolve_out_dir(
         Ok(Some(verification.normalized_output_dir()?))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod manifest_dep_tests {
+    use super::*;
+    use assert_fs::prelude::*;
+
+    #[test]
+    fn forwards_declared_wasm_dependencies_as_absolute_paths() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let manifest = temp.child("Inference.toml");
+        manifest
+            .write_str(
+                "[package]\n\
+                 name = \"demo\"\n\
+                 version = \"0.1.0\"\n\
+                 infc_version = \"0.1.0\"\n\n\
+                 [wasm-dependencies]\n\
+                 arith = { path = \"libs/arith.wasm\" }\n",
+            )
+            .unwrap();
+        let source = temp.child("src").child("main.inf");
+        source.write_str("").unwrap();
+
+        let deps = manifest_wasm_dependencies(source.path()).expect("should resolve");
+
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].0, "arith");
+        assert_eq!(deps[0].1, temp.path().join("libs/arith.wasm"));
+    }
+
+    #[test]
+    fn no_manifest_yields_no_dependencies() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let source = temp.child("main.inf");
+        source.write_str("").unwrap();
+
+        let deps = manifest_wasm_dependencies(source.path()).expect("should succeed");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn manifest_without_wasm_dependencies_yields_none() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let manifest = temp.child("Inference.toml");
+        manifest
+            .write_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\ninfc_version = \"0.1.0\"\n")
+            .unwrap();
+        let source = temp.child("main.inf");
+        source.write_str("").unwrap();
+
+        let deps = manifest_wasm_dependencies(source.path()).expect("should succeed");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn formats_utf8_dependency_path() {
+        let arg = format_wasm_dep_arg("arith", Path::new("/libs/arith.wasm"))
+            .expect("a UTF-8 path must format");
+        assert_eq!(arg, "arith=/libs/arith.wasm");
+    }
+
+    #[test]
+    fn preserves_equals_sign_in_path() {
+        // The receiver splits on the first `=`, so a `=` inside the path is
+        // preserved intact (the name is `=`-free by grammar validation).
+        let arg = format_wasm_dep_arg("arith", Path::new("/a=b/arith.wasm"))
+            .expect("a path containing `=` must format");
+        assert_eq!(arg, "arith=/a=b/arith.wasm");
+        assert_eq!(arg.split_once('=').map(|(n, _)| n), Some("arith"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_utf8_dependency_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // A path component with an invalid UTF-8 byte (0xFF) cannot round-trip
+        // through the single-`String` `<name>=<path>` argument.
+        let bytes = b"/libs/\xFF/arith.wasm";
+        let path = PathBuf::from(std::ffi::OsStr::from_bytes(bytes));
+        let err = format_wasm_dep_arg("arith", &path)
+            .expect_err("a non-UTF-8 path must be rejected, not lossily forwarded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("arith") && msg.contains("not valid UTF-8"),
+            "diagnostic should name the dependency and the UTF-8 cause; got: {msg}"
+        );
     }
 }
 

@@ -90,8 +90,8 @@ struct identity {
 //Use
 use inference::std;
 use inference::std::algorithms::sort;
-use { sort } from "./sort.rs";
-use { sort, hash } from "./sort.rs";
+use { sort } from sorting;
+use { sort, hash } from sorting;
 use inference::std::algorithms::{sort,hash};
 //Binary Expression
 fn spec_assign() -> () {
@@ -281,7 +281,7 @@ struct Account {
   }
 }
 use inference::std::algorithms::sort;
-use { sort, hash } from "./sort.0.wasm";
+use { sort, hash } from sorting;
 use inference::std::algorithms::{sort, hash};
 fn example() -> u32 {
   let a: u32 = 42;
@@ -374,7 +374,7 @@ fn bubble_sort(arr: [i32;10], compare_function: fn(left: i32, right: i32) -> i32
       }
   }
 }
-use { hash } from "./cryptography.0.wasm";
+use { hash } from cryptography;
 spec HashContext {
     type HashFunction = fn([u8; 100]) -> [u8; 32];
     fn verify_hash_transitivity(hash_f: HashFunction) -> () {

@@ -96,7 +96,7 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 
 use crate::errors::WasmToVError;
-use crate::rocq_names::validate_rocq_identifier;
+use crate::rocq_names::{sanitize_rocq_identifier, validate_rocq_identifier};
 use crate::translator::WasmParseData;
 
 /// Translates WebAssembly bytecode into Rocq (Coq) formal verification code.
@@ -348,8 +348,18 @@ fn parse(
                                 let mut func_names_map = HashMap::new();
                                 for func_name in func_names {
                                     let func_name = func_name?;
-                                    func_names_map
-                                        .insert(func_name.index, func_name.name.to_string());
+                                    // Function names are emitted verbatim as
+                                    // `Definition <name>`, so they must be
+                                    // legal Rocq identifiers. WASM names are
+                                    // not (Inference emits `Struct.method`; an
+                                    // adversarial external may use a Coq
+                                    // keyword). Sanitize at the decode boundary
+                                    // so no illegal identifier reaches Gallina;
+                                    // the translator de-duplicates the result.
+                                    func_names_map.insert(
+                                        func_name.index,
+                                        sanitize_rocq_identifier(func_name.name),
+                                    );
                                 }
                                 if !func_names_map.is_empty() {
                                     wasm_parse_data.func_names_map = Some(func_names_map);

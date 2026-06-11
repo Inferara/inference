@@ -42,4 +42,20 @@ pub(crate) enum CodegenError {
         outer_spec: String,
         inner_spec: String,
     },
+    /// A type in a signature has no WASM value-type representation. The
+    /// type-checker rejects unknown types before codegen, so reaching this is a
+    /// defense-in-depth failure rather than a normal diagnostic path; emitting
+    /// an error keeps codegen from `todo!()`-panicking on a malformed type.
+    #[error("unsupported type in WASM codegen: {rendered}")]
+    UnsupportedType { rendered: String },
+    /// A spec name exceeds the byte cap that both `inference.spec_funcs`
+    /// decoders enforce (the linker and the Rocq translator). Emitting it would
+    /// produce a `.wasm` artifact that fails its own downstream link/translate
+    /// step, so codegen refuses up front with an actionable diagnostic.
+    #[error("spec name is {len} bytes, which exceeds the maximum of {max} bytes: '{name}'")]
+    SpecNameTooLong {
+        name: String,
+        len: usize,
+        max: usize,
+    },
 }

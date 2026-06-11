@@ -1493,3 +1493,79 @@ mod scenario_10_wasm_to_v_compile_mode {
         );
     }
 }
+
+// ============================================================================
+// Scenario 11: Over-long spec name rejected at codegen (D2)
+// ============================================================================
+#[cfg(test)]
+mod scenario_11_overlong_spec_name {
+    use crate::utils::build_ast;
+    use inference_type_checker::TypeCheckerBuilder;
+    use inference_wasm_codegen::{CompilationMode, OptLevel, Target};
+
+    /// Both `inference.spec_funcs` decoders (the linker and the Rocq
+    /// translator) reject a spec name longer than 255 bytes. Codegen must
+    /// refuse to emit such a name up front rather than produce a `.wasm`
+    /// artifact that fails its own downstream link/translate step.
+    #[test]
+    fn spec_name_over_255_bytes_is_rejected_at_codegen() {
+        let long_name = "S".repeat(256);
+        let source = format!(
+            "fn foo(x: i32) -> i32 {{ return x; }}\n\
+             spec {long_name} {{\n  \
+                 fn prop() forall {{\n    \
+                     let i: i32 = @;\n    \
+                     assert(foo(i) == i);\n  \
+                 }}\n\
+             }}\n"
+        );
+
+        let arena = build_ast(source);
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type check should succeed")
+            .typed_context();
+        let err = inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "output",
+        )
+        .expect_err("codegen must reject a spec name exceeding 255 bytes");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("256") && msg.contains("255"),
+            "expected a spec-name-length diagnostic citing 256 and the 255 cap; got: {msg}"
+        );
+    }
+
+    /// A spec name at exactly the 255-byte cap is emitted normally: the limit
+    /// is inclusive, mirroring both decoders' `len() > MAX` rejection.
+    #[test]
+    fn spec_name_at_255_bytes_is_accepted() {
+        let name = "S".repeat(255);
+        let source = format!(
+            "fn foo(x: i32) -> i32 {{ return x; }}\n\
+             spec {name} {{\n  \
+                 fn prop() forall {{\n    \
+                     let i: i32 = @;\n    \
+                     assert(foo(i) == i);\n  \
+                 }}\n\
+             }}\n"
+        );
+
+        let arena = build_ast(source);
+        let typed_context = TypeCheckerBuilder::build_typed_context(arena)
+            .expect("type check should succeed")
+            .typed_context();
+        inference_wasm_codegen::codegen(
+            &typed_context,
+            Target::Wasm32,
+            CompilationMode::Proof,
+            OptLevel::O3,
+            "output",
+        )
+        .expect("a 255-byte spec name is at the cap and must be accepted");
+    }
+}

@@ -63,7 +63,8 @@ use rustc_hash::FxHashMap;
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, IdentId, NodeId, StmtId, TypeId};
 use inference_ast::nodes::{
-    ArgKind, BlockKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode, UnaryOperatorKind,
+    ArgData, ArgKind, BlockKind, Def, Expr, OperatorKind, SimpleTypeKind, Stmt, TypeNode,
+    UnaryOperatorKind,
     Visibility,
 };
 use inference_type_checker::{
@@ -71,9 +72,9 @@ use inference_type_checker::{
     typed_context::TypedContext,
 };
 use wasm_encoder::{
-    BlockType as WasmBlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function,
-    FunctionSection, GlobalSection, GlobalType, IndirectNameMap, Instruction, MemorySection,
-    MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
+    BlockType as WasmBlockType, CodeSection, ConstExpr, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType, ImportSection, IndirectNameMap,
+    Instruction, MemorySection, MemoryType, Module, NameMap, NameSection, TypeSection, ValType,
 };
 
 use crate::memory::{
@@ -267,6 +268,21 @@ struct LoopContext {
     loop_exit_depths: Vec<u32>,
 }
 
+/// A single WASM function import emitted for an `external fn`.
+///
+/// `module` / `field` are the two-level WASM import name. `module` is the
+/// logical, platform-independent module reference (`ExternOrigin::logical_module`,
+/// `::`-joined), and `field` is the export field the linker satisfies. `type_idx`
+/// indexes the shared [`Compiler::types`] table; identical signatures dedup onto
+/// the same entry. Imports occupy WASM function indices `0..N`, ahead of every
+/// locally defined function (see [`Compiler::register_imports`]).
+#[derive(Debug, Clone)]
+struct ImportEntry {
+    module: String,
+    field: String,
+    type_idx: u32,
+}
+
 /// Metadata about a function that returns an array type.
 ///
 /// Populated during `build_func_name_to_idx` so that callers and callees
@@ -369,6 +385,14 @@ pub(crate) struct Compiler {
     module_name: String,
     /// Maps function keys to their WASM function section indices.
     func_name_to_idx: FxHashMap<FnKey, u32>,
+    /// Function imports emitted for `external fn` declarations, in
+    /// registration order. Each occupies WASM function index `i` for its
+    /// position `i` in this vector (imports come before all local functions).
+    imports: Vec<ImportEntry>,
+    /// Maps an `external fn` name to its WASM import function index (`0..N`).
+    /// Calls to an extern lower to `call <this index>` rather than a local
+    /// function index. Populated alongside [`Self::imports`] during Stage 1.
+    extern_name_to_idx: FxHashMap<String, u32>,
     /// Sticky flag: set to `true` when any function requires linear memory.
     has_memory: bool,
     /// Maps function keys to their array return type metadata.
@@ -443,6 +467,8 @@ impl Compiler {
             has_main: false,
             module_name: module_name.to_string(),
             func_name_to_idx: FxHashMap::default(),
+            imports: Vec::new(),
+            extern_name_to_idx: FxHashMap::default(),
             has_memory: false,
             func_array_returns: FxHashMap::default(),
             func_struct_returns: FxHashMap::default(),
@@ -489,6 +515,13 @@ impl Compiler {
         self.spec_func_indices_by_spec
             .entry(spec_name.to_string())
             .or_default();
+    }
+
+    /// Borrows the recorded `(spec_name -> [func_idx])` map so a caller can
+    /// validate it before [`Self::finish_and_take`] consumes the compiler and
+    /// emits the `inference.spec_funcs` section.
+    pub(crate) fn spec_func_indices(&self) -> &FxHashMap<String, Vec<u32>> {
+        &self.spec_func_indices_by_spec
     }
 
     fn func(&mut self) -> &mut Function {
@@ -554,10 +587,137 @@ impl Compiler {
         Ok(())
     }
 
+    /// Registers a function import for every `external fn` reachable from this
+    /// source file, assigning each WASM function index `0..N` ahead of all local
+    /// functions.
+    ///
+    /// For each extern this:
+    /// 1. lowers its declared signature to a WASM `(params, results)` type and
+    ///    dedups it into [`Self::types`] (identical signatures share one entry);
+    /// 2. records an [`ImportEntry`] carrying the logical module / export field
+    ///    from the Phase 1 provenance ([`TypedContext::extern_origin`]);
+    /// 3. maps the extern's name to its import function index so call lowering can
+    ///    emit `call <import_idx>`.
+    ///
+    /// Externs without provenance (a bare `external fn` with no binding `use`) are
+    /// skipped: they cannot be emitted as a well-formed two-level import, and
+    /// analysis rule A024 already gates *calling* an unlinked extern. Returns the
+    /// number of imports registered, which is the base index for local functions.
+    ///
+    /// Must run before [`Self::build_func_name_to_idx`] so local indices follow
+    /// the imports.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn register_imports(
+        &mut self,
+        arena: &AstArena,
+        extern_def_ids: &[DefId],
+        ctx: &TypedContext,
+    ) -> Result<u32, CodegenError> {
+        for &def_id in extern_def_ids {
+            let Def::ExternFunction {
+                name,
+                args,
+                returns,
+                ..
+            } = &arena[def_id].kind
+            else {
+                continue;
+            };
+            let extern_name = arena[*name].name.clone();
+            // Resolve provenance by the declaring `DefId`, not by name. Two
+            // same-named externs can coexist (a bound top-level `f` and an
+            // unbound spec-inner `f`); a name-keyed lookup cannot tell them apart
+            // and would bind the unbound declaration to the bound one's origin,
+            // registering a spurious/duplicate import. The decl-keyed query
+            // returns `None` for the unbound one, so it is correctly skipped.
+            let Some(origin) = ctx.extern_origin_by_decl(def_id) else {
+                continue;
+            };
+
+            let params = Self::import_param_types(arena, args, ctx)?;
+            let results = match returns {
+                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx)?
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            let type_idx = self.intern_type(params, results);
+
+            let import_idx = self.imports.len() as u32;
+            self.imports.push(ImportEntry {
+                module: origin.logical_module,
+                field: origin.export_field,
+                type_idx,
+            });
+            self.extern_name_to_idx.insert(extern_name, import_idx);
+        }
+
+        Ok(self.imports.len() as u32)
+    }
+
+    /// Lowers an extern's declared parameter types to WASM value types. An
+    /// ignored parameter (`external fn f(_: i32)`) still occupies an ABI slot:
+    /// the call site pushes the argument and the real `.wasm` export declares
+    /// that parameter, so it is lowered as a real param just like a named or
+    /// type-only one. This keeps the import signature in lock-step with the
+    /// validator's `lower_extern_signature`. A `unit` parameter cannot reach
+    /// this point: the validator rejects it (`LowerSignatureError::UnitParameter`)
+    /// earlier in the pipeline.
+    fn import_param_types(
+        arena: &AstArena,
+        args: &[ArgData],
+        ctx: &TypedContext,
+    ) -> Result<Vec<ValType>, CodegenError> {
+        let mut params = Vec::with_capacity(args.len());
+        for arg in args {
+            let ty = match &arg.kind {
+                ArgKind::Named { ty, .. }
+                | ArgKind::TypeOnly(ty)
+                | ArgKind::Ignored { ty } => *ty,
+                // The type-checker now rejects `self` on an extern, so this is
+                // unreachable from valid source; drop it to match codegen, which
+                // emits no receiver param for an import.
+                ArgKind::SelfRef { .. } => continue,
+            };
+            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx)? {
+                params.push(val);
+            }
+        }
+        Ok(params)
+    }
+
+    /// Returns the index of `(params, results)` in [`Self::types`], appending a
+    /// new entry only when no identical signature is already present. Used so an
+    /// import and a local function (or two imports) with the same signature share
+    /// one type entry.
+    fn intern_type(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
+        if let Some(idx) = self
+            .types
+            .iter()
+            .position(|(p, r)| p == &params && r == &results)
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            return idx as u32;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let idx = self.types.len() as u32;
+        self.types.push((params, results));
+        idx
+    }
+
+    /// Sets the WASM function index at which body compilation begins. Imports
+    /// occupy `0..base`, so the first locally defined function body is index
+    /// `base`. Called once after [`Self::register_imports`], before any body is
+    /// compiled.
+    pub(crate) fn set_local_func_base(&mut self, base: u32) {
+        self.func_idx = base;
+    }
+
     /// Builds the function name-to-WASM-index map from the source file's function definitions.
     ///
     /// `base_idx` is the WASM function index assigned to `func_def_ids[0]`. Top-level
-    /// functions pass 0; spec-originated functions are routed through
+    /// functions pass the import count `N` (so locals follow the imports); spec-originated
+    /// functions are routed through
     /// [`Self::build_func_name_to_idx_with_spec_names`] instead.
     ///
     /// Must be called before `visit_function_definition` so that forward references
@@ -715,9 +875,9 @@ impl Compiler {
         arena: &AstArena,
         ty_id: TypeId,
         ctx: &TypedContext,
-    ) -> Option<ValType> {
+    ) -> Result<Option<ValType>, CodegenError> {
         match &arena[ty_id].kind {
-            TypeNode::Simple(SimpleTypeKind::Unit) => None,
+            TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
             TypeNode::Simple(
                 SimpleTypeKind::Bool
                 | SimpleTypeKind::I8
@@ -727,8 +887,8 @@ impl Compiler {
                 | SimpleTypeKind::I32
                 | SimpleTypeKind::U32,
             )
-            | TypeNode::Array { .. } => Some(ValType::I32),
-            TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Some(ValType::I64),
+            | TypeNode::Array { .. } => Ok(Some(ValType::I32)),
+            TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(ValType::I64)),
             TypeNode::Generic { .. } => todo!(),
             TypeNode::Function { .. } => todo!(),
             TypeNode::QualifiedName { .. } => todo!(),
@@ -736,9 +896,15 @@ impl Compiler {
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
                 if ctx.lookup_struct(name).is_some() || ctx.lookup_enum(name).is_some() {
-                    Some(ValType::I32)
+                    Ok(Some(ValType::I32))
                 } else {
-                    todo!("Unsupported custom type in WASM codegen: {name}")
+                    // The type-checker rejects an unknown type before codegen, so
+                    // this is unreachable from a well-formed pipeline. Returning an
+                    // error rather than `todo!()` keeps a malformed type from
+                    // panicking the compiler (H6 defense-in-depth).
+                    Err(CodegenError::UnsupportedType {
+                        rendered: name.clone(),
+                    })
                 }
             }
         }
@@ -818,10 +984,12 @@ impl Compiler {
         let results: Vec<ValType> = if is_sret {
             vec![]
         } else {
-            returns
-                .and_then(|ty_id| Self::val_type_from_type_id(arena, ty_id, ctx))
-                .into_iter()
-                .collect()
+            match returns {
+                Some(ty_id) => Self::val_type_from_type_id(arena, ty_id, ctx)?
+                    .into_iter()
+                    .collect(),
+                None => vec![],
+            }
         };
 
         let mut params: Vec<ValType> = vec![];
@@ -841,7 +1009,7 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)?
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
                     let arg_name = arena[*name].name.clone();
@@ -2168,6 +2336,15 @@ impl Compiler {
 
         for (_label, arg_expr_id) in call_args {
             self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        // An `external fn` call targets its import index (0..N) rather than a
+        // local function index. Imports never participate in spec-mangled
+        // lookup, so this probe precedes the free-callee resolution.
+        if let Some(&import_idx) = self.extern_name_to_idx.get(callee_name) {
+            cov_mark::hit!(wasm_codegen_emit_extern_call);
+            self.func().instruction(&Instruction::Call(import_idx));
+            return Ok(());
         }
 
         let func_idx = self
@@ -4272,6 +4449,22 @@ impl Compiler {
                 .function(params.iter().copied(), results.iter().copied());
         }
         module.section(&type_section);
+
+        // Import section sits between Type and Function (WASM section order).
+        // Imported functions occupy the lowest function indices, so emitting it
+        // here is what makes the local `func_idx` base reservation correct.
+        if !self.imports.is_empty() {
+            cov_mark::hit!(wasm_codegen_emit_import_section);
+            let mut import_section = ImportSection::new();
+            for import in &self.imports {
+                import_section.import(
+                    &import.module,
+                    &import.field,
+                    EntityType::Function(import.type_idx),
+                );
+            }
+            module.section(&import_section);
+        }
 
         let mut function_section = FunctionSection::new();
         for &type_idx in &self.functions {

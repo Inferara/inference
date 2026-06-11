@@ -46,19 +46,20 @@ fn visibility(p: &mut Parser) {
     }
 }
 
-/// `use ( path [ :: { types } ] | { types } from string ) ;`
+/// `use ( path [ :: { types } ] | { types } from module_ref ) ;`
 /// (`use_directive`). The two forms are distinguished by whether the body starts
-/// with `{`.
+/// with `{`. In the `from` form, `module_ref` is a logical identifier path
+/// (`name` or `a::b`) — not a filesystem string — so source stays portable.
 pub(crate) fn use_directive(p: &mut Parser) {
     let m = p.start();
     p.bump(SyntaxKind::UseKw);
     if p.at(SyntaxKind::LBrace) {
         imported_type_list(p);
         p.expect(SyntaxKind::FromKw);
-        if p.at(SyntaxKind::String) {
-            expr::string_literal(p);
+        if p.at(SyntaxKind::Ident) {
+            module_ref(p);
         } else {
-            p.error("expected a string literal");
+            p.error("expected a module name");
         }
     } else {
         types::identifier(p);
@@ -73,6 +74,21 @@ pub(crate) fn use_directive(p: &mut Parser) {
     }
     p.expect(SyntaxKind::Semi);
     m.complete(p, SyntaxKind::UseDirective);
+}
+
+/// `ident ( :: ident )*` — the logical module reference of a `from` clause.
+/// Emits one `Identifier` per path segment; segments are separated by `::`.
+fn module_ref(p: &mut Parser) {
+    types::identifier(p);
+    while p.at(SyntaxKind::ColonColon) {
+        p.bump(SyntaxKind::ColonColon);
+        if p.at(SyntaxKind::Ident) {
+            types::identifier(p);
+        } else {
+            p.error("expected a module path segment");
+            break;
+        }
+    }
 }
 
 /// `{ sep1(ident, ,) }` — the imported-type list shared by both use forms.
@@ -98,7 +114,15 @@ pub(crate) fn spec_definition(p: &mut Parser) {
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
         if at_definition_start(p) {
+            // Defense-in-depth: a `definition` handler that consumes nothing
+            // (e.g. a future non-advancing routing) would spin this loop, since
+            // completing a marker refills the fuel guard. Detect the unchanged
+            // cursor and bump the offending token into an Error node.
+            let before = p.pos();
             definition(p);
+            if p.pos() == before {
+                p.err_and_bump("expected a definition");
+            }
         } else {
             // The `}` terminating this body is the recovery anchor, so consume
             // the offending token into an Error node to guarantee progress —
@@ -147,9 +171,17 @@ pub(crate) fn function_definition(p: &mut Parser) {
 }
 
 /// `external fn ident argument_list [ -> _type ] ;`
-/// (`external_function_definition`). No visibility is allowed.
+/// (`external_function_definition`). No visibility is allowed: a stray leading
+/// `pub` is a grammar error, so we report it and then consume it as a
+/// `Visibility` node for resilience — mirroring every other definition handler —
+/// so the cursor always advances past it (otherwise the `source_file` item loop
+/// would spin on `pub external …`).
 pub(crate) fn external_function_definition(p: &mut Parser) {
     let m = p.start();
+    if p.at(SyntaxKind::PubKw) {
+        p.error("`external` functions cannot be `pub`");
+        visibility(p);
+    }
     p.expect(SyntaxKind::ExternalKw);
     p.expect(SyntaxKind::FnKw);
     types::identifier(p);
@@ -170,6 +202,10 @@ pub(crate) fn struct_definition(p: &mut Parser) {
     types::identifier(p);
     p.expect(SyntaxKind::LBrace);
     while !p.at(SyntaxKind::RBrace) && !p.at_eof() {
+        // Defense-in-depth: capture the cursor so a member handler that consumes
+        // nothing degrades to a recoverable error instead of spinning the loop
+        // (completing a marker refills the fuel guard, so it cannot catch this).
+        let before = p.pos();
         match p.current() {
             SyntaxKind::Ident => {
                 struct_field(p);
@@ -180,6 +216,9 @@ pub(crate) fn struct_definition(p: &mut Parser) {
             // consume the offending token to guarantee progress rather than
             // leaving it via a recovery set (which could spin the loop).
             _ => p.err_and_bump("expected a struct field or method"),
+        }
+        if p.pos() == before {
+            p.err_and_bump("expected a struct field or method");
         }
     }
     p.expect(SyntaxKind::RBrace);
