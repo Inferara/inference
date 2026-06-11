@@ -556,3 +556,62 @@ fn proof_mode_main_with_nondet_and_uzumaki() -> Vec<u8> {
 
     module.finish()
 }
+
+/// A main module whose exported body nests `depth` empty `block` regions, then
+/// calls `mathlib::sum` so the link has an executable tail. Used to pin the
+/// structured-control-flow depth cap on the main re-encode path: the linker must
+/// reject a body the downstream wasm-to-v translator (which recurses one frame
+/// per level) cannot render, so the v-alignment invariant — anything linkable is
+/// translatable — holds at the cap boundary as well as below it.
+fn main_with_nested_blocks(depth: usize) -> Vec<u8> {
+    let mut body = String::new();
+    for _ in 0..depth {
+        body.push_str("block ");
+    }
+    for _ in 0..depth {
+        body.push_str("end ");
+    }
+    wasm(&format!(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            {body}
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#,
+    ))
+}
+
+#[test]
+fn main_body_at_the_control_depth_cap_links_and_translates() {
+    // A main body nested one level below the cap must both link and translate.
+    // The closure scan and the wasm-to-v translator both admit nesting strictly
+    // below 256 levels; the main re-encode path must agree, so a legitimately
+    // deep (but in-bounds) body is never spuriously rejected.
+    let main = main_with_nested_blocks(255);
+    assert_output_translates("main body at the control-depth cap", &main);
+}
+
+#[test]
+fn main_body_past_the_control_depth_cap_is_rejected_before_translation() {
+    // A main body nested at the cap must be rejected by the linker, not linked
+    // and then rejected by wasm-to-v. The main re-encode path previously left
+    // the depth cap unenforced, so such a body linked cleanly and only failed
+    // downstream — violating the invariant that anything linkable is
+    // translatable. The link must now reject it up front.
+    let main = main_with_nested_blocks(256);
+    let lib = mathlib_sum();
+    let err = raw_link(&main, &[("mathlib", &lib)])
+        .expect_err("a main body past the control-depth cap must be rejected by the linker");
+    match err {
+        inference_wasm_linker::LinkError::UnsupportedConstruct(msg) => assert!(
+            msg.contains("256") && msg.contains("control"),
+            "expected an UnsupportedConstruct naming the control-depth limit, got {msg:?}"
+        ),
+        other => panic!("expected UnsupportedConstruct, got {other:?}"),
+    }
+}

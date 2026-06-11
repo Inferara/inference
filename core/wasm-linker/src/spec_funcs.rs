@@ -112,6 +112,17 @@ pub(crate) fn decode(data: &[u8]) -> Result<Vec<(String, Vec<u32>)>, LinkError> 
         out.push((name, indices));
     }
 
+    // Every declared entry has been consumed; any remaining bytes are trailing
+    // garbage the count does not cover. A corrupt or version-skewed section would
+    // re-encode without them, silently dropping data — reject it, matching the
+    // fail-closed posture of the truncation checks above.
+    if reader.bytes_remaining() != 0 {
+        return Err(LinkError::Parse(format!(
+            "spec_funcs section: {} trailing byte(s) after {count} declared entries",
+            reader.bytes_remaining()
+        )));
+    }
+
     Ok(out)
 }
 
@@ -187,5 +198,20 @@ mod tests {
         // version=1, count=1, name_len=1 'S', idx_count=1, <missing index>
         let err = decode(&[1, 1, 1, b'S', 1]).unwrap_err();
         assert!(matches!(err, LinkError::Parse(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_trailing_bytes_after_the_declared_entries() {
+        // A well-formed payload followed by extra bytes the count does not cover.
+        // Silently dropping the trailing bytes (the prior behavior) would mask a
+        // corrupt or version-skewed section; the decoder must fail closed, matching
+        // the other truncation checks in this codec.
+        let mut bytes = encode(&[("S".to_string(), vec![0])]);
+        bytes.extend_from_slice(&[0xff, 0xff]);
+        let err = decode(&bytes).unwrap_err();
+        assert!(
+            matches!(&err, LinkError::Parse(msg) if msg.contains("trailing")),
+            "expected a Parse error naming the trailing bytes, got {err:?}"
+        );
     }
 }

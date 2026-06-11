@@ -230,6 +230,17 @@ impl Plan {
                 main.tables.len()
             )));
         }
+        // The output declares a single shared linear memory. The parser keeps only
+        // the first declared memory, so a second main-side memory would be silently
+        // dropped and a body's memarg over it would rebind to memory 0 — a
+        // valid-but-wrong output. Reject up front, mirroring the external-side
+        // multi-memory guard below.
+        if main.memory_count > 1 {
+            return Err(LinkError::UnsupportedConstruct(format!(
+                "main module declares {} memories; the static merge models a single shared memory",
+                main.memory_count
+            )));
+        }
 
         // 1. Seed the output type table with the main module's function types,
         //    recording where each main type index lands.

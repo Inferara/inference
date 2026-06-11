@@ -624,6 +624,52 @@ fn tier_c_indirect_call_requires_relocatable_build() {
     );
 }
 
+#[test]
+fn tier_c_subtraction_fabricated_absolute_address_requires_relocatable_build() {
+    // An external that computes `p - (p - C)` fabricates the fixed absolute
+    // address `C` from its caller pointer `p`: `(p * 1)` is the caller pointer
+    // by value but classified not-provably-param, so the subtraction cancels to
+    // a caller-independent constant. Storing through it would write host memory
+    // the caller never authorised. The provenance analysis must classify the
+    // closure Tier C — `Param - NotParam` may not preserve param-derivation —
+    // and the whole link must reject rather than admit the write as Tier B.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (import "memlib" "store_at" (func (;0;) (type 0)))
+          (memory (;0;) 1 1)
+          (func (;1;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "memory" (memory 0))
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32)))
+          (memory (;0;) 1)
+          (func (;0;) (type 0) (param i32 i32)
+            local.get 0
+            local.get 0 i32.const 1 i32.mul i32.const 4096 i32.sub
+            i32.sub
+            local.get 1
+            i32.store)
+          (export "store_at" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[&lib])
+        .expect_err("a fabricated absolute store address must be rejected");
+    assert!(
+        matches!(err, LinkError::RequiresRelocatableBuild { .. }),
+        "expected RequiresRelocatableBuild, got {err:?}"
+    );
+}
+
 // -- Multiple externals / unsatisfied ---------------------------------------
 
 #[test]
@@ -1558,6 +1604,40 @@ fn main_with_table_section_is_rejected() {
 }
 
 #[test]
+fn main_with_two_memories_is_rejected() {
+    // The static merge models a single shared linear memory. An external is
+    // already rejected for declaring more than one memory; a main module with two
+    // memories was asymmetrically tolerated — the parser kept only memory 0 and
+    // silently discarded the rest, so a body's memarg over memory 1 would rebind
+    // to memory 0 in a valid-but-wrong output. Reject the second memory up front,
+    // mirroring the external guard and the main data/element/start/table guards.
+    let mut module = wasm_encoder::Module::new();
+    let mut mems = wasm_encoder::MemorySection::new();
+    mems.memory(wasm_encoder::MemoryType {
+        minimum: 1,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    mems.memory(wasm_encoder::MemoryType {
+        minimum: 1,
+        maximum: None,
+        memory64: false,
+        shared: false,
+        page_size_log2: None,
+    });
+    module.section(&mems);
+    let main = module.finish();
+
+    let err = raw_link(&main, &[]).expect_err("a two-memory main must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("memor")),
+        "expected an UnsupportedConstruct mentioning the multiple memories, got {err:?}"
+    );
+}
+
+#[test]
 fn main_with_v128_local_is_rejected() {
     // A main module whose body declares a `v128` local. The Inference language has
     // no SIMD types, and every SIMD operator is rejected, so the value-type axis
@@ -1949,6 +2029,49 @@ fn out_of_range_spec_funcs_index_is_a_clean_parse_error() {
     assert!(
         matches!(&err, LinkError::Parse(msg) if msg.contains("out of range")),
         "expected a Parse error naming the out-of-range index, got {err:?}"
+    );
+}
+
+#[test]
+fn two_spec_funcs_sections_in_main_are_a_clean_error_not_a_silent_overwrite() {
+    // The `inference.spec_funcs` section is a verification deliverable: its proof
+    // obligations must never be silently dropped. A main carrying two such
+    // sections previously kept only the last (last-wins overwrite), discarding the
+    // first section's obligations. The parser must instead reject the duplicate
+    // with a clean error so the lost obligations are surfaced, never vanished.
+    // version=1, count=1, name_len=1, idx_count=1, index=0 in each section, but
+    // recording different spec names so a silent overwrite would be observable.
+    let first = [1u8, 1, 1, b'A', 1, 0];
+    let second = [1u8, 1, 1, b'B', 1, 0];
+    let main_wat = r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "mathlib" "sum" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "compute" (func 1)))
+        "#;
+    let mut main = wasm(main_wat);
+    use wasm_encoder::Section as _;
+    wasm_encoder::CustomSection {
+        name: "inference.spec_funcs".into(),
+        data: (&first[..]).into(),
+    }
+    .append_to(&mut main);
+    wasm_encoder::CustomSection {
+        name: "inference.spec_funcs".into(),
+        data: (&second[..]).into(),
+    }
+    .append_to(&mut main);
+
+    let lib = mathlib_pure();
+    let err = link(&main, &[&lib])
+        .expect_err("a duplicate spec_funcs section must be rejected, never silently overwritten");
+    assert!(
+        matches!(&err, LinkError::Parse(msg) | LinkError::UnsupportedConstruct(msg) if msg.contains("spec_funcs")),
+        "expected a clean error naming the duplicate spec_funcs section, got {err:?}"
     );
 }
 

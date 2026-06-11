@@ -122,8 +122,9 @@ fn scan_body(
         // translator (which recurses one frame per level) cannot be driven to
         // stack exhaustion by an adversarially deep external body. An `End`
         // closes the innermost frame; a `block`/`loop`/`if`/non-det op opens a
-        // new one. Rejecting here keeps an over-nested body out of the merged
-        // module on every output path.
+        // new one. This scan gates external bodies; the main module's body is
+        // bounded by the matching cap in `crate::rewrite::reencode_body`, so an
+        // over-nested body is kept out of the merged module whatever its origin.
         if opens_control_frame(&op) {
             control_depth += 1;
             // Reject at `>=` so a body nested exactly `MAX_CONTROL_DEPTH` deep is

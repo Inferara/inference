@@ -406,6 +406,92 @@ fn cancel8_param_plus_const_offset_still_accepted() {
 }
 
 // ===========================================================================
+// 8b'' — MUST-REJECT: sub-side algebraic cancellation `p - (p - C) == C`
+//
+// The mirror of the add-side cancellation family above. `Param - NotParam` must
+// NOT preserve `Param`: `NotParam` means *not provably constant*, so the
+// subtrahend may itself be a negated/offset parameter such as `p - C`, and
+// `p - (p - C) == C` is a fixed, caller-independent absolute address. Only a
+// proven `Const` subtrahend keeps the minuend's param-derivation. Each case
+// below addresses a constant regardless of the caller's pointer and MUST reject.
+// ===========================================================================
+
+#[test]
+fn cancel9_param_minus_param_times_one_is_zero() {
+    // `p - (p * 1) == 0`. `p * 1` is a multiply, classified NotParam, but its
+    // runtime value is exactly the caller pointer, so the subtraction cancels to
+    // the absolute address 0. `Param - NotParam` must NOT re-promote to Param.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 local.get 0 i32.const 1 i32.mul i32.sub i32.load)
+           (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+#[test]
+fn cancel10_param_minus_notparam_offset_is_const() {
+    // `p - ((p * 1) - C) == C`, the laundering wholly within one function. The
+    // subtrahend `(p * 1) - C` is genuinely NotParam (a multiply makes `p * 1`
+    // NotParam, and `NotParam - Const` stays NotParam), yet its runtime value is
+    // `p - C`. The outer `p - (p - C)` recovers the constant `C` as a store
+    // address. `Param - NotParam` must NOT re-promote to Param.
+    assert!(!accepts(
+        r#"(module (memory 1) (func (param i32 i32)
+             local.get 0
+             local.get 0 i32.const 1 i32.mul i32.const 4096 i32.sub
+             i32.sub
+             local.get 1 i32.store) (export "f" (func 0)))"#,
+        2,
+    ));
+}
+
+#[test]
+fn cancel11_param_minus_helper_result_is_const_store() {
+    // The interprocedural form with a STORE: `$s(p) = p - 4096`. A call result is
+    // modeled NotParam, so `p - $s(p) == 4096` is a fixed absolute store address
+    // that the closure root's caller never supplies. The whole closure must
+    // reject rather than admit a fabricated host-memory write as Tier B.
+    let m = module(
+        r#"
+        (module
+          (memory (;0;) 1)
+          (type (;0;) (func (param i32)))
+          (type (;1;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32)
+            local.get 0
+            local.get 0
+            call 1
+            i32.sub
+            i32.const 1234
+            i32.store)
+          (func (;1;) (type 1) (param i32) (result i32)
+            local.get 0 i32.const 4096 i32.sub)
+          (export "writer" (func 0)))
+        "#,
+    );
+    let err = verify_param_addressing(&m, &[0, 1], 0, "writer")
+        .expect_err("p - (p - C) laundered through a call must be rejected");
+    assert!(
+        matches!(err, LinkError::RequiresRelocatableBuild { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn cancel12_param_minus_const_offset_still_accepted() {
+    // The positive control: the fix must not over-reject the legitimate
+    // `param - const` it protects. A negative offset into the caller's buffer
+    // (`p - 8`, a struct field below the pointer) stays Param and Tier B. Only a
+    // *provable* Const subtrahend keeps param-derivation, which this exercises.
+    assert!(accepts(
+        r#"(module (memory 1) (func (param i32) (result i32)
+             local.get 0 i32.const 8 i32.sub i32.load) (export "f" (func 0)))"#,
+        1,
+    ));
+}
+
+// ===========================================================================
 // 8c — MUST-REJECT: C-1 control-flow-laundered absolute address
 // ===========================================================================
 

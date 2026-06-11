@@ -1435,18 +1435,21 @@ fn add_prov(a: Prov, b: Prov) -> Prov {
 
 /// The provenance of `b - a` (minuend `b`, subtrahend `a`).
 ///
-/// - `Param - (Const | NotParam)`: `caller_base - k` varies with the caller, and
-///   the subtrahend cannot equal the minuend's caller pointer (it is not itself
-///   `Param`), so it cannot cancel to a constant (`a7`). `Param`.
+/// - `Param - Const`: `caller_base - fixed_offset` provably still varies with the
+///   caller's pointer (a struct field below the pointer, `a7`). The `Param` mask
+///   carries through unchanged.
+/// - `Param - NotParam`: **unsound to keep `Param`**, the exact mirror of the
+///   `add` cancellation. `NotParam` means *not provably parameter-derived*, not
+///   *constant*; the subtrahend may itself hold `p - C`, and `p - (p - C) == C`
+///   is a fixed, caller-independent absolute address. Demote to `NotParam`.
 /// - `Param - Param`: may be `b - b == 0`, a caller-independent constant
 ///   (`n1`/`n6`). `NotParam`.
 /// - `Const - Const`: a constant. `Const`.
-/// - `Const - Param` / anything else: the result either negates the caller
-///   contribution (`C - p`, which a later `add` must not re-promote) or is not
-///   provably constant. `NotParam`.
+/// - anything else (including `Const - Param`, which negates the caller
+///   contribution to `C - p` that a later `add` must not re-promote): `NotParam`.
 fn sub_prov(b: Prov, a: Prov) -> Prov {
     match (b, a) {
-        (Prov::Param(m), Prov::Const) | (Prov::Param(m), Prov::NotParam) => Prov::Param(m),
+        (Prov::Param(m), Prov::Const) => Prov::Param(m),
         (Prov::Const, Prov::Const) => Prov::Const,
         _ => Prov::NotParam,
     }

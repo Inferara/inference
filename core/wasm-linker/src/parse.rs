@@ -336,6 +336,17 @@ fn collect_custom_section(
         if role == ModuleRole::External {
             return Ok(());
         }
+        // A second spec_funcs section would silently discard the first under a
+        // last-wins assignment, dropping its proof obligations. Since the section
+        // is a verification deliverable, reject the duplicate with a clean error
+        // rather than vanish the earlier obligations.
+        if module.spec_funcs.is_some() {
+            return Err(LinkError::Parse(
+                "main module declares more than one inference.spec_funcs section; \
+                 its proof obligations would be silently dropped"
+                    .into(),
+            ));
+        }
         let decoded = crate::spec_funcs::decode(custom.data())?;
         module.spec_funcs = Some(decoded);
         return Ok(());

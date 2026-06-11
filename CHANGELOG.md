@@ -80,6 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a misleading `InvalidMergedModule`. **v128** value types are likewise rejected in
   merged signatures, locals, and block types: the Inference language has no SIMD types and
   every SIMD operator is already rejected ([#9])
+- wasm-linker: Fixed an unsound Tier-B provenance rule. Pointer subtraction classified
+  `Param - NotParam` as still parameter-derived; because `NotParam` only means *not provably
+  parameter-derived*, the subtrahend could itself be `p - C`, so `p - (p - C) == C` fabricated
+  a fixed absolute address that the analysis accepted as caller-relative — letting a Tier-B
+  external read or write host memory outside the caller's buffer. Subtraction now preserves
+  parameter-derivation only when subtracting a provable constant (`Param - Const`), mirroring
+  the existing `add` cancellation guard. The main-module rebuild also now enforces the same
+  256-level control-flow nesting cap as the external scan and the Rocq translator, rejects a
+  duplicate `inference.spec_funcs` section instead of silently keeping only the last, rejects
+  a multi-memory main, and rejects trailing bytes in a `spec_funcs` payload ([#9])
 - wasm-linker: Merged external function names in the output name section are now
   **module-prefixed** using a `module.field` dot convention. A closure root satisfying import
   `sum` from logical module `mathlib` is recorded as `mathlib.sum`; an inner callee the

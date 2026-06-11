@@ -14,7 +14,7 @@
 use inf_wasmparser::{BinaryReader, FunctionBody, Operator, ValType};
 use wasm_encoder::{Encode, Function, Instruction};
 
-use crate::safety::{check_operator, is_verification_only};
+use crate::safety::{check_operator, is_verification_only, opens_control_frame, MAX_CONTROL_DEPTH};
 use crate::LinkError;
 
 /// Where a body being re-encoded comes from, which decides how the
@@ -99,7 +99,26 @@ pub(crate) fn reencode_body(
         ops.push((op, offset));
     }
 
+    // Bound structured-control-flow nesting on this path too. The closure scan
+    // gates external bodies, but the main module's body is re-encoded here without
+    // passing through that scan; an over-nested main body would link and only fail
+    // in the downstream wasm-to-v translator (which recurses one frame per level),
+    // violating the invariant that anything the linker emits is translatable.
+    // Rejecting here at the same cap the closure scan and the translator use keeps
+    // the three passes in agreement. A `block`/`loop`/`if`/non-det op opens a
+    // frame; an `End` closes the innermost one.
+    let mut control_depth: usize = 0;
     for (i, (op, offset)) in ops.iter().enumerate() {
+        if opens_control_frame(op) {
+            control_depth += 1;
+            if control_depth >= MAX_CONTROL_DEPTH {
+                return Err(LinkError::UnsupportedConstruct(format!(
+                    "function body nests structured control flow at least {MAX_CONTROL_DEPTH} levels deep"
+                )));
+            }
+        } else if matches!(op, Operator::End) {
+            control_depth = control_depth.saturating_sub(1);
+        }
         let end = ops.get(i + 1).map_or(body.len(), |(_, o)| *o);
         let span = &body[*offset..end];
         emit_operator(&mut function, op, span, map, origin)?;
