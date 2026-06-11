@@ -384,6 +384,45 @@ fn simd_external_sum() -> Vec<u8> {
     module.finish()
 }
 
+/// Builds a *valid* external exporting `sum:(i32,i32)->i32` whose body uses a
+/// floating-point op (`f32.add` over two `f32.const`, immediately dropped). The
+/// module is well-formed WebAssembly — it passes the structural validation pass —
+/// but the Inference language has no `f32`/`f64` types and the linker's gate drops
+/// the baseline `FLOATS` flag, so the driver's gate must reject it as an
+/// unsupported feature naming floating point, not as malformed.
+fn float_external_sum() -> Vec<u8> {
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, Instruction, Module,
+        TypeSection, ValType,
+    };
+
+    let mut module = Module::new();
+    let mut types = TypeSection::new();
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32], [ValType::I32]);
+    module.section(&types);
+    let mut funcs = FunctionSection::new();
+    funcs.function(0);
+    module.section(&funcs);
+    let mut exports = ExportSection::new();
+    exports.export("sum", ExportKind::Func, 0);
+    module.section(&exports);
+    let mut code = CodeSection::new();
+    let mut func = Function::new([]);
+    func.instruction(&Instruction::F32Const(1.0.into()));
+    func.instruction(&Instruction::F32Const(1.0.into()));
+    func.instruction(&Instruction::F32Add);
+    func.instruction(&Instruction::Drop);
+    func.instruction(&Instruction::LocalGet(0));
+    func.instruction(&Instruction::LocalGet(1));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::End);
+    code.function(&func);
+    module.section(&code);
+    module.finish()
+}
+
 #[test]
 fn a_non_wasm1_external_is_rejected_as_unsupported_feature() {
     // Driver alignment: a well-formed external that uses a post-1.0 proposal
@@ -416,6 +455,43 @@ fn a_non_wasm1_external_is_rejected_as_unsupported_feature() {
             assert!(
                 reason.contains("SIMD"),
                 "the diagnostic names the unsupported feature: {reason}"
+            );
+        }
+        other => panic!("expected an UnsupportedFeature error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_floating_point_external_is_rejected_as_unsupported_feature() {
+    // Driver alignment: a well-formed external whose body uses a float op is
+    // rejected at resolution time with the same feature-named diagnostic the
+    // linker's gate produces. The Inference language has no `f32`/`f64` types, so
+    // floating point is outside the supported subset — distinct from a
+    // malformed-module `Invalid`.
+    let tree = TempTree::new("float-external");
+    tree.write("arith.wasm", &float_external_sum());
+
+    let typed = typed_of(
+        "external fn sum(a: i32, b: i32) -> i32;\n\
+         use { sum } from arith;\n\
+         pub fn use_it(x: i32) -> i32 { return sum(x, 1); }",
+    );
+
+    let mut search = SearchPath::new();
+    search.push_lib_dir(tree.root().to_path_buf());
+
+    let err = resolve_external_modules(&typed, &search, None).unwrap_err();
+    match err {
+        ExternalResolutionError::UnsupportedFeature {
+            logical_module,
+            ref path,
+            ref reason,
+        } => {
+            assert_eq!(logical_module, "arith");
+            assert!(path.ends_with("arith.wasm"), "names the offending file: {path:?}");
+            assert!(
+                reason.contains("floating-point"),
+                "the diagnostic names floating point: {reason}"
             );
         }
         other => panic!("expected an UnsupportedFeature error, got {other:?}"),

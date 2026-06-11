@@ -151,10 +151,13 @@ mod extern_link_tests {
             function_imports(&unified)
         );
 
-        // The merged `sum` reads as an ordinary named Rocq definition.
+        // The merged `sum` reads as an ordinary named Rocq definition, prefixed
+        // with its logical module so two libraries exporting the same field can
+        // never collide in the name section. The linker emits `arith.sum`, which
+        // wasm-to-v sanitizes (every non-alphanumeric to `_`) to `arith_sum`.
         assert!(
-            rocq.contains("Definition sum"),
-            "merged function must be a named Rocq definition; .v was:\n{rocq}"
+            rocq.contains("Definition arith_sum"),
+            "merged function must be a module-prefixed named Rocq definition; .v was:\n{rocq}"
         );
 
         // No orphan import record survives for the merged module: the linker
@@ -193,9 +196,13 @@ mod extern_link_tests {
             "no cross-module imports may remain, found {:?}",
             function_imports(&unified)
         );
+        // The merged `combine` is prefixed with its `::`-separated logical
+        // module: the linker emits `crypto::adder.combine`, which wasm-to-v
+        // sanitizes (every non-alphanumeric to `_`, then `__` runs collapsed) to
+        // `crypto_adder_combine`.
         assert!(
-            rocq.contains("Definition combine"),
-            "merged function must be a named Rocq definition; .v was:\n{rocq}"
+            rocq.contains("Definition crypto_adder_combine"),
+            "merged function must be a module-prefixed named Rocq definition; .v was:\n{rocq}"
         );
         assert!(
             !rocq.contains("Mi \"crypto::adder\""),

@@ -286,8 +286,9 @@ fn tier_a_main_calls_point_at_merged_bodies() {
 #[test]
 fn merged_functions_are_named_after_satisfied_import_fields() {
     // Neither fixture carries a `name` section. The two merged closure roots
-    // must still be named — after the import fields they satisfy — so the Rocq
-    // translator emits `Definition sum` / `Definition sub` rather than opaque
+    // must still be named — after the import fields they satisfy, prefixed with
+    // their logical module (`mathlib`) — so the Rocq translator emits
+    // `Definition mathlib_sum` / `Definition mathlib_sub` rather than opaque
     // `func_<uuid>` placeholders.
     let main = main_with_sum_and_sub();
     let lib = mathlib_pure();
@@ -297,12 +298,12 @@ fn merged_functions_are_named_after_satisfied_import_fields() {
     // Output indices: compute=0, merged sum=1, merged sub=2.
     let names = function_names(&linked);
     assert!(
-        names.contains(&(1, "sum".to_string())),
-        "merged sum must be named after its import field, got {names:?}"
+        names.contains(&(1, "mathlib.sum".to_string())),
+        "merged sum must be named after its module-prefixed import field, got {names:?}"
     );
     assert!(
-        names.contains(&(2, "sub".to_string())),
-        "merged sub must be named after its import field, got {names:?}"
+        names.contains(&(2, "mathlib.sub".to_string())),
+        "merged sub must be named after its module-prefixed import field, got {names:?}"
     );
 }
 
@@ -332,8 +333,8 @@ fn main_function_names_survive_the_merge() {
         "main `compute` name must survive at output index 0, got {names:?}"
     );
     assert!(
-        names.contains(&(1, "sum".to_string())),
-        "merged `sum` must be named, got {names:?}"
+        names.contains(&(1, "mathlib.sum".to_string())),
+        "merged `sum` must be named with its module prefix, got {names:?}"
     );
 }
 
@@ -869,10 +870,12 @@ fn lib_exporting_funcref_param_entry() -> Vec<u8> {
 
 #[test]
 fn merged_body_with_locals_and_value_block_survives_reencode() {
-    // The merged external `classify` declares locals (i64 and f64) and uses an
+    // The merged external `classify` declares locals (i64 and i32) and uses an
     // `if (result i32)` value-typed block. Re-encoding the body must preserve the
     // locals vector and re-emit the value block type — exercising the locals and
-    // block-type paths the pure-arithmetic fixtures never touch.
+    // block-type paths the pure-arithmetic fixtures never touch. The locals are
+    // integer types only: the Inference language has no `f32`/`f64` types, so a
+    // float local is rejected by the value-type chokepoint rather than merged.
     let main = wasm(
         r#"
         (module
@@ -889,7 +892,7 @@ fn merged_body_with_locals_and_value_block_survives_reencode() {
         (module
           (type (;0;) (func (param i32) (result i32)))
           (func (;0;) (type 0) (param i32) (result i32)
-            (local i64 f64)
+            (local i64 i32)
             local.get 0
             i32.const 0
             i32.gt_s
@@ -908,7 +911,7 @@ fn merged_body_with_locals_and_value_block_survives_reencode() {
     let locals = body_locals(&linked, 1);
     assert_eq!(
         locals,
-        vec![(1, "I64".to_string()), (1, "F64".to_string())],
+        vec![(1, "I64".to_string()), (1, "I32".to_string())],
         "merged body locals must be preserved through re-encoding, got {locals:?}"
     );
 
@@ -920,16 +923,19 @@ fn merged_body_with_locals_and_value_block_survives_reencode() {
 
 #[test]
 fn merged_closure_with_mixed_value_types_dedups_and_reencodes() {
-    // The library's `mix` takes (i64, f64) and returns f64, and delegates to an
+    // The library's `mix` takes (i64, i32) and returns i64, and delegates to an
     // internal `helper` of the same signature. Merging exercises the non-i32
     // arms of every value-type mapping (type-section emission, sig dedup key,
-    // and external-body type remap) plus a transitive closure re-index.
+    // and external-body type remap) plus a transitive closure re-index. The
+    // signature mixes i64 and i32 — distinct integer value types — since the
+    // Inference language has no `f32`/`f64` types and a float signature would be
+    // rejected by the value-type chokepoint rather than deduped and merged.
     let main = wasm(
         r#"
         (module
-          (type (;0;) (func (param i64 f64) (result f64)))
-          (import "fp" "mix" (func (;0;) (type 0)))
-          (func (;1;) (type 0) (param i64 f64) (result f64)
+          (type (;0;) (func (param i64 i32) (result i64)))
+          (import "ints" "mix" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i64 i32) (result i64)
             local.get 0
             local.get 1
             call 0)
@@ -939,15 +945,15 @@ fn merged_closure_with_mixed_value_types_dedups_and_reencodes() {
     let lib = wasm(
         r#"
         (module
-          (type (;0;) (func (param i64 f64) (result f64)))
-          (func (;0;) (type 0) (param i64 f64) (result f64)
+          (type (;0;) (func (param i64 i32) (result i64)))
+          (func (;0;) (type 0) (param i64 i32) (result i64)
             local.get 0
             local.get 1
             call 1)
-          (func (;1;) (type 0) (param i64 f64) (result f64)
-            local.get 1
-            f64.const 1
-            f64.add)
+          (func (;1;) (type 0) (param i64 i32) (result i64)
+            local.get 0
+            i64.const 1
+            i64.add)
           (export "mix" (func 0)))
         "#,
     );
@@ -958,15 +964,15 @@ fn merged_closure_with_mixed_value_types_dedups_and_reencodes() {
     // run + merged mix + merged helper.
     assert_eq!(code_body_count(&linked), 3);
 
-    // All four functions share one (i64,f64)->f64 type; it must dedup to one.
+    // All four functions share one (i64,i32)->i64 type; it must dedup to one.
     let sigs = type_signatures(&linked);
     assert_eq!(
         sigs,
         vec![(
-            vec!["I64".to_string(), "F64".to_string()],
-            vec!["F64".to_string()]
+            vec!["I64".to_string(), "I32".to_string()],
+            vec!["I64".to_string()]
         )],
-        "the single (i64,f64)->f64 signature must dedup to one type, got {sigs:?}"
+        "the single (i64,i32)->i64 signature must dedup to one type, got {sigs:?}"
     );
 
     // mix (output 1) re-indexes its internal call to helper (output 2).
@@ -1445,6 +1451,162 @@ fn external_with_start_section_is_rejected() {
 }
 
 #[test]
+fn main_with_start_section_is_rejected() {
+    // A main module declaring its own start function. `emit` rebuilds the main
+    // module section-by-section and writes no `StartSection`, so the start
+    // function (and its initializer side-effects) would silently vanish from the
+    // output — a valid-but-wrong `.wasm`/`.v`. The merge must reject it up front,
+    // mirroring the main-side data/element-segment guards.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func))
+          (type (;1;) (func (result i32)))
+          (global $g (mut i32) (i32.const 0))
+          (func $init (;0;) (type 0)
+            i32.const 42
+            global.set 0)
+          (func $main (;1;) (type 1) (result i32)
+            global.get 0)
+          (start 0)
+          (export "main" (func 1)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main start section must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("start")),
+        "expected an UnsupportedConstruct mentioning the start section, got {err:?}"
+    );
+}
+
+#[test]
+fn main_importing_a_non_function_is_rejected() {
+    // A main module importing a global from its environment. `emit` writes no
+    // import section, so the imported global silently vanishes and a body's
+    // `global.get 0` rebinds to the first *defined* global — a wrong value in a
+    // valid-but-wrong output, with no diagnostic. The merge models function
+    // imports only; reject the non-function import up front.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "env" "g" (global (;0;) i32))
+          (global (;1;) i32 (i32.const 42))
+          (func (;0;) (type 0) (result i32)
+            global.get 0)
+          (export "main" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main non-function import must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("non-function")),
+        "expected an UnsupportedConstruct mentioning a non-function import, got {err:?}"
+    );
+}
+
+#[test]
+fn main_importing_a_float_global_is_rejected_not_swallowed() {
+    // The float variant of the non-function-import case: an `f32` global import.
+    // Dropping the import section would silently swallow it, defeating the
+    // no-floats contract. The non-function-import guard rejects it before the
+    // float ever has a chance to reach (or bypass) any value-type check.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (import "env" "g" (global (;0;) f32))
+          (func (;0;) (type 0) (result i32)
+            i32.const 0)
+          (export "main" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main float-global import must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("non-function")),
+        "expected an UnsupportedConstruct mentioning a non-function import, got {err:?}"
+    );
+}
+
+#[test]
+fn main_with_table_section_is_rejected() {
+    // A main module declaring a table and using it via `call_indirect`. `emit`
+    // writes no `TableSection`, so the table is silently dropped; the surviving
+    // `call_indirect` then fails *after* the merge as
+    // `InvalidMergedModule("unknown table 0")`, blaming the linker's own output
+    // rather than naming the unsupported main-side construct. Reject the table
+    // section up front with a clear diagnostic.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (table (;0;) 1 funcref)
+          (func (;0;) (type 0) (result i32)
+            i32.const 0
+            call_indirect (type 0))
+          (export "main" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main table section must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("table")),
+        "expected an UnsupportedConstruct mentioning the table section, got {err:?}"
+    );
+}
+
+#[test]
+fn main_with_v128_local_is_rejected() {
+    // A main module whose body declares a `v128` local. The Inference language has
+    // no SIMD types, and every SIMD operator is rejected, so the value-type axis
+    // must be consistent: a `v128` local would otherwise pass through the
+    // main-module re-encode path (which bypasses the feature gate) into the
+    // output. Reject it on the value-type axis.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (func (;0;) (type 0) (result i32)
+            (local v128)
+            i32.const 0)
+          (export "main" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main v128 local must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
+        "expected an UnsupportedConstruct mentioning v128, got {err:?}"
+    );
+}
+
+#[test]
+fn main_with_unused_v128_type_entry_is_rejected() {
+    // A `v128` reaching the output through a type-section entry rather than a
+    // local: the merged type table copies the main module's function signatures,
+    // so a signature naming `v128` would carry the SIMD type through even with no
+    // SIMD operator present. Reject it on the type/signature axis.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (result i32)))
+          (type (;1;) (func (param v128)))
+          (func (;0;) (type 0) (result i32)
+            i32.const 0)
+          (export "main" (func 0)))
+        "#,
+    );
+
+    let err = link(&main, &[]).expect_err("main v128 type entry must be rejected");
+    assert!(
+        matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
+        "expected an UnsupportedConstruct mentioning v128, got {err:?}"
+    );
+}
+
+#[test]
 fn atomic_op_into_memoryless_main_is_rejected_not_silently() {
     // H26 / feature gate: a shared-memory atomic external linked into a
     // memoryless main. The atomic op and its shared memory belong to the threads
@@ -1586,6 +1748,125 @@ fn same_field_two_modules_binds_the_named_module_not_the_first() {
     assert!(
         body_has_i32_add(&reversed, 1),
         "filename/slice order must not decide the merged body"
+    );
+}
+
+/// Two externals bound under *different* logical modules both export `sum`, and
+/// the main module imports `sum` from each. The module-prefixed naming makes the
+/// two merged roots' name-section entries distinct by construction (`alib.sum`,
+/// `blib.sum`), so neither collides nor forces wasm-to-v's index-suffix
+/// disambiguation — even though their import field is identical.
+#[test]
+fn same_field_two_modules_get_distinct_prefixed_names() {
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "alib" "sum" (func (;0;) (type 0)))
+          (import "blib" "sum" (func (;1;) (type 0)))
+          (func (;2;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0
+            local.get 0
+            local.get 1
+            call 1
+            i32.sub)
+          (export "compute" (func 2)))
+        "#,
+    );
+    let alib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "sum" (func 0)))
+        "#,
+    );
+    let blib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.mul)
+          (export "sum" (func 0)))
+        "#,
+    );
+
+    let linked = raw_link(&main, &[("alib", &alib), ("blib", &blib)])
+        .expect("both same-field modules must satisfy their respective imports");
+    assert_valid(&linked);
+    assert!(function_imports(&linked).is_empty());
+
+    // Output indices: compute=0, then the two merged `sum` roots. Both carry the
+    // import field `sum`, so only the module prefix keeps their name-section
+    // entries distinct.
+    let names = function_names(&linked);
+    let merged: std::collections::BTreeSet<&str> = names
+        .iter()
+        .filter(|(idx, _)| *idx != 0)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    assert!(
+        merged.contains("alib.sum"),
+        "the alib-bound root must be named `alib.sum`, got {names:?}"
+    );
+    assert!(
+        merged.contains("blib.sum"),
+        "the blib-bound root must be named `blib.sum`, got {names:?}"
+    );
+    assert_eq!(
+        merged.len(),
+        2,
+        "the two same-field roots must have distinct names by construction, got {names:?}"
+    );
+}
+
+/// A logical module name carrying Inference's `::` path separator
+/// (`crypto::sha256`) must flow through the prefix unchanged and deterministically
+/// (`crypto::sha256.hash`), with no panic. The downstream Rocq translator
+/// sanitizes every non-alphanumeric to `_`, so the residual `::` is the
+/// translator's concern, not the linker's — the linker keeps the logical name
+/// verbatim so the prefix stays traceable to its source module.
+#[test]
+fn a_path_separated_logical_module_name_prefixes_deterministically() {
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (import "crypto::sha256" "hash" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32 i32) (result i32)))
+          (func (;0;) (type 0) (param i32 i32) (result i32)
+            local.get 0
+            local.get 1
+            i32.add)
+          (export "hash" (func 0)))
+        "#,
+    );
+
+    let linked = raw_link(&main, &[("crypto::sha256", &lib)])
+        .expect("a `::`-separated logical module must link without panicking");
+    assert_valid(&linked);
+
+    let names = function_names(&linked);
+    assert!(
+        names.contains(&(1, "crypto::sha256.hash".to_string())),
+        "the merged root must keep its logical module verbatim in the prefix, got {names:?}"
     );
 }
 
@@ -3199,9 +3480,11 @@ fn external_nested_within_the_cap_merges() {
 ///
 /// The external (built from plain WAT) has no name section, so its inner callee
 /// `func 1` starts nameless. The closure root that satisfies the import is
-/// renamed to the import field (`compute`); the inner callee must be filled
-/// with `func_<out_idx>` rather than left nameless (which previously forced
-/// wasm-to-v down a per-process random-UUID path).
+/// renamed to the import field, prefixed with its logical module
+/// (`lib.compute`); the inner callee must be filled with `<module>.func_<out_idx>`
+/// (`lib.func_2`) rather than left nameless (which previously forced wasm-to-v
+/// down a per-process random-UUID path). The `lib.` prefix sanitizes to `lib_`
+/// in the downstream Rocq names.
 #[test]
 fn nameless_merged_inner_callee_gets_deterministic_name() {
     let main = wasm(
@@ -3236,25 +3519,27 @@ fn nameless_merged_inner_callee_gets_deterministic_name() {
     assert_valid(&linked);
 
     let names = function_names(&linked);
-    // The closure root is named after the import field it satisfies.
+    // The closure root is named after the import field it satisfies, prefixed
+    // with its logical module.
     assert!(
-        names.iter().any(|(_, n)| n == "compute"),
-        "the closure root should be named `compute`: {names:?}"
+        names.iter().any(|(_, n)| n == "lib.compute"),
+        "the closure root should be named `lib.compute`: {names:?}"
     );
     // Every merged function carries a name (a complete name section), and the
-    // nameless inner callee is named deterministically from its output index —
-    // never left out of the section.
+    // nameless inner callee is named deterministically from its output index,
+    // under the same `<module>.` namespace as the root — never left out of the
+    // section.
     assert!(
-        names.iter().any(|(_, n)| n.starts_with("func_")),
-        "the nameless inner callee should get a deterministic `func_<idx>` name: {names:?}"
+        names.iter().any(|(_, n)| n == "lib.func_2"),
+        "the nameless inner callee should get a deterministic `lib.func_<idx>` name: {names:?}"
     );
-    // No UUID-style name leaks in: a deterministic name is a plain `func_<idx>`
-    // whose suffix parses as an integer.
+    // No UUID-style name leaks in: a deterministic fallback name is a plain
+    // `<module>.func_<idx>` whose suffix after the last `.` parses as an integer.
     for (_, n) in &names {
-        if let Some(suffix) = n.strip_prefix("func_") {
+        if let Some(suffix) = n.rsplit('.').next().and_then(|s| s.strip_prefix("func_")) {
             assert!(
                 suffix.parse::<u32>().is_ok(),
-                "a `func_`-prefixed name must be index-derived, not a UUID: {n}"
+                "a `func_`-prefixed fallback name must be index-derived, not a UUID: {n}"
             );
         }
     }
@@ -3901,15 +4186,16 @@ fn main_module_with_an_element_segment_is_rejected_cleanly() {
 
 // -- WASM 1.0 feature gate: supported post-MVP additions link ------------------
 //
-// `SUPPORTED_WASM_FEATURES` is WASM 1.0 plus exactly three scalar post-MVP
-// additions Inference codegen emits and the merge models: sign-extension,
-// saturating float-to-int, and bulk memory. An external using only these must
-// pass the link gate and merge normally — the gate rejects *post-1.0 proposals*,
-// not these deliberately-supported ops.
+// `SUPPORTED_WASM_FEATURES` is the integer WASM 1.0 core plus exactly one scalar
+// post-MVP addition the merge models: bulk memory. An external using only this
+// must pass the link gate and merge normally — the gate rejects *every* other
+// post-1.0 proposal, including sign-extension and saturating float-to-int (the
+// Rocq translator models neither), and all floating point (the Inference language
+// has no `f32`/`f64` types).
 
 /// A main module importing a pure `f:(i32)->i32` from `lib` and calling it. The
-/// shared shape for the positive feature-gate fixtures, each of which supplies a
-/// `lib` exporting `f` whose body exercises one supported post-MVP op.
+/// shared shape for the feature-gate fixtures, each of which supplies a `lib`
+/// exporting `f` whose body exercises one post-MVP op.
 fn main_importing_f() -> Vec<u8> {
     wasm(
         r#"
@@ -3925,9 +4211,13 @@ fn main_importing_f() -> Vec<u8> {
 }
 
 #[test]
-fn sign_extension_external_passes_the_gate_and_merges() {
-    // The sign-extension proposal (`i32.extend8_s`) is in the supported subset, so
-    // the gate admits it and the body merges into a valid module.
+fn sign_extension_external_is_rejected_at_the_feature_gate() {
+    // The sign-extension proposal (`i32.extend8_s`) is outside the supported
+    // subset: the Rocq translator has no lowering for it, and Inference codegen
+    // narrows sub-i32 values with shifts/masks instead of emitting it. The gate's
+    // feature pass rejects such an external up front with the validator's
+    // sign-extension diagnostic — before the closure scanner's allow-list (the
+    // defense-in-depth backstop, tested directly in `safety.rs`) is reached.
     let main = main_importing_f();
     let lib = wasm(
         r#"
@@ -3939,17 +4229,20 @@ fn sign_extension_external_passes_the_gate_and_merges() {
           (export "f" (func 0)))
         "#,
     );
-    let linked = link(&main, &[&lib]).expect("a sign-extension external must link");
-    assert_valid(&linked);
-    assert!(function_imports(&linked).is_empty());
-    assert_eq!(code_body_count(&linked), 2, "main `run` plus the merged `f`");
+    let err = assert_clean_rejection(&main, &lib, "sign extension");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("sign extension")),
+        "expected an UnsupportedWasmFeature naming sign extension, got {err:?}"
+    );
 }
 
 #[test]
-fn saturating_float_to_int_external_passes_the_gate_and_merges() {
-    // The saturating float-to-int proposal (`i32.trunc_sat_f32_s`) is in the
-    // supported subset. The body takes an f32 and returns an i32, so the import
-    // signature matches a dedicated `lib` rather than `main_importing_f`.
+fn saturating_float_to_int_external_is_rejected_at_the_feature_gate() {
+    // The saturating float-to-int proposal (`i32.trunc_sat_f32_s`) is outside the
+    // supported subset: the Rocq translator has no lowering for it, and its
+    // operand is a float — and the Inference language has no `f32`/`f64` types.
+    // The body takes an f32 and returns an i32, so the gate rejects it on the
+    // float type first; the validator names floating point.
     let main = wasm(
         r#"
         (module
@@ -3971,10 +4264,11 @@ fn saturating_float_to_int_external_passes_the_gate_and_merges() {
           (export "f" (func 0)))
         "#,
     );
-    let linked = link(&main, &[&lib]).expect("a saturating-conversion external must link");
-    assert_valid(&linked);
-    assert!(function_imports(&linked).is_empty());
-    assert_eq!(code_body_count(&linked), 2);
+    let err = assert_clean_rejection(&main, &lib, "saturating float-to-int");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
 }
 
 #[test]
@@ -4119,11 +4413,190 @@ fn multi_result_function_external_is_rejected_at_the_feature_gate() {
     );
 }
 
+// -- Floating point: no f32/f64 anywhere, rejected at the gate ----------------
+//
+// The Inference language has no `f32`/`f64` types: codegen never emits a float
+// operator, value type, or constant, and the Rocq translator models none. The
+// feature gate (`SUPPORTED_WASM_FEATURES`) drops the fork's baseline `FLOATS`
+// flag, so the validator rejects, at the feature pass, any float instruction
+// ("floating-point instruction disallowed") and any float value type in a
+// signature, local, or global ("floating-point support is disabled"). Each case
+// below proves a distinct float surface — operator, signature, local, global,
+// constant — is rejected *at the gate* with a feature-named `UnsupportedWasmFeature`
+// naming floating point, before the per-opcode / value-type backstops in the
+// merge are reached.
+
+#[test]
+fn float_op_external_is_rejected_at_the_feature_gate() {
+    // A float *operator* in the external body. The signature stays integer so the
+    // rejection is attributable to the operator, not the type.
+    let main = main_importing_f();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            f32.const 1
+            f32.const 1
+            f32.add
+            drop
+            local.get 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    let err = assert_clean_rejection(&main, &lib, "float operator");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
+}
+
+#[test]
+fn float_in_signature_only_external_is_rejected_at_the_feature_gate() {
+    // A float appears *only* in a reachable function's signature — no float
+    // operator anywhere. The reachable `(param f64) (result i32)` helper sits
+    // behind an i32 root, so a signature-blind upstream check could admit it; the
+    // gate must still reject on the float value type in the signature.
+    let main = main_importing_f();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (type (;1;) (func (param f64) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            local.get 0)
+          (func (;1;) (type 1) (param f64) (result i32)
+            i32.const 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    let err = assert_clean_rejection(&main, &lib, "float in signature");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
+}
+
+#[test]
+fn float_local_only_external_is_rejected_at_the_feature_gate() {
+    // A float appears only as a *local* — no float operator, no float in any
+    // signature. The gate rejects on the float value type of the local.
+    let main = main_importing_f();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            (local f32)
+            local.get 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    let err = assert_clean_rejection(&main, &lib, "float local");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
+}
+
+#[test]
+fn float_global_external_is_rejected_at_the_feature_gate() {
+    // An `f32` global declared in the external. The gate rejects on the float
+    // value type of the global, before the global-collection chokepoint in
+    // `parse::collect_global` is reached.
+    let main = main_importing_f();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (global (;0;) f32 (f32.const 1))
+          (func (;0;) (type 0) (param i32) (result i32)
+            local.get 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    let err = assert_clean_rejection(&main, &lib, "float global");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
+}
+
+#[test]
+fn float_const_only_external_is_rejected_at_the_feature_gate() {
+    // A lone `f64.const` (immediately dropped) with an otherwise-integer
+    // signature. The float constant is itself a float instruction, so the gate's
+    // feature pass rejects it.
+    let main = main_importing_f();
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            f64.const 1
+            drop
+            local.get 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    let err = assert_clean_rejection(&main, &lib, "float const");
+    assert!(
+        matches!(&err, LinkError::UnsupportedWasmFeature { details, .. } if details.contains("floating-point")),
+        "expected an UnsupportedWasmFeature naming floating point, got {err:?}"
+    );
+}
+
+#[test]
+fn main_module_carrying_a_float_is_rejected_cleanly() {
+    // The MAIN module is not passed through the feature gate (it is the linker's
+    // own codegen output on the live pipeline), but the public `link()` API
+    // accepts arbitrary main bytes. A main carrying a float operator must still be
+    // rejected with a clean `LinkError` — never a panic, never a silent merge.
+    // The allow-list backstop on the main re-encode path catches the float op.
+    let main = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (import "lib" "f" (func (;0;) (type 0)))
+          (func (;1;) (type 0) (param i32) (result i32)
+            f32.const 1
+            f32.const 1
+            f32.add
+            drop
+            local.get 0
+            call 0)
+          (export "run" (func 1)))
+        "#,
+    );
+    let lib = wasm(
+        r#"
+        (module
+          (type (;0;) (func (param i32) (result i32)))
+          (func (;0;) (type 0) (param i32) (result i32)
+            local.get 0)
+          (export "f" (func 0)))
+        "#,
+    );
+    match link(&main, &[&lib]) {
+        Ok(bytes) => panic!(
+            "a float-carrying main silently produced a {}-byte module; it must be rejected",
+            bytes.len()
+        ),
+        Err(LinkError::UnsupportedConstruct(msg)) => {
+            assert!(
+                msg.contains("floating-point"),
+                "expected a floating-point UnsupportedConstruct, got {msg:?}"
+            );
+        }
+        Err(other) => panic!("expected a floating-point UnsupportedConstruct, got {other:?}"),
+    }
+}
+
 // -- COV-2 (D3): GC and stack-switching externals are rejected ---------------
 //
-// `SUPPORTED_WASM_FEATURES` includes the fork's baseline `GC_TYPES` value-type
-// flag (transitively via `WASM1`), but admits NO GC *proposal* construct: a GC
-// type still needs the `GC` feature, which is off. These tests pin the ACTUAL
+// `SUPPORTED_WASM_FEATURES` names the fork's baseline `GC_TYPES` value-type flag
+// directly, but admits NO GC *proposal* construct: a GC type still needs the `GC`
+// feature, which is off. These tests pin the ACTUAL
 // rejection layer determined empirically — the GC type is caught by the gate's
 // feature pass naming `gc`, the stack-switching construct by the gate's
 // structural pass (continuation types are off even under default features).

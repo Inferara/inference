@@ -58,7 +58,10 @@ byte-identical to the input wherever no index changes.
 Two functions with identical signatures share one type entry in the output type
 section. The deduplication key is a byte-packed encoding of the parameter and
 result value types. This prevents the type section from growing with duplicate
-entries as more external closures are merged in.
+entries as more external closures are merged in. Only **type-section entries**
+(signature declarations) are deduplicated — function bodies are never
+deduplicated or dropped by this step. Unreachable functions are excluded earlier
+by the transitive closure walk, before any output index is committed.
 
 ### Name Section
 
@@ -67,10 +70,29 @@ named `Definition`s rather than opaque `func_<uuid>` placeholders:
 
 - Main module local functions keep their source debug names (re-indexed onto the
   import-free output space).
-- Each merged closure root is named after the import field it satisfies (e.g., a
-  closure that satisfies import `sum` is named `sum`). Inner callees that the
-  source module named retain their own debug names.
+- Every merged external function is named under its source's logical module,
+  using a `module.field` form:
+  - A merged closure **root** is named `<module>.<import field>` — a closure that
+    satisfies import `sum` bound under logical module `mathlib` becomes
+    `mathlib.sum`.
+  - A merged **inner callee** the source module named keeps that name, prefixed:
+    `mathlib.helper`.
+  - A **nameless** inner callee (an external stripped of its name section) is
+    given a deterministic fallback derived from its output index, prefixed the
+    same way: `mathlib.func_<idx>`.
 - If no function carries a name, the name section is omitted entirely.
+
+The module prefix is collision-free by construction: two externals bound under
+different logical modules may export — and internally call — functions of the
+same field, and an unprefixed scheme would let those names collide in the name
+section, forcing the Rocq translator down its index-suffix disambiguation
+(`sum` vs `sum_2`), which is index-dependent and shifts across merges. The `.`
+separator matches Inference's `Type.method` naming convention. The Rocq
+translator (`core/wasm-to-v/src/rocq_names.rs`) sanitizes every non-alphanumeric
+to `_`, so `mathlib.sum` reads as `Definition mathlib_sum` in the `.v`. A residual
+name collision after sanitization (e.g. two distinct logical modules that
+sanitize to the same identifier) is still disambiguated by the translator's index
+suffix; the module prefix removes the common case rather than every possible one.
 
 ## Feasibility Tiers
 
@@ -175,7 +197,29 @@ to a same-named `sum` exported by a different module.
 | `LinkError::UnsatisfiedImport { field }` | No external module exports a function named `field` |
 | `LinkError::TransitiveHostImport { module, field }` | A body inside the merged closure calls one of the external module's own imports; there is no body to copy for it |
 | `LinkError::RequiresRelocatableBuild { field, reasons }` | The closure for `field` is Tier C; `reasons` lists the specific signals |
-| `LinkError::UnsupportedConstruct(msg)` | The external module imports its environment (non-function imports), or a body contains a reference-typed value |
+| `LinkError::UnsupportedConstruct(msg)` | A body contains an unmergeable construct: any floating-point instruction (diagnosed with the exact mnemonic, e.g. `floating-point instruction 'f32.add' is not supported`), a float or `v128` value type in a merged signature/local/block type, a reference-typed value, a tail call (`return_call`/`return_call_indirect`), a sign-extension op, a segment-indexed table op (`table.init`/`elem.drop`/`table.copy`), a verification-only non-det or uzumaki opcode in an external body, or the external module importing its environment (non-function imports). Also raised when the main module carries a section the merge cannot preserve: a start function, a table section, non-function imports, or data/element segments. The message names the specific construct. |
+| `LinkError::UnsupportedWasmFeature { module, details }` | The external module is well-formed WASM but uses a feature outside the supported subset: any floating-point type or instruction, sign-extension, saturating float-to-int, reference types, SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, GC, or tail calls. The `details` field carries the validator's feature-named diagnostic. |
+
+## Supported Subset
+
+The linker accepts only the following WebAssembly feature set (see `SUPPORTED_WASM_FEATURES` in `src/lib.rs`):
+
+- Integer core: `i32`/`i64` value types, all integer arithmetic, comparisons, loads/stores, and the three integer width conversions (`i32.wrap_i64`, `i64.extend_i32_s/u`).
+- Mutable globals and bulk memory (`memory.copy`/`memory.fill`).
+
+Rejected at the feature gate (external modules using any of these produce `UnsupportedWasmFeature`):
+
+- **Floats** — `f32`/`f64` value types in any signature, local, or global; any float instruction. The Inference language has no `f32`/`f64` types and the Rocq translator models none.
+- **Sign-extension** (`i32.extend8_s`, `i64.extend32_s`, etc.) — the Rocq translator has no lowering.
+- **Saturating float-to-int** (`i32.trunc_sat_f32_s`, etc.) — the Rocq translator has no lowering.
+- Reference types, SIMD, atomics/threads, exceptions, `memory64`, multi-memory, multi-value, GC, tail calls.
+
+The safety allow-list (`src/safety.rs`) provides an independent per-opcode backstop. It additionally rejects, as `UnsupportedConstruct`:
+
+- Tail calls (`return_call`/`return_call_indirect`) — the Rocq translator has no lowering.
+- Segment-indexed table ops (`table.init`/`elem.drop`/`table.copy`) — carry element segments the merge cannot relocate, and the Rocq translator has no lowering.
+- Float instructions that reach the allow-list from the main-module re-encode path (which bypasses the feature gate), diagnosed with the exact mnemonic.
+- Verification-only constructs (`forall`/`exists`/`assume`/`unique` blocks, `i32.uzumaki`/`i64.uzumaki`) in an external body — they have no executable semantics.
 
 ## Current Limitations
 
@@ -186,9 +230,13 @@ to a same-named `sum` exported by a different module.
   imports — memory, global, tag) is rejected as `UnsupportedConstruct`. A module
   importing only other functions from its host is rejected as
   `TransitiveHostImport` when the closure reaches one of those imports.
-- Reference-typed values (`funcref`, `externref`) in merged bodies are rejected
-  as `UnsupportedConstruct`. The Inference codegen output uses only `i32`/`i64`,
+- Reference-typed values (`funcref`, `externref`) and `v128` in merged signatures or bodies
+  are rejected as `UnsupportedConstruct`. The Inference codegen output uses only `i32`/`i64`,
   so this limit does not affect Inference-generated main modules.
+- The main module must not declare a start function, a table section, data or element
+  segments, or non-function imports — the static merge does not preserve these sections, so
+  each is rejected up front rather than silently dropped. Inference codegen emits none of
+  them; the guards apply to hand-built or third-party main modules fed to the public `link()`.
 - One `.wasm` library version per logical name. Multi-version resolution is
   deferred to the manifest layer (issue #96).
 

@@ -193,6 +193,43 @@ impl Plan {
                 main.element_count
             )));
         }
+        // A main-side start function runs side-effecting initialization that
+        // `emit` rebuilds no `StartSection` for — so it would be silently dropped,
+        // losing its initializer effects in a valid-but-wrong `.wasm`/`.v`. Reject
+        // it up front, mirroring the external-side start guard. Inference codegen
+        // emits no start section, so this guards the public library API.
+        if main.start.is_some() {
+            return Err(LinkError::UnsupportedConstruct(
+                "main module declares a start function; the static merge does not \
+                 preserve the start section"
+                    .into(),
+            ));
+        }
+        // `emit` writes no import section: every function import is satisfied and
+        // removed, and the merge models *function* imports only. A main-side
+        // non-function import (global/memory/table) would be silently dropped, and
+        // a body's `global.get`/etc. would then rebind to the first *defined*
+        // entity — a wrong value in a valid-but-wrong output, with no diagnostic.
+        // Reject it up front.
+        if main.non_func_imports > 0 {
+            return Err(LinkError::UnsupportedConstruct(format!(
+                "main module imports {} non-function (global/memory/table) entit{} from its \
+                 environment; the static merge models function imports only",
+                main.non_func_imports,
+                if main.non_func_imports == 1 { "y" } else { "ies" }
+            )));
+        }
+        // `emit` writes no `TableSection`, so a main-side table is silently
+        // dropped; a surviving `call_indirect`/`table.*` then fails *after* the
+        // merge as `InvalidMergedModule("unknown table 0")`, blaming the linker's
+        // own output rather than naming the unsupported construct. Reject the
+        // table section up front so the diagnostic names the real cause.
+        if !main.tables.is_empty() {
+            return Err(LinkError::UnsupportedConstruct(format!(
+                "main module declares {} table(s); the static merge does not preserve tables",
+                main.tables.len()
+            )));
+        }
 
         // 1. Seed the output type table with the main module's function types,
         //    recording where each main type index lands.
@@ -350,11 +387,27 @@ impl Plan {
                 let out_func_idx = next_output_idx;
                 next_output_idx += 1;
                 merged_index.insert(key, out_func_idx);
+                // Prefix the merged inner callee's debug name with its logical
+                // module (`mathlib.helper`). Two externals bound under different
+                // logical modules may export — and internally call — functions of
+                // the same name; without the prefix those names would collide in
+                // the output name section and force wasm-to-v's index-suffix
+                // disambiguation (`helper` vs `helper_2`), which is index-
+                // dependent and shifts across merges. The prefix keeps each merged
+                // function traceable to its source module and makes the *wasm-level*
+                // names distinct. It is not a hard collision guarantee at the Rocq
+                // level: wasm-to-v sanitizes `.` (and other non-identifier bytes)
+                // to `_`, so two distinct sources can still sanitize to the same
+                // Rocq identifier (e.g. via `__` runs); wasm-to-v's index suffix
+                // remains the final disambiguator. The `.` separator matches
+                // Inference's `Type.method` convention.
                 merged.push(MergedFunc {
                     external_idx: ext_idx,
                     source_func_idx: src_func,
                     out_type_idx,
-                    name: external.func_name(src_func).map(str::to_string),
+                    name: external
+                        .func_name(src_func)
+                        .map(|name| format!("{}.{name}", external.logical_module)),
                 });
             }
 
@@ -362,30 +415,49 @@ impl Plan {
             import_target.insert(import_idx as u32, root_output);
 
             // The closure root satisfies this import: name it after the import
-            // field (e.g. `sum`) so the merged function reads as an ordinary,
-            // named definition. An explicit debug name on the source module
+            // field, prefixed with the external's logical module
+            // (`mathlib.sum`), so the merged function reads as an ordinary, named
+            // definition that is traceable to its source module. The field alone
+            // is not unique: two externals bound under different logical modules
+            // may satisfy imports of the same field, and their roots would then
+            // collide in the output name section, forcing wasm-to-v's index-
+            // suffix disambiguation (`sum` vs `sum_2`), which is index-dependent
+            // across merges. The module prefix makes the wasm-level names distinct;
+            // it is not a hard Rocq-level collision guarantee, since wasm-to-v
+            // sanitizes `.` to `_` and two distinct sources can still sanitize to
+            // the same Rocq identifier (`__` runs), with wasm-to-v's index suffix
+            // as the final disambiguator. The `.` separator matches Inference's
+            // `Type.method` convention. An explicit debug name on the source module
             // would otherwise win, but a codegen-produced external typically
             // exports the field under that same name, so this is stable.
+            let external = &externals[ext_idx];
             let field = &main.imported_funcs[import_idx].field;
             if let Some(root_merged) = merged.iter_mut().find(|m| {
                 merged_index.get(&(m.external_idx, m.source_func_idx)) == Some(&root_output)
             }) {
-                root_merged.name = Some(field.clone());
+                root_merged.name = Some(format!("{}.{field}", external.logical_module));
             }
         }
 
         // Give every still-nameless merged inner callee a name derived from its
-        // output function index. An external stripped of its `name` section
-        // (third-party / `wasm-tools`-stripped) leaves inner callees with
-        // `name: None`; without a name `build_func_names` emits no name-section
-        // entry, and `wasm-to-v` then falls back to a per-process random UUID
-        // `Definition` name, making the `.v` non-reproducible for byte-identical
-        // input. Naming each from its deterministic output index keeps the name
-        // section complete and the proof artifact reproducible.
+        // output function index, prefixed with its logical module
+        // (`lib.func_5`). An external stripped of its `name` section (third-party
+        // / `wasm-tools`-stripped) leaves inner callees with `name: None`;
+        // without a name `build_func_names` emits no name-section entry, and
+        // `wasm-to-v` then falls back to a per-process random UUID `Definition`
+        // name, making the `.v` non-reproducible for byte-identical input. Naming
+        // each from its deterministic output index keeps the name section
+        // complete and the proof artifact reproducible. The module prefix keeps
+        // the synthesized name in the same `module.field` namespace as the named
+        // roots and callees above, so two stripped externals can never produce
+        // the same fallback name for distinct functions. The `.` separator
+        // matches Inference's `Type.method` convention and sanitizes to `_` in
+        // the Rocq name.
         let merged_base = main_local_base + main.local_funcs.len() as u32;
         for (i, m) in merged.iter_mut().enumerate() {
             if m.name.is_none() {
-                m.name = Some(format!("func_{}", merged_base + i as u32));
+                let logical_module = &externals[m.external_idx].logical_module;
+                m.name = Some(format!("{}.func_{}", logical_module, merged_base + i as u32));
             }
         }
 
@@ -783,17 +855,32 @@ fn sig_key(sig: &FuncSig) -> Result<Vec<u8>, LinkError> {
     Ok(key)
 }
 
-/// A dedup discriminant for a non-reference value type. A reference type has no
-/// tag: it is an unsupported construct, surfaced as a clean error rather than
-/// the prior `Ref(_) => I32` collapse.
+/// A dedup discriminant for a supported value type. Floating-point, SIMD, and
+/// reference types have no tag: each is an unsupported construct, surfaced as a
+/// clean error (a float because the Inference language has no `f32`/`f64` types;
+/// a `v128` because it has no SIMD types and every SIMD operator is rejected; a
+/// reference rather than the prior `Ref(_) => I32` collapse). This is the
+/// signature-axis chokepoint, paired with the operator-stream gate in
+/// [`crate::safety`].
 fn val_type_tag(ty: inf_wasmparser::ValType) -> Result<u8, LinkError> {
     use inf_wasmparser::ValType::*;
     Ok(match ty {
         I32 => 0,
         I64 => 1,
-        F32 => 2,
-        F64 => 3,
-        V128 => 4,
+        F32 | F64 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "floating-point value type (f32/f64) in merged function signature: \
+                 the Inference language has no f32/f64 types"
+                    .into(),
+            ));
+        }
+        V128 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "v128 value type in merged function signature: \
+                 the Inference language has no SIMD types"
+                    .into(),
+            ));
+        }
         Ref(_) => {
             return Err(LinkError::UnsupportedConstruct(
                 "reference-typed value in merged function signature".into(),
@@ -882,20 +969,39 @@ fn scan_body_type_indices(body: &[u8]) -> Result<Vec<u32>, LinkError> {
     Ok(indices)
 }
 
-/// Maps a value type into the encoder equivalent, rejecting reference types.
+/// Maps a value type into the encoder equivalent, rejecting floating-point and
+/// reference types.
 ///
-/// A reference-typed value in a merged signature cannot be soundly emitted: the
-/// static merge models no reference types, and collapsing `Ref(_)` to `i32`
-/// (the prior behavior) silently produced a module whose bodies still operate
-/// on the reference, which no runtime accepts. Surface it as a clean error.
+/// A float value type cannot appear in a merged signature: the Inference language
+/// has no `f32`/`f64` types. A `v128` likewise cannot: the language has no SIMD
+/// types and every SIMD operator is rejected, so the type axis must stay
+/// consistent rather than carry the SIMD type into the output. A reference-typed
+/// value cannot be soundly emitted either: the static merge models no reference
+/// types, and collapsing `Ref(_)` to `i32` (the prior behavior) silently produced
+/// a module whose bodies still operate on the reference, which no runtime
+/// accepts. Surface each as a clean error. This duplicates the rejection in
+/// [`val_type_tag`] as defense in depth: the two functions are reached on
+/// independent paths (dedup keying vs. type emission), so each must guard the
+/// unsupported value-type axes itself.
 fn map_val_type(ty: &inf_wasmparser::ValType) -> Result<EncValType, LinkError> {
     use inf_wasmparser::ValType::*;
     Ok(match ty {
         I32 => EncValType::I32,
         I64 => EncValType::I64,
-        F32 => EncValType::F32,
-        F64 => EncValType::F64,
-        V128 => EncValType::V128,
+        F32 | F64 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "floating-point value type (f32/f64) in merged function signature: \
+                 the Inference language has no f32/f64 types"
+                    .into(),
+            ));
+        }
+        V128 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "v128 value type in merged function signature: \
+                 the Inference language has no SIMD types"
+                    .into(),
+            ));
+        }
         Ref(_) => {
             return Err(LinkError::UnsupportedConstruct(
                 "reference-typed value in merged function signature".into(),
@@ -1434,6 +1540,40 @@ mod tests {
         assert!(
             matches!(err, LinkError::UnsupportedConstruct(_)),
             "expected an UnsupportedConstruct, got {err:?}"
+        );
+        assert!(out_types.is_empty(), "no signature is committed on rejection");
+    }
+
+    #[test]
+    fn v128_signature_is_rejected_at_intern_time() {
+        // The Inference language has no SIMD types, and every SIMD operator is
+        // rejected, so a `v128` in a function signature must be rejected on the
+        // signature axis too rather than carried through into the merged type
+        // table. `sig_key` is the dedup chokepoint every signature passes through;
+        // `intern_sig` reaches it. This parallels the float/reference rejections.
+        use inf_wasmparser::ValType;
+
+        let v128_param = FuncSig {
+            params: vec![ValType::V128],
+            results: vec![],
+        };
+        let err = sig_key(&v128_param).expect_err("a v128 param must not be interned");
+        assert!(
+            matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
+            "expected an UnsupportedConstruct naming v128, got {err:?}"
+        );
+
+        let v128_result = FuncSig {
+            params: vec![],
+            results: vec![ValType::V128],
+        };
+        let mut out_types = Vec::new();
+        let mut cache = std::collections::BTreeMap::new();
+        let err = intern_sig(&mut out_types, &mut cache, &v128_result)
+            .expect_err("a v128 result must not be interned");
+        assert!(
+            matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
+            "expected an UnsupportedConstruct naming v128, got {err:?}"
         );
         assert!(out_types.is_empty(), "no signature is committed on rejection");
     }

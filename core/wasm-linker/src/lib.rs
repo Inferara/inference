@@ -56,43 +56,57 @@ use thiserror::Error;
 /// The merge copies external function bodies verbatim onto a single shared
 /// linear memory, re-indexing only the handful of index-bearing operators, and
 /// the paired Rocq translator (`wasm-to-v`) models exactly this machine. That is
-/// sound only for **WebAssembly 1.0** (the MVP plus `mutable-global`) and the
-/// three scalar post-MVP additions Inference codegen deliberately emits and the
-/// allow-list (`safety.rs`) already models:
+/// sound only for the integer **WebAssembly 1.0** core (the MVP plus
+/// `mutable-global`) and the single scalar post-MVP addition the merge models:
 ///
-/// - **sign-extension** (`i32.extend8_s`, …),
-/// - **saturating float-to-int** (`i32.trunc_sat_f32_s`, …),
 /// - **bulk memory** (`memory.copy` / `memory.fill` over the single memory).
 ///
 /// Every other *proposal* — reference types, multi-value, tail calls, SIMD,
 /// threads/atomics, exception handling, `memory64`, multi-memory, the GC
-/// proposal, stack switching — is **off**. An external using any of them is
-/// rejected up front at the link gate with a feature-named
-/// [`LinkError::UnsupportedWasmFeature`], rather than late and indirectly when a
-/// specific unmodeled opcode happens to reach the merge.
+/// proposal, stack switching, sign-extension, and saturating float-to-int — is
+/// **off**. An external using any of them is rejected up front at the link gate
+/// with a feature-named [`LinkError::UnsupportedWasmFeature`], rather than late
+/// and indirectly when a specific unmodeled opcode happens to reach the merge.
 ///
-/// ## What `WASM1` actually carries
+/// ## No floating point, anywhere
 ///
-/// In this `inf-wasmparser` fork, `WasmFeatures::WASM1` resolves to
-/// `FLOATS | GC_TYPES | MUTABLE_GLOBAL`. `FLOATS` and `GC_TYPES` are **not**
-/// WebAssembly proposals: they are the fork's internal *baseline value-type*
-/// flags (`FLOATS` gates float operators/types, `GC_TYPES` gates value types
-/// such as `funcref`), and the validator needs them on to accept ordinary MVP
-/// modules. They are therefore deliberately retained. Crucially, `GC_TYPES`
-/// being on does **not** admit the GC *proposal*: a GC reference type
-/// (`externref`/`anyref`) additionally requires `REFERENCE_TYPES` *and* `GC`
-/// (`1 << 19`), neither of which is in this set, and no GC/reference *instruction*
-/// survives the allow-list in [`safety`] — every one rejects as an
-/// [`LinkError::UnsupportedConstruct`] if it reaches the merge. `STACK_SWITCHING`
-/// is likewise off (and defaults off in the fork). So the gate's contract — only
-/// the WASM 1.0 instruction set plus the three scalar additions below — holds,
-/// even though the bitset names the two baseline value-type flags.
+/// The Inference language has no `f32`/`f64` types: its codegen never emits a
+/// float operator, a float value type, or a float constant, and the Rocq
+/// translator models none of them. Floats are therefore deliberately excluded
+/// at the gate. In this `inf-wasmparser` fork, `WasmFeatures::WASM1` bundles
+/// `FLOATS` (the baseline float value-type/operator flag) into the MVP set, so
+/// this gate cannot name `WASM1` directly: it lists the baseline value-type
+/// flags it *does* need and leaves `FLOATS` out. With `FLOATS` off the validator
+/// rejects, at the feature pass, any float instruction ("floating-point
+/// instruction disallowed") and any float value type in a signature, local, or
+/// global ("floating-point support is disabled"). The gate thus encodes a single
+/// rule — no floats anywhere, neither operators nor types — enforced before a
+/// body is ever copied.
+///
+/// `GC_TYPES` and `MUTABLE_GLOBAL` are the fork's internal *baseline value-type*
+/// flags (`GC_TYPES` gates the GC reference types `externref`/`anyref` — `funcref`
+/// is *not* gated by it; `MUTABLE_GLOBAL` admits mutable globals), not WebAssembly
+/// proposals, and the validator needs them on to accept ordinary MVP modules.
+/// They are therefore deliberately retained. Crucially, `GC_TYPES` being on does
+/// **not** admit the GC *proposal*: a GC reference type (`externref`/`anyref`)
+/// additionally requires `REFERENCE_TYPES` *and* `GC` (`1 << 19`), neither of
+/// which is in this set, and no GC/reference *instruction* survives the allow-list
+/// in [`safety`] — every one rejects as an [`LinkError::UnsupportedConstruct`] if
+/// it reaches the merge.
+/// `STACK_SWITCHING` is likewise off (and defaults off in the fork).
+///
+/// Sign-extension and saturating float-to-int are *not* in this set even though
+/// they are scalar integer-adjacent proposals: the Rocq translator does not
+/// model them (it has no lowering for `i32.extend8_s` or `i32.trunc_sat_f32_s`),
+/// and Inference codegen emits neither, so admitting them at the gate would let a
+/// third-party external carry an opcode the `-v` proof path cannot render. An
+/// external using either is rejected at this gate with the validator's
+/// feature-named diagnostic.
 ///
 /// This is the linker's explicit, enforced supported-version contract: a feature
 /// added to the parser later cannot quietly become linkable.
-pub const SUPPORTED_WASM_FEATURES: WasmFeatures = WasmFeatures::WASM1
-    .union(WasmFeatures::SIGN_EXTENSION)
-    .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
+pub const SUPPORTED_WASM_FEATURES: WasmFeatures = WasmFeatures::GC_TYPES
+    .union(WasmFeatures::MUTABLE_GLOBAL)
     .union(WasmFeatures::BULK_MEMORY);
 
 /// Why a static merge could not be produced.
@@ -103,10 +117,12 @@ pub enum LinkError {
     Parse(String),
 
     /// An external module is well-formed WebAssembly but uses a feature outside
-    /// the supported [`SUPPORTED_WASM_FEATURES`] subset (e.g. reference types,
-    /// SIMD, atomics, exceptions, `memory64`, multi-memory, multi-value, or tail
-    /// calls). The merge cannot soundly fold such a module onto the single shared
-    /// memory the output models, so it is rejected at the link gate with the
+    /// the supported [`SUPPORTED_WASM_FEATURES`] subset (e.g. any floating-point
+    /// type or instruction, reference types, SIMD, atomics, exceptions,
+    /// `memory64`, multi-memory, multi-value, tail calls, sign-extension, or
+    /// saturating float-to-int). The merge cannot soundly fold such a module onto
+    /// the single shared memory the output models — and the Rocq translator does
+    /// not model these constructs — so it is rejected at the link gate with the
     /// validator's feature-named diagnostic rather than later, per unmodeled
     /// opcode.
     #[error(
@@ -140,7 +156,9 @@ pub enum LinkError {
 
     /// More than one supplied external module exports a function of the same
     /// field name an import requests, so the body to merge is ambiguous.
-    #[error("import `{module}::{field}` is ambiguous: more than one external module exports `{field}`")]
+    #[error(
+        "import `{module}::{field}` is ambiguous: more than one external module exports `{field}`"
+    )]
     AmbiguousImport { module: String, field: String },
 
     /// The merged module failed structural validation. This is a guard against

@@ -402,9 +402,16 @@ fn collect_global(global: &inf_wasmparser::Global) -> Result<GlobalDef, LinkErro
     let init = match first {
         Operator::I32Const { value } => GlobalInit::I32(value),
         Operator::I64Const { value } => GlobalInit::I64(value),
+        // Only the two integer constant initializers are modeled. A float
+        // initializer (`f32.const`/`f64.const`) is the most likely "other" here —
+        // the Inference language has no `f32`/`f64` types — so the catch-all names
+        // what is supported rather than mislabeling a constant `f32.const` as
+        // "non-constant". A float global is also rejected up front by the feature
+        // gate; this is the chokepoint for the main-module path that bypasses it.
         other => {
             return Err(LinkError::UnsupportedConstruct(format!(
-                "non-constant global initializer: {other:?}"
+                "unsupported global initializer for the static merge: {other:?} \
+                 (only i32.const/i64.const are modeled)"
             )));
         }
     };

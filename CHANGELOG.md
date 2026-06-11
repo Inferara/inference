@@ -57,6 +57,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive closures into the main module, rewrites all index-bearing operators into a
   unified index space, deduplicates function types, preserves the `name` custom section for
   Rocq translation, and emits the unified WASM binary ([#9])
+- wasm-linker: External modules using **floating-point** (any `f32`/`f64` value type in a
+  signature, local, or global, or any float instruction) are now rejected by the linker. The
+  Inference language has no `f32`/`f64` types and the Rocq translator models none; floats were
+  previously admitted at the feature gate via `WASM1` but are now excluded. The feature gate
+  (`SUPPORTED_WASM_FEATURES`) is `GC_TYPES | MUTABLE_GLOBAL | BULK_MEMORY`; the safety
+  allow-list provides a second, independent backstop that rejects every float opcode with a
+  diagnostic naming the exact mnemonic (e.g. `floating-point instruction 'f32.add' is not
+  supported by the static merge`). **Sign-extension** and **saturating float-to-int** are
+  also removed from the supported set: the Rocq translator has no lowering for either, and
+  Inference codegen emits neither ([#9])
+- wasm-linker: **Tail calls** (`return_call`/`return_call_indirect`) and **segment-indexed
+  table ops** (`table.init`/`elem.drop`/`table.copy`) are rejected by the safety allow-list
+  (`UnsupportedConstruct`). The Rocq translator has no lowering for either; Inference codegen
+  never emits them, so the rejection applies only to third-party externals ([#9])
+- wasm-linker: The main-module rebuild is now fail-closed on constructs the merge cannot
+  preserve: a main module that declares a **start function**, imports **non-function
+  entities** (globals/memories/tables) from its environment, or declares a **table section**
+  is rejected up front with `UnsupportedConstruct`. Previously the start section and
+  non-function imports were silently dropped — the latter shifting the global index space so
+  `global.get` could read the wrong global — and table-using mains failed after the merge
+  with a misleading `InvalidMergedModule`. **v128** value types are likewise rejected in
+  merged signatures, locals, and block types: the Inference language has no SIMD types and
+  every SIMD operator is already rejected ([#9])
+- wasm-linker: Merged external function names in the output name section are now
+  **module-prefixed** using a `module.field` dot convention. A closure root satisfying import
+  `sum` from logical module `mathlib` is recorded as `mathlib.sum`; an inner callee the
+  source named `helper` becomes `mathlib.helper`; a nameless callee receives a deterministic
+  fallback `mathlib.func_<idx>`. The prefix is collision-free by construction (two externals
+  bound under different logical modules can export the same field without colliding in the
+  name section). The Rocq translator sanitizes `.` to `_`, so `mathlib.sum` translates to
+  `Definition mathlib_sum` in the `.v` ([#9])
 - wasm-codegen: Emit WASM import section for `external fn` declarations. The three-stage
   index pre-scan now runs `register_imports` before local functions, so every
   `Def::ExternFunction` bound via `use … from` is assigned a function import index (lowest

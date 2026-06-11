@@ -149,9 +149,6 @@ fn emit_operator(
         Operator::Call { function_index } => {
             function.instruction(&Instruction::Call((map.func)(*function_index)));
         }
-        Operator::ReturnCall { function_index } => {
-            function.instruction(&Instruction::ReturnCall((map.func)(*function_index)));
-        }
         Operator::RefFunc { function_index } => {
             function.instruction(&Instruction::RefFunc((map.func)(*function_index)));
         }
@@ -164,15 +161,12 @@ fn emit_operator(
                 table_index: *table_index,
             });
         }
-        Operator::ReturnCallIndirect {
-            type_index,
-            table_index,
-        } => {
-            function.instruction(&Instruction::ReturnCallIndirect {
-                type_index: (map.ty)(*type_index)?,
-                table_index: *table_index,
-            });
-        }
+        // The tail-call forms (`return_call` / `return_call_indirect`) have no
+        // arm of their own: the Rocq translator has no lowering for them, and
+        // Inference codegen never emits them. They fall through to the final arm,
+        // which rejects them via the fail-closed allow-list — closing the bypass
+        // that previously re-indexed and copied a tail call on the main path.
+
         // Block-type operators can carry a type index in their multi-value
         // form. Inference codegen only emits the empty and value block types,
         // but a Tier-A/B external body could use a function block type, so
@@ -283,13 +277,34 @@ fn map_block_type(
 }
 
 /// Maps an `inf-wasmparser` value type to the `wasm-encoder` equivalent.
+///
+/// Rejects floating-point value types: the Inference language has no `f32`/`f64`
+/// types, so a float local or float block result cannot appear in a body the
+/// merge models. The feature gate rejects a float-using external before its body
+/// is re-encoded, but the main-module re-encode path bypasses that gate, so this
+/// is the float backstop on the value-type axis (the operator-stream backstop is
+/// [`crate::safety::is_float`]). `v128` is rejected for the same reason: the
+/// language has no SIMD types and every SIMD operator is rejected, so the type
+/// axis must stay consistent. Reference types are likewise unsupported; only the
+/// integer value types map through.
 fn map_val_type(ty: ValType) -> Result<wasm_encoder::ValType, LinkError> {
     Ok(match ty {
         ValType::I32 => wasm_encoder::ValType::I32,
         ValType::I64 => wasm_encoder::ValType::I64,
-        ValType::F32 => wasm_encoder::ValType::F32,
-        ValType::F64 => wasm_encoder::ValType::F64,
-        ValType::V128 => wasm_encoder::ValType::V128,
+        ValType::F32 | ValType::F64 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "floating-point value type (f32/f64) in merged function body: \
+                 the Inference language has no f32/f64 types"
+                    .into(),
+            ));
+        }
+        ValType::V128 => {
+            return Err(LinkError::UnsupportedConstruct(
+                "v128 value type in merged function body: \
+                 the Inference language has no SIMD types"
+                    .into(),
+            ));
+        }
         ValType::Ref(_) => {
             return Err(LinkError::UnsupportedConstruct(
                 "reference-typed value in merged function body".into(),
@@ -427,7 +442,12 @@ mod tests {
     }
 
     #[test]
-    fn reencodes_return_call_indirect_type_index() {
+    fn tail_call_indirect_is_rejected_not_reencoded() {
+        // `return_call_indirect` is a tail call: the Rocq translator has no
+        // lowering for it, and Inference codegen never emits it. The re-encoder
+        // must not have a dedicated arm that re-indexes and copies it; it falls
+        // through to the fail-closed allow-list and is rejected. This closes the
+        // main-module bypass that previously copied a tail call verbatim.
         let module = wat::parse_str(
             r#"
             (module
@@ -446,17 +466,43 @@ mod tests {
 
         let (func, ty) = shifting_map();
         let map = IndexMap { func: &func, ty: &ty };
-        let out = reencode_body(&body, &map, BodyOrigin::External)
-            .expect("re-encode return_call_indirect");
-        let wrapped = wrap(&out);
-
-        let has_remapped = operators(&wrapped, 0).into_iter().any(|op| {
-            matches!(op, Operator::ReturnCallIndirect { type_index, .. } if type_index == 100)
-        });
+        let err = reencode_body(&body, &map, BodyOrigin::External)
+            .expect_err("return_call_indirect must be rejected");
         assert!(
-            has_remapped,
-            "return_call_indirect type index must be remapped to 100"
+            matches!(err, LinkError::UnsupportedConstruct(_)),
+            "expected UnsupportedConstruct, got {err:?}"
         );
+    }
+
+    #[test]
+    fn tail_call_is_rejected_not_reencoded() {
+        // `return_call` likewise has no re-encoder arm: it falls through to the
+        // allow-list and is rejected, on both the external and the main re-encode
+        // path. This is the direct-call counterpart to the bypass closure above.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func (param i32) (result i32)))
+              (func (;0;) (type 0) (param i32) (result i32)
+                local.get 0
+                return_call 1)
+              (func (;1;) (type 0) (param i32) (result i32)
+                local.get 0)
+              (export "f" (func 0)))
+            "#,
+        );
+        let Ok(module) = module else { return };
+        let body = body_bytes(&module, 0);
+
+        let (func, ty) = shifting_map();
+        let map = IndexMap { func: &func, ty: &ty };
+        for origin in [BodyOrigin::External, BodyOrigin::Main] {
+            let err = reencode_body(&body, &map, origin).expect_err("return_call must be rejected");
+            assert!(
+                matches!(err, LinkError::UnsupportedConstruct(_)),
+                "{origin:?}: expected UnsupportedConstruct, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -594,15 +640,17 @@ mod tests {
     }
 
     #[test]
-    fn reencodes_each_value_type_local() {
-        // Locals of every non-reference value type must map onto the encoder
-        // equivalents, covering all arms of `map_val_type`.
+    fn reencodes_supported_value_type_locals() {
+        // Locals of every *supported* value type (the integer types) must map onto
+        // the encoder equivalents, covering those arms of `map_val_type`. The float
+        // and `v128` locals are exercised separately below: they are rejected,
+        // since the Inference language has no `f32`/`f64` or SIMD types.
         let module = wat::parse_str(
             r#"
             (module
               (type (;0;) (func))
               (func (;0;) (type 0)
-                (local i32 i64 f32 f64 v128))
+                (local i32 i64))
               (export "f" (func 0)))
             "#,
         )
@@ -612,7 +660,7 @@ mod tests {
         let (func, ty) = shifting_map();
         let map = IndexMap { func: &func, ty: &ty };
         let out = reencode_body(&body, &map, BodyOrigin::External)
-            .expect("re-encode all value-type locals");
+            .expect("re-encode supported value-type locals");
         let wrapped = wrap(&out);
 
         let locals: Vec<_> = {
@@ -633,15 +681,70 @@ mod tests {
         let types: Vec<ValType> = locals.iter().map(|(_, t)| *t).collect();
         assert_eq!(
             types,
-            vec![
-                ValType::I32,
-                ValType::I64,
-                ValType::F32,
-                ValType::F64,
-                ValType::V128
-            ],
-            "every value-type local must survive re-encoding"
+            vec![ValType::I32, ValType::I64],
+            "every supported value-type local must survive re-encoding"
         );
+    }
+
+    #[test]
+    fn v128_local_is_rejected() {
+        // A `v128` local cannot be re-encoded: the Inference language has no SIMD
+        // types and every SIMD operator is rejected, so the value-type chokepoint
+        // must reject the SIMD type too. This is the value-type backstop on the
+        // main-module path that bypasses the feature gate.
+        let module = wat::parse_str(
+            r#"
+            (module
+              (type (;0;) (func))
+              (func (;0;) (type 0)
+                (local v128))
+              (export "f" (func 0)))
+            "#,
+        )
+        .unwrap();
+        let body = body_bytes(&module, 0);
+
+        let (func, ty) = shifting_map();
+        let map = IndexMap { func: &func, ty: &ty };
+        let err = reencode_body(&body, &map, BodyOrigin::External)
+            .expect_err("v128 local must be rejected");
+        assert!(
+            matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("v128")),
+            "expected a v128 UnsupportedConstruct, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn float_local_is_rejected() {
+        // An `f32` or `f64` local cannot be re-encoded: the Inference language has
+        // no `f32`/`f64` types, so the value-type chokepoint rejects it. This is
+        // the value-type backstop on the main-module path that bypasses the
+        // feature gate; the operator-stream backstop is `safety::is_float`.
+        for ty in ["f32", "f64"] {
+            let module = wat::parse_str(format!(
+                r#"
+                (module
+                  (type (;0;) (func))
+                  (func (;0;) (type 0)
+                    (local {ty}))
+                  (export "f" (func 0)))
+                "#,
+            ))
+            .unwrap();
+            let body = body_bytes(&module, 0);
+
+            let (func, ty_map) = shifting_map();
+            let map = IndexMap {
+                func: &func,
+                ty: &ty_map,
+            };
+            let err = reencode_body(&body, &map, BodyOrigin::External)
+                .expect_err("float local must be rejected");
+            assert!(
+                matches!(&err, LinkError::UnsupportedConstruct(msg) if msg.contains("floating-point")),
+                "{ty}: expected a floating-point UnsupportedConstruct, got {err:?}"
+            );
+        }
     }
 
     /// Hand-encodes a single-function body whose only operator is one of the
