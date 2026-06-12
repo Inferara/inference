@@ -1099,7 +1099,6 @@ mod tests {
                 kind,
                 type_params: vec![],
             },
-            visibility: Visibility::Public,
         }
     }
 
@@ -1110,6 +1109,7 @@ mod tests {
             type_params: vec![],
             visibility: Visibility::Public,
             definition_scope_id: 0,
+            definition_location: inference_ast::nodes::Location::default(),
         }
     }
 
@@ -1404,7 +1404,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
                 (
                     "y".to_string(),
@@ -1412,7 +1411,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
             ],
         )
@@ -1459,7 +1457,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
                 (
                     "y".to_string(),
@@ -1467,7 +1464,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I32),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
             ],
         )
@@ -1492,7 +1488,6 @@ mod tests {
                         kind: TypeInfoKind::Bool,
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
                 (
                     "b".to_string(),
@@ -1500,7 +1495,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I64),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
             ],
         )
@@ -1539,7 +1533,6 @@ mod tests {
                         kind: TypeInfoKind::Bool,
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
                 (
                     "b".to_string(),
@@ -1547,7 +1540,6 @@ mod tests {
                         kind: TypeInfoKind::Number(NumberType::I64),
                         type_params: vec![],
                     },
-                    Visibility::Public,
                 ),
             ],
         )

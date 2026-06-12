@@ -38,6 +38,37 @@ pub(crate) fn try_build_ast(source_code: String) -> anyhow::Result<AstArena> {
     }
 }
 
+/// Builds a multi-file arena from `(module_path, source)` pairs and type-checks
+/// it, returning the [`TypedContext`] on success or the aggregated type errors.
+///
+/// The first pair must be the entry file (empty `module_path`); each subsequent
+/// pair is an imported file named by its source-root-relative segments
+/// (`["lib", "arith"]`). Files are folded with
+/// [`inference_parser::parse_into`], so no filesystem access occurs — this is
+/// the unit-test seam mirroring what the project front end builds at runtime.
+///
+/// # Panics
+/// Panics if any file has a syntax error (tests should pass valid sources).
+pub(crate) fn try_type_check_multi_file(
+    files: &[(Vec<&str>, &str)],
+) -> anyhow::Result<inference_type_checker::typed_context::TypedContext> {
+    let mut arena = inference_ast::arena::AstArena::default();
+    for (module_path, source) in files {
+        let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
+        let parsed = inference_parser::parse_into(arena, source, module_path);
+        assert!(
+            parsed.errors.is_empty(),
+            "multi-file test source has syntax errors: {:?}",
+            parsed.errors
+        );
+        arena = parsed.arena;
+    }
+    Ok(
+        inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)?
+            .typed_context(),
+    )
+}
+
 /// Controls whether the analysis pass runs during codegen.
 #[derive(Clone, Copy, Default)]
 pub(crate) enum AnalysisMode {

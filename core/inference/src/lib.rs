@@ -232,8 +232,10 @@
 //!
 //! ## Limitations
 //!
-//! - **Single-file support**: Multi-file compilation is not yet implemented.
-//!   The AST expects a single source file as input.
+//! - **Multi-file codegen**: the front end ([`parse_project`]) folds a whole
+//!   import-reachable file closure into one arena, but code generation still
+//!   accepts a single source file only; cross-file type checking and codegen
+//!   are tracked by #63.
 //! - **Analyze phase**: The semantic analysis phase currently covers loop
 //!   control flow validation. Additional analyses are planned for future releases.
 //!
@@ -267,8 +269,13 @@ pub use inference_analysis::errors::{AnalysisErrors, AnalysisResult};
 use inference_ast::arena::AstArena;
 pub use inference_type_checker::typed_context::TypedContext;
 
+pub mod errors;
 pub mod extern_prelude;
+mod project;
 pub mod wasm_link;
+
+pub use errors::InferenceError;
+pub use project::{parse_project, ProjectParse, ProjectWarning};
 
 /// Re-export of `rustc_hash::FxHashMap` so library consumers of `inference`
 /// can construct the spec-funcs map passed to [`wasm_to_v`] without taking a

@@ -46,7 +46,6 @@ fn check_defs(
                 });
             }
             Def::Spec { defs, .. } => check_defs(arena, defs, errors),
-            Def::Module { defs: Some(inner), .. } => check_defs(arena, inner, errors),
             _ => {}
         }
     }

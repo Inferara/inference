@@ -38,7 +38,6 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], warnings: &mut Vec<AnalysisDi
                 }
             }
             Def::Spec { defs, .. } => check_defs(arena, defs, warnings),
-            Def::Module { defs: Some(d), .. } => check_defs(arena, d, warnings),
             _ => {}
         }
     }

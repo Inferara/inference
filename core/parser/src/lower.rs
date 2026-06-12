@@ -36,16 +36,28 @@ pub(crate) struct Lowering<'s> {
     arena: AstArena,
     errors: Vec<ParseError>,
     src: &'s str,
+    module_path: Vec<String>,
 }
 
 impl<'s> Lowering<'s> {
     /// Creates a lowering over `src`, the original source string (needed to slice
     /// identifier/literal text and to store as `SourceFileData.source`).
+    ///
+    /// The lowered file is stamped as the **entry** (empty module path), matching
+    /// the single-file `parse` contract.
     pub(crate) fn new(src: &'s str) -> Self {
+        Self::into_arena(AstArena::default(), src, Vec::new())
+    }
+
+    /// Creates a lowering that appends a file with `module_path` into an existing
+    /// `arena`, for multi-file project parsing. Passing an empty `module_path`
+    /// stamps the file as the entry; non-empty segments name its namespace.
+    pub(crate) fn into_arena(arena: AstArena, src: &'s str, module_path: Vec<String>) -> Self {
         Self {
-            arena: AstArena::default(),
+            arena,
             errors: Vec::new(),
             src,
+            module_path,
         }
     }
 
@@ -79,11 +91,13 @@ impl<'s> Lowering<'s> {
             }
         }
 
+        let module_path = std::mem::take(&mut self.module_path);
         self.arena.source_files.alloc(SourceFileData {
             location,
             source,
             defs,
             directives,
+            module_path,
         });
     }
 
@@ -104,6 +118,10 @@ impl<'s> Lowering<'s> {
     fn lower_use_directive(&mut self, node: &SyntaxNode) -> UseDirective {
         use crate::syntax_tree::SyntaxElement;
         let location = node.loc;
+        // A `pub use` lowers a leading `Visibility` node child. It is not an
+        // `Identifier`, so the positional bucketing below ignores it and the
+        // segment/imported-type split is unaffected.
+        let vis = self.visibility(node);
 
         // Three identifier buckets, keyed by position relative to the `{ … }`
         // import list and the `from` keyword:
@@ -115,9 +133,13 @@ impl<'s> Lowering<'s> {
         let mut from_segments: Vec<&SyntaxNode> = Vec::new();
         let mut in_braces = false;
         let mut after_from = false;
+        let mut braced = false;
         for element in &node.children {
             match element {
-                SyntaxElement::Token(t) if t.kind == SyntaxKind::LBrace => in_braces = true,
+                SyntaxElement::Token(t) if t.kind == SyntaxKind::LBrace => {
+                    in_braces = true;
+                    braced = true;
+                }
                 SyntaxElement::Token(t) if t.kind == SyntaxKind::RBrace => in_braces = false,
                 SyntaxElement::Token(t) if t.kind == SyntaxKind::FromKw => after_from = true,
                 SyntaxElement::Node(n) if n.kind == SyntaxKind::Identifier => {
@@ -154,8 +176,10 @@ impl<'s> Lowering<'s> {
 
         UseDirective {
             location,
+            vis,
             imported_types,
             segments,
+            braced,
             from,
         }
     }
@@ -1946,6 +1970,7 @@ mod tests {
         let directives = &files[0].directives;
         assert_eq!(directives.len(), 1);
         let Directive::Use(directive) = &directives[0];
+        assert_eq!(directive.vis, Visibility::Private);
         assert!(directive.from.is_none());
         let segments: Vec<&str> = directive
             .segments
@@ -1987,6 +2012,7 @@ mod tests {
         let arena = lower("use { hash } from crypto::sha256;");
         let files: Vec<_> = arena.source_files().collect();
         let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Private);
         let from = directive.from.as_ref().expect("from module reference");
         let from_segments: Vec<&str> = from
             .segments
@@ -2001,6 +2027,204 @@ mod tests {
             .map(|&t| arena.ident_name(t))
             .collect();
         assert_eq!(imported, ["hash"]);
+    }
+
+    #[test]
+    fn lowers_pub_use_path_form() {
+        let arena = lower("pub use lib::arith;");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        let segments: Vec<&str> = directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(segments, ["lib", "arith"]);
+        assert!(directive.imported_types.is_empty());
+    }
+
+    #[test]
+    fn lowers_pub_use_braced_items() {
+        let arena = lower("pub use a::b::{ X, Y };");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        let segments: Vec<&str> = directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(segments, ["a", "b"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y"]);
+    }
+
+    #[test]
+    fn lowers_pub_use_from_form() {
+        // The leading `pub` must not perturb the segment/imported-type buckets:
+        // the braced items are imports and the `from` clause carries the module
+        // reference, exactly as without `pub`.
+        let arena = lower("pub use { x } from M;");
+        let files: Vec<_> = arena.source_files().collect();
+        let Directive::Use(directive) = &files[0].directives[0];
+        assert_eq!(directive.vis, Visibility::Public);
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["M"]);
+        assert!(directive.segments.is_empty());
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["x"]);
+    }
+
+    // -- Use directives: #63 lowering matrix ---------------------------------
+    //
+    // The smoke tests above lower one happy case per form (path-form braced,
+    // from simple/path, and the three `pub` variants). This matrix adds the
+    // brace-free *file* import form (absent above), the non-`pub` `vis = Private`
+    // default across forms, and multi-/single-segment path lowering with the
+    // exact segment vectors. The CST-shape and diagnostic assertions live in
+    // `grammar.rs`.
+
+    /// The single source file's single `UseDirective`. Asserts exactly one file
+    /// with exactly one directive (the use forms under test never combine).
+    fn single_use(arena: &AstArena) -> &inference_ast::nodes::UseDirective {
+        let files: Vec<_> = arena.source_files().collect();
+        assert_eq!(files.len(), 1, "expected exactly one source file");
+        assert_eq!(
+            files[0].directives.len(),
+            1,
+            "expected exactly one use directive"
+        );
+        let Directive::Use(directive) = &files[0].directives[0];
+        directive
+    }
+
+    /// The `::`-joined segment names of a directive's path (file import path).
+    fn segment_names(arena: &AstArena, directive: &inference_ast::nodes::UseDirective) -> Vec<String> {
+        directive
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn lowers_bare_file_import_defaults_to_private() {
+        // The brace-free single-segment file import `use math;` is the form the
+        // path-form smoke test does not cover (it uses braces). `vis` defaults to
+        // `Private`, there is no `from`, no imported items, and one segment.
+        let arena = lower("use math;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.from.is_none());
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["math"]);
+    }
+
+    #[test]
+    fn lowers_pub_bare_file_import_is_public() {
+        // `pub use math;` — the re-exported file import. One public segment, no
+        // braces, no `from`.
+        let arena = lower("pub use math;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["math"]);
+    }
+
+    #[test]
+    fn lowers_multi_segment_file_import_path() {
+        // A 3-segment brace-free file import lowers all segments in order with no
+        // imported items — the namespace-binding shape the type checker resolves.
+        let arena = lower("use lib::math::arith;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.imported_types.is_empty());
+        assert_eq!(segment_names(&arena, directive), ["lib", "math", "arith"]);
+    }
+
+    #[test]
+    fn lowers_non_pub_braced_items_default_to_private() {
+        // The non-`pub` counterpart of `lowers_pub_use_braced_items`: same
+        // segment/imported-item split, but `vis = Private`.
+        let arena = lower("use a::b::{ X, Y };");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert_eq!(segment_names(&arena, directive), ["a", "b"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y"]);
+    }
+
+    #[test]
+    fn lowers_pub_deep_path_braced_items() {
+        // `pub use` + a 3-segment path + a 3-item brace list: the leading `pub`
+        // does not shift the positional segment/imported-item bucketing.
+        let arena = lower("pub use a::b::c::{ X, Y, Z };");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Public);
+        assert!(directive.from.is_none());
+        assert_eq!(segment_names(&arena, directive), ["a", "b", "c"]);
+        let imported: Vec<&str> = directive
+            .imported_types
+            .iter()
+            .map(|&t| arena.ident_name(t))
+            .collect();
+        assert_eq!(imported, ["X", "Y", "Z"]);
+    }
+
+    #[test]
+    fn lowers_non_pub_from_defaults_to_private() {
+        // The non-`pub` from-form already has happy-path coverage, but its `vis`
+        // default is not asserted there; pin `Private` explicitly so a future
+        // change to the visibility default is caught.
+        let arena = lower("use { x } from M;");
+        let directive = single_use(&arena);
+        assert_eq!(directive.vis, Visibility::Private);
+        assert!(directive.segments.is_empty());
+        let from = directive.from.as_ref().expect("from module reference");
+        let from_segments: Vec<&str> = from
+            .segments
+            .iter()
+            .map(|&s| arena.ident_name(s))
+            .collect();
+        assert_eq!(from_segments, ["M"]);
+    }
+
+    #[test]
+    fn use_directive_vis_default_is_private_in_ast() {
+        // Direct assertion of the AST-level default: any directive built without a
+        // leading `pub` carries `Visibility::Private`. Covers the bare file
+        // import, the braced item import, and the from-form in one sweep so the
+        // default holds uniformly across every form that lowers today.
+        for src in ["use a;", "use a::b::{ X };", "use { X } from M;"] {
+            let arena = lower(src);
+            let directive = single_use(&arena);
+            assert_eq!(
+                directive.vis,
+                Visibility::Private,
+                "default visibility must be Private for {src:?}"
+            );
+        }
     }
 
     // -- Statements ----------------------------------------------------------

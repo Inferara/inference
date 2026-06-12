@@ -349,11 +349,60 @@ pub enum TypeCheckError {
     #[error("{location}: cannot resolve import path: {path}")]
     ImportResolutionFailed { path: String, location: Location },
 
-    #[error("{location}: circular glob import detected: {path}::*")]
-    CircularImport { path: String, location: Location },
+    /// A path-form `use a::b;` was written without a project context (the
+    /// string-parse and REPL paths have only the entry file), so the named file
+    /// cannot exist. Distinct from a typo: the fix is to build the project, not
+    /// to correct the path.
+    #[error(
+        "{location}: file imports require a project context: `use {path};` names a source file, which is only resolvable when building a project (not a single string-parsed file)"
+    )]
+    FileImportWithoutProjectContext { path: String, location: Location },
 
-    #[error("{location}: glob import path cannot be empty")]
-    EmptyGlobImport { location: Location },
+    /// An item import `use a::b::{x};` named an item `x` that does not exist in
+    /// file `a::b`.
+    #[error("{location}: item `{item}` not found in file `{file}`")]
+    ImportedItemNotFound {
+        item: String,
+        file: String,
+        location: Location,
+    },
+
+    /// An item import named an item that exists in the target file but is not
+    /// `pub`, so it cannot cross the file boundary. Carries the definition site so
+    /// the fix (adding `pub`) can be pointed at directly.
+    #[error(
+        "{location}: item `{item}` in file `{file}` is private\nnote: `{item}` is defined at {definition_location} in file `{file}`; add `pub` to export it"
+    )]
+    ImportedItemPrivate {
+        item: String,
+        file: String,
+        location: Location,
+        definition_location: Location,
+    },
+
+    /// An imported name collides with a name already bound in the importing
+    /// file — either a local definition or an earlier import.
+    #[error("{location}: imported name `{name}` collides with {with} of the same name")]
+    ImportNameCollision {
+        name: String,
+        with: String,
+        location: Location,
+    },
+
+    /// `use a::b::{};` — a braced item import with no items. The braces say
+    /// "import items" but none are listed, so the directive does nothing.
+    #[error(
+        "{location}: empty import list in `use {path}::{{}};` — import the file (`use {path};`) or list the items to import (`use {path}::{{x, y}};`)"
+    )]
+    EmptyImportList { path: String, location: Location },
+
+    /// A cycle among definition *values* — consts whose initializers reference
+    /// each other, or mutually recursive type aliases — across one or more files.
+    /// `cycle` names the members in order (e.g. `A -> B -> A`). File-to-file
+    /// import cycles are allowed and never reach here; only value cycles, which
+    /// have no computable evaluation order, are rejected.
+    #[error("{location}: circular definition detected: {cycle}")]
+    CircularDefinition { cycle: String, location: Location },
 
     #[error("{location}: error registering {kind} `{name}`{}", reason.as_ref().map_or(String::new(), |r| format!(": {}", r)))]
     RegistrationFailed {
@@ -423,10 +472,21 @@ pub enum TypeCheckError {
         location: Location,
     },
 
-    #[error("{location}: cannot access private {context}")]
+    /// Access to a private item from outside its defining file.
+    ///
+    /// Carries both the use site (`location`) and the definition site
+    /// (`definition_location` in file `definition_file`) so the diagnostic points
+    /// the user at where to add `pub`. `definition_file` is the `::`-joined module
+    /// path of the defining file, empty for the entry file.
+    #[error(
+        "{location}: cannot access private {context}\nnote: {context} is defined at {definition_location}{}; add `pub` to export it",
+        if definition_file.is_empty() { String::new() } else { format!(" in file `{definition_file}`") }
+    )]
     PrivateAccessViolation {
         context: VisibilityContext,
         location: Location,
+        definition_location: Location,
+        definition_file: String,
     },
 
     /// Instance method called as associated function.
@@ -615,8 +675,12 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::ImportResolutionFailed { location, .. }
-            | TypeCheckError::CircularImport { location, .. }
-            | TypeCheckError::EmptyGlobImport { location }
+            | TypeCheckError::FileImportWithoutProjectContext { location, .. }
+            | TypeCheckError::ImportedItemNotFound { location, .. }
+            | TypeCheckError::ImportedItemPrivate { location, .. }
+            | TypeCheckError::ImportNameCollision { location, .. }
+            | TypeCheckError::EmptyImportList { location, .. }
+            | TypeCheckError::CircularDefinition { location, .. }
             | TypeCheckError::RegistrationFailed { location, .. }
             | TypeCheckError::ExpectedArrayType { location, .. }
             | TypeCheckError::ExpectedStructType { location, .. }
@@ -996,23 +1060,15 @@ mod tests {
     }
 
     #[test]
-    fn display_circular_import() {
-        let err = TypeCheckError::CircularImport {
-            path: "mod_a::mod_b".to_string(),
+    fn display_circular_definition() {
+        let err = TypeCheckError::CircularDefinition {
+            cycle: "A -> B -> A".to_string(),
             location: test_location(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: circular glob import detected: mod_a::mod_b::*"
+            "1:5: circular definition detected: A -> B -> A"
         );
-    }
-
-    #[test]
-    fn display_empty_glob_import() {
-        let err = TypeCheckError::EmptyGlobImport {
-            location: test_location(),
-        };
-        assert_eq!(err.to_string(), "1:5: glob import path cannot be empty");
     }
 
     #[test]
@@ -1196,10 +1252,13 @@ mod tests {
                 name: "helper".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::arith".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private function `helper`"
+            "1:5: cannot access private function `helper`\n\
+             note: function `helper` is defined at 1:5 in file `lib::arith`; add `pub` to export it"
         );
     }
 
@@ -1211,10 +1270,13 @@ mod tests {
                 field_name: "x".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::geo".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private field `x` of struct `Point`"
+            "1:5: cannot access private field `x` of struct `Point`\n\
+             note: field `x` of struct `Point` is defined at 1:5 in file `lib::geo`; add `pub` to export it"
         );
     }
 
@@ -1226,10 +1288,30 @@ mod tests {
                 method_name: "reset".to_string(),
             },
             location: test_location(),
+            definition_location: test_location(),
+            definition_file: "lib::counter".to_string(),
         };
         assert_eq!(
             err.to_string(),
-            "1:5: cannot access private method `reset` on type `Counter`"
+            "1:5: cannot access private method `reset` on type `Counter`\n\
+             note: method `reset` on type `Counter` is defined at 1:5 in file `lib::counter`; add `pub` to export it"
+        );
+    }
+
+    #[test]
+    fn display_private_access_violation_entry_file_omits_file_note() {
+        let err = TypeCheckError::PrivateAccessViolation {
+            context: VisibilityContext::Function {
+                name: "helper".to_string(),
+            },
+            location: test_location(),
+            definition_location: test_location(),
+            definition_file: String::new(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "1:5: cannot access private function `helper`\n\
+             note: function `helper` is defined at 1:5; add `pub` to export it"
         );
     }
 

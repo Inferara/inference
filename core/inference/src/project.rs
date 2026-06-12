@@ -1,0 +1,1389 @@
+//! Multi-file project front end: walk the import-reachable closure of `.inf`
+//! files from an entry point and lower them all into a single [`AstArena`].
+//!
+//! # Model
+//!
+//! The **source root** is the entry file's parent directory. A path-form `use`
+//! directive names a file relative to that root: `use a::b;` and
+//! `use a::b::{x, y};` both refer to `<root>/a/b.inf` (a braced item import names
+//! the same file as the brace-free form — the braces only select items). The
+//! `from`-form (`use … from M;`, external WASM modules) is not a source import
+//! and is ignored here.
+//!
+//! Discovery is breadth-first with a visited set keyed by canonical module path,
+//! so import cycles terminate. The files are then stored in the arena in
+//! **canonical order** — entry first, then imported files sorted lexicographically
+//! by module path — which downstream phases consume as their single source of
+//! truth for ordering.
+//!
+//! All filesystem access lives here; `core/parser` stays I/O-free and is driven
+//! through [`inference_parser::parse_into`].
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+
+use anyhow::anyhow;
+use inference_ast::arena::AstArena;
+use inference_ast::nodes::{Directive, UseDirective};
+use rustc_hash::FxHashSet;
+
+use crate::errors::InferenceError;
+
+/// File extension of an Inference source file.
+const SOURCE_EXTENSION: &str = "inf";
+
+/// Maximum edit distance at which a sibling filename is offered as a
+/// "did you mean" suggestion for a missing import.
+const SUGGESTION_MAX_DISTANCE: usize = 2;
+
+/// Outcome of parsing a project: the unified arena plus any non-fatal warnings.
+///
+/// Warnings are returned rather than printed so library code stays silent; the
+/// caller (a CLI) decides how to surface them.
+#[derive(Debug)]
+#[must_use = "a project parse carries both the arena and any warnings"]
+pub struct ProjectParse {
+    /// All reachable files lowered into one arena, in canonical order.
+    pub arena: AstArena,
+    /// Non-fatal findings collected during the walk.
+    pub warnings: Vec<ProjectWarning>,
+}
+
+/// A non-fatal finding from a project parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectWarning {
+    /// A `.inf` file under the source root is reachable from no import chain and
+    /// will therefore not be compiled.
+    UnreachableFile { path: PathBuf },
+}
+
+impl std::fmt::Display for ProjectWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProjectWarning::UnreachableFile { path } => write!(
+                f,
+                "warning: `{}` is not imported by any reachable file and will not be compiled",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// A discovered file: its canonical module path (empty for the entry) and source.
+struct DiscoveredFile {
+    module_path: Vec<String>,
+    source: String,
+}
+
+/// Parses a project starting from `entry`, returning one arena holding every
+/// import-reachable file plus any unreachable-file warnings.
+///
+/// The source root is `entry`'s parent directory. The entry is parsed first;
+/// its path-form `use` directives are followed breadth-first, each mapped to a
+/// file under the root, until the reachable closure is exhausted. A file
+/// referenced more than once is parsed once. Import cycles are permitted and
+/// terminate via a visited set.
+///
+/// # Errors
+///
+/// Returns [`InferenceError::NoSourceRoot`] if `entry` has no parent directory,
+/// [`InferenceError::Io`] if a file cannot be read,
+/// [`InferenceError::InvalidImportSegment`] for a malformed `use` path segment,
+/// [`InferenceError::ImportFileNotFound`] (with a nearest-match suggestion) for a
+/// `use` naming a non-existent file, and [`InferenceError::ImportedFileParse`]
+/// for a file with syntax errors.
+pub fn parse_project(entry: &Path) -> anyhow::Result<ProjectParse> {
+    let src_root = entry
+        .parent()
+        .ok_or_else(|| InferenceError::NoSourceRoot(entry.to_path_buf()))?
+        .to_path_buf();
+
+    let discovered = discover_files(entry, &src_root)?;
+    let arena = lower_in_canonical_order(discovered)?;
+    let warnings = collect_unreachable_warnings(&arena, &src_root, entry);
+
+    Ok(ProjectParse { arena, warnings })
+}
+
+/// Breadth-first walk of the import closure, returning the entry first and every
+/// reachable imported file. Each file is keyed by its canonical module path so a
+/// file reached twice (including through a cycle) is visited once.
+fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<DiscoveredFile>> {
+    let mut files = Vec::new();
+    let mut visited: FxHashSet<Vec<String>> = FxHashSet::default();
+    let mut queue: VecDeque<(Vec<String>, PathBuf)> = VecDeque::new();
+
+    // The entry is the one file with an empty module path.
+    visited.insert(Vec::new());
+    queue.push_back((Vec::new(), entry.to_path_buf()));
+
+    while let Some((module_path, file_path)) = queue.pop_front() {
+        let source = read_source(&file_path)?;
+        let imports = path_form_imports(&source)?;
+
+        for segments in imports {
+            if visited.contains(&segments) {
+                continue;
+            }
+            let dep_path = module_file_path(src_root, &segments);
+            if !dep_path.is_file() {
+                return Err(missing_import_error(&segments, &dep_path));
+            }
+            visited.insert(segments.clone());
+            queue.push_back((segments, dep_path));
+        }
+
+        files.push(DiscoveredFile {
+            module_path,
+            source,
+        });
+    }
+
+    Ok(files)
+}
+
+/// Lowers every discovered file into one arena in canonical order: entry first,
+/// then imported files sorted lexicographically by module path. The stored order
+/// is what later phases consume, so it is independent of discovery order.
+fn lower_in_canonical_order(mut files: Vec<DiscoveredFile>) -> anyhow::Result<AstArena> {
+    files.sort_by(|a, b| {
+        // The entry (empty path) sorts first; the empty Vec already compares
+        // less than any non-empty one, so a plain lexicographic order suffices.
+        a.module_path.cmp(&b.module_path)
+    });
+
+    let mut arena = AstArena::default();
+    for file in files {
+        // Name the file before its path is moved into `parse_into`, for the
+        // error arm only.
+        let label = if file.module_path.is_empty() {
+            "<entry>".to_string()
+        } else {
+            file.module_path.join("::")
+        };
+        let parse = inference_parser::parse_into(arena, &file.source, file.module_path);
+        arena = parse.arena;
+        if !parse.errors.is_empty() {
+            let details = parse
+                .errors
+                .iter()
+                .map(|error| {
+                    format!(
+                        "  {}:{}: {}",
+                        error.span.start_line, error.span.start_column, error.message
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(anyhow!(InferenceError::ImportedFileParse {
+                module_path: label,
+                details,
+            }));
+        }
+    }
+    Ok(arena)
+}
+
+/// Extracts the path-form `use` imports of a single source file as canonical
+/// module-path segment lists. A braced item import (`use a::b::{x};`) maps to the
+/// file `a::b` — the segments *before* the brace list. The `from`-form is skipped.
+fn path_form_imports(source: &str) -> anyhow::Result<Vec<Vec<String>>> {
+    let parsed = inference_parser::parse(source);
+    // Syntax errors here are reported when this file is lowered in
+    // `lower_in_canonical_order`; discovery only needs the directive shapes,
+    // which the resilient parser still produces.
+    let Some(source_file) = parsed.arena.source_files().next() else {
+        return Ok(Vec::new());
+    };
+
+    let mut imports = Vec::new();
+    for directive in &source_file.directives {
+        let Directive::Use(use_dir) = directive;
+        if use_dir.from.is_some() {
+            continue;
+        }
+        let segments = use_directive_segments(&parsed.arena, use_dir)?;
+        if !segments.is_empty() {
+            imports.push(segments);
+        }
+    }
+    Ok(imports)
+}
+
+/// Resolves a path-form `use` directive's segment identifiers to validated owned
+/// strings. Rejects a segment that is not a usable file/directory name.
+fn use_directive_segments(
+    arena: &AstArena,
+    use_dir: &UseDirective,
+) -> anyhow::Result<Vec<String>> {
+    let mut segments = Vec::with_capacity(use_dir.segments.len());
+    for &ident in &use_dir.segments {
+        let segment = arena.ident_name(ident).to_string();
+        if !is_valid_segment(&segment) {
+            let referenced_as = use_dir
+                .segments
+                .iter()
+                .map(|&id| arena.ident_name(id))
+                .collect::<Vec<_>>()
+                .join("::");
+            return Err(anyhow!(InferenceError::InvalidImportSegment {
+                referenced_as,
+                segment,
+            }));
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+/// Whether `segment` is a plain file/directory name usable in a filesystem path.
+fn is_valid_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && !segment.contains('/')
+        && !segment.contains('\\')
+}
+
+/// Maps canonical module-path segments to the file they name under `src_root`:
+/// `["lib", "arith"]` ⇒ `<src_root>/lib/arith.inf`.
+fn module_file_path(src_root: &Path, segments: &[String]) -> PathBuf {
+    let mut path = src_root.to_path_buf();
+    for segment in segments {
+        path.push(segment);
+    }
+    path.set_extension(SOURCE_EXTENSION);
+    path
+}
+
+/// Reads a source file into a string, mapping IO failures to [`InferenceError::Io`].
+fn read_source(path: &Path) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).map_err(|source| {
+        anyhow!(InferenceError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    })
+}
+
+/// Builds a missing-import error, offering the nearest sibling `.inf` stem as a
+/// suggestion when one is within [`SUGGESTION_MAX_DISTANCE`] edits. The
+/// suggestion is searched in the directory the missing file would have lived in.
+fn missing_import_error(segments: &[String], expected_path: &Path) -> anyhow::Error {
+    let referenced_as = segments.join("::");
+    let suggestion = expected_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|target| nearest_sibling(expected_path, target));
+    anyhow!(InferenceError::ImportFileNotFound {
+        referenced_as,
+        expected_path: expected_path.to_path_buf(),
+        suggestion,
+    })
+}
+
+/// Finds the closest-named sibling `.inf` file to `target` (the missing file's
+/// stem) in the directory `missing` would have lived in, by edit distance.
+fn nearest_sibling(missing: &Path, target: &str) -> Option<String> {
+    let dir = missing.parent()?;
+    let entries = std::fs::read_dir(dir).ok()?;
+
+    let mut best: Option<(usize, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(SOURCE_EXTENSION) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let distance = edit_distance(target, stem);
+        if distance == 0 {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(d, _)| distance < *d) {
+            best = Some((distance, stem.to_string()));
+        }
+    }
+
+    best.filter(|(d, _)| *d <= SUGGESTION_MAX_DISTANCE)
+        .map(|(_, name)| name)
+}
+
+/// Levenshtein edit distance between two strings (insert/delete/substitute), used
+/// to rank near-miss filename suggestions. Operates on chars to stay
+/// Unicode-correct for non-ASCII filenames.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
+}
+
+/// Enumerates every `.inf` file under `src_root` and warns about those reached by
+/// no import chain (i.e. not present in the arena's canonical file set). The
+/// entry file is always reachable and never warned about.
+fn collect_unreachable_warnings(
+    arena: &AstArena,
+    src_root: &Path,
+    entry: &Path,
+) -> Vec<ProjectWarning> {
+    let reachable: FxHashSet<PathBuf> = arena
+        .source_files()
+        .map(|sf| {
+            if sf.module_path.is_empty() {
+                entry.to_path_buf()
+            } else {
+                module_file_path(src_root, &sf.module_path)
+            }
+        })
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .collect();
+
+    let mut warnings = Vec::new();
+    let mut on_disk = enumerate_source_files(src_root);
+    // Sort so the warning order is deterministic regardless of directory-read
+    // order (which the OS does not guarantee).
+    on_disk.sort();
+    for path in on_disk {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !reachable.contains(&canonical) {
+            warnings.push(ProjectWarning::UnreachableFile { path });
+        }
+    }
+    warnings
+}
+
+/// Recursively collects every `.inf` file under `root`. Returns an empty vector
+/// if `root` is unreadable, so an unreachable-file scan failure never aborts an
+/// otherwise-successful parse.
+fn enumerate_source_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some(SOURCE_EXTENSION) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway source tree under the system temp dir, removed on drop.
+    struct TempProject {
+        root: PathBuf,
+    }
+
+    impl TempProject {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "inference-project-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).expect("create temp project root");
+            TempProject { root }
+        }
+
+        /// Writes `source` to `<root>/<relative>`, creating parent directories,
+        /// and returns the absolute path.
+        fn write(&self, relative: &str, source: &str) -> PathBuf {
+            let dest = self.root.join(relative);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).expect("create source parent dir");
+            }
+            std::fs::write(&dest, source).expect("write source file");
+            dest
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The canonical module paths of an arena's files, in stored order.
+    fn module_paths(parse: &ProjectParse) -> Vec<Vec<String>> {
+        parse
+            .arena
+            .source_files()
+            .map(|sf| sf.module_path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn single_file_is_entry_with_empty_module_path() {
+        let project = TempProject::new("single");
+        let entry = project.write("main.inf", "pub fn main() -> i32 { return 0; }");
+
+        let parse = parse_project(&entry).expect("single file parses");
+
+        assert_eq!(module_paths(&parse), vec![Vec::<String>::new()]);
+        assert!(parse.arena.source_files().next().unwrap().is_entry());
+        assert!(parse.warnings.is_empty());
+    }
+
+    #[test]
+    fn three_file_project_parses_into_one_arena() {
+        let project = TempProject::new("three");
+        let entry = project.write(
+            "main.inf",
+            "use math;\npub fn main() -> i32 { return 0; }",
+        );
+        project.write("math.inf", "use lib::arith;\npub fn foo() {}");
+        project.write("lib/arith.inf", "pub fn add(a: i32, b: i32) -> i32 { return a + b; }");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        // Entry first, then imported files sorted lexicographically by path:
+        // ["lib","arith"] < ["math"].
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                vec!["lib".to_string(), "arith".to_string()],
+                vec!["math".to_string()],
+            ]
+        );
+        assert!(parse.warnings.is_empty());
+    }
+
+    #[test]
+    fn import_cycle_terminates() {
+        let project = TempProject::new("cycle");
+        let entry = project.write("main.inf", "use a;\npub fn main() {}");
+        project.write("a.inf", "use b;\npub fn fa() {}");
+        project.write("b.inf", "use a;\npub fn fb() {}");
+
+        let parse = parse_project(&entry).expect("cyclic imports terminate and parse");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                vec!["a".to_string()],
+                vec!["b".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_dependency_parsed_once() {
+        let project = TempProject::new("shared");
+        let entry = project.write("main.inf", "use a;\nuse b;\npub fn main() {}");
+        project.write("a.inf", "use common;\npub fn fa() {}");
+        project.write("b.inf", "use common;\npub fn fb() {}");
+        project.write("common.inf", "pub fn shared() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        let common_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path == vec!["common".to_string()])
+            .count();
+        assert_eq!(common_count, 1, "a shared dependency is parsed exactly once");
+    }
+
+    #[test]
+    fn braced_item_import_maps_to_file() {
+        let project = TempProject::new("braced");
+        let entry = project.write(
+            "main.inf",
+            "use lib::arith::{add};\npub fn main() {}",
+        );
+        project.write("lib/arith.inf", "pub fn add(a: i32, b: i32) -> i32 { return a + b; }");
+
+        let parse = parse_project(&entry).expect("braced item import resolves to a file");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                vec!["lib".to_string(), "arith".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_import_file_errors_with_expected_path() {
+        let project = TempProject::new("missing");
+        let entry = project.write("main.inf", "use nope;\npub fn main() {}");
+
+        let err = parse_project(&entry).expect_err("missing import must error");
+        let inference_err = err
+            .downcast_ref::<InferenceError>()
+            .expect("error is an InferenceError");
+        match inference_err {
+            InferenceError::ImportFileNotFound {
+                referenced_as,
+                expected_path,
+                ..
+            } => {
+                assert_eq!(referenced_as, "nope");
+                assert!(expected_path.ends_with("nope.inf"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn syntax_error_in_imported_file_reports_module_name() {
+        // A broken imported file is still discovered (the resilient parser
+        // produces directive shapes), then rejected when it is lowered, named by
+        // its module path rather than the opaque entry placeholder.
+        let project = TempProject::new("imported-parse");
+        let entry = project.write("main.inf", "use lib::broken;\npub fn main() {}");
+        project.write("lib/broken.inf", "pub fn oops( { return 1; }");
+
+        let err = parse_project(&entry).expect_err("a syntax error in an imported file must error");
+        let inference_err = err
+            .downcast_ref::<InferenceError>()
+            .expect("error is an InferenceError");
+        match inference_err {
+            InferenceError::ImportedFileParse {
+                module_path,
+                details,
+            } => {
+                assert_eq!(module_path, "lib::broken");
+                assert!(!details.is_empty(), "the syntax errors must be reported");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn syntax_error_in_entry_file_reports_entry_label() {
+        let project = TempProject::new("entry-parse");
+        let entry = project.write("main.inf", "pub fn main( { return 0; }");
+
+        let err = parse_project(&entry).expect_err("a syntax error in the entry must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportedFileParse { module_path, .. } => {
+                assert_eq!(module_path, "<entry>");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_import_suggests_near_match() {
+        let project = TempProject::new("suggest");
+        let entry = project.write("main.inf", "use arith;\npub fn main() {}");
+        // A sibling one edit away from the missing `arith.inf`.
+        project.write("arithh.inf", "pub fn add(a: i32, b: i32) -> i32 { return a + b; }");
+
+        let err = parse_project(&entry).expect_err("missing import must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound { suggestion, .. } => {
+                assert_eq!(suggestion.as_deref(), Some("arithh"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn segment_validation_rejects_filesystem_traversal() {
+        // The lexer only ever produces plain identifiers, so an invalid segment
+        // is not reachable from valid source; the predicate is a fail-safe that
+        // keeps a `use` from ever naming `.`, `..`, or a separator-bearing path.
+        assert!(!is_valid_segment(""));
+        assert!(!is_valid_segment("."));
+        assert!(!is_valid_segment(".."));
+        assert!(!is_valid_segment("a/b"));
+        assert!(!is_valid_segment("a\\b"));
+        assert!(is_valid_segment("arith"));
+        assert!(is_valid_segment("_private"));
+    }
+
+    #[test]
+    fn unreachable_file_warns() {
+        let project = TempProject::new("unreachable");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        let orphan = project.write("orphan.inf", "pub fn orphan() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(parse.warnings.len(), 1, "exactly one unreachable file");
+        let ProjectWarning::UnreachableFile { path } = &parse.warnings[0];
+        assert_eq!(
+            std::fs::canonicalize(path).unwrap(),
+            std::fs::canonicalize(&orphan).unwrap()
+        );
+    }
+
+    #[test]
+    fn entry_named_main_among_imports_still_qualified() {
+        // An imported file literally named `main.inf` (in a subdirectory) must
+        // receive its real module path, never the empty entry path.
+        let project = TempProject::new("main-name");
+        let entry = project.write("app.inf", "use sub::main;\npub fn main() {}");
+        project.write("sub/main.inf", "pub fn helper() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                vec!["sub".to_string(), "main".to_string()],
+            ]
+        );
+        // The single entry is `app.inf`, not the imported `sub/main.inf`.
+        let entry_files = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.is_entry())
+            .count();
+        assert_eq!(entry_files, 1);
+    }
+
+    #[test]
+    fn canonical_order_independent_of_discovery_order() {
+        // Two projects with the same files but imports listed in different orders
+        // must produce the same canonical file order.
+        let forward = TempProject::new("order-fwd");
+        let fwd_entry = forward.write("main.inf", "use a;\nuse b;\npub fn main() {}");
+        forward.write("a.inf", "pub fn fa() {}");
+        forward.write("b.inf", "pub fn fb() {}");
+
+        let backward = TempProject::new("order-bwd");
+        let bwd_entry = backward.write("main.inf", "use b;\nuse a;\npub fn main() {}");
+        backward.write("a.inf", "pub fn fa() {}");
+        backward.write("b.inf", "pub fn fb() {}");
+
+        let fwd = parse_project(&fwd_entry).expect("forward parses");
+        let bwd = parse_project(&bwd_entry).expect("backward parses");
+
+        assert_eq!(module_paths(&fwd), module_paths(&bwd));
+        assert_eq!(
+            module_paths(&fwd),
+            vec![
+                Vec::<String>::new(),
+                vec!["a".to_string()],
+                vec!["b".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn from_form_import_is_not_a_source_dependency() {
+        // `use { x } from M;` is an external WASM import, not a file import, so it
+        // must not be followed as a source dependency.
+        let project = TempProject::new("from-form");
+        let entry = project.write(
+            "main.inf",
+            "use { sort } from sorting;\npub fn main() {}",
+        );
+
+        let parse = parse_project(&entry).expect("from-form does not trigger file resolution");
+        assert_eq!(module_paths(&parse), vec![Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn edit_distance_basic() {
+        assert_eq!(edit_distance("arith", "arith"), 0);
+        assert_eq!(edit_distance("arith", "arithh"), 1);
+        assert_eq!(edit_distance("arith", "airth"), 2);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Comprehensive matrix. Broadens the smoke tests above
+    // along axes they do not cover: deep nesting, diamond/cycle combos,
+    // self-import, multi-file canonical ordering, `pub use` discovery, mixed
+    // directives, missing-file edge cases, and unreachable-warning edge cases.
+    // -----------------------------------------------------------------------
+
+    /// Convenience constructor for an owned `["a", "b", ...]` module path.
+    fn mp(segments: &[&str]) -> Vec<String> {
+        segments.iter().map(ToString::to_string).collect()
+    }
+
+    // --- Axis: deep nesting -------------------------------------------------
+
+    #[test]
+    fn three_directory_levels_resolve() {
+        // `use a::b::c;` must map to `<root>/a/b/c.inf`, three directories deep.
+        let project = TempProject::new("deep-three");
+        let entry = project.write("main.inf", "use a::b::c;\npub fn main() {}");
+        project.write("a/b/c.inf", "pub fn deep() {}");
+
+        let parse = parse_project(&entry).expect("three-level path resolves");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["a", "b", "c"])],
+        );
+        assert!(parse.warnings.is_empty());
+    }
+
+    #[test]
+    fn multiple_files_in_same_directory() {
+        // Several siblings in one nested directory are each pulled in by path.
+        let project = TempProject::new("same-dir");
+        let entry = project.write(
+            "main.inf",
+            "use lib::a;\nuse lib::b;\nuse lib::c;\npub fn main() {}",
+        );
+        project.write("lib/a.inf", "pub fn fa() {}");
+        project.write("lib/b.inf", "pub fn fb() {}");
+        project.write("lib/c.inf", "pub fn fc() {}");
+
+        let parse = parse_project(&entry).expect("sibling files in one dir resolve");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["lib", "a"]),
+                mp(&["lib", "b"]),
+                mp(&["lib", "c"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn sibling_import_from_nested_file_is_src_root_relative() {
+        // Paths are resolved from the SRC ROOT regardless of the importer's
+        // location: `use lib::arith;` written inside `deep/inner.inf` must still
+        // resolve to `<root>/lib/arith.inf`, not `<root>/deep/lib/arith.inf`.
+        let project = TempProject::new("nested-sibling");
+        let entry = project.write("main.inf", "use deep::inner;\npub fn main() {}");
+        project.write("deep/inner.inf", "use lib::arith;\npub fn inner() {}");
+        project.write(
+            "lib/arith.inf",
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        );
+
+        let parse = parse_project(&entry).expect("src-root-relative resolution from nested file");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["deep", "inner"]),
+                mp(&["lib", "arith"]),
+            ],
+        );
+        assert!(
+            parse.warnings.is_empty(),
+            "every file is reachable, so no unreachable warning"
+        );
+    }
+
+    // --- Axis: diamond + cycle combos --------------------------------------
+
+    #[test]
+    fn diamond_dependency_parses_shared_apex_once() {
+        // A -> B -> D, A -> C -> D, plus the direct A -> D edge (diamond). D is
+        // reached by three paths but parsed once.
+        let project = TempProject::new("diamond");
+        let entry = project.write(
+            "main.inf",
+            "use b;\nuse c;\nuse d;\npub fn main() {}",
+        );
+        project.write("b.inf", "use d;\npub fn fb() {}");
+        project.write("c.inf", "use d;\npub fn fc() {}");
+        project.write("d.inf", "pub fn fd() {}");
+
+        let parse = parse_project(&entry).expect("diamond parses");
+
+        let d_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path == mp(&["d"]))
+            .count();
+        assert_eq!(d_count, 1, "the diamond apex is parsed exactly once");
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["b"]),
+                mp(&["c"]),
+                mp(&["d"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn two_node_cycle_with_third_file_terminates() {
+        // A -> B -> A (a back-edge cycle) while A also pulls in an acyclic C.
+        // The visited set makes the cycle terminate and C is still discovered.
+        let project = TempProject::new("cycle-plus-third");
+        let entry = project.write("main.inf", "use a;\nuse c;\npub fn main() {}");
+        project.write("a.inf", "use b;\npub fn fa() {}");
+        project.write("b.inf", "use a;\npub fn fb() {}");
+        project.write("c.inf", "pub fn fc() {}");
+
+        let parse = parse_project(&entry).expect("cycle with a third file terminates");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["a"]),
+                mp(&["b"]),
+                mp(&["c"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn self_import_is_accepted_and_parsed_once() {
+        // `use myself;` written inside `myself.inf`. PINNED BEHAVIOR: a file
+        // importing itself is accepted (file cycles are legal) and the
+        // file appears exactly once in the arena. The entry's own self-edge is
+        // a no-op because the entry's empty module path is already visited.
+        let project = TempProject::new("self-import");
+        let entry = project.write("main.inf", "use myself;\npub fn main() {}");
+        project.write("myself.inf", "use myself;\npub fn loops() {}");
+
+        let parse = parse_project(&entry).expect("self-import is accepted");
+
+        let myself_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path == mp(&["myself"]))
+            .count();
+        assert_eq!(myself_count, 1, "a self-importing file is parsed once");
+        assert_eq!(
+            module_paths(&parse),
+            vec![Vec::<String>::new(), mp(&["myself"])],
+        );
+    }
+
+    // --- Axis: canonical order ---------------------------------------------
+
+    #[test]
+    fn five_files_sorted_lexicographically_regardless_of_discovery() {
+        // Discovery order (the `use` list) is deliberately the reverse of the
+        // canonical lexicographic order. The stored arena order must still be
+        // entry-first then lexicographic by module path.
+        let project = TempProject::new("five-sorted");
+        let entry = project.write(
+            "main.inf",
+            "use zebra;\nuse mango;\nuse delta;\nuse charlie;\nuse alpha;\npub fn main() {}",
+        );
+        for name in ["alpha", "charlie", "delta", "mango", "zebra"] {
+            project.write(&format!("{name}.inf"), "pub fn f() {}");
+        }
+
+        let parse = parse_project(&entry).expect("five files parse");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["alpha"]),
+                mp(&["charlie"]),
+                mp(&["delta"]),
+                mp(&["mango"]),
+                mp(&["zebra"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn arena_order_is_byte_stable_across_two_runs() {
+        // Determinism: the same project parsed twice yields identical canonical
+        // order. (The smoke suite checks two *different* discovery orders agree;
+        // this pins that a single project is stable run-to-run, guarding against
+        // hash-set iteration leaking into the stored order.)
+        let project = TempProject::new("stable");
+        let entry = project.write(
+            "main.inf",
+            "use b;\nuse a;\nuse lib::z;\npub fn main() {}",
+        );
+        project.write("a.inf", "pub fn fa() {}");
+        project.write("b.inf", "pub fn fb() {}");
+        project.write("lib/z.inf", "pub fn fz() {}");
+
+        let first = parse_project(&entry).expect("first run parses");
+        let second = parse_project(&entry).expect("second run parses");
+
+        assert_eq!(module_paths(&first), module_paths(&second));
+        assert_eq!(
+            module_paths(&first),
+            vec![
+                Vec::<String>::new(),
+                mp(&["a"]),
+                mp(&["b"]),
+                mp(&["lib", "z"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn entry_sorts_first_even_when_its_name_sorts_last() {
+        // The entry's identity is its empty module path, not its filename. An
+        // entry file literally named `zzz.inf` (which would sort last among the
+        // imported names) must still be stored first.
+        let project = TempProject::new("entry-last-name");
+        let entry = project.write("zzz.inf", "use aaa;\nuse mmm;\npub fn main() {}");
+        project.write("aaa.inf", "pub fn fa() {}");
+        project.write("mmm.inf", "pub fn fm() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        let paths = module_paths(&parse);
+        assert!(
+            paths[0].is_empty(),
+            "the entry (empty path) is stored first regardless of filename"
+        );
+        assert_eq!(
+            paths,
+            vec![Vec::<String>::new(), mp(&["aaa"]), mp(&["mmm"])],
+        );
+        assert!(parse.arena.source_files().next().unwrap().is_entry());
+    }
+
+    #[test]
+    fn nested_paths_sort_below_their_first_segment() {
+        // Lexicographic ordering on the segment vectors: ["lib"] is not a file
+        // here, but ["lib","a"] < ["lib","b"] < ["zed"], and a top-level
+        // ["alpha"] sorts before any ["lib", _].
+        let project = TempProject::new("nested-order");
+        let entry = project.write(
+            "main.inf",
+            "use zed;\nuse lib::b;\nuse lib::a;\nuse alpha;\npub fn main() {}",
+        );
+        project.write("alpha.inf", "pub fn fa() {}");
+        project.write("lib/a.inf", "pub fn la() {}");
+        project.write("lib/b.inf", "pub fn lb() {}");
+        project.write("zed.inf", "pub fn fz() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["alpha"]),
+                mp(&["lib", "a"]),
+                mp(&["lib", "b"]),
+                mp(&["zed"]),
+            ],
+        );
+    }
+
+    // --- Axis: `pub use` in the closure walk --------------------------------
+
+    #[test]
+    fn pub_use_pulls_file_into_closure() {
+        // A `pub use` re-export must drive discovery exactly like a plain `use`:
+        // `math.inf` re-exports `lib::arith`, so `arith` is in the closure even
+        // though only `main` -> `math` is a plain import.
+        let project = TempProject::new("pub-use");
+        let entry = project.write("main.inf", "use math;\npub fn main() {}");
+        project.write("math.inf", "pub use lib::arith;\npub fn foo() {}");
+        project.write(
+            "lib/arith.inf",
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        );
+
+        let parse = parse_project(&entry).expect("pub use drives discovery");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["lib", "arith"]),
+                mp(&["math"]),
+            ],
+        );
+        assert!(
+            parse.warnings.is_empty(),
+            "the re-exported file is reachable, so no unreachable warning"
+        );
+    }
+
+    #[test]
+    fn pub_use_braced_item_form_pulls_file() {
+        // `pub use lib::arith::{add};` re-exports items but still names the file
+        // `lib/arith.inf` for discovery, identically to the brace-free form.
+        let project = TempProject::new("pub-use-braced");
+        let entry = project.write("main.inf", "use math;\npub fn main() {}");
+        project.write("math.inf", "pub use lib::arith::{add};\npub fn foo() {}");
+        project.write(
+            "lib/arith.inf",
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        );
+
+        let parse = parse_project(&entry).expect("braced pub use drives discovery");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["lib", "arith"]),
+                mp(&["math"]),
+            ],
+        );
+    }
+
+    // --- Axis: mixed directives in one file --------------------------------
+
+    #[test]
+    fn mixed_directive_forms_only_path_form_drives_discovery() {
+        // One file carrying all three shapes: a path-form file import, a braced
+        // path-form item import, and a from-form external. Only the two
+        // path-form directives name source files; the `from`-form is skipped.
+        let project = TempProject::new("mixed");
+        let entry = project.write(
+            "main.inf",
+            "use plain;\nuse lib::arith::{add};\nuse { sort } from sorting;\npub fn main() {}",
+        );
+        project.write("plain.inf", "pub fn fp() {}");
+        project.write(
+            "lib/arith.inf",
+            "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        );
+
+        let parse = parse_project(&entry).expect("mixed directives parse");
+
+        // No `sorting.inf` file exists, yet there is no missing-file error,
+        // proving the from-form was never resolved as a source dependency.
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["lib", "arith"]),
+                mp(&["plain"]),
+            ],
+        );
+    }
+
+    #[test]
+    fn pub_use_and_plain_use_mix_in_one_file() {
+        // A file mixing `pub use` (re-export) and plain `use` (private) — both
+        // path forms drive discovery regardless of visibility.
+        let project = TempProject::new("mix-vis");
+        let entry = project.write(
+            "main.inf",
+            "pub use exported;\nuse internal;\npub fn main() {}",
+        );
+        project.write("exported.inf", "pub fn fe() {}");
+        project.write("internal.inf", "pub fn fi() {}");
+
+        let parse = parse_project(&entry).expect("mixed-visibility imports parse");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                mp(&["exported"]),
+                mp(&["internal"]),
+            ],
+        );
+    }
+
+    // --- Axis: missing-file edge cases -------------------------------------
+
+    #[test]
+    fn suggestion_offered_at_distance_exactly_two() {
+        // The nearest sibling is exactly `SUGGESTION_MAX_DISTANCE` (2) edits
+        // away — the boundary case that must still produce a suggestion.
+        let project = TempProject::new("suggest-two");
+        let entry = project.write("main.inf", "use arith;\npub fn main() {}");
+        // "arith" -> "airth": two substitutions (transposition counts as two).
+        project.write("airth.inf", "pub fn f() {}");
+
+        let err = parse_project(&entry).expect_err("missing import must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound { suggestion, .. } => {
+                assert_eq!(suggestion.as_deref(), Some("airth"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_suggestion_when_nothing_is_close() {
+        // A sibling exists but is far past the distance threshold, so no
+        // suggestion is offered (the message would just name the expected path).
+        let project = TempProject::new("suggest-none");
+        let entry = project.write("main.inf", "use arith;\npub fn main() {}");
+        project.write("completely_unrelated.inf", "pub fn f() {}");
+
+        let err = parse_project(&entry).expect_err("missing import must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound { suggestion, .. } => {
+                assert_eq!(
+                    suggestion.as_deref(),
+                    None,
+                    "no sibling within distance 2 means no suggestion"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_file_from_nested_importer_names_full_expected_path() {
+        // A `use` written in a deeply nested file that points at a missing file
+        // must report the full src-root-relative expected path, not a path
+        // relative to the importer.
+        let project = TempProject::new("missing-nested");
+        let entry = project.write("main.inf", "use deep::inner;\npub fn main() {}");
+        project.write("deep/inner.inf", "use lib::gone;\npub fn inner() {}");
+        // `lib/` exists (so the parent dir is real) but `gone.inf` does not.
+        project.write("lib/present.inf", "pub fn p() {}");
+
+        let err = parse_project(&entry).expect_err("missing nested import must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound {
+                referenced_as,
+                expected_path,
+                ..
+            } => {
+                assert_eq!(referenced_as, "lib::gone");
+                assert!(
+                    expected_path.ends_with(std::path::Path::new("lib").join("gone.inf")),
+                    "expected path must be src-root-relative `lib/gone.inf`, got {expected_path:?}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn directory_exists_but_file_missing_errors() {
+        // The directory named by the leading segments is present, but the leaf
+        // `.inf` file is absent — still a missing-import error.
+        let project = TempProject::new("dir-no-file");
+        let entry = project.write("main.inf", "use lib::absent;\npub fn main() {}");
+        // Materialize `lib/` via an unrelated sibling, so the directory exists.
+        project.write("lib/other.inf", "pub fn f() {}");
+
+        let err = parse_project(&entry).expect_err("missing leaf file must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound {
+                referenced_as,
+                expected_path,
+                ..
+            } => {
+                assert_eq!(referenced_as, "lib::absent");
+                assert!(expected_path.ends_with("absent.inf"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_file_suggestion_searches_only_the_target_directory() {
+        // A near-miss sibling in a DIFFERENT directory must not be suggested:
+        // the suggestion search is scoped to the directory the missing file
+        // would have lived in. `lib/arithh.inf` is one edit from the missing
+        // `lib/arith.inf`; a same-named `arithh.inf` at the root must be ignored.
+        let project = TempProject::new("suggest-scoped");
+        let entry = project.write("main.inf", "use lib::arith;\npub fn main() {}");
+        project.write("lib/sibling.inf", "pub fn f() {}");
+        // A close name, but at the root rather than under `lib/`.
+        project.write("arithh.inf", "pub fn f() {}");
+
+        let err = parse_project(&entry).expect_err("missing import must error");
+        let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+        match inference_err {
+            InferenceError::ImportFileNotFound { suggestion, .. } => {
+                assert_ne!(
+                    suggestion.as_deref(),
+                    Some("arithh"),
+                    "a near-miss outside the target directory must not be suggested"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // --- Axis: unreachable warnings ----------------------------------------
+
+    #[test]
+    fn multiple_unreachable_files_warn_in_sorted_order() {
+        // Three orphans created in a non-sorted order; the warnings must come
+        // back sorted by path so output is deterministic.
+        let project = TempProject::new("unreachable-many");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        let zeta = project.write("zeta.inf", "pub fn fz() {}");
+        let alpha = project.write("alpha.inf", "pub fn fa() {}");
+        let mango = project.write("mango.inf", "pub fn fm() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(parse.warnings.len(), 3, "three orphan files");
+        let warned: Vec<PathBuf> = parse
+            .warnings
+            .iter()
+            .map(|ProjectWarning::UnreachableFile { path }| path.clone())
+            .collect();
+        let mut expected_sorted = vec![alpha, mango, zeta];
+        expected_sorted.sort();
+        assert_eq!(
+            warned, expected_sorted,
+            "unreachable warnings must be path-sorted"
+        );
+    }
+
+    #[test]
+    fn unreachable_file_in_nested_directory_warns() {
+        // An orphan that lives several directories deep is still found by the
+        // recursive `src/**/*.inf` scan and warned about.
+        let project = TempProject::new("unreachable-nested");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        let orphan = project.write("deep/nested/orphan.inf", "pub fn f() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(parse.warnings.len(), 1);
+        let ProjectWarning::UnreachableFile { path } = &parse.warnings[0];
+        assert_eq!(
+            std::fs::canonicalize(path).unwrap(),
+            std::fs::canonicalize(&orphan).unwrap(),
+        );
+    }
+
+    #[test]
+    fn no_warnings_when_closure_covers_everything() {
+        // Every `.inf` under the root is reachable through imports, so the
+        // unreachable scan must produce zero warnings — including a nested file.
+        let project = TempProject::new("no-orphans");
+        let entry = project.write("main.inf", "use a;\nuse lib::b;\npub fn main() {}");
+        project.write("a.inf", "pub fn fa() {}");
+        project.write("lib/b.inf", "pub fn fb() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert!(
+            parse.warnings.is_empty(),
+            "a fully-covered closure must warn about nothing, got {:?}",
+            parse.warnings
+        );
+    }
+
+    #[test]
+    fn unreachable_scan_ignores_non_inf_files() {
+        // The src tree contains README.md and a .wasm artifact next to the
+        // entry; neither is a `.inf` source, so neither may be warned about.
+        let project = TempProject::new("non-inf");
+        let entry = project.write("main.inf", "pub fn main() {}");
+        project.write("README.md", "# not source");
+        project.write("notes.txt", "scratch");
+        // A `.wasm` next to the source must also be ignored.
+        std::fs::write(project.root.join("out.wasm"), b"\0asm").unwrap();
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert!(
+            parse.warnings.is_empty(),
+            "only .inf files are eligible for unreachable warnings, got {:?}",
+            parse.warnings
+        );
+    }
+
+    #[test]
+    fn reachable_file_with_orphan_sibling_warns_only_the_orphan() {
+        // A mixed tree: one imported (reachable) file and one orphan in the same
+        // directory. Exactly the orphan is warned about.
+        let project = TempProject::new("mixed-reach");
+        let entry = project.write("main.inf", "use lib::used;\npub fn main() {}");
+        project.write("lib/used.inf", "pub fn fu() {}");
+        let orphan = project.write("lib/unused.inf", "pub fn fo() {}");
+
+        let parse = parse_project(&entry).expect("project parses");
+
+        assert_eq!(parse.warnings.len(), 1, "only the orphan warns");
+        let ProjectWarning::UnreachableFile { path } = &parse.warnings[0];
+        assert_eq!(
+            std::fs::canonicalize(path).unwrap(),
+            std::fs::canonicalize(&orphan).unwrap(),
+        );
+    }
+
+    // --- Axis: error precedence --------------------------------------------
+
+    #[test]
+    fn missing_file_aborts_before_unreachable_scan() {
+        // A missing import is a hard error; it must surface as
+        // `ImportFileNotFound` even though an orphan sibling also exists (the
+        // unreachable scan only runs on a successful discovery).
+        let project = TempProject::new("missing-wins");
+        let entry = project.write("main.inf", "use gone;\npub fn main() {}");
+        project.write("orphan.inf", "pub fn fo() {}");
+
+        let err = parse_project(&entry).expect_err("missing import wins over orphan scan");
+        assert!(matches!(
+            err.downcast_ref::<InferenceError>(),
+            Some(InferenceError::ImportFileNotFound { .. })
+        ));
+    }
+
+    // --- Axis: entry-level error variants ----------------------------------
+    // The `Io` and `NoSourceRoot` arms guard the entry itself, ahead of the
+    // import walk; the rest of the matrix only ever exercises healthy entries.
+
+    #[test]
+    fn entry_at_filesystem_root_has_no_source_root() {
+        // The source root is the entry's parent directory; a filesystem root
+        // (`/`) has no parent, so no root can be derived. This is read-only — it
+        // touches no files and never reads `/`.
+        let root = std::path::Path::new(std::path::MAIN_SEPARATOR_STR);
+
+        let err = parse_project(root).expect_err("a parentless entry must error");
+        match err.downcast_ref::<InferenceError>() {
+            Some(InferenceError::NoSourceRoot(path)) => {
+                assert_eq!(path, root);
+            }
+            other => panic!("expected NoSourceRoot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unreadable_entry_file_surfaces_io_error() {
+        // The entry is read before the per-import `is_file` guard, so an entry
+        // that cannot be read as a file (here: a directory in the entry slot)
+        // surfaces as `Io`, not as a missing-import error. A directory exists but
+        // `read_to_string` on it fails deterministically.
+        let project = TempProject::new("io-entry");
+        let entry_as_dir = project.root.join("not_a_file.inf");
+        std::fs::create_dir_all(&entry_as_dir).expect("create the directory-in-entry-slot");
+
+        let err = parse_project(&entry_as_dir).expect_err("an unreadable entry must error");
+        match err.downcast_ref::<InferenceError>() {
+            Some(InferenceError::Io { path, .. }) => {
+                assert_eq!(path, &entry_as_dir);
+            }
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+}

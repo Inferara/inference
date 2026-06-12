@@ -545,7 +545,6 @@ mod tests {
     /// Builds a `TypedContext` with the given structs registered, mirroring the
     /// `register_test_struct` pattern used by `core/wasm-codegen` unit tests.
     fn ctx_with_structs(structs: &[(&str, &[(&str, TypeInfoKind)])]) -> TypedContext {
-        use inference_ast::nodes::Visibility;
         let mut ctx = TypedContext::default();
         for (name, fields) in structs {
             let field_specs: Vec<_> = fields
@@ -557,7 +556,6 @@ mod tests {
                             kind: kind.clone(),
                             type_params: vec![],
                         },
-                        Visibility::Public,
                     )
                 })
                 .collect();

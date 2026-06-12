@@ -153,7 +153,7 @@ use clap::Parser;
 use inference::wasm_link::{
     resolve_external_modules, ManifestDeps, ResolvedExternalModule, SearchPath,
 };
-use inference::{analyze, link, parse, type_check, wasm_to_v};
+use inference::{analyze, link, parse_project, type_check, wasm_to_v};
 use parser::{Cli, CliMode};
 use std::{
     fs,
@@ -451,19 +451,19 @@ fn main() {
     let need_analyze = args.analyze;
     let need_codegen = args.codegen;
 
-    let source_code = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("Error reading source file: {e}");
-            process::exit(1);
-        }
-    };
     let mut t_ast = None;
     if need_codegen || need_analyze || need_parse {
-        match parse(source_code.as_str()) {
-            Ok(ast) => {
+        // Drive the multi-file front end. A single file with no path-form `use`
+        // imports yields a one-file arena identical to the legacy single-file
+        // parse, so existing single-file behavior is preserved; reachable
+        // imported files are folded into the same arena.
+        match parse_project(&path) {
+            Ok(project) => {
                 println!("Parsed: {}", path.display());
-                t_ast = Some(ast);
+                for warning in &project.warnings {
+                    eprintln!("{warning}");
+                }
+                t_ast = Some(project.arena);
             }
             Err(e) => {
                 eprintln!("Parse error: {e}");

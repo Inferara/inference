@@ -2754,11 +2754,6 @@ mod recursive_struct_tests {
         assert!(err.contains("recursive struct definition"), "got: {err}");
     }
 
-    // Module definitions are not yet supported in the grammar, so we cannot
-    // write a parser-level test for recursive structs inside modules. The fix
-    // handles Def::Module nonetheless to avoid a latent bug when module parsing
-    // is added.
-
     #[test]
     fn test_non_recursive_struct_inside_spec_is_accepted() {
         let source = r#"

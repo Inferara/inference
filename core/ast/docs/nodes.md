@@ -161,6 +161,7 @@ Import statement for bringing external symbols into scope.
 ```rust
 pub struct UseDirective {
     pub location: Location,
+    pub vis: Visibility,
     pub imported_types: Vec<IdentId>,
     pub segments: Vec<IdentId>,
     pub from: Option<ModuleRef>,
@@ -171,11 +172,14 @@ pub struct UseDirective {
 ```inference
 use std::{io, fs};
 use core::option::Option;
+pub use lib::arith;
 use { sort } from sorting;
 use { hash } from crypto::sha256;
 ```
 
 **Fields:**
+- `vis`: Import visibility. `Public` (`pub use …`) re-exports the imported
+  namespace or items; `Private` (the default) keeps the import file-local.
 - `imported_types`: Specific types to import (e.g., `{io, fs}`)
 - `segments`: Path-form module segments (e.g., `std`, `core`)
 - `from`: Optional logical module reference of a `from` clause. A `ModuleRef`

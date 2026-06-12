@@ -41,10 +41,11 @@ use inference_ast::nodes::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
+    definition_graph::{self, DefNode, GraphOutcome},
     errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{
         ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind, ResolvedImport,
-        SymbolTable,
+        ResolvedImportTarget, SymbolTable,
     },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::TypedContext,
@@ -54,7 +55,6 @@ use crate::{
 pub(crate) struct TypeChecker {
     symbol_table: SymbolTable,
     errors: Vec<TypeCheckError>,
-    glob_resolution_in_progress: FxHashSet<u32>,
     reported_errors: FxHashSet<(DedupKind, String)>,
     /// Type parameter names for the function/method body currently being inferred.
     /// Set before walking the body, cleared after. Used by `infer_statement` to
@@ -146,19 +146,25 @@ impl TypeChecker {
         self.process_directives(ctx);
         self.collect_extern_bindings(ctx);
         self.register_types(ctx);
-        self.resolve_imports();
         self.collect_function_and_constant_definitions(ctx);
+        // Imports resolve after both types and functions are registered so an
+        // item import (`use a::b::{f};`) can bind a function as well as a type;
+        // import binding never feeds the registration passes, so this ordering
+        // is safe.
+        self.resolve_imports();
+        self.check_definition_cycles(ctx);
         self.check_spec_function_shadows_top_level(ctx);
         // Continue to inference phase even if registration had errors
-        // to collect all errors before returning
-        let top_level_defs: Vec<DefId> = ctx
-            .arena()
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
-        for def_id in top_level_defs {
-            self.infer_def(def_id, ctx);
+        // to collect all errors before returning. Each file's bodies are
+        // inferred inside that file's scope so name resolution and visibility
+        // checks see the file's own definitions and imports.
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                self.infer_def(def_id, ctx);
+            }
         }
+        self.symbol_table.reset_to_root();
         if !self.errors.is_empty() {
             let error_messages: Vec<String> = std::mem::take(&mut self.errors)
                 .into_iter()
@@ -198,16 +204,81 @@ impl TypeChecker {
         }
     }
 
+    /// Collects each source file's `(module_path, defs)` in canonical arena
+    /// order (entry first, then by module path). Every registration pass walks
+    /// this list, entering the file's scope before processing its definitions so
+    /// each file's symbols land in their own namespace; the entry file's scope is
+    /// the root, keeping single-file programs unchanged.
+    fn files_with_defs(ctx: &TypedContext) -> Vec<(Vec<String>, Vec<DefId>)> {
+        ctx.arena()
+            .source_files()
+            .map(|sf| (sf.module_path.clone(), sf.defs.clone()))
+            .collect()
+    }
+
+    /// Detects value cycles among top-level `const` initializers and `type`
+    /// aliases across all files, emitting [`TypeCheckError::CircularDefinition`]
+    /// on a cycle. When acyclic, records the dependency-first topological order on
+    /// the context for a later phase to emit constants in a computable order.
+    ///
+    /// File-to-file import cycles are unaffected — they are allowed (#63). Only a
+    /// cycle in the *values* of definitions, which has no evaluation order, is an
+    /// error.
+    fn check_definition_cycles(&mut self, ctx: &mut TypedContext) {
+        let nodes = self.collect_definition_nodes(ctx);
+        if nodes.is_empty() {
+            return;
+        }
+        match definition_graph::analyze(ctx.arena(), &nodes) {
+            GraphOutcome::Acyclic { topo_order } => ctx.set_definition_order(topo_order),
+            GraphOutcome::Cyclic { cycle, location } => {
+                self.errors.push(TypeCheckError::CircularDefinition {
+                    cycle: cycle.join(" -> "),
+                    location,
+                });
+            }
+        }
+    }
+
+    /// Builds a [`DefNode`] for every top-level `const` and `type` alias across
+    /// all files, recording the scope each registered in (its file scope) and its
+    /// scope ancestry so the value graph can resolve references by name.
+    fn collect_definition_nodes(&mut self, ctx: &TypedContext) -> Vec<DefNode> {
+        let mut nodes = Vec::new();
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            let scope_id = self.symbol_table.enter_file_scope(&module_path);
+            let scope_chain = self.symbol_table.scope_ancestry(scope_id);
+            let file_path = module_path.join("::");
+            for def_id in defs {
+                let def_data = &ctx.arena()[def_id];
+                let location = def_data.location;
+                let name_id = match &def_data.kind {
+                    Def::Constant { name, .. } | Def::TypeAlias { name, .. } => *name,
+                    _ => continue,
+                };
+                nodes.push(DefNode {
+                    def_id,
+                    scope_id,
+                    name: ctx.arena()[name_id].name.clone(),
+                    file_path: file_path.clone(),
+                    location,
+                    scope_chain: scope_chain.clone(),
+                });
+            }
+        }
+        self.symbol_table.reset_to_root();
+        nodes
+    }
+
     /// Registers `Def::TypeAlias`, `Def::Struct`, `Def::Enum`, and `Def::Spec`
     fn register_types(&mut self, ctx: &mut TypedContext) {
-        let top_level_defs: Vec<DefId> = ctx
-            .arena()
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
-        for def_id in top_level_defs {
-            self.register_type_for_def(def_id, ctx);
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                self.register_type_for_def(def_id, ctx);
+            }
         }
+        self.symbol_table.reset_to_root();
 
         self.check_recursive_struct_definitions(ctx);
     }
@@ -238,13 +309,12 @@ impl TypeChecker {
                 methods,
             } => {
                 let struct_name = arena[*name].name.clone();
-                let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
+                let field_infos: Vec<(String, TypeInfo)> = fields
                     .iter()
                     .map(|f| {
                         (
                             arena[f.name].name.clone(),
                             TypeInfo::from_type_id(arena, f.ty),
-                            Visibility::Private,
                         )
                     })
                     .collect();
@@ -266,7 +336,7 @@ impl TypeChecker {
                 let method_ids: Vec<DefId> = methods.clone();
                 let vis_clone = vis.clone();
                 self.symbol_table
-                    .register_struct(&struct_name, &field_infos, vec![], vis_clone)
+                    .register_struct(&struct_name, &field_infos, vec![], vis_clone, location)
                     .unwrap_or_else(|_| {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Struct,
@@ -328,6 +398,7 @@ impl TypeChecker {
                             return_type,
                             visibility: method_vis.clone(),
                             definition_scope_id,
+                            definition_location: method_location,
                             kind: FuncKind::Local,
                         };
 
@@ -371,7 +442,7 @@ impl TypeChecker {
                     }
                 }
                 self.symbol_table
-                    .register_enum(&enum_name, &variant_names, vis.clone())
+                    .register_enum(&enum_name, &variant_names, vis.clone(), location)
                     .unwrap_or_else(|_| {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Enum,
@@ -404,10 +475,7 @@ impl TypeChecker {
                     guard.register_type_for_def(inner_id, ctx);
                 }
             }
-            Def::Constant { .. }
-            | Def::Function { .. }
-            | Def::ExternFunction { .. }
-            | Def::Module { .. } => {}
+            Def::Constant { .. } | Def::Function { .. } | Def::ExternFunction { .. } => {}
         }
     }
 
@@ -553,11 +621,6 @@ impl TypeChecker {
                 Def::Spec { defs, .. } => {
                     self.check_recursive_structs_in_defs(arena, defs);
                 }
-                Def::Module {
-                    defs: Some(defs), ..
-                } => {
-                    self.check_recursive_structs_in_defs(arena, defs);
-                }
                 _ => {}
             }
         }
@@ -597,14 +660,13 @@ impl TypeChecker {
 
     /// Registers `Def::Function`, `Def::ExternFunction`, and `Def::Constant`
     fn collect_function_and_constant_definitions(&mut self, ctx: &mut TypedContext) {
-        let top_level_defs: Vec<DefId> = ctx
-            .arena()
-            .source_files()
-            .flat_map(|sf| sf.defs.iter().copied())
-            .collect();
-        for def_id in top_level_defs {
-            self.collect_for_def(def_id, ctx);
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                self.collect_for_def(def_id, ctx);
+            }
         }
+        self.symbol_table.reset_to_root();
     }
 
     #[allow(clippy::too_many_lines)]
@@ -639,6 +701,7 @@ impl TypeChecker {
             }
             Def::Function {
                 name,
+                vis,
                 type_params,
                 args,
                 returns,
@@ -646,6 +709,7 @@ impl TypeChecker {
             } => {
                 let func_name = ctx.arena()[*name].name.clone();
                 let name_ident_id = *name;
+                let func_vis = vis.clone();
                 let tp_names: Vec<String> = type_params
                     .iter()
                     .map(|p| ctx.arena()[*p].name.clone())
@@ -713,11 +777,13 @@ impl TypeChecker {
                 let return_type = returns
                     .map(|r| TypeInfo::from_type_id_with_type_params(ctx.arena(), r, &tp_names))
                     .unwrap_or_default();
-                if let Err(err) = self.symbol_table.register_function(
+                if let Err(err) = self.symbol_table.register_function_with_visibility(
                     &func_name,
                     tp_names,
                     param_types,
                     return_type,
+                    func_vis,
+                    location,
                 ) {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Function,
@@ -796,10 +862,7 @@ impl TypeChecker {
                     guard.collect_for_def(inner_id, ctx);
                 }
             }
-            Def::Struct { .. }
-            | Def::Enum { .. }
-            | Def::TypeAlias { .. }
-            | Def::Module { .. } => {}
+            Def::Struct { .. } | Def::Enum { .. } | Def::TypeAlias { .. } => {}
         }
     }
 
@@ -1462,9 +1525,14 @@ impl TypeChecker {
                             if let Some(field_info) =
                                 struct_info.get_field_info_by_name(&field_name)
                             {
+                                // A field is accessible exactly when its struct
+                                // is: fields carry no visibility of their own, so
+                                // the check consults the struct's visibility and
+                                // defining scope (#63).
                                 self.check_and_report_visibility(
-                                    &field_info.visibility,
+                                    &struct_info.visibility,
                                     struct_info.definition_scope_id,
+                                    struct_info.definition_location,
                                     &location,
                                     VisibilityContext::Field {
                                         struct_name: struct_name.clone(),
@@ -1548,6 +1616,7 @@ impl TypeChecker {
                         self.check_and_report_visibility(
                             &enum_info.visibility,
                             enum_info.definition_scope_id,
+                            enum_info.definition_location,
                             &location,
                             VisibilityContext::Enum {
                                 name: enum_name.clone(),
@@ -1907,6 +1976,130 @@ impl TypeChecker {
         }
     }
 
+    /// Flattens a chain of `TypeMemberAccess` nodes whose deepest base is an
+    /// identifier into its `::`-separated path segments
+    /// (`math::arith::add` ⇒ `["math", "arith", "add"]`).
+    ///
+    /// Returns `None` if the base is anything other than an identifier — a value
+    /// expression like `foo().bar::baz` is not a static path and is left to the
+    /// other call-resolution paths.
+    fn flatten_type_member_path(arena: &AstArena, expr_id: ExprId) -> Option<Vec<String>> {
+        match &arena[expr_id].kind {
+            Expr::Identifier(ident_id) => Some(vec![arena[*ident_id].name.clone()]),
+            Expr::TypeMemberAccess { expr, name } => {
+                let mut segments = Self::flatten_type_member_path(arena, *expr)?;
+                segments.push(arena[*name].name.clone());
+                Some(segments)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves a `::`-separated call target (`math::arith::add(...)`) to a
+    /// function in another file, returning `Some(result)` when the path names a
+    /// function and `None` when it does not (so the caller falls through to
+    /// method / enum / plain-call handling).
+    ///
+    /// Only multi-qualifier paths (three or more segments) are handled here; a
+    /// single-qualifier `Type::name` is left to the existing method/enum code so
+    /// associated-function and variant calls keep their dedicated diagnostics.
+    fn try_infer_qualified_function_call(
+        &mut self,
+        call_expr_id: ExprId,
+        function_expr_id: ExprId,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &mut TypedContext,
+    ) -> Option<Option<TypeInfo>> {
+        let segments = Self::flatten_type_member_path(ctx.arena(), function_expr_id)?;
+        if segments.len() < 3 {
+            return None;
+        }
+
+        let location = ctx.arena()[call_expr_id].location;
+        let path = segments.join("::");
+
+        // A three-or-more-segment call target is unambiguously a file-qualified
+        // function path. If it does not resolve to a callable function — the
+        // name is wrong, or a hop crosses a non-re-exported (private) import —
+        // this is the call's error to report, not a fall-through: the
+        // method/enum/plain-call handlers below can never resolve a multi-hop
+        // path, so silently falling through would accept it.
+        let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        let signature = match self.symbol_table.resolve_qualified_name(&segments, from_scope) {
+            Some((symbol, _)) if symbol.as_function().is_some() => {
+                let sig = symbol.as_function().expect("checked above").clone();
+                // A qualified path may name a private function in another file
+                // (`lib::arith::secret()`). Resolution reaches it through the
+                // scope tree, so the final symbol's `pub`-ness must be enforced
+                // against the accessing file — the re-export gate only guards
+                // intermediate hops, not the target itself.
+                self.check_and_report_visibility(
+                    &sig.visibility,
+                    sig.definition_scope_id,
+                    sig.definition_location,
+                    &location,
+                    VisibilityContext::Function { name: path.clone() },
+                );
+                sig
+            }
+            _ => {
+                self.push_error_dedup(TypeCheckError::UndefinedFunction {
+                    name: path,
+                    location,
+                });
+                for arg in call_args {
+                    self.infer_expression(arg.1, ctx);
+                }
+                return Some(None);
+            }
+        };
+
+        if call_args.len() != signature.param_types.len() {
+            self.errors.push(TypeCheckError::ArgumentCountMismatch {
+                kind: "function",
+                name: path,
+                expected: signature.param_types.len(),
+                found: call_args.len(),
+                location,
+            });
+            for arg in call_args {
+                self.infer_expression(arg.1, ctx);
+            }
+            return Some(None);
+        }
+
+        let sig_param_types = signature.param_types.clone();
+        for (i, arg) in call_args.iter().enumerate() {
+            self.propagate_arg_uzumaki_type(arg.1, sig_param_types.get(i), ctx);
+            let arg_type = self.infer_expression(arg.1, ctx);
+            if let Some(arg_type) = arg_type
+                && i < sig_param_types.len()
+                && arg_type != sig_param_types[i]
+            {
+                self.errors.push(TypeCheckError::TypeMismatch {
+                    expected: sig_param_types[i].clone(),
+                    found: arg_type,
+                    context: TypeMismatchContext::FunctionArgument {
+                        function_name: path.clone(),
+                        arg_name: format!("arg{i}"),
+                        arg_index: i,
+                    },
+                    location,
+                });
+            }
+        }
+
+        ctx.set_node_typeinfo(
+            NodeId::Expr(function_expr_id),
+            TypeInfo {
+                kind: TypeInfoKind::Function(path),
+                type_params: vec![],
+            },
+        );
+        ctx.set_node_typeinfo(NodeId::Expr(call_expr_id), signature.return_type.clone());
+        Some(Some(signature.return_type))
+    }
+
     /// Infer types for a function call expression.
     ///
     /// Handles associated function calls (Type::method), instance method calls (obj.method),
@@ -1920,6 +2113,18 @@ impl TypeChecker {
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &mut TypedContext,
     ) -> Option<TypeInfo> {
+        // A `::`-separated path that names a function in another file
+        // (`math::arith::add(...)`) resolves through the file scope tree and the
+        // importing file's resolved imports. This is tried before the
+        // `Type::function()` handling below, which only covers single-qualifier
+        // method/enum access; a path naming a struct method or enum variant
+        // returns no function symbol here and falls through unchanged.
+        if let Some(result) =
+            self.try_infer_qualified_function_call(call_expr_id, function_expr_id, call_args, ctx)
+        {
+            return result;
+        }
+
         let arena = ctx.arena();
         let location = arena[call_expr_id].location;
 
@@ -1969,6 +2174,7 @@ impl TypeChecker {
                     self.check_and_report_visibility(
                         &method_info.visibility,
                         method_info.scope_id,
+                        method_info.signature.definition_location,
                         &ctx.arena()[function_expr_id].location,
                         VisibilityContext::Method {
                             type_name: type_name.clone(),
@@ -2073,6 +2279,7 @@ impl TypeChecker {
                         self.check_and_report_visibility(
                             &method_info.visibility,
                             method_info.scope_id,
+                            method_info.signature.definition_location,
                             &ctx.arena()[function_expr_id].location,
                             VisibilityContext::Method {
                                 type_name: type_name.clone(),
@@ -2169,6 +2376,7 @@ impl TypeChecker {
             self.check_and_report_visibility(
                 &s.visibility,
                 s.definition_scope_id,
+                s.definition_location,
                 &location,
                 VisibilityContext::Function {
                     name: func_name.clone(),
@@ -2300,238 +2508,38 @@ impl TypeChecker {
 
     // Compound-return-in-arg check moved to analysis rule A016.
 
-    /// Process a module definition.
-    ///
-    /// Creates a new scope for the module and processes all definitions within it.
-    /// After processing, pops back to the parent scope.
-    #[allow(dead_code)]
-    fn process_module_definition(
-        &mut self,
-        def_id: DefId,
-        ctx: &mut TypedContext,
-    ) -> anyhow::Result<()> {
-        let arena = ctx.arena();
-        let def_data = &arena[def_id];
-        let Def::Module { name, vis, defs } = &def_data.kind else {
-            return Ok(());
-        };
-        let module_name = arena[*name].name.clone();
-        let defs_snapshot = defs.clone();
-        let _scope_id = self.symbol_table.enter_module(&module_name, vis.clone());
-
-        if let Some(body) = &defs_snapshot {
-            for &inner_def_id in body {
-                let arena = ctx.arena();
-                let inner_def = &arena[inner_def_id];
-                let inner_location = inner_def.location;
-                match &inner_def.kind {
-                    Def::TypeAlias { name, ty, .. } => {
-                        let type_name = arena[*name].name.clone();
-                        let type_info = TypeInfo::from_type_id(arena, *ty);
-                        self.symbol_table
-                            .register_type(&type_name, Some(type_info))
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Type,
-                                    name: type_name,
-                                    reason: None,
-                                    location: inner_location,
-                                });
-                            });
-                    }
-                    Def::Struct {
-                        name: struct_name,
-                        vis: struct_vis,
-                        fields,
-                        ..
-                    } => {
-                        let s_name = arena[*struct_name].name.clone();
-                        let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
-                            .iter()
-                            .map(|f| {
-                                (
-                                    arena[f.name].name.clone(),
-                                    TypeInfo::from_type_id(arena, f.ty),
-                                    Visibility::Private,
-                                )
-                            })
-                            .collect();
-                        self.symbol_table
-                            .register_struct(&s_name, &field_infos, vec![], struct_vis.clone())
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Struct,
-                                    name: s_name,
-                                    reason: None,
-                                    location: inner_location,
-                                });
-                            });
-                    }
-                    Def::Enum {
-                        name: enum_name,
-                        vis: enum_vis,
-                        variants,
-                    } => {
-                        let e_name = arena[*enum_name].name.clone();
-                        let variant_names: Vec<&str> =
-                            variants.iter().map(|v| arena[*v].name.as_str()).collect();
-                        self.symbol_table
-                            .register_enum(&e_name, &variant_names, enum_vis.clone())
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Enum,
-                                    name: e_name,
-                                    reason: None,
-                                    location: inner_location,
-                                });
-                            });
-                    }
-                    Def::Spec {
-                        name: spec_name, ..
-                    } => {
-                        let sp_name = arena[*spec_name].name.clone();
-                        self.symbol_table
-                            .register_spec(&sp_name)
-                            .unwrap_or_else(|_| {
-                                self.errors.push(TypeCheckError::RegistrationFailed {
-                                    kind: RegistrationKind::Spec,
-                                    name: sp_name,
-                                    reason: None,
-                                    location: inner_location,
-                                });
-                            });
-                    }
-                    Def::Module { .. } => {
-                        self.process_module_definition(inner_def_id, ctx)?;
-                    }
-                    Def::Function { .. } => {
-                        self.infer_variables(inner_def_id, ctx);
-                    }
-                    Def::Constant {
-                        name: const_name,
-                        ty,
-                        value,
-                        ..
-                    } => {
-                        let c_name = arena[*const_name].name.clone();
-                        let const_type = self
-                            .symbol_table
-                            .resolve_custom_type(TypeInfo::from_type_id(arena, *ty));
-                        let value_id = *value;
-                        if let Err(err) = self.symbol_table.push_variable_to_scope(
-                            &c_name,
-                            const_type.clone(),
-                            false,
-                        ) {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Variable,
-                                name: c_name,
-                                reason: Some(err.to_string()),
-                                location: inner_location,
-                            });
-                        }
-                        self.check_const_initializer(
-                            value_id,
-                            &const_type,
-                            inner_location,
-                            ctx,
-                        );
-                    }
-                    Def::ExternFunction {
-                        name: ef_name,
-                        args,
-                        returns,
-                        ..
-                    } => {
-                        let fn_name = arena[*ef_name].name.clone();
-                        // Same validation as the top-level extern arm: reject a
-                        // `self` receiver (H7) and check every signature type so
-                        // an undeclared `Custom` cannot reach codegen (H6).
-                        // Externs carry no type parameters, hence the empty slice.
-                        for arg in args {
-                            match &arg.kind {
-                                ArgKind::SelfRef { .. } => {
-                                    self.errors.push(TypeCheckError::SelfReferenceInFunction {
-                                        function_name: fn_name.clone(),
-                                        location: arg.location,
-                                    });
-                                }
-                                ArgKind::Named { ty, .. }
-                                | ArgKind::Ignored { ty }
-                                | ArgKind::TypeOnly(ty) => {
-                                    self.validate_type(arena, *ty, &[]);
-                                }
-                            }
-                        }
-                        if let Some(return_type_id) = returns {
-                            self.validate_type(arena, *return_type_id, &[]);
-                        }
-                        let param_types: Vec<TypeInfo> = args
-                            .iter()
-                            .filter_map(|a| match &a.kind {
-                                ArgKind::SelfRef { .. } => None,
-                                ArgKind::Named { ty, .. }
-                                | ArgKind::Ignored { ty }
-                                | ArgKind::TypeOnly(ty) => Some(TypeInfo::from_type_id(arena, *ty)),
-                            })
-                            .collect();
-                        let return_type = returns
-                            .map(|r| TypeInfo::from_type_id(arena, r))
-                            .unwrap_or_default();
-                        // Module-inner externs are never bound by a (file-global)
-                        // `use … from` clause: the binding map is keyed by
-                        // top-level declaration only, so this lookup correctly
-                        // misses, leaving the module-inner extern unbound.
-                        let origin = self.extern_module_bindings.get(&inner_def_id).cloned();
-                        if let Err(err) = self.symbol_table.register_extern_function(
-                            &fn_name,
-                            param_types,
-                            return_type,
-                            origin,
-                        ) {
-                            self.errors.push(TypeCheckError::RegistrationFailed {
-                                kind: RegistrationKind::Function,
-                                name: fn_name,
-                                reason: Some(err),
-                                location: inner_location,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        self.symbol_table.pop_scope();
-        Ok(())
-    }
-
-    /// Process all use directives in source files (Phase A of import resolution).
+    /// Process all use directives (Phase A of import resolution): registers each
+    /// file's `use` directives as unresolved imports in that file's scope, so
+    /// resolution later binds them against the importing file's namespace.
     fn process_directives(&mut self, ctx: &mut TypedContext) {
-        let arena = ctx.arena();
-        let all_directives: Vec<_> = arena
+        let per_file: Vec<(Vec<String>, Vec<Directive>)> = ctx
+            .arena()
             .source_files()
-            .flat_map(|sf| sf.directives.iter())
-            .cloned()
+            .map(|sf| (sf.module_path.clone(), sf.directives.clone()))
             .collect();
-        for directive in &all_directives {
-            match directive {
-                Directive::Use(use_directive) => {
-                    let arena = ctx.arena();
-                    if let Err(_err) = self.process_use_statement(arena, use_directive) {
-                        let path = use_directive
-                            .segments
-                            .iter()
-                            .map(|s| arena[*s].name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        self.errors.push(TypeCheckError::ImportResolutionFailed {
-                            path,
-                            location: use_directive.location,
-                        });
+        for (module_path, directives) in per_file {
+            self.symbol_table.enter_file_scope(&module_path);
+            for directive in &directives {
+                match directive {
+                    Directive::Use(use_directive) => {
+                        let arena = ctx.arena();
+                        if let Err(_err) = self.process_use_statement(arena, use_directive) {
+                            let path = use_directive
+                                .segments
+                                .iter()
+                                .map(|s| arena[*s].name.as_str())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            self.errors.push(TypeCheckError::ImportResolutionFailed {
+                                path,
+                                location: use_directive.location,
+                            });
+                        }
                     }
                 }
             }
         }
+        self.symbol_table.reset_to_root();
     }
 
     /// Binds each `external fn` to the source module named by a `use … from`
@@ -2660,6 +2668,19 @@ impl TypeChecker {
             .map(|s| arena[*s].name.clone())
             .collect();
 
+        // A braced `use a::b::{ ... }` with no items is parseable but means
+        // nothing; reject it with guidance rather than registering an empty
+        // import that resolves to nothing. The brace presence (recorded by the
+        // parser as `braced`) is what distinguishes it from a file import, since
+        // both leave `imported_types` empty.
+        if use_stmt.braced && use_stmt.imported_types.is_empty() {
+            self.errors.push(TypeCheckError::EmptyImportList {
+                path: path.join("::"),
+                location: use_stmt.location,
+            });
+            return Ok(());
+        }
+
         let kind = if use_stmt.imported_types.is_empty() {
             ImportKind::Plain
         } else {
@@ -2677,6 +2698,7 @@ impl TypeChecker {
         let import = Import {
             path,
             kind,
+            visibility: use_stmt.vis.clone(),
             location: use_stmt.location,
         };
         self.symbol_table.register_import(import)
@@ -2692,7 +2714,12 @@ impl TypeChecker {
         }
     }
 
-    /// Resolve imports within a single scope
+    /// Resolve the imports registered in a single file scope.
+    ///
+    /// A file import (`use a::b;`) binds the namespace `b` to the scope `a::b`;
+    /// an item import (`use a::b::{x};`) binds each named item, which must exist
+    /// in `a::b` and be `pub`. A `pub use` marks the resulting binding as
+    /// re-exported, so an importer of *this* file may traverse through it.
     fn resolve_imports_in_scope(&mut self, scope_id: u32) {
         let imports = {
             let scope = match self.symbol_table.get_scope(scope_id) {
@@ -2703,136 +2730,171 @@ impl TypeChecker {
         };
 
         for import in imports {
+            let reexported = matches!(import.visibility, Visibility::Public);
             match &import.kind {
-                ImportKind::Plain => {
-                    if let Some(symbol_name) = import.path.last() {
-                        if let Some((symbol, def_scope_id)) = self
-                            .symbol_table
-                            .resolve_qualified_name(&import.path, scope_id)
-                        {
-                            if !symbol.is_public() {
-                                self.check_and_report_visibility(
-                                    &Visibility::Private,
-                                    def_scope_id,
-                                    &import.location,
-                                    VisibilityContext::Import {
-                                        path: import.path.join("::"),
-                                    },
-                                );
-                            }
-                            let resolved = ResolvedImport {
-                                local_name: symbol_name.clone(),
-                                symbol,
-                                definition_scope_id: def_scope_id,
-                            };
-                            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
-                                scope.borrow_mut().add_resolved_import(resolved);
-                            }
-                        } else {
-                            self.errors.push(TypeCheckError::ImportResolutionFailed {
-                                path: import.path.join("::"),
-                                location: import.location,
-                            });
-                        }
-                    }
-                }
+                ImportKind::Plain => self.resolve_file_import(scope_id, &import, reexported),
                 ImportKind::Partial(items) => {
-                    for item in items {
-                        let mut full_path = import.path.clone();
-                        full_path.push(item.name.clone());
-
-                        if let Some((symbol, def_scope_id)) = self
-                            .symbol_table
-                            .resolve_qualified_name(&full_path, scope_id)
-                        {
-                            if !symbol.is_public() {
-                                self.check_and_report_visibility(
-                                    &Visibility::Private,
-                                    def_scope_id,
-                                    &import.location,
-                                    VisibilityContext::Import {
-                                        path: full_path.join("::"),
-                                    },
-                                );
-                            }
-                            let local_name =
-                                item.alias.clone().unwrap_or_else(|| item.name.clone());
-                            let resolved = ResolvedImport {
-                                local_name,
-                                symbol,
-                                definition_scope_id: def_scope_id,
-                            };
-                            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
-                                scope.borrow_mut().add_resolved_import(resolved);
-                            }
-                        } else {
-                            self.errors.push(TypeCheckError::ImportResolutionFailed {
-                                path: format!("{}::{}", import.path.join("::"), item.name),
-                                location: import.location,
-                            });
-                        }
-                    }
-                }
-                ImportKind::Glob => {
-                    self.resolve_glob_import(&import.path, &import.location, scope_id);
+                    self.resolve_item_imports(scope_id, &import, items, reexported);
                 }
             }
         }
     }
 
-    /// Resolve a glob import (`use path::*`) by importing all public symbols from the target module.
-    fn resolve_glob_import(&mut self, path: &[String], location: &Location, into_scope_id: u32) {
-        if path.is_empty() {
-            self.errors.push(TypeCheckError::EmptyGlobImport {
-                location: *location,
-            });
+    /// Resolves a file import (`use a::b;`): the last segment names a namespace
+    /// scope `a::b` and is bound under that name in `scope_id`. A binding that
+    /// collides with a local definition or an existing import of the same name is
+    /// rejected.
+    fn resolve_file_import(&mut self, scope_id: u32, import: &Import, reexported: bool) {
+        let Some(local_name) = import.path.last().cloned() else {
             return;
-        }
-
-        let target_scope_id = match self.symbol_table.find_module_scope(path) {
-            Some(id) => id,
-            None => {
-                self.errors.push(TypeCheckError::ImportResolutionFailed {
-                    path: format!("{}::* - module not found", path.join("::")),
-                    location: *location,
-                });
-                return;
-            }
         };
 
-        if self.glob_resolution_in_progress.contains(&target_scope_id) {
-            cov_mark::hit!(type_checker_circular_glob_import_detected);
-            self.errors.push(TypeCheckError::CircularImport {
-                path: path.join("::"),
-                location: *location,
-            });
+        let Some(target_scope_id) = self.symbol_table.find_module_scope(&import.path) else {
+            self.report_unresolvable_file_import(import);
+            return;
+        };
+
+        if self.report_import_name_collision(scope_id, &local_name, &import.location) {
             return;
         }
 
-        self.glob_resolution_in_progress.insert(target_scope_id);
+        let resolved = ResolvedImport {
+            local_name,
+            target: ResolvedImportTarget::Namespace {
+                scope_id: target_scope_id,
+            },
+            reexported,
+        };
+        if let Some(scope) = self.symbol_table.get_scope(scope_id) {
+            scope.borrow_mut().add_resolved_import(resolved);
+        }
+    }
 
-        let public_symbols = self
-            .symbol_table
-            .get_public_symbols_from_scope(target_scope_id);
+    /// Reports an unresolvable file import. Without a project context (the
+    /// string-parse and REPL paths) the only file is the entry, so a path-form
+    /// `use` can never name an existing namespace; that case gets a dedicated,
+    /// actionable message rather than the generic resolution failure.
+    fn report_unresolvable_file_import(&mut self, import: &Import) {
+        let path = import.path.join("::");
+        if !self.symbol_table.has_file_namespaces() {
+            self.errors
+                .push(TypeCheckError::FileImportWithoutProjectContext {
+                    path,
+                    location: import.location,
+                });
+        } else {
+            self.errors.push(TypeCheckError::ImportResolutionFailed {
+                path,
+                location: import.location,
+            });
+        }
+    }
 
-        if let Some(scope) = self.symbol_table.get_scope(into_scope_id) {
-            for (name, symbol) in public_symbols {
-                let resolved = ResolvedImport {
-                    local_name: name,
-                    symbol,
-                    definition_scope_id: target_scope_id,
-                };
+    /// Resolves an item import (`use a::b::{x, y};`): each item must exist in the
+    /// namespace `a::b` and be `pub`. Found items are bound for bare use.
+    fn resolve_item_imports(
+        &mut self,
+        scope_id: u32,
+        import: &Import,
+        items: &[ImportItem],
+        reexported: bool,
+    ) {
+        let file_path = import.path.join("::");
+        for item in items {
+            let mut full_path = import.path.clone();
+            full_path.push(item.name.clone());
+            let local_name = item.alias.clone().unwrap_or_else(|| item.name.clone());
+
+            let Some((symbol, def_scope_id)) = self
+                .symbol_table
+                .resolve_qualified_name(&full_path, scope_id)
+            else {
+                self.errors.push(TypeCheckError::ImportedItemNotFound {
+                    item: item.name.clone(),
+                    file: file_path.clone(),
+                    location: import.location,
+                });
+                continue;
+            };
+
+            if !symbol.is_public() {
+                self.errors.push(TypeCheckError::ImportedItemPrivate {
+                    item: item.name.clone(),
+                    file: file_path.clone(),
+                    location: import.location,
+                    definition_location: Self::symbol_definition_location(&symbol),
+                });
+            }
+
+            if self.report_import_name_collision(scope_id, &local_name, &import.location) {
+                continue;
+            }
+
+            let resolved = ResolvedImport {
+                local_name,
+                target: ResolvedImportTarget::Item {
+                    symbol: Box::new(symbol),
+                    definition_scope_id: def_scope_id,
+                },
+                reexported,
+            };
+            if let Some(scope) = self.symbol_table.get_scope(scope_id) {
                 scope.borrow_mut().add_resolved_import(resolved);
             }
         }
-
-        self.glob_resolution_in_progress.remove(&target_scope_id);
     }
 
-    /// Check visibility of a definition from current scope.
+    /// Reports an [`TypeCheckError::ImportNameCollision`] when `local_name`
+    /// already names a local definition or a previously-resolved import in
+    /// `scope_id`. Returns `true` when a collision was reported so the caller
+    /// skips binding the name.
+    fn report_import_name_collision(
+        &mut self,
+        scope_id: u32,
+        local_name: &str,
+        location: &Location,
+    ) -> bool {
+        let Some(scope) = self.symbol_table.get_scope(scope_id) else {
+            return false;
+        };
+        let (clashes_local, clashes_import) = {
+            let scope = scope.borrow();
+            (
+                scope.lookup_symbol_local(local_name).is_some(),
+                scope.resolved_imports.contains_key(local_name),
+            )
+        };
+        if clashes_local || clashes_import {
+            let with = if clashes_local {
+                "a local definition"
+            } else {
+                "another import"
+            };
+            self.errors.push(TypeCheckError::ImportNameCollision {
+                name: local_name.to_string(),
+                with: with.to_string(),
+                location: *location,
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Source location of an imported symbol's declaration, for the definition
+    /// note on a private-import diagnostic.
+    fn symbol_definition_location(symbol: &crate::symbol_table::Symbol) -> Location {
+        symbol.definition_location()
+    }
+
+    /// Whether an item is accessible from the current scope (#63).
     ///
-    /// A private item is visible to the same scope and all descendant scopes.
-    /// A public item is visible everywhere.
+    /// An item is accessible iff (a) the access happens within the item's
+    /// defining file — including that file's spec scopes and nested blocks, which
+    /// are descendants of the defining scope — or (b) the item is `pub`.
+    /// `pub` items reached across a file boundary travel through the import
+    /// machinery, which already gates each hop on `pub`/re-export, so a single
+    /// `Public` check suffices here. With per-file scopes, the same-file case is
+    /// exactly "access scope is a descendant of the defining scope".
     fn check_visibility(
         &self,
         visibility: &Visibility,
@@ -2845,12 +2907,17 @@ impl TypeChecker {
         }
     }
 
-    /// Check visibility and report error if access is not allowed.
-    /// Returns true if access is allowed, false if error was reported.
+    /// Check visibility and report a dual-location error if access is denied.
+    /// Returns true if access is allowed, false if an error was reported.
+    ///
+    /// The reported error names both the use site (`location`) and the
+    /// definition site (`definition_location` in the defining file), so a
+    /// private cross-file access tells the user exactly where to add `pub`.
     fn check_and_report_visibility(
         &mut self,
         visibility: &Visibility,
         definition_scope: u32,
+        definition_location: Location,
         location: &Location,
         context: VisibilityContext,
     ) -> bool {
@@ -2858,9 +2925,12 @@ impl TypeChecker {
         if self.check_visibility(visibility, definition_scope, access_scope) {
             true
         } else {
+            let definition_file = self.symbol_table.module_path_of_scope(definition_scope);
             self.errors.push(TypeCheckError::PrivateAccessViolation {
                 context,
                 location: *location,
+                definition_location,
+                definition_file,
             });
             false
         }

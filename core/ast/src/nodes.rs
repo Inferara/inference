@@ -196,12 +196,36 @@ pub struct Ident {
 }
 
 /// Root AST node representing a parsed source file.
+///
+/// In a multi-file program every file carries a `module_path`: the segments of
+/// its location relative to the source root (the entry file's directory),
+/// e.g. `src/lib/arith.inf` ⇒ `["lib", "arith"]`. These segments are the file's
+/// canonical namespace name, used to qualify its symbols across the rest of the
+/// pipeline.
+///
+/// The **entry file is the one and only file with an empty `module_path`**.
+/// Identity is positional, never by filename: an imported file literally named
+/// `main.inf` still receives its real path segments, so the entry is unspoofable
+/// by name. Single-file programs (including the string-based `parse`) have one
+/// file, which is the entry, so its `module_path` is empty.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SourceFileData {
     pub location: Location,
     pub source: String,
     pub defs: Vec<DefId>,
     pub directives: Vec<Directive>,
+    /// Source-root-relative path segments naming this file's namespace; empty
+    /// for the entry file. See the type-level docs for the entry invariant.
+    pub module_path: Vec<String>,
+}
+
+impl SourceFileData {
+    /// Whether this is the program entry file (the one file with no module
+    /// path). Exactly one file in an arena satisfies this.
+    #[must_use]
+    pub fn is_entry(&self) -> bool {
+        self.module_path.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,8 +264,18 @@ pub struct ModuleRef {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UseDirective {
     pub location: Location,
+    /// Visibility of the import. `Public` (`pub use …`) re-exports the imported
+    /// namespace or items from the importing file; `Private` (the default) keeps
+    /// the import local to that file.
+    pub vis: Visibility,
     pub imported_types: Vec<IdentId>,
     pub segments: Vec<IdentId>,
+    /// Whether the directive carried a `{ … }` item list. An item import always
+    /// sets this; a brace-free file import (`use a::b;`) does not. It lets the
+    /// type checker tell an empty item list (`use a::b::{};`) — which is
+    /// parseable but meaningless — apart from a file import, since both leave
+    /// `imported_types` empty.
+    pub braced: bool,
     /// Logical module reference of a `from` clause, if present. The string-literal
     /// path form (`from "./sort.wasm"`) was removed in favour of this portable form.
     pub from: Option<ModuleRef>,
@@ -293,11 +327,6 @@ pub enum Def {
         name: IdentId,
         vis: Visibility,
         ty: TypeId,
-    },
-    Module {
-        name: IdentId,
-        vis: Visibility,
-        defs: Option<Vec<DefId>>,
     },
 }
 

@@ -57,13 +57,6 @@ fn check_def(arena: &AstArena, def_id: inference_ast::ids::DefId, warnings: &mut
                 check_def(arena, inner_def_id, warnings);
             }
         }
-        Def::Module {
-            defs: Some(inner), ..
-        } => {
-            for &inner_def_id in inner {
-                check_def(arena, inner_def_id, warnings);
-            }
-        }
         _ => {}
     }
 }

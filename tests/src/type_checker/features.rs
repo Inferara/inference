@@ -311,8 +311,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved import path, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "A brace-free file import without a project context should surface the dedicated message, got: {}",
                     error_msg
                 );
             }
@@ -332,8 +332,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved imports, got: {}",
+                    error_msg.contains("item `File` not found in file `std::io`"),
+                    "A braced item import should report the missing item by file, got: {}",
                     error_msg
                 );
             }
@@ -389,8 +389,67 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved import path, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "A file import without a project context should surface the dedicated message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        // A path-form `use` in a string-parsed (single-file) arena has no
+        // project context to resolve files against, so it must surface the
+        // dedicated `file imports require a project context` message rather than
+        // being silently accepted or reported as a generic typo (#63). Both the
+        // file form (`use math;`) and the nested form are pinned here.
+        #[test]
+        fn path_form_use_without_project_context_errors_file_form() {
+            let source = r#"use math; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "Path-form `use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn path_form_use_without_project_context_errors_nested_form() {
+            let source = r#"use lib::arith; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "Nested path-form `use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
+                    error_msg
+                );
+            }
+        }
+
+        #[test]
+        fn pub_use_without_project_context_errors() {
+            let source = r#"pub use math; fn test() -> i32 { return 42; }"#;
+            let result = try_type_check(source);
+            assert!(
+                result.is_err(),
+                "`pub use` without a project context must not be silently accepted"
+            );
+            if let Err(error) = result {
+                let error_msg = error.to_string();
+                assert!(
+                    error_msg.contains("file imports require a project context"),
+                    "Error should surface the dedicated project-context message, got: {}",
                     error_msg
                 );
             }
@@ -424,8 +483,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention unresolved imports, got: {}",
+                    error_msg.contains("file imports require a project context"),
+                    "File-form imports without a project context should surface the dedicated message, got: {}",
                     error_msg
                 );
             }
@@ -450,8 +509,8 @@ mod import_tests {
             if let Err(error) = result {
                 let error_msg = error.to_string();
                 assert!(
-                    error_msg.contains("cannot resolve import path"),
-                    "Error should mention import resolution failure, got: {}",
+                    error_msg.contains("item `Bar` not found in file `foo`"),
+                    "A braced item import should report each missing item by file, got: {}",
                     error_msg
                 );
             }

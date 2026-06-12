@@ -75,7 +75,7 @@ fn check_defs<'a>(
                     }
                 }
             }
-            Def::Spec { defs, .. } | Def::Module { defs: Some(defs), .. } => {
+            Def::Spec { defs, .. } => {
                 check_defs(arena, ctx, defs, scopes, errors);
             }
             _ => {}

@@ -115,14 +115,10 @@ fn collect_defs(
                 let sn = arena[*name].name.clone();
                 collect_defs(ctx, arena, defs, Some(&sn), type_name, nodes);
             }
-            Def::Module { defs: Some(d), .. } => {
-                collect_defs(ctx, arena, d, spec, type_name, nodes);
-            }
             Def::Enum { .. }
             | Def::Constant { .. }
             | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. }
-            | Def::Module { defs: None, .. } => {}
+            | Def::TypeAlias { .. } => {}
         }
     }
 }
@@ -195,12 +191,8 @@ pub(crate) fn fn_key(spec: Option<&str>, type_name: Option<&str>, fname: &str) -
 /// when the callee form is unsupported or its receiver type is unknown.
 ///
 /// Known limitation: a `recv.method()` whose receiver type only resolves via
-/// [`TypedContext::lookup_struct`] is dropped when that lookup misses. The
-/// symbol table does not recurse into `Def::Module.defs`, so a method of a
-/// module-nested struct is not visible there and its edge would go unrecorded.
-/// This is unreachable today (the grammar has no module-body syntax — see the
-/// `unimplemented!` in `core/ast/src/builder.rs`) but must be revisited when
-/// modules land, alongside the matching `lookup_struct` gap.
+/// [`TypedContext::lookup_struct`] is dropped when that lookup misses, so its
+/// edge goes unrecorded.
 fn resolve_callee_raw(ctx: &TypedContext, function: ExprId) -> Option<String> {
     let arena = ctx.arena();
     match &arena[function].kind {

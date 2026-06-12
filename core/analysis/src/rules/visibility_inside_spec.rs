@@ -33,20 +33,14 @@ fn scan_for_specs(
     warnings: &mut Vec<AnalysisDiagnostic>,
 ) {
     for &def_id in defs {
-        match &arena[def_id].kind {
-            Def::Spec { name, defs: inner, .. } => {
-                let spec_name = arena[*name].name.clone();
-                for &inner_id in inner {
-                    check_inner_def(arena, inner_id, &spec_name, warnings);
-                }
-                // Defensively recurse so nested specs (should they ever
-                // become reachable) are still inspected.
-                scan_for_specs(arena, inner, warnings);
+        if let Def::Spec { name, defs: inner, .. } = &arena[def_id].kind {
+            let spec_name = arena[*name].name.clone();
+            for &inner_id in inner {
+                check_inner_def(arena, inner_id, &spec_name, warnings);
             }
-            Def::Module { defs: Some(inner), .. } => {
-                scan_for_specs(arena, inner, warnings);
-            }
-            _ => {}
+            // Defensively recurse so nested specs (should they ever become
+            // reachable) are still inspected.
+            scan_for_specs(arena, inner, warnings);
         }
     }
 }
@@ -64,10 +58,9 @@ fn check_inner_def(
         Def::Enum { vis, name, .. } => (vis, *name, "enum"),
         Def::Constant { vis, name, .. } => (vis, *name, "const"),
         Def::TypeAlias { vis, name, .. } => (vis, *name, "type"),
-        // Nested spec / module inside a spec body is not currently
-        // grammatically reachable; the outer scan_for_specs handles
-        // any future reachability.
-        Def::Spec { .. } | Def::Module { .. } => return,
+        // A nested spec inside a spec body is not currently grammatically
+        // reachable; the outer scan_for_specs handles any future reachability.
+        Def::Spec { .. } => return,
     };
     if matches!(vis, Visibility::Public) {
         warnings.push(AnalysisDiagnostic::VisibilityInsideSpec {

@@ -102,6 +102,7 @@ use inference_ast::arena::AstArena;
 
 use crate::{type_checker::TypeChecker, typed_context::TypedContext};
 
+mod definition_graph;
 pub mod errors;
 mod symbol_table;
 mod type_checker;
@@ -162,6 +163,7 @@ impl TypeCheckerBuilder<TypeCheckerInitState> {
         match type_checker.infer_types(&mut ctx) {
             Ok(symbol_table) => {
                 ctx.symbol_table = symbol_table;
+                ctx.build_type_indexes();
             }
             Err(e) => {
                 return Err(e);

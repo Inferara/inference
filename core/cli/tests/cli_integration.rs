@@ -95,10 +95,19 @@ fn fails_when_file_missing() {
 ///
 /// **Expected behavior**: Exit with code 0 and print "Parsed: <filepath>" to stdout
 /// when the source file is syntactically valid.
+///
+/// The fixture is copied into an isolated temp directory so the multi-file front
+/// end's source-root scan sees exactly the one file under test and reports no
+/// unreachable-sibling warnings.
 #[test]
 fn parse_only_succeeds() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
-    cmd.arg(example_file("example.inf")).arg("--parse");
+    cmd.current_dir(temp.path()).arg(dest.path()).arg("--parse");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("Parsed:"));
@@ -851,4 +860,147 @@ fn out_dir_with_codegen_no_output_flags_creates_no_directory() {
         !temp.child("build").path().exists(),
         "--codegen without -o/-v writes nothing, so --out-dir must not be created"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-file front end (issue #63).
+//
+// infc drives `parse_project` for the `--parse` phase, folding the
+// import-reachable closure into one arena. These binary-level tests exercise
+// the success path (`Parsed:` on stdout), the unreachable-file warning (stderr),
+// and the missing-import error with a nearest-match suggestion (stderr, exit 1).
+//
+// They stay at `--parse` because multi-file codegen is not wired yet; driving
+// the full pipeline here would hit the codegen `todo!()` for >1 file.
+// ---------------------------------------------------------------------------
+
+/// Writes `source` to `<root>/<relative>` (a `/`-joined logical path), creating
+/// parent directories, and returns the absolute path. The logical path is split
+/// and re-joined with `PathBuf` so the literal-slash rule is honored on every
+/// platform.
+fn write_source(root: &std::path::Path, relative: &str, source: &str) -> std::path::PathBuf {
+    let mut dest = root.to_path_buf();
+    for segment in relative.split('/') {
+        dest.push(segment);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&dest, source).unwrap();
+    dest
+}
+
+/// A three-file project parses through `infc --parse`: the entry imports a file
+/// which imports a nested file, all folded into one arena. Success prints
+/// `Parsed:` and exits 0.
+#[test]
+fn parse_multi_file_project_succeeds() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use math;\npub fn main() {}");
+    write_source(temp.path(), "math.inf", "use lib::arith;\npub fn foo() {}");
+    write_source(
+        temp.path(),
+        "lib/arith.inf",
+        "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Parsed:"));
+}
+
+/// An orphan `.inf` file under the source root that no import reaches produces a
+/// warning on stderr while the parse still succeeds (exit 0).
+#[test]
+fn parse_multi_file_warns_on_unreachable_file() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use used;\npub fn main() {}");
+    write_source(temp.path(), "used.inf", "pub fn fu() {}");
+    write_source(temp.path(), "orphan.inf", "pub fn fo() {}");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Parsed:"))
+        .stderr(
+            predicate::str::contains("warning")
+                .and(predicate::str::contains("orphan.inf"))
+                .and(predicate::str::contains("not imported by any reachable file")),
+        );
+}
+
+/// A `use` naming a file that does not exist aborts the parse with exit 1 and a
+/// "Parse error" on stderr naming the missing import.
+#[test]
+fn parse_multi_file_missing_import_errors() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use absent;\npub fn main() {}");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Parse error"))
+        .stderr(predicate::str::contains("imported file not found"));
+}
+
+/// A missing import whose name is one edit away from an existing sibling yields
+/// the "did you mean" suggestion in the error text.
+#[test]
+fn parse_multi_file_missing_import_suggests_near_match() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use arith;\npub fn main() {}");
+    // One edit away from the missing `arith.inf`.
+    write_source(
+        temp.path(),
+        "arithh.inf",
+        "pub fn add(a: i32, b: i32) -> i32 { return a + b; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("did you mean"))
+        .stderr(predicate::str::contains("arithh"));
+}
+
+/// A syntax error inside an IMPORTED file is reported by name (its `::`-joined
+/// module path), not as the entry, with exit 1.
+#[test]
+fn parse_multi_file_syntax_error_in_import_names_module() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::broken;\npub fn main() {}");
+    write_source(temp.path(), "lib/broken.inf", "pub fn oops( { return 1; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Parse error"))
+        .stderr(predicate::str::contains("lib::broken"));
+}
+
+/// Regression: a single-file input with no imports still parses through the
+/// multi-file front end exactly as before, with no spurious warnings on stderr.
+#[test]
+fn parse_single_file_through_project_front_end_is_quiet() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "solo.inf", "pub fn main() -> i32 { return 0; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("Parsed:"))
+        .stderr(predicate::str::is_empty());
 }

@@ -103,6 +103,11 @@ pub(crate) struct FuncInfo {
     pub(crate) return_type: TypeInfo,
     pub(crate) visibility: Visibility,
     pub(crate) definition_scope_id: u32,
+    /// Source location of the declaration, used to point a cross-file
+    /// private-access diagnostic at the definition site. `Default` (a zero span)
+    /// for synthetic functions that have no source (builtins, externals loaded
+    /// from a prelude, test fixtures).
+    pub(crate) definition_location: Location,
     /// Local function, unbound extern, or bound extern. See [`FuncKind`].
     pub(crate) kind: FuncKind,
 }
@@ -125,11 +130,15 @@ impl FuncInfo {
 }
 
 /// Information about a struct field.
+///
+/// Fields carry no visibility of their own: a field is accessible exactly when
+/// its enclosing struct is accessible from the referencing file (#63). The
+/// access check therefore consults [`StructInfo::visibility`] and
+/// [`StructInfo::definition_scope_id`], never a per-field flag.
 #[derive(Debug, Clone)]
 pub struct StructFieldInfo {
     pub name: String,
     pub type_info: TypeInfo,
-    pub visibility: Visibility,
 }
 
 /// Information about a struct type. Visibility and definition_scope_id are used
@@ -141,6 +150,10 @@ pub struct StructInfo {
     pub type_params: Vec<String>,
     pub visibility: Visibility,
     pub definition_scope_id: u32,
+    /// Source location of the declaration, used to point a cross-file
+    /// private-access diagnostic at the definition site. `Default` for
+    /// synthetic structs without source (test fixtures, prelude externals).
+    pub definition_location: Location,
 }
 
 impl StructInfo {
@@ -161,6 +174,10 @@ pub struct EnumInfo {
     pub variants: Vec<String>,
     pub visibility: Visibility,
     pub definition_scope_id: u32,
+    /// Source location of the declaration, used to point a cross-file
+    /// private-access diagnostic at the definition site. `Default` for
+    /// synthetic enums without source (test fixtures, prelude externals).
+    pub definition_location: Location,
 }
 
 impl EnumInfo {
@@ -219,42 +236,60 @@ pub(crate) struct ImportItem {
     pub(crate) alias: Option<String>,
 }
 
-/// The kind of import statement
+/// The kind of import statement.
+///
+/// A brace-free `use a::b;` is a [`Self::Plain`] *file* import (it binds the
+/// namespace `b`); a braced `use a::b::{x, y};` is a [`Self::Partial`] *item*
+/// import. The two are unambiguous from syntax alone — the resolver never
+/// consults the filesystem to classify a directive. Glob imports are rejected at
+/// the parser, so this enum carries no glob variant.
 #[derive(Debug, Clone)]
 pub(crate) enum ImportKind {
-    /// Plain import: `use path::item`
+    /// File import: `use a::b;` — binds the namespace named by the last segment.
     Plain,
-    /// Glob import: `use path::*`
-    #[allow(dead_code)]
-    Glob,
-    /// Partial import with multiple items: `use path::{a, b as c}`
+    /// Item import: `use a::b::{x, y}` — binds each listed item for bare use.
     Partial(Vec<ImportItem>),
 }
 
-/// Represents an unresolved import in a scope
+/// Represents an unresolved import in a scope.
 #[derive(Debug, Clone)]
 pub(crate) struct Import {
-    /// The path segments of the import (e.g., ["std", "io", "File"])
+    /// The path segments of the import (e.g., ["lib", "arith"]).
     pub(crate) path: Vec<String>,
     /// The kind of import
     pub(crate) kind: ImportKind,
+    /// Whether the directive is `pub use` (re-exported from the importing file).
+    pub(crate) visibility: Visibility,
     /// Source location of the import statement
     pub(crate) location: Location,
 }
 
-/// Represents a resolved import binding.
-/// Fields `symbol` and `definition_scope_id` are used in future phases
-/// for visibility checking and resolved name lookup.
+/// What a resolved import name binds to in the importing file's scope.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedImportTarget {
+    /// A file import (`use a::b;`) binds the name to the namespace scope `a::b`,
+    /// so a later `b::item` access resolves `item` inside that scope.
+    Namespace { scope_id: u32 },
+    /// An item import (`use a::b::{x};`) binds the name to the item `x` itself,
+    /// usable bare. The scope id is the item's defining scope (for diagnostics).
+    /// The symbol is boxed because it is far larger than a namespace's scope id.
+    Item {
+        symbol: Box<Symbol>,
+        definition_scope_id: u32,
+    },
+}
+
+/// Represents a resolved import binding in a scope.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedImport {
-    /// The local name (either original or alias)
+    /// The local name the import binds (the last path segment, or an item name).
     pub(crate) local_name: String,
-    /// The resolved symbol
-    #[allow(dead_code)]
-    pub(crate) symbol: Symbol,
-    /// The scope where the symbol is defined (for visibility checking)
-    #[allow(dead_code)]
-    pub(crate) definition_scope_id: u32,
+    /// What the name resolves to (a namespace scope or a concrete item).
+    pub(crate) target: ResolvedImportTarget,
+    /// `true` when the directive is `pub use`: the binding is re-exported, so an
+    /// importer of *this* file may traverse through it. A plain `use` binding is
+    /// private to the importing file and is not followed across files.
+    pub(crate) reexported: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +360,19 @@ impl Symbol {
                 type_params: vec![],
             }),
             Symbol::Function(_) => None,
+        }
+    }
+
+    /// Source location of this symbol's declaration, used to point a cross-file
+    /// private-access diagnostic at the definition. Type aliases and specs carry
+    /// no location and report a zero span.
+    #[must_use = "the location is the return value"]
+    pub(crate) fn definition_location(&self) -> Location {
+        match self {
+            Symbol::Struct(info) => info.definition_location,
+            Symbol::Enum(info) => info.definition_location,
+            Symbol::Function(sig) => sig.definition_location,
+            Symbol::TypeAlias(_) | Symbol::Spec(_) => Location::default(),
         }
     }
 
@@ -643,21 +691,19 @@ impl SymbolTable {
     pub(crate) fn register_struct(
         &mut self,
         name: &str,
-        fields: &[(String, TypeInfo, Visibility)],
+        fields: &[(String, TypeInfo)],
         type_params: Vec<String>,
         visibility: Visibility,
+        location: Location,
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
             let fields = fields
                 .iter()
-                .map(
-                    |(field_name, field_type, field_visibility)| StructFieldInfo {
-                        name: field_name.clone(),
-                        type_info: field_type.clone(),
-                        visibility: field_visibility.clone(),
-                    },
-                )
+                .map(|(field_name, field_type)| StructFieldInfo {
+                    name: field_name.clone(),
+                    type_info: field_type.clone(),
+                })
                 .collect();
             let struct_info = StructInfo {
                 name: name.to_string(),
@@ -665,6 +711,7 @@ impl SymbolTable {
                 type_params,
                 visibility,
                 definition_scope_id: scope_id,
+                definition_location: location,
             };
             scope
                 .borrow_mut()
@@ -679,6 +726,7 @@ impl SymbolTable {
         name: &str,
         variants: &[&str],
         visibility: Visibility,
+        location: Location,
     ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             let scope_id = scope.borrow().id;
@@ -687,6 +735,7 @@ impl SymbolTable {
                 variants: variants.iter().map(|s| (*s).to_string()).collect(),
                 visibility,
                 definition_scope_id: scope_id,
+                definition_location: location,
             };
             scope
                 .borrow_mut()
@@ -730,6 +779,10 @@ impl SymbolTable {
         }
     }
 
+    /// Registers a private local function. A thin default-visibility wrapper
+    /// over [`Self::register_function_with_visibility`], kept for test setup that
+    /// does not care about visibility.
+    #[cfg(test)]
     pub(crate) fn register_function(
         &mut self,
         name: &str,
@@ -743,6 +796,7 @@ impl SymbolTable {
             param_types,
             return_type,
             Visibility::Private,
+            Location::default(),
         )
     }
 
@@ -753,6 +807,7 @@ impl SymbolTable {
         param_types: Vec<TypeInfo>,
         return_type: TypeInfo,
         visibility: Visibility,
+        location: Location,
     ) -> Result<(), String> {
         self.insert_func_symbol(
             name,
@@ -760,6 +815,7 @@ impl SymbolTable {
             param_types,
             return_type,
             visibility,
+            location,
             FuncKind::Local,
         )
     }
@@ -784,6 +840,7 @@ impl SymbolTable {
             param_types,
             return_type,
             Visibility::Private,
+            Location::default(),
             FuncKind::Extern(origin),
         )
     }
@@ -795,6 +852,7 @@ impl SymbolTable {
         param_types: Vec<TypeInfo>,
         return_type: TypeInfo,
         visibility: Visibility,
+        location: Location,
         kind: FuncKind,
     ) -> Result<(), String> {
         if let Some(scope) = &self.current_scope {
@@ -809,6 +867,7 @@ impl SymbolTable {
                 return_type: self.resolve_custom_type(return_type),
                 visibility,
                 definition_scope_id: scope_id,
+                definition_location: location,
                 kind,
             };
             scope
@@ -842,7 +901,11 @@ impl SymbolTable {
         {
             return symbol.as_type_info();
         }
-        None
+        // A bare type reference may name a struct/enum brought in by
+        // `use a::b::{T};`; the import binds `T` as a resolved item in the file
+        // scope, so consult those when no like-named symbol is in scope.
+        self.lookup_imported_item_symbol(name)
+            .and_then(|symbol| symbol.as_type_info())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -874,10 +937,36 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_function(&self, name: &str) -> Option<FuncInfo> {
-        self.current_scope
+        let from_symbol = self
+            .current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .and_then(|symbol| symbol.as_function().cloned());
+        if from_symbol.is_some() {
+            return from_symbol;
+        }
+        // A bare call may name an item brought in by `use a::b::{f};`; the import
+        // binds `f` as a resolved item in the file scope, so consult those when
+        // no like-named symbol is in scope.
+        self.lookup_imported_item_symbol(name)
             .and_then(|symbol| symbol.as_function().cloned())
+    }
+
+    /// Looks up a resolved item import named `name`, walking the current scope's
+    /// parent chain. Returns the imported symbol, letting bare references resolve
+    /// the items an `use a::b::{x};` brought into the file.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn lookup_imported_item_symbol(&self, name: &str) -> Option<Symbol> {
+        let mut scope = self.current_scope.clone();
+        while let Some(s) = scope {
+            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+                && let ResolvedImportTarget::Item { symbol, .. } = &resolved.target
+            {
+                return Some((**symbol).clone());
+            }
+            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        None
     }
 
     /// Looks up a function by name in the root scope only, without walking
@@ -892,29 +981,43 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
-        self.current_scope
+        let from_symbol = self
+            .current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .and_then(|symbol| symbol.as_struct().cloned());
+        if from_symbol.is_some() {
+            return from_symbol;
+        }
+        // Resolve a struct brought in by `use a::b::{S};` for bare use.
+        self.lookup_imported_item_symbol(name)
             .and_then(|symbol| symbol.as_struct().cloned())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
-        self.current_scope
+        let from_symbol = self
+            .current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .and_then(|symbol| symbol.as_enum().cloned());
+        if from_symbol.is_some() {
+            return from_symbol;
+        }
+        // Resolve an enum brought in by `use a::b::{E};` for bare use.
+        self.lookup_imported_item_symbol(name)
             .and_then(|symbol| symbol.as_enum().cloned())
     }
 
-    /// Looks up a struct by name across **all** registered scopes.
+    /// Looks up a struct by name across **all** registered scopes, in ascending
+    /// scope-id order (root wins on a name clash).
     ///
-    /// Used by post-type-check phases (analysis, codegen) that walk the AST
-    /// into spec/module scopes and need to resolve struct metadata regardless
-    /// of where the struct was defined. Bare-name resolution from the type
-    /// checker stays scope-local; this helper is the explicit escape hatch.
-    ///
-    /// Iteration is in ascending scope-id order so the result is deterministic
-    /// (root scope wins when the same name exists in multiple scopes).
+    /// This is a deliberate global escape hatch, used only where a name must be
+    /// checked for existence regardless of file scope — e.g. rejecting a
+    /// spec-inner struct that shadows any other struct. Type-reference and
+    /// codegen resolution go through [`Self::resolve_struct_in_scope`] /
+    /// canonical keys instead, so they never collapse same-named structs from
+    /// different files.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct_anywhere(&self, name: &str) -> Option<StructInfo> {
         let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
@@ -926,6 +1029,161 @@ impl SymbolTable {
             {
                 return Some(info.clone());
             }
+        }
+        None
+    }
+
+    /// Builds the canonical key for a type named `name` defined in `scope_id`:
+    /// the `::`-joined path of the type's enclosing **file** prefixed onto the
+    /// name, or the bare name when that file is the entry file (root, empty path).
+    ///
+    /// The entry file maps to the root scope, so its types keep bare keys and a
+    /// single-file program's keys are byte-identical to the pre-file-scope
+    /// world. A non-entry file `["lib", "arith"]` defines `Point` under scope
+    /// `lib::arith`, yielding the canonical key `lib::arith::Point` — distinct
+    /// from a same-named `Point` in any other file.
+    ///
+    /// A type defined inside a `spec` is keyed by its enclosing file, not the
+    /// spec's sub-scope: spec types are unique by bare name within a file (a
+    /// same-named spec struct is rejected at registration), so they qualify by
+    /// file exactly like top-level types and stay reachable by bare name in a
+    /// single-file program.
+    #[must_use = "the canonical key is the return value"]
+    pub(crate) fn canonical_key_for_scope(&self, scope_id: u32, name: &str) -> String {
+        let path = self.enclosing_file_path(scope_id);
+        if path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{path}::{name}")
+        }
+    }
+
+    /// Returns the `::`-joined module path of the nearest enclosing **file**
+    /// scope of `scope_id`, walking up the parent chain. A file scope is one
+    /// registered in `mod_scopes` (the entry file is the root, keyed by the empty
+    /// string). Spec and anonymous block scopes are transparent — their types
+    /// belong to the enclosing file for canonical-key purposes.
+    fn enclosing_file_path(&self, scope_id: u32) -> String {
+        let file_ids: BTreeSet<u32> = self.mod_scopes.values().map(|s| s.borrow().id).collect();
+        let mut current = self.get_scope(scope_id);
+        while let Some(scope) = current {
+            let id = scope.borrow().id;
+            if file_ids.contains(&id) {
+                return scope.borrow().full_path.clone();
+            }
+            current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        String::new()
+    }
+
+    /// Enumerates every registered struct paired with its canonical key, in
+    /// ascending scope-id order. The post-type-check store ([`TypedContext`])
+    /// folds this into a key-indexed map so codegen and analysis resolve a type
+    /// reference to exactly the layout of its defining file — never a same-named
+    /// struct from another file.
+    #[must_use = "the enumeration is the return value"]
+    pub(crate) fn structs_with_canonical_keys(&self) -> Vec<(String, StructInfo)> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(scope) = self.scopes.get(&id) else {
+                continue;
+            };
+            for symbol in scope.borrow().symbols.values() {
+                if let Some(info) = symbol.as_struct() {
+                    out.push((self.canonical_key_for_scope(id, &info.name), info.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Enumerates every registered enum paired with its canonical key. Mirrors
+    /// [`Self::structs_with_canonical_keys`].
+    #[must_use = "the enumeration is the return value"]
+    pub(crate) fn enums_with_canonical_keys(&self) -> Vec<(String, EnumInfo)> {
+        let mut ids: Vec<u32> = self.scopes.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::new();
+        for id in ids {
+            let Some(scope) = self.scopes.get(&id) else {
+                continue;
+            };
+            for symbol in scope.borrow().symbols.values() {
+                if let Some(info) = symbol.as_enum() {
+                    out.push((self.canonical_key_for_scope(id, &info.name), info.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolves a struct type reference `name` as seen from `from_scope_id`,
+    /// returning the struct and its canonical key. Resolution honors file
+    /// boundaries and visibility: the name is looked up along the referencing
+    /// scope's parent chain (own file, then root), so a non-entry file sees its
+    /// own private structs but never another file's private struct. A bare name
+    /// that names an item brought in by `use a::b::{S};` resolves through that
+    /// import binding.
+    ///
+    /// The canonical key is computed from the struct's *defining* scope, so two
+    /// same-named structs in different files resolve to distinct keys.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn resolve_struct_in_scope(
+        &self,
+        name: &str,
+        from_scope_id: u32,
+    ) -> Option<(StructInfo, String)> {
+        let scope = self.get_scope(from_scope_id)?;
+        if let Some(symbol) = scope.borrow().lookup_symbol(name)
+            && let Some(info) = symbol.as_struct()
+        {
+            let key = self.canonical_key_for_scope(info.definition_scope_id, &info.name);
+            return Some((info.clone(), key));
+        }
+        if let Symbol::Struct(info) = self.lookup_imported_item_symbol_from(name, from_scope_id)? {
+            let key = self.canonical_key_for_scope(info.definition_scope_id, &info.name);
+            return Some((info, key));
+        }
+        None
+    }
+
+    /// Resolves an enum type reference. Mirrors [`Self::resolve_struct_in_scope`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn resolve_enum_in_scope(
+        &self,
+        name: &str,
+        from_scope_id: u32,
+    ) -> Option<(EnumInfo, String)> {
+        let scope = self.get_scope(from_scope_id)?;
+        if let Some(symbol) = scope.borrow().lookup_symbol(name)
+            && let Some(info) = symbol.as_enum()
+        {
+            let key = self.canonical_key_for_scope(info.definition_scope_id, &info.name);
+            return Some((info.clone(), key));
+        }
+        if let Symbol::Enum(info) = self.lookup_imported_item_symbol_from(name, from_scope_id)? {
+            let key = self.canonical_key_for_scope(info.definition_scope_id, &info.name);
+            return Some((info, key));
+        }
+        None
+    }
+
+    /// Looks up a resolved item import named `name`, walking the parent chain of
+    /// `from_scope_id` (rather than the symbol table's current cursor). Returns
+    /// the imported symbol so a type reference can resolve an item brought in by
+    /// `use a::b::{S};`.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn lookup_imported_item_symbol_from(&self, name: &str, from_scope_id: u32) -> Option<Symbol> {
+        let mut scope = self.get_scope(from_scope_id);
+        while let Some(s) = scope {
+            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+                && let ResolvedImportTarget::Item { symbol, .. } = &resolved.target
+            {
+                return Some((**symbol).clone());
+            }
+            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
         }
         None
     }
@@ -1057,16 +1315,6 @@ impl SymbolTable {
             .and_then(|scope| scope.borrow().lookup_method(type_name, method_name))
     }
 
-    #[must_use = "returns the scope ID which may be needed for later reference"]
-    pub(crate) fn enter_module(&mut self, name: &str, visibility: Visibility) -> u32 {
-        let scope_id = self.push_scope_with_name(name, visibility);
-        if let Some(scope) = self.scopes.get(&scope_id) {
-            let full_path = scope.borrow().full_path.clone();
-            self.mod_scopes.insert(full_path, Arc::clone(scope));
-        }
-        scope_id
-    }
-
     /// Enters the scope for spec `name`, creating it on first entry and
     /// re-entering the same scope on subsequent calls. Re-entry preserves
     /// the original scope id so symbols registered across the type checker's
@@ -1086,26 +1334,109 @@ impl SymbolTable {
         scope_id
     }
 
+    /// Enters the scope of the source file named by `module_path`, creating the
+    /// chain of named child scopes on first entry and re-entering the leaf on
+    /// subsequent calls.
+    ///
+    /// The entry file (empty `module_path`) maps to the root scope, so a
+    /// single-file program registers every definition exactly as it did before
+    /// file scopes existed — keeping that path byte-identical. A non-entry file
+    /// `["lib", "arith"]` yields a child scope `lib` of root containing a child
+    /// scope `arith`; the file's definitions register inside `arith`, and
+    /// [`Self::resolve_qualified_name`] walks `lib::arith::add` straight to them.
+    ///
+    /// Idempotency across the type checker's registration passes
+    /// (`process_directives`, `register_types`,
+    /// `collect_function_and_constant_definitions`) is essential: each pass
+    /// re-enters the same logical leaf so symbols accumulate in one scope rather
+    /// than spawning a fresh chain per pass. Scopes are keyed in `mod_scopes` by
+    /// their `::`-joined path, the same key [`Self::find_module_scope`] reads.
+    ///
+    /// Returns the leaf scope id and leaves `current_scope` pointing at it; the
+    /// caller restores the previous scope with [`Self::reset_to_root`] (or by
+    /// re-entering another file).
+    pub(crate) fn enter_file_scope(&mut self, module_path: &[String]) -> u32 {
+        self.reset_to_root();
+        if module_path.is_empty() {
+            return self.current_scope_id().unwrap_or(0);
+        }
+        for segment in module_path {
+            if let Some(existing) = self.child_scope_named(segment) {
+                let id = existing.borrow().id;
+                self.current_scope = Some(existing);
+                let _ = id;
+            } else {
+                let id = self.push_scope_with_name(segment, Visibility::Public);
+                if let Some(scope) = self.scopes.get(&id) {
+                    let full_path = scope.borrow().full_path.clone();
+                    self.mod_scopes.insert(full_path, Arc::clone(scope));
+                }
+            }
+        }
+        self.current_scope_id().unwrap_or(0)
+    }
+
+    /// Reassigns `current_scope` to the root scope. Counterpart to the
+    /// per-file/per-spec scope walks, letting a registration pass return to a
+    /// known anchor before entering the next file.
+    pub(crate) fn reset_to_root(&mut self) {
+        self.current_scope = self.root_scope.clone();
+    }
+
+    /// Returns the direct child scope of `current_scope` whose name matches
+    /// `name`, if one exists. Used to make file-scope creation idempotent across
+    /// registration passes without re-walking from the root each time.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn child_scope_named(&self, name: &str) -> Option<ScopeRef> {
+        let current = self.current_scope.as_ref()?;
+        current
+            .borrow()
+            .children
+            .iter()
+            .find(|c| c.borrow().name == name)
+            .cloned()
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn find_module_scope(&self, path: &[String]) -> Option<u32> {
         let key = path.join("::");
         self.mod_scopes.get(&key).map(|s| s.borrow().id)
     }
 
-    /// Get all public symbols from a scope (for glob imports).
-    #[must_use = "this is a pure lookup with no side effects"]
-    pub(crate) fn get_public_symbols_from_scope(&self, scope_id: u32) -> Vec<(String, Symbol)> {
-        self.get_scope(scope_id)
-            .map(|scope| {
-                scope
-                    .borrow()
-                    .symbols
-                    .iter()
-                    .filter(|(_, sym)| sym.is_public())
-                    .map(|(name, sym)| (name.clone(), sym.clone()))
-                    .collect()
-            })
+    /// Returns the `::`-joined module path of the scope `scope_id` — its cached
+    /// `full_path`. For a top-level definition's scope this is its defining
+    /// file's path (`lib::arith`); the empty string for the entry file (root).
+    /// Used to name the defining file in a cross-file private-access diagnostic.
+    #[must_use = "the module path is the return value"]
+    pub(crate) fn module_path_of_scope(&self, scope_id: u32) -> String {
+        self.scopes
+            .get(&scope_id)
+            .map(|s| s.borrow().full_path.clone())
             .unwrap_or_default()
+    }
+
+    /// Returns the scope ancestry of `scope_id` from itself up to the root, in
+    /// near-to-far order. Used to resolve a bare definition reference the way
+    /// name lookup would: own scope first, then enclosing scopes, then root.
+    #[must_use = "the ancestry is the return value"]
+    pub(crate) fn scope_ancestry(&self, scope_id: u32) -> Vec<u32> {
+        let mut chain = Vec::new();
+        let mut current = self.get_scope(scope_id);
+        while let Some(scope) = current {
+            chain.push(scope.borrow().id);
+            current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        chain
+    }
+
+    /// Whether any non-entry file namespace exists, i.e. whether the program was
+    /// assembled from more than one file. The entry file maps to the root scope
+    /// (the empty `mod_scopes` key); a non-empty key is a real imported file.
+    /// A file-form `use` that fails to resolve here means no project context, not
+    /// a typo.
+    #[must_use = "this is a pure check with no side effects"]
+    pub(crate) fn has_file_namespaces(&self) -> bool {
+        self.mod_scopes.keys().any(|k| !k.is_empty())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -1133,6 +1464,18 @@ impl SymbolTable {
         self.scopes.keys().copied().collect()
     }
 
+    /// Resolves a `::`-separated path to the symbol it names and the id of the
+    /// scope that defines it, starting the walk from `from_scope_id`.
+    ///
+    /// The first segment is resolved relative to the accessing scope: it may be
+    /// a child namespace scope, a namespace bound by a `use a::b;` in that scope,
+    /// an item bound by a `use a::b::{x};`, or — for an absolute path — a child
+    /// of the root. Each subsequent intermediate segment must name a child scope
+    /// or a **re-exported** (`pub use`) namespace import of the current scope:
+    /// re-exports are what let `math::arith::add` reach `lib::arith` after
+    /// `math.inf` writes `pub use lib::arith;`. A plain (non-`pub`) import is
+    /// visible only to its own file, so it is followed for the *first* segment
+    /// but never traversed across a file boundary as an intermediate hop.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn resolve_qualified_name(
         &self,
@@ -1143,43 +1486,91 @@ impl SymbolTable {
             return None;
         }
 
-        let first_segment = &path[0];
-
-        let start_scope = if first_segment == "self" {
-            self.get_scope(from_scope_id)?
-        } else {
-            self.root_scope.clone()?
-        };
-
-        let mut current_scope = start_scope;
-
-        let module_path = if first_segment == "self" {
-            &path[1..]
-        } else {
-            path
-        };
+        let (mut current_scope, module_path) = self.start_qualified_walk(path, from_scope_id)?;
 
         for (i, segment) in module_path.iter().enumerate() {
-            if i == module_path.len() - 1 {
+            let is_last = i == module_path.len() - 1;
+            if is_last {
                 let scope = current_scope.borrow();
                 if let Some(symbol) = scope.lookup_symbol_local(segment) {
                     return Some((symbol.clone(), scope.id));
                 }
+                if let Some(resolved) = scope.resolved_imports.get(segment)
+                    && let ResolvedImportTarget::Item {
+                        symbol,
+                        definition_scope_id,
+                    } = &resolved.target
+                {
+                    return Some(((**symbol).clone(), *definition_scope_id));
+                }
                 return None;
             }
 
-            let scope = current_scope.borrow();
-            let child = scope
-                .children
-                .iter()
-                .find(|c| c.borrow().name == *segment)
-                .cloned();
-
-            let c = child?;
-            drop(scope);
-            current_scope = c;
+            let next = self.next_namespace_scope(&current_scope, segment)?;
+            current_scope = next;
         }
 
+        None
+    }
+
+    /// Selects the start scope and remaining path for a qualified-name walk.
+    ///
+    /// A leading `self` anchors the walk at the accessing scope; any other first
+    /// segment that names a namespace bound in the accessing scope (a `use a::b;`
+    /// import) anchors there too, so a file can reach an imported namespace by
+    /// the bound name. Otherwise the walk starts at the root, treating the path
+    /// as absolute. The returned slice is the path with any consumed `self`
+    /// stripped.
+    fn start_qualified_walk<'p>(
+        &self,
+        path: &'p [String],
+        from_scope_id: u32,
+    ) -> Option<(ScopeRef, &'p [String])> {
+        let first_segment = &path[0];
+        if first_segment == "self" {
+            return Some((self.get_scope(from_scope_id)?, &path[1..]));
+        }
+        if let Some(from) = self.get_scope(from_scope_id) {
+            let redirect = {
+                let from = from.borrow();
+                match from.resolved_imports.get(first_segment) {
+                    Some(resolved) => match &resolved.target {
+                        ResolvedImportTarget::Namespace { scope_id } => Some(*scope_id),
+                        ResolvedImportTarget::Item { .. } => None,
+                    },
+                    None => None,
+                }
+            };
+            if let Some(scope_id) = redirect
+                && let Some(target) = self.get_scope(scope_id)
+            {
+                return Some((target, &path[1..]));
+            }
+        }
+        Some((self.root_scope.clone()?, path))
+    }
+
+    /// Advances one intermediate hop of a qualified-name walk: the next scope is
+    /// a direct child named `segment`, or a **re-exported** namespace import
+    /// named `segment` in `current`.
+    ///
+    /// The accessing file's own import (which may be private) is consumed by
+    /// [`Self::start_qualified_walk`] as the entry point, so by the time this
+    /// runs every hop crosses into another file's namespace; a plain (non-`pub`)
+    /// import there is private to its own file and is never followed. That is
+    /// what makes `math::arith::add` resolve only when `math` writes
+    /// `pub use lib::arith;`, not a plain `use`.
+    fn next_namespace_scope(&self, current: &ScopeRef, segment: &str) -> Option<ScopeRef> {
+        let scope = current.borrow();
+        if let Some(child) = scope.children.iter().find(|c| c.borrow().name == segment) {
+            return Some(child.clone());
+        }
+        if let Some(resolved) = scope.resolved_imports.get(segment)
+            && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
+            && resolved.reexported
+        {
+            return self.get_scope(*scope_id);
+        }
         None
     }
 
@@ -1234,21 +1625,27 @@ impl SymbolTable {
         def_id: DefId,
     ) -> anyhow::Result<()> {
         let def_data = &arena[def_id];
+        let location = def_data.location;
         match &def_data.kind {
             Def::Struct {
                 name, vis, fields, ..
             } => {
-                let field_infos: Vec<(String, TypeInfo, Visibility)> = fields
+                let field_infos: Vec<(String, TypeInfo)> = fields
                     .iter()
                     .map(|f| {
                         (
                             arena[f.name].name.clone(),
                             TypeInfo::from_type_id(arena, f.ty),
-                            Visibility::Private,
                         )
                     })
                     .collect();
-                self.register_struct(&arena[*name].name, &field_infos, vec![], vis.clone())?;
+                self.register_struct(
+                    &arena[*name].name,
+                    &field_infos,
+                    vec![],
+                    vis.clone(),
+                    location,
+                )?;
             }
             Def::Enum {
                 name,
@@ -1257,7 +1654,7 @@ impl SymbolTable {
             } => {
                 let variant_names: Vec<&str> =
                     variants.iter().map(|v| arena[*v].name.as_str()).collect();
-                self.register_enum(&arena[*name].name, &variant_names, vis.clone())?;
+                self.register_enum(&arena[*name].name, &variant_names, vis.clone(), location)?;
             }
             Def::Spec { name, .. } => {
                 self.register_spec(&arena[*name].name)?;
@@ -1297,6 +1694,7 @@ impl SymbolTable {
                     param_types,
                     return_type,
                     vis.clone(),
+                    location,
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
             }
@@ -1336,7 +1734,7 @@ impl SymbolTable {
                 )
                 .map_err(|e| anyhow::anyhow!(e))?;
             }
-            Def::Constant { .. } | Def::Module { .. } => {}
+            Def::Constant { .. } => {}
         }
         Ok(())
     }
@@ -1723,6 +2121,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    definition_location: Location::default(),
                     kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
@@ -1742,6 +2141,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Public,
                     definition_scope_id: 0,
+                    definition_location: Location::default(),
                     kind: FuncKind::Local,
                 },
                 visibility: Visibility::Public,
@@ -1762,6 +2162,7 @@ mod tests {
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                definition_location: Location::default(),
                 kind: FuncKind::Local,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, true);
@@ -1784,6 +2185,7 @@ mod tests {
                 return_type: TypeInfo::default(),
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                definition_location: Location::default(),
                 kind: FuncKind::Local,
             };
             let result = table.register_method("TestType", sig, Visibility::Public, false);
@@ -1805,6 +2207,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    definition_location: Location::default(),
                     kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
@@ -1819,6 +2222,7 @@ mod tests {
                     return_type: TypeInfo::default(),
                     visibility: Visibility::Private,
                     definition_scope_id: 0,
+                    definition_location: Location::default(),
                     kind: FuncKind::Local,
                 },
                 visibility: Visibility::Private,
@@ -1844,6 +2248,7 @@ mod tests {
                 variants: vec!["Red".into(), "Green".into(), "Blue".into()],
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                definition_location: Location::default(),
             };
             assert_eq!(info.variant_index("Red"), Some(0));
             assert_eq!(info.variant_index("Green"), Some(1));
@@ -1857,6 +2262,7 @@ mod tests {
                 variants: vec!["Red".into(), "Green".into(), "Blue".into()],
                 visibility: Visibility::Public,
                 definition_scope_id: 0,
+                definition_location: Location::default(),
             };
             assert_eq!(info.variant_index("Yellow"), None);
         }
@@ -1977,7 +2383,7 @@ mod tests {
                     Some(origin("collections", "sort")),
                 )
                 .unwrap();
-            let _ = table.enter_module("nested", Visibility::Public);
+            let _ = table.push_scope_with_name("nested", Visibility::Public);
             table
                 .register_extern_function(
                     "sort",

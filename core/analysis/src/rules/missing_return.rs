@@ -76,14 +76,10 @@ fn check_defs(arena: &AstArena, def_ids: &[DefId], errors: &mut Vec<AnalysisDiag
             Def::Spec { defs, .. } => {
                 check_defs(arena, defs, errors);
             }
-            Def::Module { defs: Some(d), .. } => {
-                check_defs(arena, d, errors);
-            }
             Def::Enum { .. }
             | Def::Constant { .. }
             | Def::ExternFunction { .. }
-            | Def::TypeAlias { .. }
-            | Def::Module { defs: None, .. } => {}
+            | Def::TypeAlias { .. } => {}
         }
     }
 }
