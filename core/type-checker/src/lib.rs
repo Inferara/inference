@@ -16,7 +16,7 @@
 //! - Multi-phase analysis: handles forward references and circular dependencies
 //! - Scope-aware symbol table: hierarchical scope management with proper shadowing
 //! - Method resolution: instance methods and associated functions on structs
-//! - Import system: plain, glob, and partial imports with visibility checking
+//! - Import system: file and item imports with visibility checking and `pub use` re-export
 //!
 //! **Operator Support**:
 //! - Arithmetic: `+`, `-`, `*`, `/`, `%`, `**`

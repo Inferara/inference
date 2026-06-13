@@ -38,6 +38,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Language
 
+- File-based module hierarchy (Zig-style, no `mod` keyword) ([#63])
+  - Every `.inf` file is an implicit namespace. A multi-file project lives under `src/`
+    with `src/main.inf` as the entry point.
+  - `use a::b;` imports `src/a/b.inf` and binds the name `b` in the importing file;
+    members are accessed with `::` (`b::fn()`, `a::b::fn()`). `use a::b::{x, y};`
+    imports specific `pub` items and makes them available bare. `use a::b::*;` is a
+    hard parse error with a guiding message.
+  - `pub fn`, `pub struct`, `pub enum`, `pub const`, and `pub type` are visible to
+    importing files. Everything else is file-private by default. Struct fields have no
+    per-field visibility — a field is accessible whenever its struct is accessible.
+    `pub spec` is a parse error; specs take no visibility modifier.
+  - `pub use a::b;` re-exports a namespace so importers of the current file can
+    traverse through it (Rust-style explicit re-export). Plain `use` is private.
+  - Only the entry file's top-level `pub fn`s become WASM exports; non-entry `pub` is
+    intra-project visibility only.
+  - File import cycles are allowed; only definition-value cycles (mutually referencing
+    `const` or type-alias initialisers) are hard errors (`CircularDefinition`).
+  - `infs build` and `infs build -v` compile the full import-reachable closure into one
+    `.wasm` (and `.v`) artifact. Unreachable `src/**/*.inf` files produce a compiler
+    warning; a missing imported file errors with a nearest-match suggestion.
+  - Known limitations: `pub use … from M;` external re-export is inert (wrap externals
+    in a `pub fn`); top-level `const` declarations do not reach codegen (A032 / #171);
+    no import aliasing (`use a::b as c;`).
 - `external fn` + `use { … } from <module>` — declare and call functions from external
   `.wasm` libraries using logical (platform-independent) module references. The compiler
   emits a WASM import section with one entry per bound extern; a separate link step

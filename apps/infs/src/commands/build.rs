@@ -24,8 +24,9 @@
 //! omitted, `build` operates in **project mode**: it discovers the project's
 //! `Inference.toml` by walking up from the current directory, compiles
 //! `<root>/src/main.inf` with `infc`'s working directory set to the project
-//! root (so `out/` always lands at the root), and warns about any other
-//! `src/*.inf` files (multi-file compilation is gated on #63).
+//! root (so `out/` always lands at the root). `infc` follows the
+//! import-reachable closure from `src/main.inf`, compiling every imported file
+//! and warning about any unreachable `src/**/*.inf` files itself.
 //!
 //! ```bash
 //! infs build                             # project mode: build <root>/src/main.inf

@@ -58,4 +58,20 @@ pub(crate) enum CodegenError {
         len: usize,
         max: usize,
     },
+    /// Two specs in distinct files (or a distinct file/name combination)
+    /// produce the same file-qualified key after the module path is joined to
+    /// the spec name. Because module-path segments may themselves contain `_`,
+    /// the underscore join is not injective: `lib/checks` + `S` and a file
+    /// `lib_checks` + `S` both yield `lib_checks_S`. Merging them in the
+    /// `inference.spec_funcs` map would silently drop one spec's proof
+    /// obligations, so codegen refuses and names both originating specs.
+    #[error(
+        "spec name collision: '{first}' and '{second}' both map to the qualified name '{qualified}'; \
+         rename one spec or its containing file to avoid the clash"
+    )]
+    SpecNameCollision {
+        first: String,
+        second: String,
+        qualified: String,
+    },
 }

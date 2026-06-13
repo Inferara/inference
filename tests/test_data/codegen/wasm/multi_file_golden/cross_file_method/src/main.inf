@@ -1,0 +1,6 @@
+use lib::geo::{Point};
+
+pub fn run() -> i32 {
+    let p: Point = Point::origin();
+    return p.dist();
+}

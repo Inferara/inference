@@ -50,6 +50,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::Def;
 use inference_type_checker::typed_context::TypedContext;
+use rustc_hash::FxHashMap;
 
 use crate::compiler::{Compiler, FunctionOrigin};
 use crate::errors::CodegenError;
@@ -87,7 +88,6 @@ pub use crate::spec_section::SECTION_VERSION as SPEC_FUNCS_SECTION_VERSION;
 /// # Errors
 ///
 /// Returns an error if:
-/// - More than one source file is present (multi-file not yet implemented)
 /// - Validation fails (proof + non-Wasm32, or Soroban + non-det)
 /// - Code generation fails
 pub fn codegen(
@@ -136,10 +136,6 @@ pub fn codegen(
     // traps; the `emit_index_offset` choke point is the seam where it hooks in.
     compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
 
-    if typed_context.source_files().len() > 1 {
-        todo!("Multi-file support not yet implemented");
-    }
-
     if typed_context.source_files().len() > 0 {
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
@@ -180,72 +176,164 @@ pub fn codegen(
     .with_frame_sizes(frame_sizes))
 }
 
-/// Traverses the typed AST and compiles all function and method definitions.
+/// Traverses every source file's typed AST and compiles all function and
+/// method definitions into one flat WASM module.
 ///
-/// The traversal proceeds in two stages to ensure all WASM function indices are
-/// known before any body is compiled (required for forward references):
+/// Emittable items from all files are first collected into a single set of
+/// buckets, in canonical file order (entry first, then by module path). The
+/// traversal then proceeds in two stages over those combined buckets so all
+/// WASM function indices are globally unique and known before any body is
+/// compiled (required for forward references, including cross-file calls):
 ///
 /// 1. **Index registration** -- `build_func_name_to_idx` registers top-level
-///    functions, then `build_method_name_to_idx` registers struct methods with
-///    mangled names (`TypeName.method_name`).
-/// 2. **Body compilation** -- top-level functions are compiled first, then
-///    method bodies are compiled with `method_struct_name` passed so that
-///    `self` parameter handling (Phase 3+) knows which struct type is in scope.
+///    functions, then `build_method_name_to_idx` registers struct methods.
+///    Items defined in an imported file get a file-qualified mangled name
+///    (`lib.arith.add`, `lib.arith.Point.new`); entry-file items stay
+///    unqualified, so single-file output is byte-identical.
+/// 2. **Body compilation** -- bodies are compiled in registration order, each
+///    with its defining file's module path so that struct/enum metadata
+///    resolves relative to the file the body lives in, and its
+///    `method_struct_name` so `self` handling knows the struct in scope.
 fn traverse_t_ast_with_compiler(
     typed_context: &TypedContext,
     compiler: &mut Compiler,
     mode: CompilationMode,
 ) -> Result<(), CodegenError> {
     let arena = typed_context.arena();
+
+    // Collect emittable items from every source file into one set of buckets,
+    // in canonical file order (entry first, then by module path). Registration
+    // and body compilation then run once over the combined buckets so WASM
+    // function indices are globally unique and deterministic across files; a
+    // per-file registration pass would reset the index bases and collide.
+    let mut buckets = EmittableFunctions::default();
     for source_file in typed_context.source_files() {
-        let buckets = collect_emittable_functions(arena, &source_file.defs, mode)?;
+        collect_emittable_functions(
+            arena,
+            &source_file.defs,
+            &source_file.module_path,
+            mode,
+            &mut buckets,
+        )?;
+    }
 
-        // Register every visited spec (even with zero emittable inner defs) so
-        // user-authored `spec MySpec { }` still surfaces a per-spec entry that
-        // the Rocq translator turns into `Definition output__MySpec_specs` and
-        // `Theorem valid_output__MySpec`.
-        for spec_name in &buckets.visited_spec_names {
-            compiler.ensure_spec_registered(spec_name);
-        }
+    // Reject two specs whose file-qualified names collide under the `_` join
+    // before any are recorded; the spec map is keyed by the joined name, so a
+    // post-join check could not tell a collision from a single entry.
+    check_spec_name_collisions(&buckets.visited_specs)?;
 
-        register_function_indices(arena, compiler, typed_context, &buckets)?;
+    // Register every visited spec (even with zero emittable inner defs) so
+    // user-authored `spec MySpec { }` still surfaces a per-spec entry that
+    // the Rocq translator turns into `Definition output__MySpec_specs` and
+    // `Theorem valid_output__MySpec`. The spec is keyed by its file-qualified
+    // name so two files may each define a `spec MySpec`.
+    for visited in &buckets.visited_specs {
+        compiler.ensure_spec_registered(&qualified_spec_name(
+            &visited.module_path,
+            &visited.spec_name,
+        ));
+    }
 
-        // Stage 2: Compile bodies in the same order as registration.
-        for &def_id in &buckets.funcs {
-            compiler.visit_function_definition(
-                def_id,
-                arena,
-                typed_context,
-                None,
-                &FunctionOrigin::TopLevel,
-            )?;
-        }
-        for (struct_name, method_def_id) in &buckets.methods {
-            compiler.visit_function_definition(
-                *method_def_id,
-                arena,
-                typed_context,
-                Some(struct_name),
-                &FunctionOrigin::TopLevel,
-            )?;
-        }
-        for (spec_name, def_id) in &buckets.spec_funcs {
-            compiler.visit_function_definition(
-                *def_id,
-                arena,
-                typed_context,
-                None,
-                &FunctionOrigin::SpecInner(spec_name.clone()),
-            )?;
-        }
-        for (spec_name, struct_name, method_def_id) in &buckets.spec_methods {
-            compiler.visit_function_definition(
-                *method_def_id,
-                arena,
-                typed_context,
-                Some(struct_name),
-                &FunctionOrigin::SpecInner(spec_name.clone()),
-            )?;
+    register_function_indices(arena, compiler, typed_context, &buckets)?;
+
+    // Stage 2: Compile bodies in the same order as registration.
+    for entry in &buckets.funcs {
+        compiler.visit_function_definition(
+            entry.def_id,
+            arena,
+            typed_context,
+            None,
+            &entry.module_path,
+            &FunctionOrigin::TopLevel,
+        )?;
+    }
+    for entry in &buckets.methods {
+        compiler.visit_function_definition(
+            entry.def_id,
+            arena,
+            typed_context,
+            Some(&entry.struct_name),
+            &entry.module_path,
+            &FunctionOrigin::TopLevel,
+        )?;
+    }
+    for entry in &buckets.spec_funcs {
+        compiler.visit_function_definition(
+            entry.def_id,
+            arena,
+            typed_context,
+            None,
+            &entry.module_path,
+            &FunctionOrigin::SpecInner(qualified_spec_name(
+                &entry.module_path,
+                &entry.spec_name,
+            )),
+        )?;
+    }
+    for entry in &buckets.spec_methods {
+        compiler.visit_function_definition(
+            entry.def_id,
+            arena,
+            typed_context,
+            Some(&entry.struct_name),
+            &entry.module_path,
+            &FunctionOrigin::SpecInner(qualified_spec_name(
+                &entry.module_path,
+                &entry.spec_name,
+            )),
+        )?;
+    }
+    Ok(())
+}
+
+/// File-qualifies a spec name by prefixing its defining file's module-path
+/// segments, joined with `_` (`lib_geometry_MySpec`). A spec in the entry file
+/// (empty `module_path`) keeps its bare name, so single-file proof-mode output
+/// is unchanged.
+///
+/// The `_` join keeps the result a legal Rocq identifier (`.` is not), so the
+/// spec key passes the wasm-to-v identifier validator unchanged and travels
+/// intact into the `<module>__<spec>_specs` theorem grammar. The join is not
+/// injective when a segment itself ends or begins with `_`; [`check_spec_name_collisions`]
+/// rejects the rare resulting clash rather than letting two specs merge.
+pub(crate) fn qualified_spec_name(module_path: &[String], spec_name: &str) -> String {
+    if module_path.is_empty() {
+        spec_name.to_string()
+    } else {
+        format!("{}_{spec_name}", module_path.join("_"))
+    }
+}
+
+/// Rejects two distinct `(module_path, spec_name)` pairs that collapse to the
+/// same [`qualified_spec_name`]. The underscore join is not injective —
+/// `["lib","checks"]` + `S` and `["lib_checks"]` + `S` both yield `lib_checks_S` —
+/// so two specs from different files could otherwise share one
+/// `inference.spec_funcs` map key, silently dropping one spec's obligations.
+///
+/// Checks the pre-join pairs (where each spec's identity is still distinct), so
+/// the collision is caught before the lossy join, and returns a deterministic
+/// error naming both originating specs (the `::`-rendered source path) and the
+/// shared qualified name.
+fn check_spec_name_collisions(specs: &[VisitedSpec]) -> Result<(), CodegenError> {
+    let mut seen: FxHashMap<String, &VisitedSpec> = FxHashMap::default();
+    for spec in specs {
+        let qualified = qualified_spec_name(&spec.module_path, &spec.spec_name);
+        if let Some(previous) = seen.insert(qualified.clone(), spec)
+            && (previous.module_path != spec.module_path
+                || previous.spec_name != spec.spec_name)
+        {
+            // Render both with the lower-numbered source first so the message
+            // is stable regardless of file iteration order.
+            let (first, second) = {
+                let a = previous.render_source();
+                let b = spec.render_source();
+                if a <= b { (a, b) } else { (b, a) }
+            };
+            return Err(CodegenError::SpecNameCollision {
+                first,
+                second,
+                qualified,
+            });
         }
     }
     Ok(())
@@ -296,10 +384,11 @@ fn register_function_indices(
         buckets.spec_funcs.len(),
         spec_func_indices.len(),
     );
-    for ((spec_name, _), assigned_idx) in
-        buckets.spec_funcs.iter().zip(spec_func_indices.iter())
-    {
-        compiler.record_spec_index(spec_name, *assigned_idx);
+    for (entry, assigned_idx) in buckets.spec_funcs.iter().zip(spec_func_indices.iter()) {
+        compiler.record_spec_index(
+            &qualified_spec_name(&entry.module_path, &entry.spec_name),
+            *assigned_idx,
+        );
     }
 
     let spec_func_indices_len = u32::try_from(spec_func_indices.len())
@@ -318,10 +407,11 @@ fn register_function_indices(
         buckets.spec_methods.len(),
         spec_method_indices.len(),
     );
-    for ((spec_name, _, _), assigned_idx) in
-        buckets.spec_methods.iter().zip(spec_method_indices.iter())
-    {
-        compiler.record_spec_index(spec_name, *assigned_idx);
+    for (entry, assigned_idx) in buckets.spec_methods.iter().zip(spec_method_indices.iter()) {
+        compiler.record_spec_index(
+            &qualified_spec_name(&entry.module_path, &entry.spec_name),
+            *assigned_idx,
+        );
     }
 
     // Verify Stage 1 produced the expected number of index entries.
@@ -343,25 +433,83 @@ fn register_function_indices(
     Ok(())
 }
 
+/// A top-level free function to emit, tagged with its defining file's module
+/// path (empty for the entry file). The module path file-qualifies the
+/// function's flat WASM name so two files can each define a same-named function.
+pub(crate) struct EmittableFn {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) def_id: DefId,
+}
+
+/// A struct method to emit. `module_path` is the **struct's** defining file —
+/// the method's mangled name is qualified by where its struct lives, not where
+/// it is called.
+pub(crate) struct EmittableMethod {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) struct_name: String,
+    pub(crate) def_id: DefId,
+}
+
+/// A spec-inner free function to emit, tagged with its spec and defining file.
+pub(crate) struct EmittableSpecFn {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) spec_name: String,
+    pub(crate) def_id: DefId,
+}
+
+/// A spec-inner struct method to emit, tagged with its spec, struct, and
+/// defining file.
+pub(crate) struct EmittableSpecMethod {
+    pub(crate) module_path: Vec<String>,
+    pub(crate) spec_name: String,
+    pub(crate) struct_name: String,
+    pub(crate) def_id: DefId,
+}
+
+/// A spec block visited in proof mode, tagged with its defining file so its
+/// per-spec Rocq entry can be file-qualified consistently with its inner
+/// functions.
+struct VisitedSpec {
+    module_path: Vec<String>,
+    spec_name: String,
+}
+
+impl VisitedSpec {
+    /// Renders the spec's source identity for diagnostics: `spec S` in the
+    /// entry file, `lib::checks::S` in an imported file. Uses `::` (the source
+    /// path syntax) rather than the joined codegen key so the message points at
+    /// what the user wrote.
+    fn render_source(&self) -> String {
+        if self.module_path.is_empty() {
+            self.spec_name.clone()
+        } else {
+            format!("{}::{}", self.module_path.join("::"), self.spec_name)
+        }
+    }
+}
+
+#[derive(Default)]
 struct EmittableFunctions {
     /// Top-level `external fn` declarations, emitted as WASM function imports
     /// at indices `0..N` ahead of every local function (see
     /// [`Compiler::register_imports`]).
     imports: Vec<DefId>,
-    funcs: Vec<DefId>,
-    methods: Vec<(String, DefId)>,
-    /// Each entry: `(spec_name, def_id)`.
-    spec_funcs: Vec<(String, DefId)>,
-    /// Each entry: `(spec_name, struct_name, method_def_id)`.
-    spec_methods: Vec<(String, String, DefId)>,
+    funcs: Vec<EmittableFn>,
+    methods: Vec<EmittableMethod>,
+    spec_funcs: Vec<EmittableSpecFn>,
+    spec_methods: Vec<EmittableSpecMethod>,
     /// Every spec block visited in proof mode, even if it contributes no
     /// `spec_funcs` / `spec_methods` entries. Drives `ensure_spec_registered`
     /// so an empty user `spec MySpec { }` still surfaces a per-spec
     /// `Definition` and `Theorem` in the Rocq output.
-    visited_spec_names: Vec<String>,
+    visited_specs: Vec<VisitedSpec>,
 }
 
-/// Sorts top-level defs into the five buckets used by Stage 1 registration.
+/// Folds one source file's top-level defs into `buckets`, tagging each entry
+/// with `module_path` (the file's source-root-relative segments, empty for the
+/// entry file). Called once per file in canonical order, accumulating into a
+/// single set of buckets so Stage 1 assigns globally unique, deterministic WASM
+/// function indices across the whole multi-file program.
 ///
 /// Top-level `Def::ExternFunction` declarations land in the `imports` bucket and
 /// are emitted as WASM function imports at indices `0..N` ahead of every local
@@ -376,25 +524,25 @@ struct EmittableFunctions {
 fn collect_emittable_functions(
     arena: &AstArena,
     defs: &[DefId],
+    module_path: &[String],
     mode: CompilationMode,
-) -> Result<EmittableFunctions, CodegenError> {
-    let mut buckets = EmittableFunctions {
-        imports: Vec::new(),
-        funcs: Vec::new(),
-        methods: Vec::new(),
-        spec_funcs: Vec::new(),
-        spec_methods: Vec::new(),
-        visited_spec_names: Vec::new(),
-    };
-
+    buckets: &mut EmittableFunctions,
+) -> Result<(), CodegenError> {
     for &def_id in defs {
         match &arena[def_id].kind {
             Def::ExternFunction { .. } => buckets.imports.push(def_id),
-            Def::Function { .. } => buckets.funcs.push(def_id),
+            Def::Function { .. } => buckets.funcs.push(EmittableFn {
+                module_path: module_path.to_vec(),
+                def_id,
+            }),
             Def::Struct { name, methods, .. } => {
                 let struct_name = arena[*name].name.clone();
                 for &method_def_id in methods {
-                    buckets.methods.push((struct_name.clone(), method_def_id));
+                    buckets.methods.push(EmittableMethod {
+                        module_path: module_path.to_vec(),
+                        struct_name: struct_name.clone(),
+                        def_id: method_def_id,
+                    });
                 }
             }
             Def::Spec {
@@ -403,20 +551,28 @@ fn collect_emittable_functions(
                 ..
             } if mode == CompilationMode::Proof => {
                 let spec_name = arena[*name].name.clone();
-                buckets.visited_spec_names.push(spec_name.clone());
+                buckets.visited_specs.push(VisitedSpec {
+                    module_path: module_path.to_vec(),
+                    spec_name: spec_name.clone(),
+                });
                 for &inner_id in inner {
                     match &arena[inner_id].kind {
                         Def::Function { .. } => {
-                            buckets.spec_funcs.push((spec_name.clone(), inner_id));
+                            buckets.spec_funcs.push(EmittableSpecFn {
+                                module_path: module_path.to_vec(),
+                                spec_name: spec_name.clone(),
+                                def_id: inner_id,
+                            });
                         }
                         Def::Struct { name, methods, .. } => {
                             let struct_name = arena[*name].name.clone();
                             for &method_def_id in methods {
-                                buckets.spec_methods.push((
-                                    spec_name.clone(),
-                                    struct_name.clone(),
-                                    method_def_id,
-                                ));
+                                buckets.spec_methods.push(EmittableSpecMethod {
+                                    module_path: module_path.to_vec(),
+                                    spec_name: spec_name.clone(),
+                                    struct_name: struct_name.clone(),
+                                    def_id: method_def_id,
+                                });
                             }
                         }
                         Def::Spec { name: inner_name, .. } => {
@@ -433,5 +589,99 @@ fn collect_emittable_functions(
         }
     }
 
-    Ok(buckets)
+    Ok(())
+}
+
+#[cfg(test)]
+mod spec_name_tests {
+    use super::{check_spec_name_collisions, qualified_spec_name, VisitedSpec};
+    use crate::errors::CodegenError;
+
+    fn visited(segments: &[&str], spec: &str) -> VisitedSpec {
+        VisitedSpec {
+            module_path: segments.iter().map(|s| (*s).to_string()).collect(),
+            spec_name: spec.to_string(),
+        }
+    }
+
+    #[test]
+    fn entry_file_spec_keeps_bare_name() {
+        // An entry-file spec (empty module path) keeps its bare name, so
+        // single-file proof output is byte-identical to the pre-multi-file world.
+        assert_eq!(qualified_spec_name(&[], "LibSpec"), "LibSpec");
+    }
+
+    #[test]
+    fn non_entry_spec_joins_path_with_underscore() {
+        // `.` is illegal in a Rocq identifier; the `_` join keeps the key valid.
+        assert_eq!(
+            qualified_spec_name(&["lib".to_string(), "checks".to_string()], "LibSpec"),
+            "lib_checks_LibSpec"
+        );
+    }
+
+    #[test]
+    fn single_segment_path_joins() {
+        assert_eq!(
+            qualified_spec_name(&["math".to_string()], "Sp"),
+            "math_Sp"
+        );
+    }
+
+    #[test]
+    fn distinct_specs_without_collision_pass() {
+        let specs = vec![
+            visited(&[], "EntrySpec"),
+            visited(&["lib", "checks"], "LibSpec"),
+            visited(&["lib", "geo"], "GeoSpec"),
+        ];
+        assert!(check_spec_name_collisions(&specs).is_ok());
+    }
+
+    #[test]
+    fn same_spec_recorded_twice_is_not_a_collision() {
+        // The same (module_path, spec_name) appearing twice (e.g. revisited)
+        // is the same spec, not a clash — only DISTINCT pairs that join to one
+        // key are rejected.
+        let specs = vec![
+            visited(&["lib", "checks"], "LibSpec"),
+            visited(&["lib", "checks"], "LibSpec"),
+        ];
+        assert!(check_spec_name_collisions(&specs).is_ok());
+    }
+
+    #[test]
+    fn underscore_segment_collision_is_rejected() {
+        // `["lib","checks"]` + `S` and `["lib_checks"]` + `S` both join to
+        // `lib_checks_S`. Distinct specs, one key — a hard error, never a
+        // silent merge.
+        let specs = vec![
+            visited(&["lib", "checks"], "S"),
+            visited(&["lib_checks"], "S"),
+        ];
+        let err = check_spec_name_collisions(&specs)
+            .expect_err("colliding distinct specs must be rejected");
+        match err {
+            CodegenError::SpecNameCollision {
+                first,
+                second,
+                qualified,
+            } => {
+                assert_eq!(qualified, "lib_checks_S");
+                // Both source identities are named, sorted for determinism.
+                assert_eq!(first, "lib::checks::S");
+                assert_eq!(second, "lib_checks::S");
+            }
+            other => panic!("expected SpecNameCollision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_underscore_segment_collision_is_rejected() {
+        // `["a_"]` + `b` and `["a"]` + `_b` both join to `a__b`.
+        let specs = vec![visited(&["a_"], "b"), visited(&["a"], "_b")];
+        let err = check_spec_name_collisions(&specs)
+            .expect_err("trailing-underscore collision must be rejected");
+        assert!(matches!(err, CodegenError::SpecNameCollision { .. }));
+    }
 }

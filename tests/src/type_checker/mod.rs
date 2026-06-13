@@ -7,5 +7,6 @@ mod coverage;
 mod error_recovery;
 mod features;
 mod multi_file;
+mod multi_file_matrix;
 mod struct_tests;
 mod type_info_tests;

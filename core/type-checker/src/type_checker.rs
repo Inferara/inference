@@ -48,7 +48,7 @@ use crate::{
         ResolvedImportTarget, SymbolTable,
     },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
-    typed_context::TypedContext,
+    typed_context::{CallTarget, TypedContext},
 };
 
 #[derive(Default)]
@@ -147,12 +147,30 @@ impl TypeChecker {
         self.collect_extern_bindings(ctx);
         self.register_types(ctx);
         self.collect_function_and_constant_definitions(ctx);
-        // Imports resolve after both types and functions are registered so an
-        // item import (`use a::b::{f};`) can bind a function as well as a type;
-        // import binding never feeds the registration passes, so this ordering
-        // is safe.
+        // Top-level consts become importable / qualified-resolvable symbols after
+        // functions and structs register, so a same-named function registers first
+        // and the const symbol is skipped rather than clashing (#63).
+        self.register_constant_symbols(ctx);
+        // Imports resolve after types, functions, and const symbols are registered
+        // so an item import (`use a::b::{f};` / `use a::b::{C};`) can bind a
+        // function, type, or const; import binding never feeds the registration
+        // passes, so this ordering is safe.
         self.resolve_imports();
-        self.check_definition_cycles(ctx);
+        // Signatures were resolved at registration, before imports bound, so an
+        // item-imported type stayed a bare `Custom` name. Re-resolve them now that
+        // each file's imports are visible, so a param/return of an imported struct
+        // type matches what its call sites infer (`Struct`, not `Custom`).
+        self.symbol_table.renormalize_signatures();
+        // Function signature types are validated only now, after imports resolve,
+        // so an item-imported type works in a param/return position (#63).
+        self.validate_signatures(ctx);
+        let has_value_cycle = self.check_definition_cycles(ctx);
+        // Const initializers are checked after cycles are detected: a value cycle
+        // must report only `CircularDefinition`, not a downstream resolution error
+        // from evaluating a member of the cycle.
+        if !has_value_cycle {
+            self.check_const_initializers(ctx);
+        }
         self.check_spec_function_shadows_top_level(ctx);
         // Continue to inference phase even if registration had errors
         // to collect all errors before returning. Each file's bodies are
@@ -224,18 +242,25 @@ impl TypeChecker {
     /// File-to-file import cycles are unaffected — they are allowed (#63). Only a
     /// cycle in the *values* of definitions, which has no evaluation order, is an
     /// error.
-    fn check_definition_cycles(&mut self, ctx: &mut TypedContext) {
+    /// Returns `true` when a value cycle was found, so the caller can skip the
+    /// const-initializer check (whose member resolution would otherwise emit a
+    /// confusing secondary error for a definition that is part of the cycle).
+    fn check_definition_cycles(&mut self, ctx: &mut TypedContext) -> bool {
         let nodes = self.collect_definition_nodes(ctx);
         if nodes.is_empty() {
-            return;
+            return false;
         }
         match definition_graph::analyze(ctx.arena(), &nodes) {
-            GraphOutcome::Acyclic { topo_order } => ctx.set_definition_order(topo_order),
+            GraphOutcome::Acyclic { topo_order } => {
+                ctx.set_definition_order(topo_order);
+                false
+            }
             GraphOutcome::Cyclic { cycle, location } => {
                 self.errors.push(TypeCheckError::CircularDefinition {
                     cycle: cycle.join(" -> "),
                     location,
                 });
+                true
             }
         }
     }
@@ -288,11 +313,17 @@ impl TypeChecker {
         let def_data = &arena[def_id];
         let location = def_data.location;
         match &def_data.kind {
-            Def::TypeAlias { name, ty, .. } => {
+            Def::TypeAlias { name, ty, vis } => {
                 let type_name = arena[*name].name.clone();
                 let type_info = TypeInfo::from_type_id(arena, *ty);
+                let alias_vis = vis.clone();
                 self.symbol_table
-                    .register_type(&type_name, Some(type_info))
+                    .register_type_with_visibility(
+                        &type_name,
+                        Some(type_info),
+                        alias_vis,
+                        location,
+                    )
                     .unwrap_or_else(|_| {
                         self.errors.push(TypeCheckError::RegistrationFailed {
                             kind: RegistrationKind::Type,
@@ -669,6 +700,141 @@ impl TypeChecker {
         self.symbol_table.reset_to_root();
     }
 
+    /// Registers each top-level `const` as a symbol carrying its value type and
+    /// visibility, so it is item-importable and reachable by a qualified path
+    /// across files (#63).
+    ///
+    /// Run after functions and structs are registered, and tolerant of a
+    /// pre-existing same-named symbol (the const keeps its intra-file scope
+    /// variable), so adding the const symbol never turns a latent name clash into
+    /// a hard error. Each const's value type is resolved against its own file's
+    /// scope so a custom type name resolves correctly.
+    fn register_constant_symbols(&mut self, ctx: &mut TypedContext) {
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                let (location, kind) = {
+                    let def_data = &ctx.arena()[def_id];
+                    (def_data.location, def_data.kind.clone())
+                };
+                if let Def::Constant {
+                    name, ty, vis, ..
+                } = &kind
+                {
+                    let const_name = ctx.arena()[*name].name.clone();
+                    let const_type = self
+                        .symbol_table
+                        .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
+                    if let Err(err) = self.symbol_table.register_constant(
+                        &const_name,
+                        const_type,
+                        vis.clone(),
+                        location,
+                    ) {
+                        self.errors.push(TypeCheckError::RegistrationFailed {
+                            kind: RegistrationKind::Variable,
+                            name: const_name,
+                            reason: Some(err.to_string()),
+                            location,
+                        });
+                    }
+                }
+            }
+        }
+        self.symbol_table.reset_to_root();
+    }
+
+    /// Type-checks each top-level `const`'s initializer, run after imports and
+    /// const symbols are bound.
+    ///
+    /// A `const`'s value may reference another `const` — including one in a
+    /// different file brought in bare by `use a::b::{C};` or named by a qualified
+    /// `a::b::C` path. Those resolve only after `resolve_imports` and
+    /// `register_constant_symbols`, so the initializer check waits until here;
+    /// each file is entered first so its imports are in scope. An acyclic
+    /// cross-file `const` chain (guaranteed acyclic by `check_definition_cycles`)
+    /// therefore type-checks.
+    fn check_const_initializers(&mut self, ctx: &mut TypedContext) {
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                let (location, kind) = {
+                    let def_data = &ctx.arena()[def_id];
+                    (def_data.location, def_data.kind.clone())
+                };
+                if let Def::Constant { ty, value, .. } = &kind {
+                    let const_type = self
+                        .symbol_table
+                        .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
+                    self.check_const_initializer(*value, &const_type, location, ctx);
+                }
+            }
+        }
+        self.symbol_table.reset_to_root();
+    }
+
+    /// Validates function and method signature types, run after import resolution.
+    ///
+    /// Each file is entered before its functions are checked, so a type named in a
+    /// param or return position resolves against that file's imports — an
+    /// item-imported struct (`use a::b::{T};`) is recognized in a signature
+    /// exactly as in a `let` binding (#63). Methods inside a struct, and functions
+    /// inside a spec, are validated in the same defining scope they register in.
+    fn validate_signatures(&mut self, ctx: &mut TypedContext) {
+        for (module_path, defs) in Self::files_with_defs(ctx) {
+            self.symbol_table.enter_file_scope(&module_path);
+            for def_id in defs {
+                self.validate_signature_for_def(def_id, ctx);
+            }
+        }
+        self.symbol_table.reset_to_root();
+    }
+
+    fn validate_signature_for_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
+        let kind = ctx.arena()[def_id].kind.clone();
+        match &kind {
+            Def::Function {
+                type_params,
+                args,
+                returns,
+                ..
+            } => {
+                let tp_names: Vec<String> = type_params
+                    .iter()
+                    .map(|p| ctx.arena()[*p].name.clone())
+                    .collect();
+                for arg in args {
+                    match &arg.kind {
+                        ArgKind::Named { ty, .. }
+                        | ArgKind::Ignored { ty }
+                        | ArgKind::TypeOnly(ty) => {
+                            self.validate_type(ctx.arena(), *ty, &tp_names);
+                        }
+                        ArgKind::SelfRef { .. } => {}
+                    }
+                }
+                if let Some(return_type_id) = returns {
+                    self.validate_type(ctx.arena(), *return_type_id, &tp_names);
+                }
+            }
+            Def::Struct { methods, .. } => {
+                let method_ids: Vec<DefId> = methods.clone();
+                for method_id in method_ids {
+                    self.validate_signature_for_def(method_id, ctx);
+                }
+            }
+            Def::Spec { name, defs, .. } => {
+                let spec_name = ctx.arena()[*name].name.clone();
+                let inner: Vec<DefId> = defs.clone();
+                let mut guard = SpecScopeGuard::enter(self, &spec_name);
+                for inner_id in inner {
+                    guard.validate_signature_for_def(inner_id, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn collect_for_def(&mut self, def_id: DefId, ctx: &mut TypedContext) {
         let (location, kind) = {
@@ -677,19 +843,24 @@ impl TypeChecker {
             (def_data.location, def_data.kind.clone())
         };
         match &kind {
-            Def::Constant {
-                name, ty, value, ..
-            } => {
+            Def::Constant { name, ty, .. } => {
                 let const_name = ctx.arena()[*name].name.clone();
                 let const_type = self
                     .symbol_table
                     .resolve_custom_type(TypeInfo::from_type_id(ctx.arena(), *ty));
-                let value_id = *value;
-                if let Err(err) = self.symbol_table.push_variable_to_scope(
-                    &const_name,
-                    const_type.clone(),
-                    false,
-                ) {
+                // Register as a scope variable so an intra-file use site resolves
+                // the const by value. The importable / qualified-resolvable const
+                // *symbol* is added in a later pass (`register_constant_symbols`),
+                // so it never makes a same-named function/struct registration fail.
+                //
+                // The initializer itself is type-checked later, in
+                // `check_const_initializers` after imports resolve, so a `const`
+                // may reference a cross-file `const` brought in by `use a::b::{C};`
+                // or named by a qualified path.
+                if let Err(err) =
+                    self.symbol_table
+                        .push_variable_to_scope(&const_name, const_type, false)
+                {
                     self.errors.push(TypeCheckError::RegistrationFailed {
                         kind: RegistrationKind::Variable,
                         name: const_name,
@@ -697,7 +868,6 @@ impl TypeChecker {
                         location,
                     });
                 }
-                self.check_const_initializer(value_id, &const_type, location, ctx);
             }
             Def::Function {
                 name,
@@ -715,6 +885,12 @@ impl TypeChecker {
                     .map(|p| ctx.arena()[*p].name.clone())
                     .collect();
 
+                // Signature types are validated in a dedicated pass after import
+                // resolution (`validate_signatures`), so an item-imported type
+                // (`use a::b::{T};`) is recognized in a param/return position the
+                // same as in a `let` binding. Registration below keeps unresolved
+                // `Custom` names; the validation pass reports any that never
+                // resolve.
                 for arg in args {
                     match &arg.kind {
                         ArgKind::SelfRef { .. } => {
@@ -723,13 +899,9 @@ impl TypeChecker {
                                 location: arg.location,
                             });
                         }
-                        ArgKind::Ignored { ty } => {
-                            self.validate_type(ctx.arena(), *ty, &tp_names);
-                        }
                         ArgKind::Named {
                             name: arg_name, ty, ..
                         } => {
-                            self.validate_type(ctx.arena(), *ty, &tp_names);
                             let type_info = TypeInfo::from_type_id_with_type_params(
                                 ctx.arena(),
                                 *ty,
@@ -737,9 +909,7 @@ impl TypeChecker {
                             );
                             ctx.set_node_typeinfo(NodeId::Ident(*arg_name), type_info);
                         }
-                        ArgKind::TypeOnly(ty) => {
-                            self.validate_type(ctx.arena(), *ty, &tp_names);
-                        }
+                        ArgKind::Ignored { .. } | ArgKind::TypeOnly(_) => {}
                     }
                 }
                 ctx.set_node_typeinfo(
@@ -750,7 +920,6 @@ impl TypeChecker {
                     },
                 );
                 if let Some(return_type_id) = returns {
-                    self.validate_type(ctx.arena(), *return_type_id, &tp_names);
                     let return_type_info = TypeInfo::from_type_id_with_type_params(
                         ctx.arena(),
                         *return_type_id,
@@ -1577,6 +1746,23 @@ impl TypeChecker {
                     return Some(type_info);
                 }
 
+                // A `::`-qualified path that names a top-level `const` in another
+                // file (`limits::MAX`) resolves through the file scope tree before
+                // the enum-variant handling below; that path can never name an enum
+                // variant, so resolving it here does not shadow variant access.
+                if let Some(result) = self.try_infer_qualified_const(expr_id, ctx) {
+                    return result;
+                }
+
+                // A path through a known namespace whose final segment is not a
+                // value (`lib::vals::X`, `lib::vals::add` in value position) is a
+                // namespace-access error, not an enum-variant access. Diagnosing it
+                // here avoids the misleading "enum `lib` is not defined" the
+                // variant fallback would emit for the namespace head.
+                if let Some(result) = self.try_diagnose_qualified_path(expr_id, ctx) {
+                    return result;
+                }
+
                 let arena = ctx.arena();
                 let enum_name = match &arena[inner_expr].kind {
                     Expr::Type(ty_id) => {
@@ -1956,7 +2142,11 @@ impl TypeChecker {
             }
             Expr::Identifier(ident_id) => {
                 let name = ctx.arena()[ident_id].name.clone();
-                if let Some(var_ty) = self.symbol_table.lookup_variable(&name) {
+                if let Some(var_ty) = self
+                    .symbol_table
+                    .lookup_variable(&name)
+                    .or_else(|| self.symbol_table.lookup_constant(&name))
+                {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), var_ty.clone());
                     Some(var_ty)
                 } else {
@@ -1995,14 +2185,106 @@ impl TypeChecker {
         }
     }
 
-    /// Resolves a `::`-separated call target (`math::arith::add(...)`) to a
-    /// function in another file, returning `Some(result)` when the path names a
-    /// function and `None` when it does not (so the caller falls through to
-    /// method / enum / plain-call handling).
+    /// Resolves a `::`-separated path that names a top-level `const` in another
+    /// file to its value type, returning `Some(result)` when the path resolves to
+    /// a constant and `None` otherwise (so the caller falls through to
+    /// enum-variant handling).
     ///
-    /// Only multi-qualifier paths (three or more segments) are handled here; a
-    /// single-qualifier `Type::name` is left to the existing method/enum code so
-    /// associated-function and variant calls keep their dedicated diagnostics.
+    /// Two path shapes reach a cross-file const: an absolute `lib::vals::MAX`
+    /// (three segments) and a file-import-relative `vals::MAX` (two segments, when
+    /// the file wrote `use lib::vals;`). Both are tried here. A two-segment path
+    /// that does *not* resolve to a constant — notably `Enum::Variant` — returns
+    /// `None` and is left to the variant code, so enum access is unaffected. The
+    /// target's `pub`-ness is enforced against the accessing file, matching the
+    /// qualified-call path's visibility gate.
+    fn try_infer_qualified_const(
+        &mut self,
+        expr_id: ExprId,
+        ctx: &mut TypedContext,
+    ) -> Option<Option<TypeInfo>> {
+        let segments = Self::flatten_type_member_path(ctx.arena(), expr_id)?;
+        if segments.len() < 2 {
+            return None;
+        }
+        let location = ctx.arena()[expr_id].location;
+        let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        let (symbol, def_scope_id) =
+            self.symbol_table.resolve_qualified_name(&segments, from_scope)?;
+        let crate::symbol_table::Symbol::Constant(info) = &symbol else {
+            return None;
+        };
+        let const_type = info.type_info.clone();
+        self.check_and_report_visibility(
+            &info.visibility,
+            def_scope_id,
+            info.definition_location,
+            &location,
+            VisibilityContext::Constant {
+                name: segments.join("::"),
+            },
+        );
+        ctx.set_node_typeinfo(NodeId::Expr(expr_id), const_type.clone());
+        Some(Some(const_type))
+    }
+
+    /// Reports a precise diagnostic for a `::`-qualified path in value position
+    /// whose prefix names a known namespace but whose final segment is not a
+    /// value, returning `Some(None)` when it does so and `None` to fall through.
+    ///
+    /// `try_infer_qualified_const` has already handled the case where the path
+    /// resolves to a constant. What remains for a namespace path is either a
+    /// final segment that names a non-value item (a function) or one that names
+    /// nothing. Either way the enum-variant fallback would treat the namespace
+    /// head as an undefined enum (`enum \`lib\` is not defined`), so this emits
+    /// `cannot resolve \`lib::vals::X\`` (or names the function) instead. A path
+    /// whose prefix is *not* a namespace — notably a single-qualifier
+    /// `Enum::Variant` — is left untouched for the variant code.
+    fn try_diagnose_qualified_path(
+        &mut self,
+        expr_id: ExprId,
+        ctx: &mut TypedContext,
+    ) -> Option<Option<TypeInfo>> {
+        let segments = Self::flatten_type_member_path(ctx.arena(), expr_id)?;
+        if segments.len() < 2 {
+            return None;
+        }
+        let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        if !self.symbol_table.prefix_is_namespace(&segments, from_scope) {
+            return None;
+        }
+        let location = ctx.arena()[expr_id].location;
+        let path = segments.join("::");
+        let names = self
+            .symbol_table
+            .resolve_qualified_name(&segments, from_scope)
+            .and_then(|(symbol, _)| {
+                symbol
+                    .as_function()
+                    .map(|_| "a function".to_string())
+            });
+        self.errors.push(TypeCheckError::QualifiedPathNotAValue {
+            path,
+            names,
+            location,
+        });
+        Some(None)
+    }
+
+    /// Resolves a `::`-separated call target to a function in another file,
+    /// returning `Some(result)` when the path names a function and `None` when it
+    /// does not (so the caller falls through to method / enum / plain-call
+    /// handling).
+    ///
+    /// Two shapes resolve here:
+    /// - **Multi-qualifier** (`math::arith::add(...)`, three or more segments) is
+    ///   unambiguously a file-qualified path: no method/enum/plain handler can
+    ///   resolve a multi-hop path, so a failure to resolve is reported here.
+    /// - **Single-qualifier** (`util::helper()`, exactly two segments) is the
+    ///   basic file-import call shape, but `A::b` also spells `Enum::Variant` and
+    ///   `Type::assoc_fn()`. It is taken only when the first segment is a bound
+    ///   namespace import in the accessing scope (`use util;`), which a type or
+    ///   enum name never is; otherwise the path falls through so the existing
+    ///   method/enum code keeps its dedicated diagnostics.
     fn try_infer_qualified_function_call(
         &mut self,
         call_expr_id: ExprId,
@@ -2011,20 +2293,29 @@ impl TypeChecker {
         ctx: &mut TypedContext,
     ) -> Option<Option<TypeInfo>> {
         let segments = Self::flatten_type_member_path(ctx.arena(), function_expr_id)?;
-        if segments.len() < 3 {
+        if segments.len() < 2 {
+            return None;
+        }
+
+        let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        // A two-segment path is overloaded with `Enum::Variant` and
+        // `Type::assoc_fn()`; only treat it as a namespace call when the first
+        // segment actually names an imported namespace. Three-or-more-segment
+        // paths are unambiguous and always handled here.
+        if segments.len() == 2 && !self.symbol_table.prefix_is_namespace(&segments, from_scope) {
             return None;
         }
 
         let location = ctx.arena()[call_expr_id].location;
         let path = segments.join("::");
 
-        // A three-or-more-segment call target is unambiguously a file-qualified
-        // function path. If it does not resolve to a callable function — the
-        // name is wrong, or a hop crosses a non-re-exported (private) import —
-        // this is the call's error to report, not a fall-through: the
-        // method/enum/plain-call handlers below can never resolve a multi-hop
-        // path, so silently falling through would accept it.
-        let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        // By here the path is a committed namespace call: either three or more
+        // segments (unambiguously file-qualified), or two segments whose head is
+        // a bound namespace import. If it does not resolve to a callable function
+        // — the name is wrong, or a hop crosses a non-re-exported (private)
+        // import — this is the call's error to report, not a fall-through: no
+        // method/enum/plain-call handler below can resolve a namespace path, so
+        // silently falling through would accept it.
         let signature = match self.symbol_table.resolve_qualified_name(&segments, from_scope) {
             Some((symbol, _)) if symbol.as_function().is_some() => {
                 let sig = symbol.as_function().expect("checked above").clone();
@@ -2097,6 +2388,16 @@ impl TypeChecker {
             },
         );
         ctx.set_node_typeinfo(NodeId::Expr(call_expr_id), signature.return_type.clone());
+        let module_path = self
+            .symbol_table
+            .file_module_path_of_scope(signature.definition_scope_id);
+        ctx.set_call_target(
+            function_expr_id,
+            CallTarget {
+                module_path,
+                name: signature.name.clone(),
+            },
+        );
         Some(Some(signature.return_type))
     }
 
@@ -2156,10 +2457,12 @@ impl TypeChecker {
                 let method_name = ctx.arena()[method_name_id].name.clone();
 
                 // First check if this is an enum variant - can't call variants like functions
+                let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
                 if self.symbol_table.lookup_enum(&type_name).is_some() {
                     // Fall through to standard function handling
                 } else if let Some(method_info) =
-                    self.symbol_table.lookup_method(&type_name, &method_name)
+                    self.symbol_table
+                        .resolve_method_in_scope(&type_name, &method_name, from_scope)
                 {
                     if method_info.is_instance_method() {
                         cov_mark::hit!(type_checker_instance_method_called_as_associated);
@@ -2263,8 +2566,10 @@ impl TypeChecker {
 
                 if let Some(type_name) = type_name {
                     let method_name = ctx.arena()[method_name_id].name.clone();
+                    let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
                     if let Some(method_info) =
-                        self.symbol_table.lookup_method(&type_name, &method_name)
+                        self.symbol_table
+                            .resolve_method_in_scope(&type_name, &method_name, from_scope)
                     {
                         if !method_info.is_instance_method() {
                             cov_mark::hit!(type_checker_associated_function_called_as_method);
@@ -2382,6 +2687,24 @@ impl TypeChecker {
                     name: func_name.clone(),
                 },
             );
+            // A bare call resolves either to a same-file function or to an item
+            // import (`use lib::arith::{add};`); `definition_scope_id` is the
+            // callee's defining file either way, so codegen file-qualifies the
+            // WASM name correctly even when it differs from the calling file.
+            // Externs carry no local body, so leave them to bare-name import
+            // resolution in codegen.
+            if !s.is_extern() {
+                let module_path = self
+                    .symbol_table
+                    .file_module_path_of_scope(s.definition_scope_id);
+                ctx.set_call_target(
+                    function_expr_id,
+                    CallTarget {
+                        module_path,
+                        name: s.name.clone(),
+                    },
+                );
+            }
             s.clone()
         } else {
             self.push_error_dedup(TypeCheckError::UndefinedFunction {

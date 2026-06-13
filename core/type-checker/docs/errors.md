@@ -4,7 +4,7 @@ Complete catalog of type checking errors with examples and solutions.
 
 ## Error Overview
 
-The type checker produces 45 distinct error variants, each with specific context and location
+The type checker produces 46 distinct error variants, each with specific context and location
 information. All errors implement the `Error` trait and provide detailed messages.
 
 Not all variants are covered in detail below. The authoritative list of variants and their
@@ -241,7 +241,19 @@ same nesting level) do not shadow each other and are not affected by this rule.
 
 ### `PrivateAccessViolation`
 
-Attempting to access a private symbol from outside its defining scope.
+Attempting to access a private symbol from outside its defining file. An item is
+accessible iff the access is within its defining file (including that file's spec
+scopes) or the item is `pub` and reached through an import. Fields carry no
+visibility of their own — a field is accessible exactly when its struct is.
+
+The error is dual-location: it names the use site, then a note pointing at the
+definition site and the defining file (`add \`pub\` to export it`).
+
+A private item of the *entry* file is simply not in scope by bare name in an
+imported file (the entry file is the program root; only its `pub` items are
+reachable by bare name across the file boundary). Such an access therefore
+reports an ordinary "not defined" / "undeclared variable" error rather than
+`PrivateAccessViolation` — the item was never brought into scope to begin with.
 
 **`VisibilityContext` variants**:
 
@@ -253,6 +265,7 @@ pub enum VisibilityContext {
     Field { struct_name, field_name },
     Method { type_name, method_name },
     Import { path },
+    Constant { name },
 }
 ```
 
@@ -470,19 +483,44 @@ Import path does not resolve to a valid module or symbol.
 use std::nonexistent::Module;  // Error: cannot resolve import path: std::nonexistent::Module
 ```
 
-### `CircularImport`
+### `QualifiedPathNotAValue`
 
-A glob import creates a circular dependency.
+A `::`-qualified path used in value position resolves *through* a known namespace
+(a source file or an imported namespace) but its final segment is not a value:
+either nothing of that name exists, or it names a non-value item such as a
+function. This replaces the misleading "enum `lib` is not defined" that the
+enum-variant fallback would otherwise emit for the namespace head. A single
+qualifier `Enum::Variant` is unaffected — its prefix is not a namespace, so it is
+left to the variant code.
+
+**Examples**:
+
+```inference
+// final segment does not exist in the namespace
+const X: i32 = lib::vals::NOPE;
+// Error: cannot resolve `lib::vals::NOPE`
+
+// final segment names a function, used in value position
+const Y: i32 = lib::vals::add;
+// Error: cannot resolve `lib::vals::add`: `lib::vals::add` names a function, not a value
+```
+
+**Solution**: Name a `const` (or other value) that exists in the namespace, or
+call the function rather than naming it as a value.
+
+### `CircularDefinition`
+
+A cycle among definition *values*: `const` initializers that reference each other,
+or mutually recursive `type` aliases, across one or more files. File-to-file
+import cycles are allowed; only value cycles, which have no evaluation order, are
+errors. The message names the cycle members in order.
 
 **Example**:
 
 ```rust
-use mod_a::*;  // mod_a itself imports from the current module → Error: circular glob import detected
+const A: i32 = B;  // A depends on B
+const B: i32 = A;  // B depends on A → Error: circular definition detected: A -> B -> A
 ```
-
-### `EmptyGlobImport`
-
-A glob import (`use path::*`) has an empty path segment.
 
 ---
 

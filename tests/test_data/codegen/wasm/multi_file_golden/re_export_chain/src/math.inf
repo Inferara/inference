@@ -1,0 +1,3 @@
+pub use lib::arith;
+
+pub fn foo() {}

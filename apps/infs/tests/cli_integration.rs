@@ -552,20 +552,52 @@ fn project_build_missing_entry_point_errors() {
     );
 }
 
-/// Extra `src/*.inf` files (besides `main.inf`) must be warned about by name,
-/// not silently dropped and not a hard error — the build still succeeds.
+// =============================================================================
+// Project-mode Multi-file Build Tests (#63)
+// =============================================================================
+
+/// The stale `infs`-side warning that predated multi-file support: it claimed
+/// project mode compiled only `src/main.inf`. `infc` now compiles the whole
+/// import-reachable closure, so this text must never appear again. Every
+/// multi-file test asserts its absence.
+const STALE_PENDING_WARNING_FRAGMENT: &str = "multi-file support is pending";
+
+/// Writes an extra source file at `relative` (a slash-separated path under
+/// `src/`, e.g. `"lib/util.inf"`), creating intermediate directories. The path
+/// is split on `/` and rejoined with `Path::join` so the on-disk layout is
+/// platform-correct.
+fn write_src_file(dir: &assert_fs::TempDir, relative: &str, src: &str) {
+    let mut path = dir.child("src").path().to_path_buf();
+    for segment in relative.split('/') {
+        path = path.join(segment);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(&path, src).unwrap();
+}
+
+/// A valid multi-file project (`src/main.inf` importing `src/lib/util.inf`)
+/// builds successfully: exit 0 and a `<root>/out/main.wasm` artifact. The
+/// imported file is part of the build — `infc` follows the import closure — so
+/// no unreachable-file warning and no stale "pending" text appears.
 #[test]
-fn project_build_warns_about_extra_src_files() {
+fn project_build_multi_file_succeeds() {
     let Some(infc_path) = require_infc() else {
         return;
     };
 
     let temp = assert_fs::TempDir::new().unwrap();
-    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
-    temp.child("src")
-        .child("helper.inf")
-        .write_str("pub fn helper() -> i32 { return 1; }\n")
-        .unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::util;\n\npub fn main() -> i32 {\n    return util::add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
     cmd.env("INFC_PATH", &infc_path)
@@ -574,10 +606,131 @@ fn project_build_warns_about_extra_src_files() {
 
     cmd.assert()
         .success()
-        .stderr(predicate::str::contains("helper.inf"));
+        .stderr(predicate::str::contains(STALE_PENDING_WARNING_FRAGMENT).not())
+        .stderr(predicate::str::contains("not imported by any reachable file").not());
+
+    let wasm = temp.child("out").child("main.wasm");
+    assert!(
+        wasm.path().exists(),
+        "multi-file build must produce {:?}",
+        wasm.path()
+    );
+}
+
+/// A genuinely-unreachable extra `src/**/*.inf` file surfaces the compiler's
+/// unreachable-file warning (passed through `infc`'s inherited stderr), names
+/// the file, and still builds successfully — and the stale "pending" text is
+/// absent. This is the contradiction the old `infs`-side warning created: the
+/// build now lies neither about what is compiled nor double-warns.
+#[test]
+fn project_build_unreachable_file_warns_without_stale_text() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(&temp, "demo", PROJECT_MAIN_SRC);
+    // Not imported by main.inf -> genuinely unreachable.
+    write_src_file(
+        &temp,
+        "lib/orphan.inf",
+        "pub fn orphan() -> i32 {\n    return 9;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("orphan.inf"))
+        .stderr(predicate::str::contains("not imported by any reachable file"))
+        .stderr(predicate::str::contains(STALE_PENDING_WARNING_FRAGMENT).not());
 
     let wasm = temp.child("out").child("main.wasm");
     assert!(wasm.path().exists(), "build should still succeed");
+}
+
+/// A `use` of a file that does not exist fails with a non-zero exit and the
+/// compiler's missing-import-file error, which names the expected path and (for
+/// a near-miss sibling) offers a "did you mean" suggestion. The suggestion is
+/// produced by `infc` and reaches the user through inherited stderr.
+#[test]
+fn project_build_missing_import_errors_with_suggestion() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    // `utill` is a one-character typo of the sibling `util`.
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::utill;\n\npub fn main() -> i32 {\n    return 0;\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build");
+
+    cmd.assert().failure().stderr(
+        predicate::str::contains("imported file not found")
+            .and(predicate::str::contains("did you mean `util`")),
+    );
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a missing import must abort before any WASM is written"
+    );
+}
+
+/// `infs build -v` on a valid multi-file project produces both the `.wasm` and
+/// the `.v` proof output — confirming the proof flow is wired through `infs` for
+/// multi-file projects, not just single files.
+#[test]
+fn project_build_multi_file_v_flag_produces_proof_output() {
+    let Some(infc_path) = require_infc() else {
+        return;
+    };
+
+    let temp = assert_fs::TempDir::new().unwrap();
+    scaffold_project(
+        &temp,
+        "demo",
+        "use lib::util;\n\npub fn main() -> i32 {\n    return util::add(1, 2);\n}\n",
+    );
+    write_src_file(
+        &temp,
+        "lib/util.inf",
+        "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infs"));
+    cmd.env("INFC_PATH", &infc_path)
+        .current_dir(temp.path())
+        .arg("build")
+        .arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "multi-file `-v` build must produce out/main.wasm"
+    );
+    assert!(
+        temp.child("out").child("main.v").path().exists(),
+        "multi-file `-v` build must produce out/main.v"
+    );
 }
 
 /// Single-file `infs build file.inf` must behave exactly as before the

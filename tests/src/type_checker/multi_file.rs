@@ -3,8 +3,8 @@
 //! Each test assembles an arena from `(module_path, source)` pairs with
 //! [`crate::utils::try_type_check_multi_file`] (entry first, then imported files
 //! in canonical order) and checks resolution across file scopes, imports, and
-//! re-exports. The comprehensive matrix is the test-writer's; these pin the
-//! load-bearing behaviors of Phase 3a.
+//! re-exports. The comprehensive matrix lives in `multi_file_matrix.rs`; these
+//! pin the load-bearing behaviors.
 #[cfg(test)]
 mod tests {
     use crate::utils::try_type_check_multi_file;

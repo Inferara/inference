@@ -20,19 +20,22 @@ Typed AST (TypedContext)
 
 ### Compilation Phases
 
-1. **AST Traversal** - Walk typed AST and visit function definitions
+1. **AST Traversal** - Walk the typed AST across all source files in canonical order (entry
+   file first, then imported files sorted lexicographically by module path). Each file's
+   definitions are visited in order; non-entry files contribute internal functions whose
+   names are file-qualified (see phase 2).
 2. **Import reservation + function index pre-scan** - Build the complete WASM function
-   index space before any body is compiled, in three ordered sub-steps:
+   index space before any body is compiled, in two stages that each run across all files:
    (a) `register_imports` assigns indices `0..N` to every `external fn` declaration bound
    via `use … from <module>`, populating `extern_name_to_idx` and recording the
    `(logical_module, export_field, type_idx)` tuple needed for the import section;
-   (b) `build_func_name_to_idx` assigns indices `N..N+K` to top-level local functions
-   (shifted past the imports by `set_local_func_base(N)`);
-   (c) `build_method_name_to_idx` assigns indices beyond that for struct methods under
-   mangled names (`"{StructName}.{method_name}"`). This three-stage registration ensures
-   all callee indices — imports, locals, and methods — are known before the first `call`
-   instruction is emitted. Extern calls lower to `call <import_idx>` identically to local
-   calls.
+   (b) a two-pass local scan first registers all top-level functions from every source file
+   under their mangled `FnKey` names, then registers all struct methods under their mangled
+   names (`"{StructName}.{method_name}"`). Functions from the entry file use unqualified
+   names (`add`, `main`); functions from non-entry files use file-qualified flat names
+   joining module path segments and the item name with `.` (`lib.arith.add`,
+   `lib.arith.Point.new`). This ensures all callee indices — imports, locals, and methods
+   across every file — are known before the first `call` instruction is emitted.
    See [docs/function-calls-lowering.md](docs/function-calls-lowering.md).
 3. **Compound Frame Layout** - For functions with array- or struct-typed variables or parameters,
    compute a stack frame layout by walking the entire function body and collecting array and struct
@@ -218,12 +221,16 @@ Execution: `wasmtime module.wasm`
 
 ### Reactor Model (Inference)
 
-Inference produces reactor-style modules where all `pub` functions are exported and callable individually:
+Inference produces reactor-style modules where the entry file's `pub` functions are exported and callable individually:
 
 ```text
+// In src/main.inf (entry file)
 pub fn main() → exported as "main"
 pub fn foo()  → exported as "foo"
 fn bar()      → not exported (private)
+
+// In src/lib/arith.inf (non-entry file)
+pub fn add()  → NOT exported (pub is intra-project visibility only)
 ```
 
 Execution: `wasmtime --invoke main module.wasm`
@@ -257,8 +264,7 @@ The `codegen` function:
 
 ## Current Limitations
 
-- **Multi-file support** - Only single-file compilation is fully implemented
-- **Top-level constructs** - Only function definitions are compiled; type definitions, constants at module level, and other top-level items are not yet supported
+- **Top-level constructs** - Only function definitions are compiled. Top-level `const` declarations do not reach codegen (analysis rule A032 / issue #171); cross-file `const` type-checking works and will be extended when #171 lands
 - **Control flow** - `loop` and `break` statements are now supported (conditional loops, infinite loops, nested loops, and break from any nesting depth). Assignment statements (`x = value;`) are supported for identifier targets, array index targets, and struct field targets (`p.x = v`).
 - **Expression types** - Fixed-size arrays with scalar and enum element types are supported, including array-returning functions via the sret calling convention. Enum types are fully supported: variant access (`Color::Red`), enum-typed locals and parameters, enum return values, enum fields inside structs, enums in arrays, equality/inequality comparisons (`==`, `!=`), reassignment, and uzumaki initialization. Arithmetic operations and ordering comparisons on enum values are rejected by the type checker. Structs with scalar, enum, and compound fields are supported: struct literals with nested struct and array fields, member access read/write for both scalar and compound fields, struct parameters (copy-on-entry), struct-returning functions via sret, associated function calls (`Type::func()`), and instance method calls (`obj.method()`). Arrays of structs are supported: element reads, element field reads/writes, copy semantics, and struct-array parameters via sret. Nested structs (one level deep) and structs with array fields (one level deep) are supported; nesting beyond one level is rejected by analysis rule A026. Multidimensional arrays (`[[i32; 3]; 2]`) are supported for uzumaki initialization within non-deterministic blocks. Partial initialization syntax and mutable array parameters are not yet implemented. Higher-order function calls (function pointers) are not yet implemented.
 - **Type system** - Generic types and function types are not yet fully implemented
@@ -295,7 +301,7 @@ Detailed design documents live in `docs/`:
 
 ## Module Organization
 
-- `lib.rs` - Public API, AST traversal (`traverse_t_ast_with_compiler`), two-stage index pre-scan (top-level functions then struct methods)
+- `lib.rs` - Public API, multi-file AST traversal in canonical arena order, two-stage index pre-scan across all files (imports → top-level functions → methods), root-only export policy (`should_export`), file-qualified spec name emission (`qualified_spec_name` with `_` join for non-entry specs), `SpecNameCollision` backstop
 - `compiler.rs` - WASM instruction emission, module assembly, and array frame layout computation
 - `memory.rs` - Shadow stack infrastructure: `FrameLayout`, `ArraySlot`, `StructSlot`, `StructFieldSlot`, `CompoundFieldLayout`, `compute_struct_field_layout`, `type_byte_size`, `natural_alignment_for_type`, `emit_ptr_offset_addr`, prologue/epilogue emission, load/store instruction selection, `emit_struct_param_copy`
 - `errors.rs` - `CodegenError` enum for function call lowering failures
@@ -451,6 +457,31 @@ Test data includes:
   array; validated and executed via wasmtime
 - `enum_in_struct.inf` - Enum-typed struct field: struct literal with an enum field,
   reading the field and comparing it to a variant; validated and executed via wasmtime
+- Multi-file golden fixtures in `tests/test_data/codegen/wasm/multi_file_golden/`
+  (tests in `tests/src/codegen/wasm/multi_file_golden.rs` and `multi_file.rs`):
+  - `two_file` - Entry calls a function in one imported file; verifies file-qualified
+    internal name and unqualified export
+  - `re_export_chain` - Three-file chain (`main → math → lib/arith`); `math` re-exports
+    `arith` via `pub use`; `main` reaches `math::arith::add`
+  - `item_import` - Braced item import (`use lib::arith::{add};`); item used bare at call
+    site without namespace prefix
+  - `root_only_export` - Non-entry `pub fn` is NOT a WASM export; only entry `pub fn`s
+    are exported; verified by WAT inspection
+  - `method_mangling` - Cross-file method call; method name mangled as `lib.arith.Point.new`;
+    entry-file method stays unqualified
+  - `dup_struct` - Two files each defining a private `struct Buffer` with different field
+    layouts; codegen resolves to the correct per-file layout at every access site
+  - `cross_file_struct` - Struct defined in a non-entry file, constructed and passed across
+    a file boundary; verifies canonical type key resolution in codegen
+  - `cross_file_method` - Methods on a struct defined in a non-entry file; verifies that
+    `FnKey::Method` qualifies by the struct's defining file
+  - `single_via_project` - Single-file program compiled through `parse_project`; verifies
+    byte-identical output to the direct `parse` path (golden-file regression)
+  - `proof_specs` - Non-entry file `lib/checks.inf` carries a spec; proof-mode `.v` output
+    contains `main__lib_checks_LibSpec` (underscore-joined, not dot-joined); entry spec
+    stays bare (`main__EntrySpec`)
+  - 6 execution smoke tests in `multi_file.rs` driven through `parse_project` directly,
+    including cross-file call correctness verified via Wasmtime
 - Extern import test fixtures in `tests/test_data/codegen/wasm/extern_import/`
   (tests in `tests/src/codegen/wasm/extern_import.rs`):
   - `single_import.inf` - One `external fn` bound to a module via `use … from`; verifies

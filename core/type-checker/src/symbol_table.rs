@@ -292,15 +292,49 @@ pub(crate) struct ResolvedImport {
     pub(crate) reexported: bool,
 }
 
+/// Information about a type alias (`type X = Y;`) or a builtin type binding.
+///
+/// Aliases carry real visibility (#63): a `pub type` is item-importable and
+/// reachable across files, while a private one is rejected at the file boundary
+/// exactly like a private fn/struct/enum. Builtin bindings (i32, bool, …) are
+/// always public.
+#[derive(Debug, Clone)]
+pub(crate) struct TypeAliasInfo {
+    pub(crate) type_info: TypeInfo,
+    pub(crate) visibility: Visibility,
+    /// Source location of the declaration, for the definition note on a
+    /// cross-file private-access / private-import diagnostic. `Default` for
+    /// builtin bindings, which have no source.
+    pub(crate) definition_location: Location,
+}
+
+/// Information about a top-level `const` definition.
+///
+/// A top-level const registers both as a scope variable (so an intra-file use
+/// site resolves it by value) and as this symbol (so it is item-importable and
+/// reachable by a qualified `a::b::C` path, with visibility enforced at the file
+/// boundary, #63).
+#[derive(Debug, Clone)]
+pub(crate) struct ConstInfo {
+    pub(crate) type_info: TypeInfo,
+    pub(crate) visibility: Visibility,
+    /// Source location of the declaration, for the definition note on a
+    /// cross-file private-access / private-import diagnostic.
+    pub(crate) definition_location: Location,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Symbol {
     /// A type alias mapping a name to another type (`type X = Y;`).
     /// Also used for builtin type bindings (i32, bool, etc.).
-    TypeAlias(TypeInfo),
+    TypeAlias(TypeAliasInfo),
     Struct(StructInfo),
     Enum(EnumInfo),
     Spec(String),
     Function(FuncInfo),
+    /// A top-level `const` definition, carrying its value type and visibility so
+    /// it can be item-imported and reached by a qualified path across files.
+    Constant(ConstInfo),
 }
 
 impl Symbol {
@@ -308,11 +342,12 @@ impl Symbol {
     #[must_use = "discarding the name has no effect"]
     pub(crate) fn name(&self) -> String {
         match self {
-            Symbol::TypeAlias(ti) => ti.to_string(),
+            Symbol::TypeAlias(info) => info.type_info.to_string(),
             Symbol::Struct(info) => info.name.clone(),
             Symbol::Enum(info) => info.name.clone(),
             Symbol::Spec(name) => name.clone(),
             Symbol::Function(sig) => sig.name.clone(),
+            Symbol::Constant(info) => info.type_info.to_string(),
         }
     }
 
@@ -346,7 +381,7 @@ impl Symbol {
     #[must_use = "this is a pure conversion with no side effects"]
     pub(crate) fn as_type_info(&self) -> Option<TypeInfo> {
         match self {
-            Symbol::TypeAlias(ti) => Some(ti.clone()),
+            Symbol::TypeAlias(info) => Some(info.type_info.clone()),
             Symbol::Struct(info) => Some(TypeInfo {
                 kind: crate::type_info::TypeInfoKind::Struct(info.name.clone()),
                 type_params: info.type_params.clone(),
@@ -359,35 +394,50 @@ impl Symbol {
                 kind: crate::type_info::TypeInfoKind::Spec(name.clone()),
                 type_params: vec![],
             }),
-            Symbol::Function(_) => None,
+            Symbol::Function(_) | Symbol::Constant(_) => None,
+        }
+    }
+
+    /// The value type of a top-level `const`, or `None` for any other symbol.
+    /// Lets a bare or qualified reference to an imported const resolve its type.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn as_constant_type(&self) -> Option<TypeInfo> {
+        if let Symbol::Constant(info) = self {
+            Some(info.type_info.clone())
+        } else {
+            None
         }
     }
 
     /// Source location of this symbol's declaration, used to point a cross-file
-    /// private-access diagnostic at the definition. Type aliases and specs carry
-    /// no location and report a zero span.
+    /// private-access diagnostic at the definition. Specs carry no location and
+    /// report a zero span.
     #[must_use = "the location is the return value"]
     pub(crate) fn definition_location(&self) -> Location {
         match self {
             Symbol::Struct(info) => info.definition_location,
             Symbol::Enum(info) => info.definition_location,
             Symbol::Function(sig) => sig.definition_location,
-            Symbol::TypeAlias(_) | Symbol::Spec(_) => Location::default(),
+            Symbol::TypeAlias(info) => info.definition_location,
+            Symbol::Constant(info) => info.definition_location,
+            Symbol::Spec(_) => Location::default(),
         }
     }
 
     /// Check if this symbol has public visibility.
     ///
-    /// Structs, Enums, and Functions respect their visibility field.
-    /// Type aliases and Specs are currently treated as public.
+    /// Structs, enums, functions, type aliases, and consts respect their
+    /// visibility field. Specs take no visibility modifier and are treated as
+    /// public (cross-file spec access is governed by import + `pub` elsewhere).
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn is_public(&self) -> bool {
         match self {
-            Symbol::TypeAlias(_) => true,
+            Symbol::TypeAlias(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Struct(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Enum(info) => matches!(info.visibility, Visibility::Public),
             Symbol::Spec(_) => true,
             Symbol::Function(sig) => matches!(sig.visibility, Visibility::Public),
+            Symbol::Constant(info) => matches!(info.visibility, Visibility::Public),
         }
     }
 }
@@ -483,6 +533,15 @@ impl Scope {
     #[must_use = "this is a pure lookup with no side effects"]
     fn lookup_variable_local(&self, name: &str) -> Option<(u32, TypeInfo, bool)> {
         self.variables.get(name).cloned()
+    }
+
+    /// The type of a variable declared *directly* in this scope, ignoring
+    /// parents. Lets a boundary-aware walk decide per-scope whether to read a
+    /// variable (the entry file's root-scope consts are filtered from non-entry
+    /// files).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_variable_local_type(&self, name: &str) -> Option<TypeInfo> {
+        self.variables.get(name).map(|(_, ty, _)| ty.clone())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -605,7 +664,14 @@ impl SymbolTable {
                     kind: TypeInfoKind::Number(*number_type),
                     type_params: vec![],
                 };
-                let _ = scope_mut.insert_symbol(number_type.as_str(), Symbol::TypeAlias(type_info));
+                let _ = scope_mut.insert_symbol(
+                    number_type.as_str(),
+                    Symbol::TypeAlias(TypeAliasInfo {
+                        type_info,
+                        visibility: Visibility::Public,
+                        definition_location: Location::default(),
+                    }),
+                );
             }
 
             for (name, kind) in TypeInfoKind::NON_NUMERIC_BUILTINS {
@@ -613,7 +679,14 @@ impl SymbolTable {
                     kind: kind.clone(),
                     type_params: vec![],
                 };
-                let _ = scope_mut.insert_symbol(name, Symbol::TypeAlias(type_info));
+                let _ = scope_mut.insert_symbol(
+                    name,
+                    Symbol::TypeAlias(TypeAliasInfo {
+                        type_info,
+                        visibility: Visibility::Public,
+                        definition_location: Location::default(),
+                    }),
+                );
             }
         }
     }
@@ -674,17 +747,73 @@ impl SymbolTable {
         }
     }
 
+    /// Registers a type alias with default (private) visibility and no source
+    /// location. A thin wrapper over [`Self::register_type_with_visibility`] for
+    /// local (statement-level) `type` defs and test setup, where cross-file
+    /// visibility is irrelevant.
     pub(crate) fn register_type(&mut self, name: &str, ty: Option<TypeInfo>) -> anyhow::Result<()> {
+        self.register_type_with_visibility(name, ty, Visibility::Private, Location::default())
+    }
+
+    /// Registers a type alias carrying its visibility and declaration location, so
+    /// a `pub type` is item-importable and reachable across files while a private
+    /// one is rejected at the file boundary (#63).
+    pub(crate) fn register_type_with_visibility(
+        &mut self,
+        name: &str,
+        ty: Option<TypeInfo>,
+        visibility: Visibility,
+        location: Location,
+    ) -> anyhow::Result<()> {
         if let Some(scope) = &self.current_scope {
             let type_info = ty.unwrap_or_else(|| TypeInfo {
                 kind: crate::type_info::TypeInfoKind::Custom(name.to_string()),
                 type_params: vec![],
             });
-            scope
-                .borrow_mut()
-                .insert_symbol(name, Symbol::TypeAlias(type_info))
+            scope.borrow_mut().insert_symbol(
+                name,
+                Symbol::TypeAlias(TypeAliasInfo {
+                    type_info,
+                    visibility,
+                    definition_location: location,
+                }),
+            )
         } else {
             bail!("No active scope to register type")
+        }
+    }
+
+    /// Registers a top-level `const` as a symbol carrying its value type and
+    /// visibility, so it is item-importable and reachable by a qualified path
+    /// across files (#63). The intra-file use-site resolution still goes through
+    /// the scope variable registered alongside it.
+    ///
+    /// Registration is a no-op when the name is already taken by another symbol in
+    /// the scope (e.g. a same-named function): the const stays resolvable
+    /// intra-file through its scope variable, and a doubly-defined name could not
+    /// be unambiguously imported anyway. This keeps the const-symbol pass from
+    /// turning a pre-existing latent name clash into a hard error.
+    pub(crate) fn register_constant(
+        &mut self,
+        name: &str,
+        type_info: TypeInfo,
+        visibility: Visibility,
+        location: Location,
+    ) -> anyhow::Result<()> {
+        if let Some(scope) = &self.current_scope {
+            if scope.borrow().lookup_symbol_local(name).is_some() {
+                return Ok(());
+            }
+            scope.borrow_mut().insert_symbol(
+                name,
+                Symbol::Constant(ConstInfo {
+                    type_info,
+                    visibility,
+                    definition_location: location,
+                }),
+            )
+        } else {
+            bail!("No active scope to register constant")
         }
     }
 
@@ -845,6 +974,11 @@ impl SymbolTable {
         )
     }
 
+    // The signature fields (name, type params, param/return types, visibility,
+    // source location, local-vs-extern kind) are each independent inputs to a
+    // single private constructor; grouping them into a parameter struct would add
+    // a one-use type without clarifying anything.
+    #[allow(clippy::too_many_arguments)]
     fn insert_func_symbol(
         &mut self,
         name: &str,
@@ -894,11 +1028,57 @@ impl SymbolTable {
         }
     }
 
+    /// Resolves a bare symbol name from the current scope, walking the parent
+    /// chain but honoring the file boundary at root: a non-entry file does **not**
+    /// see the entry file's *private* symbols by bare name.
+    ///
+    /// The entry file maps to the root scope, so a non-entry file's chain crosses
+    /// into root when it walks past its own file namespace. Root holds the entry
+    /// file's definitions *and* the program's builtins; the builtins are `Public`
+    /// and stay reachable, while the entry's private items are filtered. This is
+    /// what stops a private `struct Secret` in `main.inf` from being constructed
+    /// by bare name in an imported file — the soundness gate for cross-file
+    /// privacy. The entry file's own lookups start at root and never cross the
+    /// boundary, so they see their own privates unchanged.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn lookup_symbol_file_scoped(&self, name: &str) -> Option<Symbol> {
+        let start = self.current_scope.clone()?;
+        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
+        let mut scope = Some(start);
+        let mut crossed_file_boundary = false;
+        while let Some(s) = scope {
+            let is_root = Some(s.borrow().id) == root_id;
+            if let Some(symbol) = s.borrow().lookup_symbol_local(name) {
+                // A private symbol in the entry file (root) is invisible to a
+                // lookup that originated inside a non-entry file.
+                if is_root && crossed_file_boundary && !symbol.is_public() {
+                    return None;
+                }
+                return Some(symbol.clone());
+            }
+            // Leaving a non-entry file namespace means the next hop into root is a
+            // cross-file access; record it before advancing.
+            if self.is_non_entry_file_scope(s.borrow().id) {
+                crossed_file_boundary = true;
+            }
+            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        None
+    }
+
+    /// Whether `scope_id` is a non-entry file namespace — a scope registered in
+    /// `mod_scopes` under a non-empty `::`-joined path. The entry file is the root
+    /// (empty key) and is excluded.
+    #[must_use = "this is a pure check with no side effects"]
+    fn is_non_entry_file_scope(&self, scope_id: u32) -> bool {
+        self.mod_scopes
+            .iter()
+            .any(|(key, scope)| !key.is_empty() && scope.borrow().id == scope_id)
+    }
+
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_type(&self, name: &str) -> Option<TypeInfo> {
-        if let Some(scope) = &self.current_scope
-            && let Some(symbol) = scope.borrow().lookup_symbol(name)
-        {
+        if let Some(symbol) = self.lookup_symbol_file_scoped(name) {
             return symbol.as_type_info();
         }
         // A bare type reference may name a struct/enum brought in by
@@ -910,9 +1090,47 @@ impl SymbolTable {
 
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_variable(&self, name: &str) -> Option<TypeInfo> {
-        self.current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_variable(name))
+        // The only variables ever held in the root scope are the entry file's
+        // top-level `const`s (registered as scope variables for intra-file use).
+        // A non-entry file must not reach them by bare name — cross-file const
+        // access goes through `lookup_constant`, which gates on `pub`. So a
+        // lookup that originated inside a non-entry file stops before reading a
+        // root-scope variable.
+        let start = self.current_scope.as_ref()?;
+        let root_id = self.root_scope.as_ref().map(|r| r.borrow().id);
+        let mut scope = Some(Arc::clone(start));
+        let mut crossed_file_boundary = false;
+        while let Some(s) = scope {
+            let is_root = Some(s.borrow().id) == root_id;
+            if !(is_root && crossed_file_boundary)
+                && let Some(ty) = s.borrow().lookup_variable_local_type(name)
+            {
+                return Some(ty);
+            }
+            if self.is_non_entry_file_scope(s.borrow().id) {
+                crossed_file_boundary = true;
+            }
+            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        None
+    }
+
+    /// Resolves the value type of a top-level `const` named `name`, including one
+    /// brought in bare by `use a::b::{C};`.
+    ///
+    /// An intra-file const resolves through the scope variable registered
+    /// alongside its symbol; this covers the imported case, where only the symbol
+    /// (not a variable) crosses the file boundary.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn lookup_constant(&self, name: &str) -> Option<TypeInfo> {
+        let from_symbol = self
+            .lookup_symbol_file_scoped(name)
+            .and_then(|symbol| symbol.as_constant_type());
+        if from_symbol.is_some() {
+            return from_symbol;
+        }
+        self.lookup_imported_item_symbol(name)
+            .and_then(|symbol| symbol.as_constant_type())
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -938,9 +1156,7 @@ impl SymbolTable {
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_function(&self, name: &str) -> Option<FuncInfo> {
         let from_symbol = self
-            .current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .lookup_symbol_file_scoped(name)
             .and_then(|symbol| symbol.as_function().cloned());
         if from_symbol.is_some() {
             return from_symbol;
@@ -982,9 +1198,7 @@ impl SymbolTable {
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_struct(&self, name: &str) -> Option<StructInfo> {
         let from_symbol = self
-            .current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .lookup_symbol_file_scoped(name)
             .and_then(|symbol| symbol.as_struct().cloned());
         if from_symbol.is_some() {
             return from_symbol;
@@ -997,9 +1211,7 @@ impl SymbolTable {
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn lookup_enum(&self, name: &str) -> Option<EnumInfo> {
         let from_symbol = self
-            .current_scope
-            .as_ref()
-            .and_then(|scope| scope.borrow().lookup_symbol(name))
+            .lookup_symbol_file_scoped(name)
             .and_then(|symbol| symbol.as_enum().cloned());
         if from_symbol.is_some() {
             return from_symbol;
@@ -1074,6 +1286,25 @@ impl SymbolTable {
             current = scope.borrow().parent.as_ref().and_then(|p| p.upgrade());
         }
         String::new()
+    }
+
+    /// Returns the source-root-relative module path segments of the nearest
+    /// enclosing **file** scope of `scope_id`. The entry file yields an empty
+    /// vector; an imported file `lib/arith.inf` yields `["lib", "arith"]`.
+    ///
+    /// Code generation calls this to file-qualify a resolved symbol: given the
+    /// `definition_scope_id` of a function or struct, it recovers the defining
+    /// file's module path so the function's flat WASM name and the struct's
+    /// layout key can be qualified by their defining file rather than the
+    /// referencing one.
+    #[must_use = "the module path is the return value"]
+    pub(crate) fn file_module_path_of_scope(&self, scope_id: u32) -> Vec<String> {
+        let path = self.enclosing_file_path(scope_id);
+        if path.is_empty() {
+            Vec::new()
+        } else {
+            path.split("::").map(ToString::to_string).collect()
+        }
     }
 
     /// Enumerates every registered struct paired with its canonical key, in
@@ -1168,6 +1399,42 @@ impl SymbolTable {
             return Some((info, key));
         }
         None
+    }
+
+    /// Resolves a method `method_name` on the type `type_name` as referenced from
+    /// `from_scope_id`, honoring file boundaries.
+    ///
+    /// Methods register in the struct's *defining* scope, not the accessing scope,
+    /// so a parent-chain walk from the call site (the cursor-based
+    /// [`Self::lookup_method`]) never reaches a cross-file struct's methods. This
+    /// instead resolves the struct's defining scope first — via the same
+    /// file-scoped resolution a type reference uses — then looks the method up in
+    /// that scope's method table. Visibility of the method is enforced by the
+    /// caller against the returned [`MethodInfo::scope_id`].
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub(crate) fn resolve_method_in_scope(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        from_scope_id: u32,
+    ) -> Option<MethodInfo> {
+        // A bare or imported type name resolves to the struct's defining scope;
+        // the method lives in that scope's method table. Falling back to the
+        // cursor-based lookup keeps single-file resolution working when no file
+        // scope is found (e.g. spec-inner method calls).
+        if let Some((info, _)) = self.resolve_struct_in_scope(type_name, from_scope_id)
+            && let Some(scope) = self.get_scope(info.definition_scope_id)
+            && let Some(method) = scope
+                .borrow()
+                .methods
+                .get(type_name)
+                .and_then(|methods| methods.iter().find(|m| m.signature.name == method_name))
+        {
+            return Some(method.clone());
+        }
+        self.get_scope(from_scope_id)?
+            .borrow()
+            .lookup_method(type_name, method_name)
     }
 
     /// Looks up a resolved item import named `name`, walking the parent chain of
@@ -1313,6 +1580,73 @@ impl SymbolTable {
         self.current_scope
             .as_ref()
             .and_then(|scope| scope.borrow().lookup_method(type_name, method_name))
+    }
+
+    /// Re-resolves every registered function and method signature against its own
+    /// scope, after imports are bound.
+    ///
+    /// Signatures are first resolved at registration time, before imports are
+    /// bound, so an item-imported type (`use a::b::{Point};`) used in a param or
+    /// return position stays a bare `Custom("Point")` — while a call site that
+    /// constructs a `Point { .. }` infers `Struct("Point")`. The two would then
+    /// fail to unify (`expected Point, found Point`). Running once more here, with
+    /// each function's own scope active so its imports are visible, rewrites those
+    /// `Custom` names to `Struct`/`Enum`, matching what use sites infer.
+    pub(crate) fn renormalize_signatures(&mut self) {
+        let previous = self.current_scope.clone();
+        let scope_ids: Vec<u32> = self.scopes.keys().copied().collect();
+        for id in scope_ids {
+            let Some(scope) = self.scopes.get(&id).cloned() else {
+                continue;
+            };
+            self.current_scope = Some(Arc::clone(&scope));
+
+            let func_names: Vec<String> = scope
+                .borrow()
+                .symbols
+                .iter()
+                .filter(|(_, sym)| sym.as_function().is_some())
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in func_names {
+                let sig = scope
+                    .borrow()
+                    .lookup_symbol_local(&name)
+                    .and_then(|s| s.as_function().cloned());
+                if let Some(mut sig) = sig {
+                    sig.param_types = sig
+                        .param_types
+                        .into_iter()
+                        .map(|ti| self.resolve_custom_type(ti))
+                        .collect();
+                    sig.return_type = self.resolve_custom_type(sig.return_type);
+                    scope
+                        .borrow_mut()
+                        .symbols
+                        .insert(name, Symbol::Function(sig));
+                }
+            }
+
+            let method_keys: Vec<String> = scope.borrow().methods.keys().cloned().collect();
+            for type_name in method_keys {
+                let mut methods = scope
+                    .borrow()
+                    .methods
+                    .get(&type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                for method in &mut methods {
+                    method.signature.param_types = std::mem::take(&mut method.signature.param_types)
+                        .into_iter()
+                        .map(|ti| self.resolve_custom_type(ti))
+                        .collect();
+                    method.signature.return_type =
+                        self.resolve_custom_type(std::mem::take(&mut method.signature.return_type));
+                }
+                scope.borrow_mut().methods.insert(type_name, methods);
+            }
+        }
+        self.current_scope = previous;
     }
 
     /// Enters the scope for spec `name`, creating it on first entry and
@@ -1530,24 +1864,31 @@ impl SymbolTable {
         if first_segment == "self" {
             return Some((self.get_scope(from_scope_id)?, &path[1..]));
         }
-        if let Some(from) = self.get_scope(from_scope_id) {
-            let redirect = {
-                let from = from.borrow();
-                match from.resolved_imports.get(first_segment) {
-                    Some(resolved) => match &resolved.target {
-                        ResolvedImportTarget::Namespace { scope_id } => Some(*scope_id),
-                        ResolvedImportTarget::Item { .. } => None,
-                    },
-                    None => None,
-                }
-            };
-            if let Some(scope_id) = redirect
-                && let Some(target) = self.get_scope(scope_id)
-            {
-                return Some((target, &path[1..]));
-            }
+        if let Some(scope_id) = self.namespace_binding_scope(first_segment, from_scope_id)
+            && let Some(target) = self.get_scope(scope_id)
+        {
+            return Some((target, &path[1..]));
         }
         Some((self.root_scope.clone()?, path))
+    }
+
+    /// Finds the scope a `use a::b;` namespace import named `name` redirects to,
+    /// walking `from_scope_id`'s parent chain. The binding lives in the file
+    /// scope, but a reference (`b::fn()`) is written inside a function body scope,
+    /// so the lookup must climb to the file scope to find it — mirroring
+    /// [`Self::lookup_imported_item_symbol`] for bare item imports.
+    #[must_use = "this is a pure lookup with no side effects"]
+    fn namespace_binding_scope(&self, name: &str, from_scope_id: u32) -> Option<u32> {
+        let mut scope = self.get_scope(from_scope_id);
+        while let Some(s) = scope {
+            if let Some(resolved) = s.borrow().resolved_imports.get(name)
+                && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
+            {
+                return Some(*scope_id);
+            }
+            scope = s.borrow().parent.as_ref().and_then(|p| p.upgrade());
+        }
+        None
     }
 
     /// Advances one intermediate hop of a qualified-name walk: the next scope is
@@ -1572,6 +1913,33 @@ impl SymbolTable {
             return self.get_scope(*scope_id);
         }
         None
+    }
+
+    /// Whether `path` (excluding its final segment) walks a chain of namespaces
+    /// from `from_scope_id`. `["lib", "vals", "X"]` returns `true` when `lib::vals`
+    /// is a reachable namespace, regardless of whether `X` exists in it.
+    ///
+    /// This lets a diagnostic distinguish a genuine namespace path with a bad
+    /// final segment (`cannot resolve lib::vals::X`) from an `Enum::Variant`
+    /// access, whose single qualifier never names a namespace.
+    #[must_use = "this is a pure check with no side effects"]
+    pub(crate) fn prefix_is_namespace(&self, path: &[String], from_scope_id: u32) -> bool {
+        if path.len() < 2 {
+            return false;
+        }
+        let prefix = &path[..path.len() - 1];
+        let Some((mut current_scope, remaining)) =
+            self.start_qualified_walk(prefix, from_scope_id)
+        else {
+            return false;
+        };
+        for segment in remaining {
+            match self.next_namespace_scope(&current_scope, segment) {
+                Some(next) => current_scope = next,
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Load an external module's symbols into the symbol table.
@@ -1749,13 +2117,22 @@ mod tests {
     mod symbol_type_alias {
         use super::*;
 
+        /// Builds a public type-alias symbol wrapping `type_info`.
+        fn public_alias(type_info: TypeInfo) -> Symbol {
+            Symbol::TypeAlias(TypeAliasInfo {
+                type_info,
+                visibility: Visibility::Public,
+                definition_location: Location::default(),
+            })
+        }
+
         #[test]
         fn name_returns_type_info_string_representation() {
             let type_info = TypeInfo {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
+            let symbol = public_alias(type_info);
             let name = symbol.name();
             assert_eq!(name, "i32");
         }
@@ -1766,7 +2143,7 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberType::U64),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info.clone());
+            let symbol = public_alias(type_info);
             let result = symbol.as_type_info();
             assert!(result.is_some());
             let result_type = result.unwrap();
@@ -1782,7 +2159,7 @@ mod tests {
                 kind: TypeInfoKind::Custom("MyType".to_string()),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
+            let symbol = public_alias(type_info);
             let result = symbol.as_type_info();
             assert!(result.is_some());
             let result_type = result.unwrap();
@@ -1790,13 +2167,18 @@ mod tests {
         }
 
         #[test]
-        fn is_public_always_returns_true() {
+        fn is_public_follows_alias_visibility() {
             let type_info = TypeInfo {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
-            assert!(symbol.is_public());
+            assert!(public_alias(type_info.clone()).is_public());
+            let private = Symbol::TypeAlias(TypeAliasInfo {
+                type_info,
+                visibility: Visibility::Private,
+                definition_location: Location::default(),
+            });
+            assert!(!private.is_public());
         }
 
         #[test]
@@ -1853,7 +2235,7 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
+            let symbol = public_alias(type_info);
             assert!(symbol.as_function().is_none());
         }
 
@@ -1863,7 +2245,7 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
+            let symbol = public_alias(type_info);
             assert!(symbol.as_struct().is_none());
         }
 
@@ -1873,7 +2255,7 @@ mod tests {
                 kind: TypeInfoKind::Number(NumberType::I32),
                 type_params: vec![],
             };
-            let symbol = Symbol::TypeAlias(type_info);
+            let symbol = public_alias(type_info);
             assert!(symbol.as_enum().is_none());
         }
     }

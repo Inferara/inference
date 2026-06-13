@@ -189,6 +189,9 @@ pub enum VisibilityContext {
     Import {
         path: String,
     },
+    Constant {
+        name: String,
+    },
 }
 
 impl Display for VisibilityContext {
@@ -206,6 +209,7 @@ impl Display for VisibilityContext {
                 method_name,
             } => write!(f, "method `{method_name}` on type `{type_name}`"),
             VisibilityContext::Import { path } => write!(f, "item `{path}`"),
+            VisibilityContext::Constant { name } => write!(f, "constant `{name}`"),
         }
     }
 }
@@ -348,6 +352,20 @@ pub enum TypeCheckError {
 
     #[error("{location}: cannot resolve import path: {path}")]
     ImportResolutionFailed { path: String, location: Location },
+
+    /// A `::`-qualified path whose prefix names a known namespace (a file or an
+    /// imported namespace) but whose final segment does not name a value in it —
+    /// either nothing of that name exists, or it names a non-value item such as a
+    /// function. Replaces the misleading "enum `lib` is not defined" that the
+    /// enum-variant fallback would otherwise produce for a namespace path.
+    #[error("{location}: cannot resolve `{path}`{}", names.as_ref().map_or(String::new(), |n| format!(": `{path}` names {n}, not a value")))]
+    QualifiedPathNotAValue {
+        path: String,
+        /// What the final segment names instead of a value (`a function`), or
+        /// `None` when nothing of that name exists in the namespace.
+        names: Option<String>,
+        location: Location,
+    },
 
     /// A path-form `use a::b;` was written without a project context (the
     /// string-parse and REPL paths have only the entry file), so the named file
@@ -675,6 +693,7 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceInFunction { location, .. }
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::ImportResolutionFailed { location, .. }
+            | TypeCheckError::QualifiedPathNotAValue { location, .. }
             | TypeCheckError::FileImportWithoutProjectContext { location, .. }
             | TypeCheckError::ImportedItemNotFound { location, .. }
             | TypeCheckError::ImportedItemPrivate { location, .. }

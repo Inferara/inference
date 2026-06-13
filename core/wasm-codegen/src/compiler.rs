@@ -114,28 +114,70 @@ type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<String, u
 /// per-registration `assert!(!contains_key)` guards that previously
 /// caught it no longer have anything to detect.
 ///
-/// `Display` reproduces the historical mangled-string form for use in
-/// diagnostic messages, `.wat` output, and panic descriptions.
+/// Each variant also carries `module_path`: the source-root-relative segments
+/// of the item's **defining** file. A multi-file program flattens every file
+/// into one WASM module, so two files may each define a `fn add`; qualifying the
+/// key by the defining file keeps the two distinct. The entry file's
+/// `module_path` is empty, so its items keep unqualified names — a single-file
+/// program produces byte-identical output to before file qualification existed.
+/// For a method the qualifier is the **struct's** defining file, not the call
+/// site's.
+///
+/// `Display` reproduces the historical mangled-string form, prefixing the
+/// `.`-joined module path when non-empty (`lib.arith.add`, `lib.arith.Point.new`).
+/// It is used for diagnostic messages, `.wat` output, and panic descriptions.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub(crate) enum FnKey {
-    Free { name: String },
-    Method { struct_name: String, name: String },
-    SpecFree { spec: String, name: String },
-    SpecMethod { spec: String, struct_name: String, name: String },
+    Free {
+        module_path: Vec<String>,
+        name: String,
+    },
+    Method {
+        module_path: Vec<String>,
+        struct_name: String,
+        name: String,
+    },
+    SpecFree {
+        module_path: Vec<String>,
+        spec: String,
+        name: String,
+    },
+    SpecMethod {
+        module_path: Vec<String>,
+        spec: String,
+        struct_name: String,
+        name: String,
+    },
 }
 
 impl FnKey {
-    fn free(name: impl Into<String>) -> Self {
-        Self::Free { name: name.into() }
+    fn free_in(module_path: Vec<String>, name: impl Into<String>) -> Self {
+        Self::Free {
+            module_path,
+            name: name.into(),
+        }
     }
-    fn method(struct_name: impl Into<String>, name: impl Into<String>) -> Self {
+    fn method_in(
+        module_path: Vec<String>,
+        struct_name: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::Method {
+            module_path,
             struct_name: struct_name.into(),
             name: name.into(),
         }
     }
     fn spec_free(spec: impl Into<String>, name: impl Into<String>) -> Self {
+        Self::spec_free_in(Vec::new(), spec, name)
+    }
+    fn spec_free_in(
+        module_path: Vec<String>,
+        spec: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::SpecFree {
+            module_path,
             spec: spec.into(),
             name: name.into(),
         }
@@ -145,7 +187,16 @@ impl FnKey {
         struct_name: impl Into<String>,
         name: impl Into<String>,
     ) -> Self {
+        Self::spec_method_in(Vec::new(), spec, struct_name, name)
+    }
+    fn spec_method_in(
+        module_path: Vec<String>,
+        spec: impl Into<String>,
+        struct_name: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
         Self::SpecMethod {
+            module_path,
             spec: spec.into(),
             struct_name: struct_name.into(),
             name: name.into(),
@@ -155,17 +206,32 @@ impl FnKey {
 
 impl std::fmt::Display for FnKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Free { name } => write!(f, "{name}"),
-            Self::Method { struct_name, name } => {
-                write!(f, "{struct_name}{METHOD_SEPARATOR}{name}")
-            }
-            Self::SpecFree { spec, name } => write!(f, "{spec}.{name}"),
+        let (module_path, rest) = match self {
+            Self::Free { module_path, name } => (module_path, name.clone()),
+            Self::Method {
+                module_path,
+                struct_name,
+                name,
+            } => (module_path, format!("{struct_name}{METHOD_SEPARATOR}{name}")),
+            Self::SpecFree {
+                module_path,
+                spec,
+                name,
+            } => (module_path, format!("{spec}.{name}")),
             Self::SpecMethod {
+                module_path,
                 spec,
                 struct_name,
                 name,
-            } => write!(f, "{spec}.{struct_name}{METHOD_SEPARATOR}{name}"),
+            } => (
+                module_path,
+                format!("{spec}.{struct_name}{METHOD_SEPARATOR}{name}"),
+            ),
+        };
+        if module_path.is_empty() {
+            write!(f, "{rest}")
+        } else {
+            write!(f, "{}{METHOD_SEPARATOR}{rest}", module_path.join(METHOD_SEPARATOR))
         }
     }
 }
@@ -329,8 +395,17 @@ struct ResolvedField {
 /// site. For the method variants, the [`FnKey`] is already resolved by the
 /// method-name lookup helpers, which encode the spec-vs-top-level decision.
 enum ResolvedCallee {
-    /// Plain function call via `Expr::Identifier`.
+    /// Plain same-file (or spec-local) function call via `Expr::Identifier`.
+    /// Resolved with spec-aware preference against the current file's module
+    /// path at the lookup site.
     Function(String),
+    /// A call whose target the type checker resolved to a specific function in
+    /// a (possibly different) file — an item-imported bare call
+    /// (`use lib::arith::{add}; add()`) or a qualified path
+    /// (`math::arith::add(...)`). The [`FnKey`] is already file-qualified by the
+    /// callee's defining file, so it resolves directly with no spec preference
+    /// (the callee is a top-level function elsewhere).
+    QualifiedFunction(FnKey),
     /// Associated function call via `Expr::TypeMemberAccess` (e.g., `Point::new()`).
     AssociatedFunction {
         key: FnKey,
@@ -352,9 +427,9 @@ impl ResolvedCallee {
     fn display_name(&self) -> String {
         match self {
             Self::Function(name) => name.clone(),
-            Self::AssociatedFunction { key, .. } | Self::InstanceMethod { key, .. } => {
-                key.to_string()
-            }
+            Self::QualifiedFunction(key)
+            | Self::AssociatedFunction { key, .. }
+            | Self::InstanceMethod { key, .. } => key.to_string(),
         }
     }
 }
@@ -413,6 +488,12 @@ pub(crate) struct Compiler {
     /// methods so that intra-spec call resolution can prefer the mangled
     /// `"<spec>.<callee>"` key before falling back to the bare name.
     current_spec: Option<String>,
+    /// Source-root-relative module path of the file whose function is currently
+    /// being compiled (empty for the entry file). Set per function alongside
+    /// `current_fn_name`/`current_fn_key`. Lowering reads it to resolve a bare
+    /// struct/enum name in this file to its file-qualified canonical layout key
+    /// so two files defining a same-named type get distinct layouts.
+    current_module_path: Vec<String>,
     // Per-function state (set in visit_function_definition, used by lowering methods)
     func: Option<Function>,
     locals_map: FxHashMap<String, (u32, ValType)>,
@@ -475,6 +556,7 @@ impl Compiler {
             current_fn_name: String::new(),
             current_fn_key: None,
             current_spec: None,
+            current_module_path: Vec::new(),
             func: None,
             locals_map: FxHashMap::default(),
             frame_layout: None,
@@ -555,11 +637,12 @@ impl Compiler {
         return_ty_id: TypeId,
         arena: &AstArena,
         ctx: &TypedContext,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         let return_type_info = TypeInfo::from_type_id(arena, return_ty_id);
         match &return_type_info.kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                 self.func_array_returns.insert(
                     key,
                     ArrayReturnInfo {
@@ -570,8 +653,9 @@ impl Compiler {
                 );
             }
             TypeInfoKind::Custom(custom_name) => {
-                if let Some(struct_info) = ctx.lookup_struct(custom_name) {
-                    let (total_size, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
+                if let Some(struct_info) = ctx.lookup_struct_in(custom_name, module_path) {
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
                     self.func_struct_returns.insert(
                         key,
                         StructReturnInfo {
@@ -636,7 +720,7 @@ impl Compiler {
 
             let params = Self::import_param_types(arena, args, ctx)?;
             let results = match returns {
-                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx)?
+                Some(ty_id) => Self::val_type_from_type_id(arena, *ty_id, ctx, &[])?
                     .into_iter()
                     .collect::<Vec<_>>(),
                 None => Vec::new(),
@@ -679,7 +763,7 @@ impl Compiler {
                 // emits no receiver param for an import.
                 ArgKind::SelfRef { .. } => continue,
             };
-            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx)? {
+            if let Some(val) = Self::val_type_from_type_id(arena, ty, ctx, &[])? {
                 params.push(val);
             }
         }
@@ -725,27 +809,33 @@ impl Compiler {
     pub(crate) fn build_func_name_to_idx(
         &mut self,
         arena: &AstArena,
-        func_def_ids: &[DefId],
+        funcs: &[crate::EmittableFn],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
-        for (idx, &def_id) in func_def_ids.iter().enumerate() {
-            let fn_name = arena.def_name(def_id);
-            let key = FnKey::free(fn_name);
+        for (idx, entry) in funcs.iter().enumerate() {
+            let fn_name = arena.def_name(entry.def_id);
+            let key = FnKey::free_in(entry.module_path.clone(), fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Top-level function '{fn_name}' collides with an existing \
+                "Top-level function '{key}' collides with an existing \
                  top-level function. The type-checker should have rejected \
                  the duplicate at the source level."
             );
             self.func_name_to_idx
                 .insert(key.clone(), idx as u32 + base_idx);
 
-            if let Def::Function { returns, .. } = &arena[def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(())
@@ -761,18 +851,19 @@ impl Compiler {
     pub(crate) fn build_func_name_to_idx_with_spec_names(
         &mut self,
         arena: &AstArena,
-        spec_func_defs: &[(String, DefId)],
+        spec_funcs: &[crate::EmittableSpecFn],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<Vec<u32>, CodegenError> {
-        let mut assigned = Vec::with_capacity(spec_func_defs.len());
+        let mut assigned = Vec::with_capacity(spec_funcs.len());
         #[allow(clippy::cast_possible_truncation)]
-        for (idx, (spec_name, def_id)) in spec_func_defs.iter().enumerate() {
-            let fn_name = arena.def_name(*def_id);
-            let key = FnKey::spec_free(spec_name, fn_name);
+        for (idx, entry) in spec_funcs.iter().enumerate() {
+            let fn_name = arena.def_name(entry.def_id);
+            let spec_name = crate::qualified_spec_name(&entry.module_path, &entry.spec_name);
+            let key = FnKey::spec_free(&spec_name, fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Spec-inner function '{spec_name}::{fn_name}' collides with an \
+                "Spec-inner function '{key}' collides with an \
                  existing spec-inner function. The type-checker should have \
                  rejected the duplicate at the source level."
             );
@@ -780,10 +871,16 @@ impl Compiler {
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(assigned)
@@ -803,27 +900,37 @@ impl Compiler {
     pub(crate) fn build_method_name_to_idx(
         &mut self,
         arena: &AstArena,
-        method_defs: &[(String, DefId)],
+        methods: &[crate::EmittableMethod],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<(), CodegenError> {
         #[allow(clippy::cast_possible_truncation)]
-        for (i, (struct_name, def_id)) in method_defs.iter().enumerate() {
-            let method_name = arena.def_name(*def_id).to_string();
-            let key = FnKey::method(struct_name, &method_name);
+        for (i, entry) in methods.iter().enumerate() {
+            let method_name = arena.def_name(entry.def_id).to_string();
+            let key = FnKey::method_in(
+                entry.module_path.clone(),
+                &entry.struct_name,
+                &method_name,
+            );
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Method '{struct_name}::{method_name}' collides with an \
+                "Method '{key}' collides with an \
                  existing top-level method on the same struct."
             );
             self.func_name_to_idx
                 .insert(key.clone(), base_idx + i as u32);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(())
@@ -838,29 +945,36 @@ impl Compiler {
     pub(crate) fn build_method_name_to_idx_with_spec_names(
         &mut self,
         arena: &AstArena,
-        spec_method_defs: &[(String, String, DefId)],
+        spec_methods: &[crate::EmittableSpecMethod],
         ctx: &TypedContext,
         base_idx: u32,
     ) -> Result<Vec<u32>, CodegenError> {
-        let mut assigned = Vec::with_capacity(spec_method_defs.len());
+        let mut assigned = Vec::with_capacity(spec_methods.len());
         #[allow(clippy::cast_possible_truncation)]
-        for (i, (spec_name, struct_name, def_id)) in spec_method_defs.iter().enumerate() {
-            let method_name = arena.def_name(*def_id).to_string();
-            let key = FnKey::spec_method(spec_name, struct_name, &method_name);
+        for (i, entry) in spec_methods.iter().enumerate() {
+            let method_name = arena.def_name(entry.def_id).to_string();
+            let spec_name = crate::qualified_spec_name(&entry.module_path, &entry.spec_name);
+            let key = FnKey::spec_method(&spec_name, &entry.struct_name, &method_name);
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
-                "Spec-inner method '{spec_name}::{struct_name}::{method_name}' \
+                "Spec-inner method '{key}' \
                  collides with an existing spec-inner method on the same struct."
             );
             let assigned_idx = base_idx + i as u32;
             self.func_name_to_idx.insert(key.clone(), assigned_idx);
             assigned.push(assigned_idx);
 
-            if let Def::Function { returns, .. } = &arena[*def_id].kind
+            if let Def::Function { returns, .. } = &arena[entry.def_id].kind
                 && let Some(return_ty_id) = returns
             {
-                self.register_sret_if_compound(key, *return_ty_id, arena, ctx)?;
+                self.register_sret_if_compound(
+                    key,
+                    *return_ty_id,
+                    arena,
+                    ctx,
+                    &entry.module_path,
+                )?;
             }
         }
         Ok(assigned)
@@ -875,6 +989,7 @@ impl Compiler {
         arena: &AstArena,
         ty_id: TypeId,
         ctx: &TypedContext,
+        module_path: &[String],
     ) -> Result<Option<ValType>, CodegenError> {
         match &arena[ty_id].kind {
             TypeNode::Simple(SimpleTypeKind::Unit) => Ok(None),
@@ -895,7 +1010,9 @@ impl Compiler {
             TypeNode::Qualified { .. } => todo!(),
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
-                if ctx.lookup_struct(name).is_some() || ctx.lookup_enum(name).is_some() {
+                if ctx.lookup_struct_in(name, module_path).is_some()
+                    || ctx.lookup_enum_in(name, module_path).is_some()
+                {
                     Ok(Some(ValType::I32))
                 } else {
                     // The type-checker rejects an unknown type before codegen, so
@@ -924,6 +1041,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
+        module_path: &[String],
         origin: &FunctionOrigin,
     ) -> Result<(), CodegenError> {
         let spec = match origin {
@@ -931,7 +1049,7 @@ impl Compiler {
             FunctionOrigin::TopLevel => None,
         };
         let mut guard = SpecScopeGuard::enter(self, spec);
-        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, origin)
+        guard.visit_function_definition_body(def_id, arena, ctx, method_struct_name, module_path, origin)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -941,6 +1059,7 @@ impl Compiler {
         arena: &AstArena,
         ctx: &TypedContext,
         method_struct_name: Option<&str>,
+        module_path: &[String],
         origin: &FunctionOrigin,
     ) -> Result<(), CodegenError> {
         let (fn_name_id, vis, args, returns, body_id) = match &arena[def_id].kind {
@@ -956,15 +1075,24 @@ impl Compiler {
         };
 
         let raw_name = arena[fn_name_id].name.clone();
+        // Record which file this function belongs to so struct/enum metadata
+        // lookups during lowering resolve bare type names relative to this file
+        // (two files may each define a same-named struct).
+        self.current_module_path = module_path.to_vec();
         // Compute the structured key for this function so sret lookups
         // and call-site resolution stay in lockstep with the registration
-        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`.
+        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`. Spec
+        // items carry their file qualifier in `current_spec` (already a
+        // file-qualified spec name), so their keys take an empty module path;
+        // free functions and methods are qualified by their defining file here.
         let current_spec = self.current_spec.clone();
         let current_fn_key = match (current_spec.as_deref(), method_struct_name) {
             (Some(spec), Some(struct_name)) => FnKey::spec_method(spec, struct_name, &raw_name),
             (Some(spec), None) => FnKey::spec_free(spec, &raw_name),
-            (None, Some(struct_name)) => FnKey::method(struct_name, &raw_name),
-            (None, None) => FnKey::free(&raw_name),
+            (None, Some(struct_name)) => {
+                FnKey::method_in(module_path.to_vec(), struct_name, &raw_name)
+            }
+            (None, None) => FnKey::free_in(module_path.to_vec(), &raw_name),
         };
         // For diagnostics and debug names we keep the mangled-string form
         // (`Struct.method` / bare name); spec-inner-ness is implicit via
@@ -985,7 +1113,7 @@ impl Compiler {
             vec![]
         } else {
             match returns {
-                Some(ty_id) => Self::val_type_from_type_id(arena, ty_id, ctx)?
+                Some(ty_id) => Self::val_type_from_type_id(arena, ty_id, ctx, module_path)?
                     .into_iter()
                     .collect(),
                 None => vec![],
@@ -1009,7 +1137,7 @@ impl Compiler {
             match &arg.kind {
                 ArgKind::Named { name, ty, .. } => {
                     cov_mark::hit!(wasm_codegen_emit_function_params);
-                    let vt = Self::val_type_from_type_id(arena, *ty, ctx)?
+                    let vt = Self::val_type_from_type_id(arena, *ty, ctx, module_path)?
                         .expect("Function parameter type must not be unit");
                     params.push(vt);
                     let arg_name = arena[*name].name.clone();
@@ -1060,17 +1188,21 @@ impl Compiler {
         let is_method = method_struct_name.is_some();
         let is_main = fn_name == "main";
         let is_top_level = matches!(*origin, FunctionOrigin::TopLevel);
-        // Methods are not exported as WASM exports. Spec-inner functions are
-        // implementation-level only and must never be exported. A future
-        // `export` keyword will control which functions are exported. For now,
-        // only top-level `pub` functions (except `main`, which gets special
-        // handling) become WASM exports.
-        let should_export = vis == Visibility::Public && !is_main && !is_method && is_top_level;
+        // The program's WASM ABI is the entry file's public surface: only an
+        // entry-file (empty module path) top-level `pub fn` is exported. A `pub
+        // fn` in an imported file is intra-project visibility, not an export, so
+        // imported internals don't leak into the export section. Methods and
+        // spec-inner functions are never exported. A future `export` keyword
+        // will control exports explicitly.
+        let is_entry_file = module_path.is_empty();
+        let is_exportable_position =
+            vis == Visibility::Public && !is_method && is_top_level && is_entry_file;
+        let should_export = is_exportable_position && !is_main;
         if should_export {
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
         }
-        if is_main && vis == Visibility::Public && !is_method && is_top_level {
+        if is_main && is_exportable_position {
             self.has_main = true;
             self.exports
                 .push((fn_name.clone(), ExportKind::Func, self.func_idx));
@@ -1078,8 +1210,15 @@ impl Compiler {
 
         Self::pre_scan_locals(arena, body_id, ctx, &mut self.locals_map, &mut local_idx);
 
-        self.frame_layout =
-            Self::compute_frame_layout(arena, body_id, ctx, local_idx, &args, method_struct_name)?;
+        self.frame_layout = Self::compute_frame_layout(
+            arena,
+            body_id,
+            ctx,
+            local_idx,
+            &args,
+            method_struct_name,
+            module_path,
+        )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
         // canonical FnKey so A036's estimate can be checked against it. The key
@@ -1417,6 +1556,7 @@ impl Compiler {
         frame_ptr_local_idx: u32,
         args: &[inference_ast::nodes::ArgData],
         method_struct_name: Option<&str>,
+        module_path: &[String],
     ) -> Result<Option<FrameLayout>, CodegenError> {
         let mut array_offsets = FxHashMap::default();
         let mut struct_offsets = FxHashMap::default();
@@ -1428,14 +1568,18 @@ impl Compiler {
                     let type_info = TypeInfo::from_type_id(arena, *ty);
                     match &type_info.kind {
                         TypeInfoKind::Array(elem_type, length) => {
-                            let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                            let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                             let byte_count = elem_sz.checked_mul(*length).expect(
                                 "Array byte count overflow: element size * length exceeds u32::MAX",
                             );
-                            let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
+                            let align =
+                                natural_alignment_for_type(&elem_type.kind, ctx, module_path)?;
                             let aligned_offset = align_to(current_offset, align);
-                            let element_layout =
-                                compute_element_layout_if_struct(&elem_type.kind, ctx)?;
+                            let element_layout = compute_element_layout_if_struct(
+                                &elem_type.kind,
+                                ctx,
+                                module_path,
+                            )?;
                             let slot = ArraySlot {
                                 offset: aligned_offset,
                                 elem_size: elem_sz,
@@ -1450,12 +1594,16 @@ impl Compiler {
                         }
                         // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
                         TypeInfoKind::Custom(custom_name) => {
-                            if let Some(struct_info) = ctx.lookup_struct(custom_name) {
+                            if let Some(struct_info) = ctx.lookup_struct_in(custom_name, module_path)
+                            {
                                 let (total_size, field_slots) =
-                                    compute_struct_field_layout(&struct_info, ctx)?;
+                                    compute_struct_field_layout(&struct_info, ctx, module_path)?;
                                 if total_size > 0 {
-                                    let max_field_align =
-                                        memory::max_struct_alignment(&field_slots, ctx)?;
+                                    let max_field_align = memory::max_struct_alignment(
+                                        &field_slots,
+                                        ctx,
+                                        module_path,
+                                    )?;
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -1478,11 +1626,12 @@ impl Compiler {
                         "ArgKind::SelfRef encountered but no method_struct_name provided; \
                          this indicates a bug in traverse_t_ast_with_compiler",
                     );
-                    if let Some(struct_info) = ctx.lookup_struct(struct_name) {
+                    if let Some(struct_info) = ctx.lookup_struct_in(struct_name, module_path) {
                         let (total_size, field_slots) =
-                            compute_struct_field_layout(&struct_info, ctx)?;
+                            compute_struct_field_layout(&struct_info, ctx, module_path)?;
                         if total_size > 0 {
-                            let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
+                            let max_field_align =
+                                memory::max_struct_alignment(&field_slots, ctx, module_path)?;
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -1508,6 +1657,7 @@ impl Compiler {
             &mut array_offsets,
             &mut struct_offsets,
             &mut current_offset,
+            module_path,
         )?;
 
         if current_offset == 0 {
@@ -1534,6 +1684,7 @@ impl Compiler {
     /// Scalar bindings (including enum tags) produce no frame slot and are
     /// intentionally no-ops here — they are tracked by `pre_scan_locals` as
     /// WASM locals instead. Zero-sized structs also produce no slot.
+    #[allow(clippy::too_many_arguments)]
     fn collect_compound_slot_for_type(
         arena: &AstArena,
         name_id: IdentId,
@@ -1542,16 +1693,18 @@ impl Compiler {
         array_offsets: &mut FxHashMap<String, ArraySlot>,
         struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         match type_kind {
             TypeInfoKind::Array(elem_type, length) => {
-                let elem_sz = type_byte_size(&elem_type.kind, ctx)?;
+                let elem_sz = type_byte_size(&elem_type.kind, ctx, module_path)?;
                 let byte_count = elem_sz.checked_mul(*length).expect(
                     "Array byte count overflow: element size * length exceeds u32::MAX",
                 );
-                let align = natural_alignment_for_type(&elem_type.kind, ctx)?;
+                let align = natural_alignment_for_type(&elem_type.kind, ctx, module_path)?;
                 let aligned_offset = align_to(*current_offset, align);
-                let element_layout = compute_element_layout_if_struct(&elem_type.kind, ctx)?;
+                let element_layout =
+                    compute_element_layout_if_struct(&elem_type.kind, ctx, module_path)?;
                 let slot = ArraySlot {
                     offset: aligned_offset,
                     elem_size: elem_sz,
@@ -1565,19 +1718,20 @@ impl Compiler {
                 );
             }
             TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
-                let struct_info = ctx.lookup_struct(struct_name);
+                let struct_info = ctx.lookup_struct_in(struct_name, module_path);
                 debug_assert!(
                     struct_info.is_some()
                         || matches!(type_kind, TypeInfoKind::Custom(_))
-                            && ctx.lookup_enum(struct_name).is_some(),
+                            && ctx.lookup_enum_in(struct_name, module_path).is_some(),
                     "collect_compound_slot_for_type: unresolved Struct/Custom type '{struct_name}' — \
                      type checker should reject unresolved names before codegen",
                 );
                 if let Some(struct_info) = struct_info {
                     let (total_size, field_slots) =
-                        compute_struct_field_layout(&struct_info, ctx)?;
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
                     if total_size > 0 {
-                        let max_field_align = memory::max_struct_alignment(&field_slots, ctx)?;
+                        let max_field_align =
+                            memory::max_struct_alignment(&field_slots, ctx, module_path)?;
                         let aligned_offset = align_to(*current_offset, max_field_align);
                         let slot = StructSlot {
                             offset: aligned_offset,
@@ -1609,6 +1763,7 @@ impl Compiler {
         array_offsets: &mut FxHashMap<String, ArraySlot>,
         struct_offsets: &mut FxHashMap<String, StructSlot>,
         current_offset: &mut u32,
+        module_path: &[String],
     ) -> Result<(), CodegenError> {
         let block = &arena[block_id];
         for &stmt_id in &block.stmts {
@@ -1625,6 +1780,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 Stmt::ConstDef(const_def_id) => {
@@ -1640,6 +1796,7 @@ impl Compiler {
                             array_offsets,
                             struct_offsets,
                             current_offset,
+                            module_path,
                         )?;
                     }
                 }
@@ -1651,6 +1808,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 Stmt::If {
@@ -1666,6 +1824,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                     let then_end = *current_offset;
                     if let Some(else_id) = else_block {
@@ -1677,6 +1836,7 @@ impl Compiler {
                             array_offsets,
                             struct_offsets,
                             current_offset,
+                            module_path,
                         )?;
                         *current_offset = (*current_offset).max(then_end);
                     }
@@ -1689,6 +1849,7 @@ impl Compiler {
                         array_offsets,
                         struct_offsets,
                         current_offset,
+                        module_path,
                     )?;
                 }
                 _ => {}
@@ -2111,7 +2272,7 @@ impl Compiler {
                     .expect("TypeMemberAccess: could not extract type name");
                 let variant_name = &arena[variant_name_id].name;
 
-                if let Some(enum_info) = ctx.lookup_enum(&type_name) {
+                if let Some(enum_info) = ctx.lookup_enum_in(&type_name, &self.current_module_path) {
                     let tag = enum_info
                         .variant_index(variant_name)
                         .expect("TypeMemberAccess: unknown enum variant");
@@ -2167,6 +2328,9 @@ impl Compiler {
                             }
                             Err(e) => panic!("function call lowering failed: {e}"),
                         }
+                    }
+                    Some(ResolvedCallee::QualifiedFunction(ref key)) => {
+                        self.lower_qualified_function_call(arena, key, &args, ctx);
                     }
                     None => {
                         todo!(
@@ -2288,6 +2452,24 @@ impl Compiler {
         function_expr_id: ExprId,
         ctx: &TypedContext,
     ) -> Option<ResolvedCallee> {
+        // The type checker resolved every cross-file call — including paths that
+        // cross `pub use` re-exports — to the callee's defining file. When the
+        // callee lives in a *different* file than the one being compiled, trust
+        // that recorded target: it names the file the registration pass keyed
+        // the function under, which the call site's own bare-name resolution
+        // cannot reach (an item import binds a name whose definition is
+        // elsewhere; a qualified path crosses re-exports). A same-file call is
+        // left to the normal resolution below so its lowering — and byte
+        // output — is identical to a single-file program. Trusting the recorded
+        // target for a `TypeMemberAccess` chain also distinguishes a qualified
+        // function path (`math::arith::add`) from a struct associated function
+        // (`Point::new`), which share that expression shape.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && target.module_path != self.current_module_path
+        {
+            let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
+            return Some(ResolvedCallee::QualifiedFunction(key));
+        }
         match &arena[function_expr_id].kind {
             Expr::Identifier(ident_id) => {
                 Some(ResolvedCallee::Function(arena[*ident_id].name.clone()))
@@ -2296,7 +2478,7 @@ impl Compiler {
                 expr: type_expr,
                 name: method_name,
             } => {
-                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name)?;
+                let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name, ctx)?;
                 Some(ResolvedCallee::AssociatedFunction {
                     key,
                     type_expr_id: *type_expr,
@@ -2355,8 +2537,34 @@ impl Compiler {
         Ok(())
     }
 
+    /// Lowers a call whose target was resolved by the type checker to a specific
+    /// (possibly cross-file) function, identified by its already file-qualified
+    /// [`FnKey`]. Used for item-imported bare calls and qualified paths.
+    fn lower_qualified_function_call(
+        &mut self,
+        arena: &AstArena,
+        key: &FnKey,
+        call_args: &[(Option<IdentId>, ExprId)],
+        ctx: &TypedContext,
+    ) {
+        cov_mark::hit!(wasm_codegen_emit_qualified_function_call);
+
+        for (_label, arg_expr_id) in call_args {
+            self.lower_expression(arena, *arg_expr_id, ctx, None);
+        }
+
+        let func_idx = self
+            .resolve_idx_by_key(key)
+            .unwrap_or_else(|| panic!("Function '{key}' not found in func_name_to_idx"));
+
+        self.func().instruction(&Instruction::Call(func_idx));
+    }
+
     /// Resolves a free-function bare name to its WASM function index,
-    /// preferring the spec-mangled key when inside a spec scope.
+    /// preferring the spec-mangled key when inside a spec scope, then the
+    /// current file's qualified key. This is the fallback for a same-file call
+    /// the type checker did not record a target for; cross-file targets resolve
+    /// through [`ResolvedCallee::QualifiedFunction`].
     fn resolve_free_callee_idx(&self, callee_name: &str) -> Option<u32> {
         if let Some(spec) = self.current_spec.as_deref() {
             let key = FnKey::spec_free(spec, callee_name);
@@ -2364,7 +2572,8 @@ impl Compiler {
                 return Some(idx);
             }
         }
-        self.func_name_to_idx.get(&FnKey::free(callee_name)).copied()
+        let key = FnKey::free_in(self.current_module_path.clone(), callee_name);
+        self.func_name_to_idx.get(&key).copied()
     }
 
     /// Resolves a callee `FnKey` directly to its WASM function index. Used
@@ -2385,9 +2594,9 @@ impl Compiler {
                 return true;
             }
         }
-        let bare = FnKey::free(callee_name);
-        self.func_array_returns.contains_key(&bare)
-            || self.func_struct_returns.contains_key(&bare)
+        let key = FnKey::free_in(self.current_module_path.clone(), callee_name);
+        self.func_array_returns.contains_key(&key)
+            || self.func_struct_returns.contains_key(&key)
     }
 
     /// Returns `true` if a [`FnKey`] resolves to a function with sret
@@ -2403,7 +2612,8 @@ impl Compiler {
     fn resolve_callee(&self, resolved: &ResolvedCallee) -> Option<u32> {
         match resolved {
             ResolvedCallee::Function(name) => self.resolve_free_callee_idx(name),
-            ResolvedCallee::AssociatedFunction { key, .. }
+            ResolvedCallee::QualifiedFunction(key)
+            | ResolvedCallee::AssociatedFunction { key, .. }
             | ResolvedCallee::InstanceMethod { key, .. } => self.resolve_idx_by_key(key),
         }
     }
@@ -2412,7 +2622,8 @@ impl Compiler {
     fn callee_is_sret(&self, resolved: &ResolvedCallee) -> bool {
         match resolved {
             ResolvedCallee::Function(name) => self.is_sret_free(name),
-            ResolvedCallee::AssociatedFunction { key, .. }
+            ResolvedCallee::QualifiedFunction(key)
+            | ResolvedCallee::AssociatedFunction { key, .. }
             | ResolvedCallee::InstanceMethod { key, .. } => self.is_sret_by_key(key),
         }
     }
@@ -2439,7 +2650,17 @@ impl Compiler {
         else {
             return None;
         };
-        self.lookup_method_fn_key(struct_name, method_name)
+        self.lookup_method_fn_key(struct_name, method_name, ctx)
+    }
+
+    /// Returns the defining-file module path of the struct named `struct_name`
+    /// as seen from the file currently being compiled. A method's mangled name
+    /// is qualified by the struct's defining file; if the struct can't be
+    /// resolved (it should always resolve post-type-check) the current file is
+    /// assumed so single-file behavior is unaffected.
+    fn struct_defining_module_path(&self, struct_name: &str, ctx: &TypedContext) -> Vec<String> {
+        ctx.struct_module_path(struct_name, &self.current_module_path)
+            .unwrap_or_else(|| self.current_module_path.clone())
     }
 
     /// Spec-aware method lookup. Constructs the candidate [`FnKey`] directly
@@ -2448,22 +2669,23 @@ impl Compiler {
     /// probes [`Self::func_name_to_idx`] for it. When a spec is active, the
     /// `SpecMethod` candidate is tried first so an intra-spec method call
     /// resolves to the spec-inner registration; otherwise — or on miss — the
-    /// top-level `Method` candidate is tried.
-    fn lookup_method_fn_key(&self, struct_name: &str, method_name: &str) -> Option<FnKey> {
+    /// top-level `Method` candidate is tried. The top-level `Method` key is
+    /// qualified by the struct's defining file so a method on a struct in an
+    /// imported file resolves to that file's registration.
+    fn lookup_method_fn_key(
+        &self,
+        struct_name: &str,
+        method_name: &str,
+        ctx: &TypedContext,
+    ) -> Option<FnKey> {
         if let Some(spec) = self.current_spec.as_deref() {
-            let candidate = FnKey::SpecMethod {
-                spec: spec.to_string(),
-                struct_name: struct_name.to_string(),
-                name: method_name.to_string(),
-            };
+            let candidate = FnKey::spec_method(spec, struct_name, method_name);
             if self.func_name_to_idx.contains_key(&candidate) {
                 return Some(candidate);
             }
         }
-        let candidate = FnKey::Method {
-            struct_name: struct_name.to_string(),
-            name: method_name.to_string(),
-        };
+        let module_path = self.struct_defining_module_path(struct_name, ctx);
+        let candidate = FnKey::method_in(module_path, struct_name, method_name);
         self.func_name_to_idx
             .contains_key(&candidate)
             .then_some(candidate)
@@ -2558,10 +2780,11 @@ impl Compiler {
         arena: &AstArena,
         type_expr_id: ExprId,
         method_name_id: IdentId,
+        ctx: &TypedContext,
     ) -> Option<FnKey> {
         let type_name = Self::extract_type_name_from_type_expr(arena, type_expr_id)?;
         let method_name = &arena[method_name_id].name;
-        self.lookup_method_fn_key(&type_name, method_name)
+        self.lookup_method_fn_key(&type_name, method_name, ctx)
     }
 
     /// Lowers an associated function call (`Type::method(args)`) to WASM instructions.
@@ -2588,7 +2811,7 @@ impl Compiler {
         cov_mark::hit!(wasm_codegen_emit_associated_function_call);
 
         let fn_key = self
-            .resolve_associated_fn_key(arena, type_expr_id, method_name_id)
+            .resolve_associated_fn_key(arena, type_expr_id, method_name_id, ctx)
             .unwrap_or_else(|| {
                 let method_name = &arena[method_name_id].name;
                 panic!(
@@ -2762,9 +2985,13 @@ impl Compiler {
             Expr::ArrayLiteral { elements } => {
                 let elements = elements.clone();
                 if is_struct_element {
-                    let field_slots = compute_element_layout_if_struct(&return_info.elem_kind, ctx)
-                        .expect("sret return: struct layout computation failed")
-                        .expect("Struct element must have field layout");
+                    let field_slots = compute_element_layout_if_struct(
+                        &return_info.elem_kind,
+                        ctx,
+                        &self.current_module_path,
+                    )
+                    .expect("sret return: struct layout computation failed")
+                    .expect("Struct element must have field layout");
                     self.lower_array_literal_struct_elements(
                         arena,
                         &elements,
@@ -2922,7 +3149,7 @@ impl Compiler {
         let array_len = Self::array_length(array_expr_id, ctx);
 
         if is_compound_element {
-            let elem_sz = type_byte_size(&elem_type_info.kind, ctx)
+            let elem_sz = type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
                 .expect("array index write: type_byte_size failed for compound element");
 
             // dest: array_base + index * struct_size
@@ -3085,7 +3312,7 @@ impl Compiler {
         );
 
         let elem_sz = if is_compound_element {
-            type_byte_size(&elem_type_info.kind, ctx)
+            type_byte_size(&elem_type_info.kind, ctx, &self.current_module_path)
                 .expect("array index access: type_byte_size failed for compound element")
         } else {
             memory::element_size(&elem_type_info.kind)
@@ -3359,10 +3586,11 @@ impl Compiler {
 
         if field_slots.is_empty() {
             let struct_info = ctx
-                .lookup_struct(struct_name)
+                .lookup_struct_in(struct_name, &self.current_module_path)
                 .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
             if !struct_info.fields.is_empty() {
-                let (_, computed_fields) = compute_struct_field_layout(&struct_info, ctx)?;
+                let (_, computed_fields) =
+                    compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)?;
                 for field in &computed_fields {
                     self.emit_struct_field_uzumaki(frame_ptr_local, slot_offset, field)?;
                 }
@@ -3876,7 +4104,7 @@ impl Compiler {
         ctx: &TypedContext,
         skip_zero_stores: bool,
     ) {
-        let stride = type_byte_size(elem_kind, ctx)
+        let stride = type_byte_size(elem_kind, ctx, &self.current_module_path)
             .expect("element byte size must be computable for array literal leaves");
 
         // For a struct leaf (reached only via the `Array` arm's recursion on a
@@ -3884,9 +4112,9 @@ impl Compiler {
         // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
         let struct_leaf_layout = match elem_kind {
             TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-                ctx.lookup_struct(name).map(|struct_info| {
+                ctx.lookup_struct_in(name, &self.current_module_path).map(|struct_info| {
                     let (total_size, field_slots) =
-                        memory::compute_struct_field_layout(&struct_info, ctx)
+                        memory::compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
                             .expect("struct field layout must be computable for array literal leaves");
                     (name.clone(), total_size, field_slots)
                 })
@@ -4379,11 +4607,12 @@ impl Compiler {
         };
 
         let struct_info = ctx
-            .lookup_struct(struct_name)
+            .lookup_struct_in(struct_name, &self.current_module_path)
             .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
-        let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)
-            .expect("resolve field offset: struct layout computation failed");
+        let (_, field_slots) =
+            compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
+                .expect("resolve field offset: struct layout computation failed");
         let field_slot = field_slots
             .iter()
             .find(|fs| fs.name == *field_name)
@@ -4564,13 +4793,14 @@ impl Compiler {
 fn compute_element_layout_if_struct(
     kind: &TypeInfoKind,
     ctx: &TypedContext,
+    module_path: &[String],
 ) -> Result<Option<Vec<memory::StructFieldSlot>>, CodegenError> {
     match kind {
         TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            let Some(struct_info) = ctx.lookup_struct(name) else {
+            let Some(struct_info) = ctx.lookup_struct_in(name, module_path) else {
                 return Ok(None);
             };
-            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx)?;
+            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx, module_path)?;
             Ok(Some(field_slots))
         }
         _ => Ok(None),
@@ -4596,6 +4826,42 @@ fn try_const_index_byte_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_file_fnkey_display_is_unqualified() {
+        // An empty module path is the entry file; its keys must render exactly
+        // as before file qualification existed so every single-file golden
+        // stays byte-identical.
+        assert_eq!(FnKey::free_in(vec![], "add").to_string(), "add");
+        assert_eq!(
+            FnKey::method_in(vec![], "Point", "new").to_string(),
+            "Point.new"
+        );
+        assert_eq!(FnKey::spec_free("MySpec", "f").to_string(), "MySpec.f");
+        assert_eq!(
+            FnKey::spec_method("MySpec", "Point", "new").to_string(),
+            "MySpec.Point.new"
+        );
+    }
+
+    #[test]
+    fn non_entry_file_fnkey_display_is_qualified() {
+        let path = vec!["lib".to_string(), "arith".to_string()];
+        assert_eq!(
+            FnKey::free_in(path.clone(), "add").to_string(),
+            "lib.arith.add"
+        );
+        assert_eq!(
+            FnKey::method_in(path, "Point", "new").to_string(),
+            "lib.arith.Point.new"
+        );
+        // A spec carries its file qualifier in the spec name string, so a spec
+        // key's module path stays empty and the spec name renders the file.
+        assert_eq!(
+            FnKey::spec_free("lib.geometry.MySpec", "f").to_string(),
+            "lib.geometry.MySpec.f"
+        );
+    }
 
     #[test]
     fn finish_without_memory_omits_memory_section() {

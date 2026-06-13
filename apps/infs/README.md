@@ -65,10 +65,10 @@ cargo build -p infs --release
 
 `infs build` supports two modes:
 
-**Project mode** (no path): discovers `Inference.toml` by walking up from the current directory and compiles `src/main.inf`. The manifest's `[build] mode` and `[verification] output-dir` are consumed as configuration (CLI flags override).
+**Project mode** (no path): discovers `Inference.toml` by walking up from the current directory and compiles `src/main.inf` together with its full import-reachable closure into a single `out/main.wasm`. The compiler (`infc`) follows every `use` directive transitively; unreachable `src/**/*.inf` files produce a warning from `infc`. The manifest's `[build] mode` and `[verification] output-dir` are consumed as configuration (CLI flags override).
 
 ```bash
-# Project mode: compile <root>/src/main.inf -> <root>/out/main.wasm
+# Project mode: compile <root>/src/main.inf (+ imported files) -> <root>/out/main.wasm
 infs build
 
 # Project mode: proof build using [build] mode = "proof" from Inference.toml
@@ -382,12 +382,13 @@ cargo build -p infs
 cargo test -p infs
 ```
 
-415 tests (321 unit + 94 integration) cover:
+Tests cover:
 - Command argument parsing
 - Build phases (parse, analyze, codegen)
 - Output generation (WASM, Rocq)
 - Project scaffolding
 - Project-mode build and run (manifest semantics, output-dir, mode override)
+- Multi-file project builds: import closure compiled to single `out/main.wasm`, unreachable-file warning surfaced, missing-import error with nearest-match suggestion, `-v` proof-mode output for multi-file projects
 - Toolchain management operations
 - TUI navigation and command execution
 - TUI rendering with TestBackend

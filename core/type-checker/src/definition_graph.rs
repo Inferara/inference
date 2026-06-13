@@ -107,10 +107,13 @@ impl<'a> DefGraph<'a> {
                 _ => continue,
             }
             for name in referenced {
-                if let Some(target) = resolve_ref(&by_key, &by_path, node, &name) {
-                    if target != i && !edges[i].contains(&target) {
-                        edges[i].push(target);
-                    }
+                // A self-edge (`const A = A;`) is a degenerate value cycle: the
+                // node's value depends on its own, with no evaluation order. It is
+                // recorded like any other edge so the cycle check rejects it.
+                if let Some(target) = resolve_ref(&by_key, &by_path, node, &name)
+                    && !edges[i].contains(&target)
+                {
+                    edges[i].push(target);
                 }
             }
         }

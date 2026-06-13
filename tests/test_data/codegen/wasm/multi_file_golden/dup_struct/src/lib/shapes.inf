@@ -1,0 +1,9 @@
+pub struct Pair {
+    a: i64;
+    b: i32;
+}
+
+pub fn there_b() -> i32 {
+    let p: Pair = Pair { a: 100, b: 200 };
+    return p.b;
+}
