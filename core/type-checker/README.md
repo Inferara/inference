@@ -185,19 +185,22 @@ fn operators() {
 
 ### Import System
 
+Each directive binds a distinct name, so this file compiles as written:
+
 ```inference
-// File import — binds the name `arith` in the importing file
+// File import — binds the name `arith`; members are reached with `::`
 use lib::arith;
 
-// Item import — binds `add` and `sub` bare in the importing file
-use lib::arith::{add, sub};
+// Item import — binds `max` and `min` bare in the importing file
+use lib::cmp::{max, min};
 
-// Re-export — makes `arith` part of the importing file's public surface
-pub use lib::arith;
+// Re-export — makes `util` part of this file's public surface for importers
+pub use lib::util;
 
-// Cross-file call via namespace access
-pub fn main() {
-    let r: i32 = arith::add(1, 2);
+pub fn main() -> i32 {
+    let sum: i32 = arith::add(1, 2);   // namespace access via `::`
+    let hi: i32 = max(sum, 10);        // bare item import
+    return hi;
 }
 ```
 
@@ -326,7 +329,7 @@ Test organization:
 **Canonical type keys**:
 - Every struct and enum is stored under a file-qualified key (e.g. `lib_arith::Point`).
 - `TypedContext::canonical_struct_key` / `canonical_enum_key` expose these for codegen.
-- The bare-name `lookup_struct_anywhere` / `lookup_enum_anywhere` escape hatches are no longer on the `TypedContext` consumer path; they survive only as the deliberate spec-collision existence check inside the type checker.
+- The spec-collision existence check resolves by canonical key (`lookup_struct_by_key` / `lookup_enum_by_key`), so a spec-inner type only conflicts with a same-named type *in its own file*; same-named types in other files are distinct.
 - Spec-inner types key by their enclosing file, so single-file programs produce bare keys and existing golden files stay valid.
 
 **`CircularDefinition` check**:
@@ -387,7 +390,7 @@ Test organization:
 - Assignment to a struct field (`p.x = v`) validates that the root variable is declared `mut` (`AssignToImmutable`) using the unified `extract_root_variable_name` helper that handles arbitrarily nested access chains (`arr[i].field`, `p.x.y`, etc.)
 
 **Struct Parameters and Return Types**:
-- Struct-typed function parameters are registered with `TypeInfoKind::Struct(name)` after `resolve_custom_type()` resolves the AST `Custom` node
+- Struct-typed function parameters are registered with `TypeInfoKind::Struct(name, key)` after `resolve_custom_type()` resolves the AST `Custom` node, where `key` is the struct's canonical file-qualified identity (the bare name for the entry file). Two same-named structs from different files carry distinct keys and are non-assignable; type identity (`PartialEq`) compares the key alone.
 - Functions returning a struct are registered and their return type is tracked for downstream use by the analysis pass (which enforces codegen restrictions on compound-returning calls)
 
 **Struct Definition Validation**:

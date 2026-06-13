@@ -41,10 +41,15 @@ fn file_local_key(bare_name: &str, module_path: &[String]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallTarget {
     /// Source-root-relative segments of the callee's defining file. Empty for a
-    /// callee defined in the entry file (its WASM name stays unqualified).
+    /// callee defined in the entry file (its WASM name stays unqualified). For a
+    /// method this is the *struct's* defining file.
     pub module_path: Vec<String>,
     /// The callee's bare name (the final path segment), e.g. `add` or `new`.
     pub name: String,
+    /// `Some(struct_name)` when the target is an associated function reached
+    /// through a namespace (`geo::Point::new`): the call lowers to the struct's
+    /// file-qualified method, not a free function. `None` for a free function.
+    pub receiver_struct: Option<String>,
 }
 
 /// Public metadata about a method defined on a type.
@@ -323,6 +328,22 @@ impl TypedContext {
                 self.symbol_table
                     .file_module_path_of_scope(info.definition_scope_id)
             })
+    }
+
+    /// Returns the source-root-relative module path of the file that contains the
+    /// scope `scope_id`. The entry file yields an empty vector; an imported file
+    /// `lib/arith.inf` yields `["lib", "arith"]`.
+    ///
+    /// A type's layout depends only on its defining file, never the file that
+    /// accesses it: two files can each define a same-named struct with different
+    /// fields. Code generation derives a struct's own defining path from its
+    /// [`StructInfo::definition_scope_id`](crate::StructInfo::definition_scope_id)
+    /// and lays its fields out relative to that path, so a nested cross-file field
+    /// resolves to the layout of *its* defining file rather than the access site
+    /// (#63).
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_path_of_scope(&self, scope_id: u32) -> Vec<String> {
+        self.symbol_table.file_module_path_of_scope(scope_id)
     }
 
     /// Registers a struct definition in the type context for testing.

@@ -111,37 +111,19 @@ mod import_tests {
         // FIXME: Struct field visibility (pub keyword on fields) not yet implemented in AST
         // When implemented, these tests should verify method and field access visibility
 
-        #[test]
-        fn test_visibility_error_message_function() {
-            let source =
-                r#"fn helper() -> i32 { return 5; } fn test() -> i32 { return helper(); }"#;
-            let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("cannot access private function"),
-                    "Error message should mention private function access violation, got: {}",
-                    error_msg
-                );
-            }
-        }
-
         // FIXME: Method visibility error testing requires methods without self to work
         // FIXME: Field visibility error testing requires pub keyword on fields in AST
         // These tests are placeholders for when those features are implemented
 
         #[test]
-        fn test_visibility_error_has_location() {
+        fn test_root_scope_function_call_with_distinct_name_type_checks() {
             let source = r#"fn private_fn() -> i32 { return 99; } fn caller() -> i32 { return private_fn(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains(":"),
-                    "Error message should include location information (line:col), got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a sibling root-scope function call must type-check, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -167,21 +149,6 @@ mod import_tests {
         }
 
         #[test]
-        fn test_visibility_context_display_function() {
-            let source =
-                r#"fn helper() -> i32 { return 42; } fn test() -> i32 { return helper(); }"#;
-            let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("function `helper`"),
-                    "Error should include function name in context, got: {}",
-                    error_msg
-                );
-            }
-        }
-
-        #[test]
         fn test_function_visibility_preserved_across_calls() {
             let source = r#"fn utility() -> i32 { return 100; } fn wrapper() -> i32 { return utility(); } fn main() -> i32 { return wrapper(); }"#;
             let result = try_type_check(source);
@@ -204,17 +171,14 @@ mod import_tests {
         }
 
         #[test]
-        fn test_visibility_error_format_includes_context() {
+        fn test_root_scope_long_named_function_call_type_checks() {
             let source = r#"fn private_function() -> i32 { return 42; } fn test() -> i32 { return private_function(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                assert!(
-                    error_msg.contains("function") || error_msg.is_empty(),
-                    "If visibility error occurs, it should include context, got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a root-scope function call type-checks regardless of name, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -250,21 +214,21 @@ mod import_tests {
             );
         }
 
+        // A root-scope function is callable from any sibling root-scope function:
+        // there is no scope boundary to cross, so no visibility error is possible
+        // in single-file source. (The cross-file private-access diagnostic is
+        // exercised by the multi-file matrix instead.) This pins the real
+        // behavior — clean type-check — rather than a never-taken error branch.
         #[test]
-        fn test_visibility_check_location_information() {
+        fn test_root_scope_function_call_is_not_a_visibility_error() {
             let source =
                 r#"fn helper() -> i32 { return 5; } fn test() -> i32 { return helper(); }"#;
             let result = try_type_check(source);
-            if result.is_err() {
-                let error_msg = result.err().unwrap().to_string();
-                let has_line_info =
-                    error_msg.contains(":") && error_msg.chars().filter(|&c| c == ':').count() >= 1;
-                assert!(
-                    has_line_info || error_msg.is_empty(),
-                    "Visibility errors should include location (line:col), got: {}",
-                    error_msg
-                );
-            }
+            assert!(
+                result.is_ok(),
+                "a same-scope call crosses no visibility boundary, got: {:?}",
+                result.err()
+            );
         }
 
         #[test]

@@ -49,7 +49,7 @@ fn check_uzumaki_init(
     let arena = ctx.arena();
     if matches!(arena[expr_id].kind, Expr::Uzumaki)
         && let Some(type_info) = ctx.get_node_typeinfo(NodeId::Stmt(stmt_id))
-        && let TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) = &type_info.kind
+        && let TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) = &type_info.kind
         && walker::has_compound_fields(ctx, &type_info.kind)
     {
         errors.push(AnalysisDiagnostic::UzumakiOnNestedStruct {

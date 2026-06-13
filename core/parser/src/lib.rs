@@ -280,8 +280,8 @@ mod parse_into_tests {
 
     #[test]
     fn single_parse_stamps_entry_identity() {
-        // AD-16: the string-based `parse` always yields a single entry file with
-        // an empty module path.
+        // The string-based `parse` always yields a single entry file with an
+        // empty module path.
         let parsed = parse("pub fn main() -> i32 { return 0; }");
 
         assert!(parsed.errors.is_empty());

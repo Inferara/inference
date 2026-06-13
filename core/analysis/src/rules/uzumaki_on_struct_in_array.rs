@@ -63,7 +63,7 @@ fn check_uzumaki_init(
 fn array_contains_struct(kind: &TypeInfoKind) -> bool {
     match kind {
         TypeInfoKind::Array(elem_type, _) => match &elem_type.kind {
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) => true,
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) => true,
             TypeInfoKind::Array(_, _) => array_contains_struct(&elem_type.kind),
             _ => false,
         },

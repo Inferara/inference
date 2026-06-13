@@ -113,21 +113,50 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
     let mut visited: FxHashSet<Vec<String>> = FxHashSet::default();
     let mut queue: VecDeque<(Vec<String>, PathBuf)> = VecDeque::new();
 
-    // The entry is the one file with an empty module path.
+    // The entry is the one file with an empty module path. It is keyed by the
+    // empty segment list, but a `use main;` that resolves to the entry file
+    // carries the segments `["main"]`, which the visited set would not catch — so
+    // a path resolving to the entry file is recognized separately, below.
+    let entry_canonical = std::fs::canonicalize(entry).ok();
     visited.insert(Vec::new());
     queue.push_back((Vec::new(), entry.to_path_buf()));
 
     while let Some((module_path, file_path)) = queue.pop_front() {
         let source = read_source(&file_path)?;
-        let imports = path_form_imports(&source)?;
+        let parsed = inference_parser::parse(&source);
 
-        for segments in imports {
+        // Surface a file's own syntax errors before resolving its imports. A
+        // rejected `use a::b::*;` still lowers to the segments `a::b`, so without
+        // this guard the glob would be probed as the file `a/b.inf`; when that
+        // file is absent, the "file not found" lookup would mask the educational
+        // glob diagnostic. Reporting the parse error first means the user sees why
+        // their directive is invalid rather than a misleading missing-file path.
+        if !parsed.errors.is_empty() {
+            return Err(parse_error(&module_path, &parsed.errors));
+        }
+
+        for segments in path_form_imports(&parsed.arena)? {
             if visited.contains(&segments) {
                 continue;
             }
             let dep_path = module_file_path(src_root, &segments);
             if !dep_path.is_file() {
                 return Err(missing_import_error(&segments, &dep_path));
+            }
+            // A `use` that names the entry file itself (e.g. `use main;` when the
+            // entry is `src/main.inf`) is a self-import: the entry is already in
+            // the closure under the empty module path, so re-discovering it here
+            // would lower its definitions into the arena twice and emit every
+            // entry function twice. Skip it, mirroring the reserved `use root;`
+            // handle. The reserved-handle name is the intended way to reach the
+            // entry; a literal self-import resolving to it is just deduplicated.
+            // Canonicalization failures fall through to normal handling so a real
+            // distinct file is never wrongly dropped.
+            if let (Some(entry_path), Ok(dep_canonical)) =
+                (entry_canonical.as_ref(), std::fs::canonicalize(&dep_path))
+                && *entry_path == dep_canonical
+            {
+                continue;
             }
             visited.insert(segments.clone());
             queue.push_back((segments, dep_path));
@@ -142,6 +171,31 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
     Ok(files)
 }
 
+/// Builds an [`InferenceError::ImportedFileParse`] for `errors`, labelling it by
+/// the file's canonical `module_path` (the entry uses the `<entry>` placeholder).
+/// Shared by discovery and lowering so both report syntax errors identically.
+fn parse_error(module_path: &[String], errors: &[inference_parser::ParseError]) -> anyhow::Error {
+    let label = if module_path.is_empty() {
+        "<entry>".to_string()
+    } else {
+        module_path.join("::")
+    };
+    let details = errors
+        .iter()
+        .map(|error| {
+            format!(
+                "  {}:{}: {}",
+                error.span.start_line, error.span.start_column, error.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow!(InferenceError::ImportedFileParse {
+        module_path: label,
+        details,
+    })
+}
+
 /// Lowers every discovered file into one arena in canonical order: entry first,
 /// then imported files sorted lexicographically by module path. The stored order
 /// is what later phases consume, so it is independent of discovery order.
@@ -152,47 +206,39 @@ fn lower_in_canonical_order(mut files: Vec<DiscoveredFile>) -> anyhow::Result<As
         a.module_path.cmp(&b.module_path)
     });
 
+    // Discovery deduplicates files by module path (and self-imports of the entry),
+    // so each file appears exactly once. A duplicate would lower the same
+    // definitions twice and emit them twice in codegen; assert the invariant so a
+    // future discovery regression is caught here rather than in the output.
+    debug_assert!(
+        files.windows(2).all(|w| w[0].module_path != w[1].module_path),
+        "discovered files must have unique module paths after deduplication"
+    );
+
     let mut arena = AstArena::default();
     for file in files {
-        // Name the file before its path is moved into `parse_into`, for the
-        // error arm only.
-        let label = if file.module_path.is_empty() {
-            "<entry>".to_string()
-        } else {
-            file.module_path.join("::")
-        };
+        // Keep the path for the error arm before it is moved into `parse_into`.
+        // Discovery already rejects any file with syntax errors, so this arm is a
+        // defensive backstop that surfaces them identically should lowering ever
+        // observe an error discovery did not.
+        let module_path = file.module_path.clone();
         let parse = inference_parser::parse_into(arena, &file.source, file.module_path);
         arena = parse.arena;
         if !parse.errors.is_empty() {
-            let details = parse
-                .errors
-                .iter()
-                .map(|error| {
-                    format!(
-                        "  {}:{}: {}",
-                        error.span.start_line, error.span.start_column, error.message
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(anyhow!(InferenceError::ImportedFileParse {
-                module_path: label,
-                details,
-            }));
+            return Err(parse_error(&module_path, &parse.errors));
         }
     }
     Ok(arena)
 }
 
-/// Extracts the path-form `use` imports of a single source file as canonical
+/// Extracts the path-form `use` imports of an already-parsed file as canonical
 /// module-path segment lists. A braced item import (`use a::b::{x};`) maps to the
 /// file `a::b` — the segments *before* the brace list. The `from`-form is skipped.
-fn path_form_imports(source: &str) -> anyhow::Result<Vec<Vec<String>>> {
-    let parsed = inference_parser::parse(source);
-    // Syntax errors here are reported when this file is lowered in
-    // `lower_in_canonical_order`; discovery only needs the directive shapes,
-    // which the resilient parser still produces.
-    let Some(source_file) = parsed.arena.source_files().next() else {
+///
+/// The caller parses the file and surfaces any syntax errors first, so only the
+/// directive shapes of a cleanly-parsed file reach here.
+fn path_form_imports(arena: &AstArena) -> anyhow::Result<Vec<Vec<String>>> {
+    let Some(source_file) = arena.source_files().next() else {
         return Ok(Vec::new());
     };
 
@@ -202,7 +248,14 @@ fn path_form_imports(source: &str) -> anyhow::Result<Vec<Vec<String>>> {
         if use_dir.from.is_some() {
             continue;
         }
-        let segments = use_directive_segments(&parsed.arena, use_dir)?;
+        let segments = use_directive_segments(arena, use_dir)?;
+        // `use root;` / `use root::{x};` is the reserved handle for the program
+        // entry file (Inference's `@import("root")`), not a file to load: the entry
+        // is already in the closure. A literal `src/root.inf` is shadowed by the
+        // reserved name and would surface as an unreachable-file warning instead.
+        if is_root_handle(&segments) {
+            continue;
+        }
         if !segments.is_empty() {
             imports.push(segments);
         }
@@ -234,6 +287,12 @@ fn use_directive_segments(
         segments.push(segment);
     }
     Ok(segments)
+}
+
+/// Whether `segments` is the reserved single-segment `root` handle — the entry
+/// file (Inference's `@import("root")`) — which names no file on disk.
+fn is_root_handle(segments: &[String]) -> bool {
+    segments.len() == 1 && segments[0] == "root"
 }
 
 /// Whether `segment` is a plain file/directory name usable in a filesystem path.
@@ -288,21 +347,26 @@ fn nearest_sibling(missing: &Path, target: &str) -> Option<String> {
     let dir = missing.parent()?;
     let entries = std::fs::read_dir(dir).ok()?;
 
+    // Collect the candidate stems and sort them so the suggestion is stable when
+    // two siblings tie on edit distance. `read_dir` yields entries in an
+    // OS-dependent order, so without this the strict `<` below would otherwise
+    // pick whichever tied stem the OS happened to surface first.
+    let mut stems: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some(SOURCE_EXTENSION))
+        .filter_map(|path| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        .collect();
+    stems.sort();
+
     let mut best: Option<(usize, String)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some(SOURCE_EXTENSION) {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let distance = edit_distance(target, stem);
+    for stem in stems {
+        let distance = edit_distance(target, &stem);
         if distance == 0 {
             continue;
         }
         if best.as_ref().is_none_or(|(d, _)| distance < *d) {
-            best = Some((distance, stem.to_string()));
+            best = Some((distance, stem));
         }
     }
 
@@ -578,6 +642,38 @@ mod tests {
     }
 
     #[test]
+    fn glob_import_surfaces_educational_message_over_missing_file() {
+        // `use a::b::*;` lowers to the segments `a::b` (the glob `*` is rejected
+        // after them), so it would otherwise be probed as the file `a/b.inf`.
+        // With that file absent, discovery must report the file's own parse error
+        // (the educational glob message) rather than a misleading "file not found"
+        // for `a/b.inf` — the user wrote a glob, not a path import.
+        let project = TempProject::new("glob-missing");
+        let entry = project.write("main.inf", "use a::b::*;\npub fn main() {}");
+
+        let err = parse_project(&entry).expect_err("a glob import must error");
+        let inference_err = err
+            .downcast_ref::<InferenceError>()
+            .expect("error is an InferenceError");
+        match inference_err {
+            InferenceError::ImportedFileParse {
+                module_path,
+                details,
+            } => {
+                assert_eq!(module_path, "<entry>");
+                assert!(
+                    details.contains("glob imports are not supported"),
+                    "the educational glob message must be surfaced, got: {details}"
+                );
+            }
+            InferenceError::ImportFileNotFound { .. } => {
+                panic!("the missing-file lookup masked the glob diagnostic");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn syntax_error_in_entry_file_reports_entry_label() {
         let project = TempProject::new("entry-parse");
         let entry = project.write("main.inf", "pub fn main( { return 0; }");
@@ -606,6 +702,34 @@ mod tests {
                 assert_eq!(suggestion.as_deref(), Some("arithh"));
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggestion_is_deterministic_on_distance_tie() {
+        // Two siblings are an equal edit distance from the missing `arith.inf`
+        // (`brith` and `zrith`, each one substitution away). `read_dir` order is
+        // OS-dependent, so the suggestion must be pinned by sorting candidates:
+        // the lexicographically first tied stem (`brith`) always wins. Run the
+        // resolution repeatedly to catch any order-dependence.
+        let project = TempProject::new("suggest-tie");
+        let entry = project.write("main.inf", "use arith;\npub fn main() {}");
+        project.write("brith.inf", "pub fn b() {}");
+        project.write("zrith.inf", "pub fn z() {}");
+
+        for _ in 0..16 {
+            let err = parse_project(&entry).expect_err("missing import must error");
+            let inference_err = err.downcast_ref::<InferenceError>().unwrap();
+            match inference_err {
+                InferenceError::ImportFileNotFound { suggestion, .. } => {
+                    assert_eq!(
+                        suggestion.as_deref(),
+                        Some("brith"),
+                        "tie must resolve to the lexicographically first sibling"
+                    );
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
         }
     }
 
@@ -1385,5 +1509,64 @@ mod tests {
             }
             other => panic!("expected Io, got {other:?}"),
         }
+    }
+
+    // --- Axis: self-import of the entry file -------------------------------
+    // A `use main;` from a non-entry file resolves to the entry's own path. The
+    // entry is already in the closure under the empty module path, so it must not
+    // be discovered a second time — re-adding it would lower (and emit) every
+    // entry definition twice.
+
+    #[test]
+    fn self_import_of_entry_does_not_duplicate_it() {
+        let project = TempProject::new("self-import");
+        let entry = project.write(
+            "main.inf",
+            "use lib::helper;\npub fn entry_fn() -> i32 { return 7; }\npub fn main() -> i32 { return helper::doubled(); }",
+        );
+        project.write(
+            "lib/helper.inf",
+            "use main;\npub fn doubled() -> i32 { return 14; }",
+        );
+
+        let parse = parse_project(&entry).expect("self-import deduplicates rather than failing");
+
+        // The entry appears exactly once (empty path); the `use main;` self-import
+        // did not re-add it under a `["main"]` path.
+        let entry_count = parse
+            .arena
+            .source_files()
+            .filter(|sf| sf.module_path.is_empty())
+            .count();
+        assert_eq!(entry_count, 1, "the entry file is discovered exactly once");
+        assert_eq!(
+            module_paths(&parse),
+            vec![
+                Vec::<String>::new(),
+                vec!["lib".to_string(), "helper".to_string()],
+            ],
+            "no spurious [\"main\"] module is added for the self-import"
+        );
+    }
+
+    #[test]
+    fn import_of_non_entry_file_named_main_loads_normally() {
+        // When the entry is `app.inf`, a sibling `main.inf` is an ordinary file;
+        // `use main;` must load it (its path differs from the entry's), so the
+        // self-import guard keys on the actual entry path, not the literal name.
+        let project = TempProject::new("named-main");
+        let entry = project.write(
+            "app.inf",
+            "use main;\npub fn run() -> i32 { return main::value(); }",
+        );
+        project.write("main.inf", "pub fn value() -> i32 { return 42; }");
+
+        let parse = parse_project(&entry).expect("a real non-entry main.inf loads");
+
+        assert_eq!(
+            module_paths(&parse),
+            vec![Vec::<String>::new(), vec!["main".to_string()]],
+            "a non-entry file named main is discovered like any other import"
+        );
     }
 }

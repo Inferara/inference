@@ -37,7 +37,7 @@ fn check_assign_rhs(
         && let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id))
         && matches!(
             ti.kind,
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)
         )
     {
         errors.push(AnalysisDiagnostic::CompoundReturnCallInAssignment {

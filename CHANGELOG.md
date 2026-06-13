@@ -600,7 +600,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Invoked with no path, both commands discover the project's `Inference.toml` by walking up from the current directory (nearest ancestor wins; the start directory is canonicalized once for symlink stability), then compile `<root>/src/main.inf` with the compiler's working directory set to the project root so `out/` always lands at the root regardless of where the command was invoked
   - The existing single-file forms (`infs build path/to/file.inf`, `infs run path/to/file.inf`) are preserved unchanged
   - `infs new` / `infs init` "Next steps" hint updated from `infs build src/main.inf` to `infs build`
-  - Other `src/*.inf` files besides `main.inf` emit a warning (each named) and are excluded from the build — multi-file compilation is pending ([#63])
+  - `src/**/*.inf` files reachable from `main.inf` through `use` imports are compiled into the single output artifact; files reachable from no import chain emit a warning (each named) and are excluded from the build ([#63])
   - Project-mode `infs run` always builds in compile mode and invokes `main`; a non-`main` `--entry-point` is rejected with guidance to use single-file mode (proof-mode WASM embeds non-deterministic opcodes wasmtime cannot execute)
   - Discovery and entry-point failures produce remediation-style errors (suggesting `infs new`, `infs init`, or an explicit file path)
 - Add automatic PATH configuration on first install ([#96])

@@ -152,7 +152,7 @@ pub(crate) fn array_nesting_depth(kind: &TypeInfoKind) -> u32 {
 #[must_use]
 fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(_) => true,
+        TypeInfoKind::Struct(_, _) => true,
         TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
         TypeInfoKind::Array(elem, _) => is_compound_type(ctx, &elem.kind),
         _ => false,
@@ -171,10 +171,10 @@ fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
 #[must_use]
 pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             ctx.lookup_struct(name).is_some_and(|s| {
                 s.fields.iter().any(|f| match &f.type_info.kind {
-                    TypeInfoKind::Struct(_) => true,
+                    TypeInfoKind::Struct(_, _) => true,
                     TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
                     TypeInfoKind::Array(_, _) => {
                         is_compound_type(ctx, &f.type_info.kind)
@@ -198,7 +198,7 @@ pub(crate) fn is_compound_returning_call(ctx: &TypedContext, expr_id: ExprId) ->
     }
     if let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id)) {
         match &ti.kind {
-            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_) => true,
+            TypeInfoKind::Array(_, _) | TypeInfoKind::Struct(_, _) => true,
             TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
             _ => false,
         }

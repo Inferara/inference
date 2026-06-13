@@ -150,8 +150,8 @@ mod scenario_1_type_checker_scoping {
             "error must identify the colliding struct: {msg}"
         );
         assert!(
-            msg.contains("duplicate definition across spec scopes is not supported"),
-            "error must cite the cross-spec collision reason: {msg}"
+            msg.contains("duplicate definition within a file's spec scopes is not supported"),
+            "error must cite the same-file spec collision reason: {msg}"
         );
     }
 

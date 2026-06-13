@@ -215,10 +215,10 @@ match &type_info.kind {
     TypeInfoKind::Array(elem_type, size) => {
         println!("Array of {} with size {}", elem_type, size);
     }
-    TypeInfoKind::Struct(name) => {
+    TypeInfoKind::Struct(name, _key) => {
         println!("Struct: {}", name);
     }
-    TypeInfoKind::Enum(name) => {
+    TypeInfoKind::Enum(name, _key) => {
         println!("Enum: {}", name);
     }
     TypeInfoKind::Generic(name) => {
@@ -448,10 +448,10 @@ use inference_type_checker::type_info::{TypeInfo, TypeInfoKind};
 let resolved_type = symbol_table.resolve_custom_type(type_info);
 
 match &resolved_type.kind {
-    TypeInfoKind::Struct(name) => {
+    TypeInfoKind::Struct(name, _key) => {
         println!("Resolved to struct: {}", name);
     }
-    TypeInfoKind::Enum(name) => {
+    TypeInfoKind::Enum(name, _key) => {
         println!("Resolved to enum: {}", name);
     }
     TypeInfoKind::Array(elem_type, size) => {

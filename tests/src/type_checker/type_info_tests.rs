@@ -89,7 +89,7 @@ mod type_info_predicates {
     #[test]
     fn test_is_struct() {
         let struct_type = TypeInfo {
-            kind: TypeInfoKind::Struct("Point".to_string()),
+            kind: TypeInfoKind::Struct("Point".to_string(), "Point".to_string()),
             type_params: vec![],
         };
         assert!(struct_type.is_struct());
@@ -113,11 +113,11 @@ mod type_info_predicates {
             TypeInfo::string(),
             TypeInfo::default(),
             TypeInfo {
-                kind: TypeInfoKind::Struct("Foo".to_string()),
+                kind: TypeInfoKind::Struct("Foo".to_string(), "Foo".to_string()),
                 type_params: vec![],
             },
             TypeInfo {
-                kind: TypeInfoKind::Enum("Color".to_string()),
+                kind: TypeInfoKind::Enum("Color".to_string(), "Color".to_string()),
                 type_params: vec![],
             },
         ];
@@ -348,7 +348,7 @@ mod has_unresolved_params {
     #[test]
     fn test_struct_no_unresolved() {
         let struct_type = TypeInfo {
-            kind: TypeInfoKind::Struct("Point".to_string()),
+            kind: TypeInfoKind::Struct("Point".to_string(), "Point".to_string()),
             type_params: vec![],
         };
         assert!(!struct_type.has_unresolved_params());
@@ -357,7 +357,7 @@ mod has_unresolved_params {
     #[test]
     fn test_enum_no_unresolved() {
         let enum_type = TypeInfo {
-            kind: TypeInfoKind::Enum("Color".to_string()),
+            kind: TypeInfoKind::Enum("Color".to_string(), "Color".to_string()),
             type_params: vec![],
         };
         assert!(!enum_type.has_unresolved_params());
@@ -437,7 +437,7 @@ mod display {
     #[test]
     fn test_display_struct() {
         let struct_type = TypeInfo {
-            kind: TypeInfoKind::Struct("Point".to_string()),
+            kind: TypeInfoKind::Struct("Point".to_string(), "Point".to_string()),
             type_params: vec![],
         };
         assert_eq!(struct_type.to_string(), "Point");
@@ -446,7 +446,7 @@ mod display {
     #[test]
     fn test_display_enum() {
         let enum_type = TypeInfo {
-            kind: TypeInfoKind::Enum("Color".to_string()),
+            kind: TypeInfoKind::Enum("Color".to_string(), "Color".to_string()),
             type_params: vec![],
         };
         assert_eq!(enum_type.to_string(), "Color");
@@ -455,7 +455,7 @@ mod display {
     #[test]
     fn test_display_with_type_params() {
         let ti = TypeInfo {
-            kind: TypeInfoKind::Struct("Vec".to_string()),
+            kind: TypeInfoKind::Struct("Vec".to_string(), "Vec".to_string()),
             type_params: vec!["T".to_string()],
         };
         assert_eq!(ti.to_string(), "Vec T'");
@@ -464,7 +464,7 @@ mod display {
     #[test]
     fn test_display_with_multiple_type_params() {
         let ti = TypeInfo {
-            kind: TypeInfoKind::Struct("Map".to_string()),
+            kind: TypeInfoKind::Struct("Map".to_string(), "Map".to_string()),
             type_params: vec!["K".to_string(), "V".to_string()],
         };
         assert_eq!(ti.to_string(), "Map K' V'");
@@ -690,7 +690,7 @@ mod type_info_kind_builtin_methods {
             None
         );
         assert_eq!(
-            TypeInfoKind::Struct("Bar".to_string()).as_builtin_str(),
+            TypeInfoKind::Struct("Bar".to_string(), "Bar".to_string()).as_builtin_str(),
             None
         );
         assert_eq!(
@@ -1162,11 +1162,11 @@ mod is_signed_methods {
             TypeInfo::string(),
             TypeInfo::default(),
             TypeInfo {
-                kind: TypeInfoKind::Struct("Point".to_string()),
+                kind: TypeInfoKind::Struct("Point".to_string(), "Point".to_string()),
                 type_params: vec![],
             },
             TypeInfo {
-                kind: TypeInfoKind::Enum("Color".to_string()),
+                kind: TypeInfoKind::Enum("Color".to_string(), "Color".to_string()),
                 type_params: vec![],
             },
             TypeInfo {

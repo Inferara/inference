@@ -649,11 +649,28 @@ mod tests {
 
     #[test]
     fn pub_spec_exact_message_single_error() {
-        // The `pub spec` diagnostic is reported exactly once; the `pub` is then
-        // consumed and the spec body parses, so no cascade follows.
+        // The `pub spec` diagnostic is reported exactly once at the CST level; the
+        // `pub` is then consumed and the spec body parses, so no parse cascade
+        // follows. This checks parsing only; the parse+lower variant below guards
+        // against a lowering cascade re-reporting the same invalid input.
         let (_root, msgs) = parse_messages("pub spec S { const a: i32 = 10; type T = u32; }");
         assert_eq!(
             msgs,
+            vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
+        );
+    }
+
+    #[test]
+    fn pub_spec_single_error_through_lowering() {
+        // The full parse+lower pipeline must surface exactly one diagnostic for a
+        // `pub spec`. The stray `pub` is a `Visibility` node child of the spec; a
+        // naive "skip the first node child" loop over the spec body would re-lower
+        // the name `Identifier` as if it were a definition and emit a spurious
+        // second diagnostic. Drive the public `parse` (which runs lowering) so a
+        // CST-only check cannot mask that cascade.
+        let parsed = crate::parse("pub spec S { const a: i32 = 10; type T = u32; }");
+        assert_eq!(
+            parsed.errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>(),
             vec!["specs take no visibility modifier; they are stripped before codegen".to_string()]
         );
     }
@@ -1003,6 +1020,85 @@ mod tests {
         let s = first(src, SyntaxKind::StructExpression);
         // name + two field names = three Identifier nodes at least.
         assert!(count_kind(&s, SyntaxKind::Identifier) >= 3);
+    }
+
+    #[test]
+    fn single_segment_qualified_struct_literal() {
+        // `geo::Point { .. }` is a struct literal whose name is a
+        // `TypeQualifiedName` head.
+        let src = "fn f() { let p : Point = geo::Point { x: 1, y: 2 }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeQualifiedName);
+        assert_eq!(head.text(src), "geo::Point");
+    }
+
+    #[test]
+    fn multi_segment_qualified_struct_literal() {
+        // Previously-failing case (#63): `lib::geo::Point { .. }` now parses into
+        // a struct literal whose head is the whole `::` chain.
+        let src = "fn f() { let p : Point = lib::geo::Point { x: 1, y: 2 }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeMemberAccessExpression);
+        assert_eq!(head.text(src), "lib::geo::Point");
+    }
+
+    #[test]
+    fn deep_qualified_struct_literal_with_empty_body() {
+        let src = "fn f() { let p : Point = a::b::c::Point { }; }";
+        assert_clean(src);
+        let s = first(src, SyntaxKind::StructExpression);
+        let head = s.node_children().next().expect("struct head node");
+        assert_eq!(head.kind, SyntaxKind::TypeMemberAccessExpression);
+        assert_eq!(head.text(src), "a::b::c::Point");
+    }
+
+    #[test]
+    fn qualified_call_is_not_a_struct_literal() {
+        // `a::b::c(...)` is a call, not a struct literal: no `StructExpression`.
+        let src = "fn f() { x = a::b::c(); }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(find(&root, SyntaxKind::StructExpression).is_none());
+        assert!(find(&root, SyntaxKind::FunctionCallExpression).is_some());
+    }
+
+    #[test]
+    fn qualified_variant_access_is_not_a_struct_literal() {
+        // `a::b::C` (e.g. an enum variant) stays a type-member access chain.
+        let src = "fn f() { x = a::b::C; }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(find(&root, SyntaxKind::StructExpression).is_none());
+        assert_eq!(
+            count_kind(&root, SyntaxKind::TypeMemberAccessExpression),
+            1
+        );
+    }
+
+    #[test]
+    fn qualified_struct_literal_suppressed_in_if_head() {
+        // In an `if` head the `{` opens the body, even after a `::` chain: no
+        // struct literal is parsed (mirrors the bare/single-segment behaviour).
+        let src = "fn f() { if a::b::Point { } }";
+        assert_clean(src);
+        let (root, _) = parse_to_cst(src);
+        assert!(
+            find(&root, SyntaxKind::StructExpression).is_none(),
+            "if head must not greedily parse a qualified struct literal:\n{}",
+            tree(src)
+        );
+        assert!(find(&root, SyntaxKind::IfStatement).is_some());
+    }
+
+    #[test]
+    fn qualified_struct_literal_suppressed_in_loop_head() {
+        let src = "fn f() { loop a::b::Cond { break; } }";
+        assert_clean(src);
+        assert!(find(&parse_to_cst(src).0, SyntaxKind::StructExpression).is_none());
     }
 
     // ---- expressions: precedence & associativity ----

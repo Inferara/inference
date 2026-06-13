@@ -407,11 +407,7 @@ enum ResolvedCallee {
     /// (the callee is a top-level function elsewhere).
     QualifiedFunction(FnKey),
     /// Associated function call via `Expr::TypeMemberAccess` (e.g., `Point::new()`).
-    AssociatedFunction {
-        key: FnKey,
-        type_expr_id: ExprId,
-        method_name_id: IdentId,
-    },
+    AssociatedFunction { key: FnKey },
     /// Instance method call via `Expr::MemberAccess` (e.g., `p.translate()`).
     InstanceMethod {
         key: FnKey,
@@ -1599,11 +1595,8 @@ impl Compiler {
                                 let (total_size, field_slots) =
                                     compute_struct_field_layout(&struct_info, ctx, module_path)?;
                                 if total_size > 0 {
-                                    let max_field_align = memory::max_struct_alignment(
-                                        &field_slots,
-                                        ctx,
-                                        module_path,
-                                    )?;
+                                    let max_field_align =
+                                        memory::max_struct_alignment(&field_slots);
                                     let aligned_offset = align_to(current_offset, max_field_align);
                                     let slot = StructSlot {
                                         offset: aligned_offset,
@@ -1630,8 +1623,7 @@ impl Compiler {
                         let (total_size, field_slots) =
                             compute_struct_field_layout(&struct_info, ctx, module_path)?;
                         if total_size > 0 {
-                            let max_field_align =
-                                memory::max_struct_alignment(&field_slots, ctx, module_path)?;
+                            let max_field_align = memory::max_struct_alignment(&field_slots);
                             let aligned_offset = align_to(current_offset, max_field_align);
                             let slot = StructSlot {
                                 offset: aligned_offset,
@@ -1717,7 +1709,7 @@ impl Compiler {
                     "Frame offset overflow: total array allocation exceeds u32::MAX",
                 );
             }
-            TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name) => {
+            TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name) => {
                 let struct_info = ctx.lookup_struct_in(struct_name, module_path);
                 debug_assert!(
                     struct_info.is_some()
@@ -1730,8 +1722,7 @@ impl Compiler {
                     let (total_size, field_slots) =
                         compute_struct_field_layout(&struct_info, ctx, module_path)?;
                     if total_size > 0 {
-                        let max_field_align =
-                            memory::max_struct_alignment(&field_slots, ctx, module_path)?;
+                        let max_field_align = memory::max_struct_alignment(&field_slots);
                         let aligned_offset = align_to(*current_offset, max_field_align);
                         let slot = StructSlot {
                             offset: aligned_offset,
@@ -1982,7 +1973,7 @@ impl Compiler {
         );
         let is_struct_type = matches!(
             type_info.as_ref().map(|ti| &ti.kind),
-            Some(TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_))
+            Some(TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_))
         ) && self
             .frame_layout
             .as_ref()
@@ -2268,11 +2259,23 @@ impl Compiler {
                 expr: type_expr,
                 name: variant_name_id,
             } => {
-                let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
-                    .expect("TypeMemberAccess: could not extract type name");
                 let variant_name = &arena[variant_name_id].name;
+                // The type checker keyed this node's enum type by the enum's
+                // defining file. For a namespace-qualified variant
+                // (`geo::Color::Blue`) the type expression is itself a `::` path the
+                // bare-name extractor cannot read, so resolve the enum by its
+                // canonical key first; fall back to the bare type name for a local
+                // `Enum::Variant`, keeping single-file output identical.
+                let enum_info = match ctx.get_node_typeinfo(NodeId::Expr(expr_id)).map(|t| t.kind) {
+                    Some(TypeInfoKind::Enum(_, key)) => ctx.lookup_enum(&key),
+                    _ => None,
+                }
+                .or_else(|| {
+                    let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)?;
+                    ctx.lookup_enum_in(&type_name, &self.current_module_path)
+                });
 
-                if let Some(enum_info) = ctx.lookup_enum_in(&type_name, &self.current_module_path) {
+                if let Some(enum_info) = enum_info {
                     let tag = enum_info
                         .variant_index(variant_name)
                         .expect("TypeMemberAccess: unknown enum variant");
@@ -2280,6 +2283,8 @@ impl Compiler {
                     let tag_i32 = tag as i32;
                     self.func().instruction(&Instruction::I32Const(tag_i32));
                 } else {
+                    let type_name = Self::extract_type_name_from_type_expr(arena, type_expr)
+                        .unwrap_or_else(|| "<qualified>".to_string());
                     todo!(
                         "TypeMemberAccess for non-enum type `{type_name}::{variant_name}` \
                          is not yet supported in wasm codegen"
@@ -2303,19 +2308,8 @@ impl Compiler {
                             None,
                         );
                     }
-                    Some(ResolvedCallee::AssociatedFunction {
-                        type_expr_id,
-                        method_name_id,
-                        ..
-                    }) => {
-                        self.lower_associated_function_call(
-                            arena,
-                            type_expr_id,
-                            method_name_id,
-                            &args,
-                            ctx,
-                            None,
-                        );
+                    Some(ResolvedCallee::AssociatedFunction { key, .. }) => {
+                        self.lower_associated_function_call(arena, &key, &args, ctx, None);
                     }
                     Some(ResolvedCallee::Function(ref name)) => {
                         match self.lower_function_call(arena, name, &args, ctx) {
@@ -2399,7 +2393,7 @@ impl Compiler {
                         | NumberType::I32
                         | NumberType::U32,
                     )
-                    | TypeInfoKind::Enum(_) => {
+                    | TypeInfoKind::Enum(_, _) => {
                         cov_mark::hit!(wasm_codegen_emit_uzumaki_i32);
                         self.emit_uzumaki(UZUMAKI_I32_OPCODE);
                     }
@@ -2422,7 +2416,7 @@ impl Compiler {
                             panic!("array uzumaki lowering failed: {e}");
                         }
                     }
-                    TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                    TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                         cov_mark::hit!(wasm_codegen_emit_struct_uzumaki);
                         let name = name.clone();
                         let var_name = enclosing_var_name.unwrap_or_else(|| {
@@ -2464,8 +2458,41 @@ impl Compiler {
         // target for a `TypeMemberAccess` chain also distinguishes a qualified
         // function path (`math::arith::add`) from a struct associated function
         // (`Point::new`), which share that expression shape.
+        // A namespace-qualified associated call (`geo::Point::new(...)`) was
+        // resolved by the type checker to a struct method whose mangled name is
+        // keyed by the struct's defining file. Its `TypeMemberAccess` expression
+        // (`geo::Point::new`) is not a plain type the bare-name resolution can
+        // read, so the recorded target — carrying the struct name and defining
+        // file — is the source of truth.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && let Some(struct_name) = &target.receiver_struct
+            && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
+        {
+            let key = FnKey::method_in(
+                target.module_path.clone(),
+                struct_name.clone(),
+                target.name.clone(),
+            );
+            return Some(ResolvedCallee::AssociatedFunction { key });
+        }
         if let Some(target) = ctx.call_target(function_expr_id)
             && target.module_path != self.current_module_path
+        {
+            let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
+            return Some(ResolvedCallee::QualifiedFunction(key));
+        }
+        // A same-file free function reached through a `::` namespace path —
+        // `root::helper()` for an entry item imported via `use root;` (#63). The
+        // recorded target is a free function (no receiver struct) whose defining
+        // file is the one being compiled, so the cross-file branch above did not
+        // fire. Its `TypeMemberAccess` expression (`root::helper`) is not a struct
+        // associated function, so route it by key rather than letting the
+        // `TypeMemberAccess` arm below mis-resolve it as a method and return
+        // `None`. The key equals the one a bare `helper()` call resolves to, so
+        // the lowering is identical.
+        if let Some(target) = ctx.call_target(function_expr_id)
+            && target.receiver_struct.is_none()
+            && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
         {
             let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
             return Some(ResolvedCallee::QualifiedFunction(key));
@@ -2479,11 +2506,7 @@ impl Compiler {
                 name: method_name,
             } => {
                 let key = self.resolve_associated_fn_key(arena, *type_expr, *method_name, ctx)?;
-                Some(ResolvedCallee::AssociatedFunction {
-                    key,
-                    type_expr_id: *type_expr,
-                    method_name_id: *method_name,
-                })
+                Some(ResolvedCallee::AssociatedFunction { key })
             }
             Expr::MemberAccess {
                 expr: receiver,
@@ -2645,7 +2668,7 @@ impl Compiler {
     ) -> Option<FnKey> {
         let method_name = &arena[method_name_id].name;
         let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
-        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+        let (TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name)) =
             &receiver_type.kind
         else {
             return None;
@@ -2802,27 +2825,16 @@ impl Compiler {
     fn lower_associated_function_call(
         &mut self,
         arena: &AstArena,
-        type_expr_id: ExprId,
-        method_name_id: IdentId,
+        fn_key: &FnKey,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
         sret_local: Option<u32>,
     ) {
         cov_mark::hit!(wasm_codegen_emit_associated_function_call);
 
-        let fn_key = self
-            .resolve_associated_fn_key(arena, type_expr_id, method_name_id, ctx)
-            .unwrap_or_else(|| {
-                let method_name = &arena[method_name_id].name;
-                panic!(
-                    "Associated function call: could not resolve mangled name for \
-                     method '{method_name}' (type expression has no resolvable type name)"
-                )
-            });
+        let is_sret = self.is_sret_by_key(fn_key);
 
-        let is_sret = self.is_sret_by_key(&fn_key);
-
-        let func_idx = self.resolve_idx_by_key(&fn_key).unwrap_or_else(|| {
+        let func_idx = self.resolve_idx_by_key(fn_key).unwrap_or_else(|| {
             panic!("Method '{fn_key}' not found in func_name_to_idx")
         });
 
@@ -2969,7 +2981,7 @@ impl Compiler {
             .expect("sret return: array byte size overflow");
         let is_struct_element = matches!(
             &return_info.elem_kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)
         );
 
         match &arena[return_expr_id].kind {
@@ -3143,7 +3155,7 @@ impl Compiler {
 
         let is_compound_element = matches!(
             &elem_type_info.kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
         let array_len = Self::array_length(array_expr_id, ctx);
@@ -3308,7 +3320,7 @@ impl Compiler {
 
         let is_compound_element = matches!(
             &elem_type_info.kind,
-            TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+            TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
         );
 
         let elem_sz = if is_compound_element {
@@ -4111,7 +4123,7 @@ impl Compiler {
         // nested array-of-structs literal), the field layout is constant for this
         // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
         let struct_leaf_layout = match elem_kind {
-            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+            TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                 ctx.lookup_struct_in(name, &self.current_module_path).map(|struct_info| {
                     let (total_size, field_slots) =
                         memory::compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
@@ -4381,7 +4393,7 @@ impl Compiler {
                     } = &arena[field_value_expr_id].kind
                     {
                         let nested_name = match &field_slot.type_kind {
-                            TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+                            TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
                                 name.as_str()
                             }
                             _ => "<nested struct>",
@@ -4413,7 +4425,7 @@ impl Compiler {
                 } => {
                     if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
                         assert!(
-                            !matches!(elem_kind, TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_)),
+                            !matches!(elem_kind, TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)),
                             "Array literal element-wise store requires scalar element type, \
                              got {elem_kind:?}"
                         );
@@ -4597,7 +4609,7 @@ impl Compiler {
             .get_node_typeinfo(NodeId::Expr(struct_expr_id))
             .expect("MemberAccess: struct expression must have type info");
 
-        let (TypeInfoKind::Struct(struct_name) | TypeInfoKind::Custom(struct_name)) =
+        let (TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name)) =
             &struct_type.kind
         else {
             panic!(
@@ -4606,9 +4618,19 @@ impl Compiler {
             )
         };
 
-        let struct_info = ctx
-            .lookup_struct_in(struct_name, &self.current_module_path)
-            .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
+        // The receiver's type carries the file-qualified canonical key of its
+        // struct. A chained access (`o.mid.a`) reaches a struct whose bare name
+        // may name a *different* struct in the file being emitted, so resolving
+        // the bare name against `current_module_path` would pick the wrong
+        // layout. Prefer the canonical key, which identifies the struct by its
+        // defining file (#63).
+        let struct_info = match &struct_type.kind {
+            TypeInfoKind::Struct(_, key) => ctx
+                .lookup_struct(key)
+                .or_else(|| ctx.lookup_struct_in(struct_name, &self.current_module_path)),
+            _ => ctx.lookup_struct_in(struct_name, &self.current_module_path),
+        }
+        .unwrap_or_else(|| panic!("Struct '{struct_name}' not found in type context"));
 
         let (_, field_slots) =
             compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
@@ -4796,7 +4818,7 @@ fn compute_element_layout_if_struct(
     module_path: &[String],
 ) -> Result<Option<Vec<memory::StructFieldSlot>>, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             let Some(struct_info) = ctx.lookup_struct_in(name, module_path) else {
                 return Ok(None);
             };

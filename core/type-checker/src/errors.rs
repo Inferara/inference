@@ -367,6 +367,17 @@ pub enum TypeCheckError {
         location: Location,
     },
 
+    /// A namespace-qualified call whose target function exists, but the path is
+    /// blocked because an intermediate file imported the next namespace with a
+    /// plain `use` rather than `pub use`. The function is reachable in principle
+    /// — only the missing re-export hides it — so the fix is to add `pub use`,
+    /// not to correct the path. Distinct from [`Self::UndefinedFunction`], which
+    /// fires when no such function exists.
+    #[error(
+        "{location}: call to `{path}` is blocked: an intermediate file imports the next namespace with a plain `use`; change it to `pub use` to re-export the path"
+    )]
+    QualifiedPathNotReexported { path: String, location: Location },
+
     /// A path-form `use a::b;` was written without a project context (the
     /// string-parse and REPL paths have only the entry file), so the named file
     /// cannot exist. Distinct from a typo: the fix is to build the project, not
@@ -694,6 +705,7 @@ impl TypeCheckError {
             | TypeCheckError::SelfReferenceOutsideMethod { location }
             | TypeCheckError::ImportResolutionFailed { location, .. }
             | TypeCheckError::QualifiedPathNotAValue { location, .. }
+            | TypeCheckError::QualifiedPathNotReexported { location, .. }
             | TypeCheckError::FileImportWithoutProjectContext { location, .. }
             | TypeCheckError::ImportedItemNotFound { location, .. }
             | TypeCheckError::ImportedItemPrivate { location, .. }

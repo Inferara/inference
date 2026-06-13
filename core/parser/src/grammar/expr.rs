@@ -131,6 +131,13 @@ fn unary_expr(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
 
 /// Parses an atom and then repeatedly folds in postfix operators: function call
 /// `(`, member access `.`, type-member access `::` (glued), and index `[`.
+///
+/// A `{` after a multi-segment `::` chain opens a namespace-qualified struct
+/// literal (`a::b::Type { .. }`, #63), the postfix analogue of the bare and
+/// single-segment forms `name_atom` recognizes. It fires only when struct
+/// literals are allowed (suppressed in `if`/`loop` heads) and only directly
+/// after a `::` chain, so value-position `{` after `.`, a call, or an index is
+/// left to open the following block.
 fn postfix_expr(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
     let mut lhs = atom(p, allow_struct)?;
     loop {
@@ -139,10 +146,24 @@ fn postfix_expr(p: &mut Parser, allow_struct: bool) -> Option<CompletedMarker> {
             SyntaxKind::Dot => member_access(p, lhs),
             SyntaxKind::ColonColon if p.prev_joint() => type_member_access(p, lhs),
             SyntaxKind::LBracket => array_index(p, lhs),
+            SyntaxKind::LBrace
+                if allow_struct && lhs.kind() == SyntaxKind::TypeMemberAccessExpression =>
+            {
+                qualified_struct_literal(p, lhs)
+            }
             _ => break,
         };
     }
     Some(lhs)
+}
+
+/// Wraps a completed `::` chain (`a::b::Type`) in a `struct_expression`, parsing
+/// the `{ field: value, .. }` body. The chain becomes the struct name, matching
+/// the node shape the bare and single-segment struct literals produce.
+fn qualified_struct_literal(p: &mut Parser, lhs: CompletedMarker) -> CompletedMarker {
+    let m = lhs.precede(p);
+    struct_body(p);
+    m.complete(p, SyntaxKind::StructExpression)
 }
 
 /// `lhs ( [ args ] )` (`function_call_expression`). Each argument is

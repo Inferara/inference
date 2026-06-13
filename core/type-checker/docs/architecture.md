@@ -459,10 +459,14 @@ When a type is declared using a custom name (like a struct or enum), the type ch
 pub fn resolve_custom_type(&self, mut ti: TypeInfo) -> TypeInfo {
     match &ti.kind {
         TypeInfoKind::Custom(name) => {
-            if self.lookup_struct(name).is_some() {
-                ti.kind = TypeInfoKind::Struct(name.clone());
-            } else if self.lookup_enum(name).is_some() {
-                ti.kind = TypeInfoKind::Enum(name.clone());
+            // Resolve from the current scope, capturing the type's canonical key
+            // (its defining-file identity) so a same-named type from another file
+            // is a distinct type. The `Struct`/`Enum` kinds carry `(bare_name, key)`.
+            let from_scope = self.current_scope_id().unwrap_or(0);
+            if let Some((_, key)) = self.resolve_struct_in_scope(name, from_scope) {
+                ti.kind = TypeInfoKind::Struct(name.clone(), key);
+            } else if let Some((_, key)) = self.resolve_enum_in_scope(name, from_scope) {
+                ti.kind = TypeInfoKind::Enum(name.clone(), key);
             }
             // Falls through to Custom if not found (forward reference)
             ti

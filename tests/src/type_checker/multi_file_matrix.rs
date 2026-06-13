@@ -107,15 +107,31 @@ mod tests {
     }
 
     #[test]
-    fn absolute_path_to_entry_item_from_non_entry_file() {
-        // A non-entry file reaches an entry-file item by bare name (entry is the
-        // program root; its public items are visible to the closure).
-        assert_ok(&[
+    fn entry_item_not_bare_visible_but_reachable_via_use_root() {
+        // A non-entry file does NOT see an entry item by bare name: there is no
+        // ambient cross-file visibility. The entry's `pub` items are reached only
+        // through the reserved `use root;` handle, as `root::item`.
+        let msg = assert_err(&[
             (
                 vec![],
                 "use lib::helper; pub fn entry_fn() -> i32 { return 1; } pub fn main() {}",
             ),
             (vec!["lib", "helper"], "pub fn run() -> i32 { return entry_fn(); }"),
+        ]);
+        assert!(
+            msg.contains("call to undefined function `entry_fn`"),
+            "an entry item is not bare-visible from a non-entry file, got: {msg}"
+        );
+
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::helper; pub fn entry_fn() -> i32 { return 1; } pub fn main() {}",
+            ),
+            (
+                vec!["lib", "helper"],
+                "use root; pub fn run() -> i32 { return root::entry_fn(); }",
+            ),
         ]);
     }
 
@@ -448,6 +464,30 @@ mod tests {
     }
 
     #[test]
+    fn nested_struct_typed_field_access_when_entry_imports_only_outer() {
+        // The entry imports `Outer` but NOT the inner `Mid` that `Outer` nests.
+        // Reading `o.mid.a` must type-check: `Mid` is `pub` and reached through the
+        // accessible `Outer`, so the field's type resolves through `Outer`'s
+        // defining file even though the entry cannot name `Mid` by itself. A
+        // field-type resolution against the *access site* would reject this as
+        // "member access requires a struct type, found Mid" (Rule 4) (#63).
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::a::{Outer}; use lib::a; \
+                 pub fn main() -> i32 { let o: Outer = a::make(); return o.mid.a + o.mid.b; }",
+            ),
+            (
+                vec!["lib", "a"],
+                "use lib::b::{Mid}; \
+                 pub struct Outer { head: i32; mid: Mid; tail: i32; } \
+                 pub fn make() -> Outer { return Outer { head: 1, mid: Mid { a: 2, b: 3 }, tail: 4 }; }",
+            ),
+            (vec!["lib", "b"], "pub struct Mid { a: i32; b: i32; }"),
+        ]);
+    }
+
+    #[test]
     fn pub_associated_method_callable_cross_file() {
         // `Type::assoc()` of a public associated method on an imported struct.
         assert_ok(&[
@@ -672,13 +712,17 @@ mod tests {
     #[test]
     fn plain_use_blocks_traversal_at_last_hop() {
         // The re-exporting file uses a plain (non-pub) `use`, so the chain through
-        // it does not resolve.
+        // it does not resolve. The leaf `add` exists; only the plain `use` hides
+        // it, so the diagnostic names the path and steers toward `pub use`.
         let msg = assert_err(&[
             (vec![], "use math; pub fn main() -> i32 { return math::arith::add(1, 2); }"),
             (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
             (vec!["math"], "use lib::arith;"),
         ]);
-        assert!(!msg.is_empty(), "plain use must not be traversable, got: {msg}");
+        assert!(
+            msg.contains("call to `math::arith::add` is blocked") && msg.contains("pub use"),
+            "plain use must surface the re-export hint, got: {msg}"
+        );
     }
 
     #[test]
@@ -691,8 +735,8 @@ mod tests {
             (vec!["m1"], "use m2;"),
         ]);
         assert!(
-            msg.contains("call to undefined function `m1::m2::lib::add`"),
-            "breaking the first hop blocks the whole chain, got: {msg}"
+            msg.contains("call to `m1::m2::lib::add` is blocked") && msg.contains("pub use"),
+            "breaking the first hop surfaces the re-export hint, got: {msg}"
         );
     }
 
@@ -706,25 +750,106 @@ mod tests {
             (vec!["m1"], "pub use m2;"),
         ]);
         assert!(
-            msg.contains("call to undefined function `m1::m2::lib::add`"),
-            "breaking the middle hop blocks the whole chain, got: {msg}"
+            msg.contains("call to `m1::m2::lib::add` is blocked") && msg.contains("pub use"),
+            "breaking the middle hop surfaces the re-export hint, got: {msg}"
         );
     }
 
     #[test]
-    fn pub_use_of_item_is_not_surfaced_through_reexporter() {
-        // `pub use lib::arith::{add};` re-exports the ITEM, but neither
-        // `use math::{add};` nor `math::add(...)` reaches it: only namespace
-        // re-exports are traversable. Pinned as the current behavior (item
-        // re-exports are effectively private to the re-exporting file).
+    fn genuinely_undefined_namespace_function_stays_undefined() {
+        // The companion to the re-export hint: when the leaf truly does not exist
+        // in the reachable namespace, the diagnostic must remain the plain
+        // "undefined function" rather than wrongly suggesting a missing `pub use`.
         let msg = assert_err(&[
+            (vec![], "use math; pub fn main() -> i32 { return math::nope(1, 2); }"),
+            (vec!["math"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
+        ]);
+        assert!(
+            msg.contains("call to undefined function `math::nope`") && !msg.contains("pub use"),
+            "a genuinely absent leaf must stay an undefined-function error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn reexport_blocked_non_function_leaf_stays_undefined() {
+        // The leaf reached gate-free is a STRUCT, not a function, so calling it is
+        // nonsense regardless of re-export. The "add `pub use`" hint must NOT fire;
+        // the call falls back to the plain undefined-function diagnostic.
+        let msg = assert_err(&[
+            (vec![], "use math; pub fn main() -> i32 { return math::Thing(1, 2); }"),
+            (vec!["lib", "geo"], "pub struct Thing { x: i32; }"),
+            (vec!["math"], "use lib::geo::{Thing};"),
+        ]);
+        assert!(
+            msg.contains("`math::Thing`") && !msg.contains("pub use"),
+            "a non-function leaf must not trigger the re-export hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn pub_use_of_item_is_reimportable_through_reexporter() {
+        // `pub use lib::arith::{add};` re-exports the ITEM, so an importer of
+        // `math` reaches `add` BOTH ways, consistently: a bare item re-import
+        // `use math::{add};` and a namespace-qualified call `math::add(...)`.
+        // Item-import resolution runs to a fixpoint, so `math`'s own re-export
+        // binding is available when `main`'s re-import resolves regardless of the
+        // order scopes are visited (#63).
+        assert_ok(&[
             (vec![], "use math::{add}; pub fn main() -> i32 { return add(1, 2); }"),
             (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
             (vec!["math"], "pub use lib::arith::{add};"),
         ]);
+        assert_ok(&[
+            (vec![], "use math; pub fn main() -> i32 { return math::add(1, 2); }"),
+            (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
+            (vec!["math"], "pub use lib::arith::{add};"),
+        ]);
+    }
+
+    #[test]
+    fn plain_use_of_item_is_not_reimportable_through_reexporter() {
+        // A PLAIN `use lib::arith::{add};` keeps `add` private to `math`, so a
+        // re-import from `math` must fail — the consistent counterpart to
+        // [`pub_use_of_item_is_reimportable_through_reexporter`].
+        let msg = assert_err(&[
+            (vec![], "use math::{add}; pub fn main() -> i32 { return add(1, 2); }"),
+            (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
+            (vec!["math"], "use lib::arith::{add};"),
+        ]);
         assert!(
             msg.contains("item `add` not found in file `math`"),
-            "a pub-use'd item is not re-importable from the re-exporter, got: {msg}"
+            "a plain-use'd item is not re-importable from the re-exporter, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn item_reexport_chain_three_hops_resolves() {
+        // A 3-hop item re-export chain — `a` pub-uses `b` pub-uses `c` (which
+        // defines `deep`) — resolves when the entry item-imports `deep` from `a`.
+        // The fixpoint walks the chain to a stable point regardless of scope
+        // visitation order (#63).
+        assert_ok(&[
+            (vec![], "use lib::a::{deep}; pub fn main() -> i32 { return deep(5); }"),
+            (vec!["lib", "c"], "pub fn deep(a: i32) -> i32 { return a + 100; }"),
+            (vec!["lib", "b"], "pub use lib::c::{deep};"),
+            (vec!["lib", "a"], "pub use lib::b::{deep};"),
+        ]);
+    }
+
+    #[test]
+    fn item_reexport_chain_broken_by_plain_hop_rejected() {
+        // The same chain with a PLAIN middle hop (`b` plain-uses `c`) does not
+        // re-export `deep`, so `a`'s `pub use lib::b::{deep};` cannot find it and
+        // the entry re-import is rejected.
+        let msg = assert_err(&[
+            (vec![], "use lib::a::{deep}; pub fn main() -> i32 { return deep(5); }"),
+            (vec!["lib", "c"], "pub fn deep(a: i32) -> i32 { return a + 100; }"),
+            (vec!["lib", "b"], "use lib::c::{deep};"),
+            (vec!["lib", "a"], "pub use lib::b::{deep};"),
+        ]);
+        assert!(
+            msg.contains("not found"),
+            "a plain hop breaks the re-export chain, got: {msg}"
         );
     }
 
@@ -875,8 +1000,131 @@ mod tests {
             (vec!["lib", "buf"], "struct Buffer { x: i32; }"),
         ]);
         assert!(
-            !msg.is_empty(),
+            msg.contains("struct `Buffer` is not defined")
+                || msg.contains("unknown type `Buffer`"),
             "a spec must not reach another file's private struct by bare name, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_helper_struct_does_not_collide_with_other_file_top_level() {
+        // A spec-inner helper `struct Tmp` in `lib::a` and an unrelated top-level
+        // `struct Tmp` in the entry file are distinct types in distinct files, so
+        // both register cleanly. Spec types key by their enclosing file, not
+        // project-globally, so this no longer over-rejects.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::a; struct Tmp { x: i32; } pub fn main() -> i32 { return a::add(1, 2); }",
+            ),
+            (
+                vec!["lib", "a"],
+                "spec S { struct Tmp { v: i32; } } pub fn add(p: i32, q: i32) -> i32 { return p + q; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn spec_helper_structs_in_two_files_do_not_collide() {
+        // Two spec-inner helpers both named `Tmp`, one per file, key by their own
+        // files and never conflict.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::a; spec S { struct Tmp { v: i32; } } pub fn main() -> i32 { return a::add(1, 2); }",
+            ),
+            (
+                vec!["lib", "a"],
+                "spec SA { struct Tmp { x: i32; } } pub fn add(p: i32, q: i32) -> i32 { return p + q; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn same_named_spec_cannot_reach_other_files_spec_private_fn() {
+        // Two files each declare `spec Sp`. File `b`'s spec must NOT see file
+        // `a`'s spec-private `priv_a`: spec scopes are keyed by their file, so
+        // the two `Sp` scopes are distinct. A bare reference to `priv_a` from
+        // b's spec is an undefined-name error, never a cross-file privacy leak
+        // (and never a codegen panic in proof mode) (#63).
+        let msg = assert_err(&[
+            (vec![], "use lib::a; use lib::b; pub fn main() -> i32 { return b::run() + a::helper(); }"),
+            (
+                vec!["lib", "a"],
+                "pub fn helper() -> i32 { return 0; } spec Sp { fn priv_a() -> i32 { return 1; } fn use_a() -> i32 { return priv_a(); } }",
+            ),
+            (
+                vec!["lib", "b"],
+                "pub fn run() -> i32 { return 2; } spec Sp { fn check() -> i32 { return priv_a(); } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("undefined function `priv_a`"),
+            "b's spec must not reach a's spec-private fn, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn same_named_specs_with_same_named_inner_fns_compile() {
+        // Two files each declare `spec Invariant` containing same-named inner fns
+        // `check`/`driver`. File-qualified spec scope keys keep the two `Invariant`
+        // scopes distinct, so the inner names never collide and each spec's inner
+        // fn is callable only within its own file's spec (#63).
+        assert_ok(&[
+            (vec![], "use lib::a; use lib::b; pub fn main() -> i32 { return a::helper() + b::run(); }"),
+            (
+                vec!["lib", "a"],
+                "pub fn helper() -> i32 { return 0; } spec Invariant { fn check() -> i32 { return 1; } fn driver() -> i32 { return check(); } }",
+            ),
+            (
+                vec!["lib", "b"],
+                "pub fn run() -> i32 { return 2; } spec Invariant { fn check() -> i32 { return 3; } fn driver() -> i32 { return check(); } }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn spec_helper_struct_collides_within_same_file() {
+        // The same-file collision must still be rejected: two specs in ONE file
+        // each declaring `struct Tmp` would map to the same canonical key.
+        let msg = assert_err(&[(
+            vec![],
+            "spec S1 { struct Tmp { v: i32; } } spec S2 { struct Tmp { w: i32; } } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering struct `Tmp`")
+                && msg.contains("within a file's spec scopes"),
+            "two same-named spec helpers in one file must still collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_helper_enum_does_not_collide_with_other_file_top_level() {
+        // The enum twin of the struct case: a spec-inner helper `enum E` and an
+        // unrelated top-level `enum E` in another file do not collide.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::a; enum E { A } pub fn main() -> i32 { return a::add(1, 2); }",
+            ),
+            (
+                vec!["lib", "a"],
+                "spec S { enum E { B } } pub fn add(p: i32, q: i32) -> i32 { return p + q; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn spec_helper_enum_collides_within_same_file() {
+        // The same-file enum collision is rejected, exactly like the struct twin.
+        let msg = assert_err(&[(
+            vec![],
+            "spec S1 { enum E { A } } spec S2 { enum E { B } } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering enum `E`")
+                && msg.contains("within a file's spec scopes"),
+            "two same-named spec helper enums in one file must still collide, got: {msg}"
         );
     }
 
@@ -1043,8 +1291,9 @@ mod tests {
     fn use_main_does_not_name_the_entry_file() {
         // The entry has the empty module path, not `["main"]`, so a non-entry file
         // writing `use main;` cannot resolve it. Pinned as the current behavior:
-        // the import fails to resolve. (Entry items remain reachable by bare name
-        // from the closure — see `absolute_path_to_entry_item_from_non_entry_file`.)
+        // the import fails to resolve. Entry items are reached through the reserved
+        // `use root;` handle, not bare or via `use main;` — see
+        // `entry_item_not_bare_visible_but_reachable_via_use_root`.
         let msg = assert_err(&[
             (vec![], "use lib::helper; pub fn entry_fn() -> i32 { return 1; } pub fn main() {}"),
             (
@@ -1082,12 +1331,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Axis 16 — entry-file privacy: a non-entry file must NOT reach the entry
-    // file's *private* items by bare name. The entry file is the program root,
-    // so a bare lookup from an imported file walks into root; private root items
-    // are filtered at the file boundary (soundness). Public entry items stay
-    // reachable by bare name (pinned by
-    // `absolute_path_to_entry_item_from_non_entry_file` in Axis 1).
+    // Axis 16 — entry-file boundary: a non-entry file reaches NO entry item by
+    // bare name — neither private (soundness) nor public (no ambient cross-file
+    // visibility). The entry's `pub` items are reachable only through the reserved
+    // `use root;` handle, as `root::item` (pinned by
+    // `entry_item_not_bare_visible_but_reachable_via_use_root` in Axis 1 and the
+    // `pub_entry_*_via_use_root_item` tests below).
     // ---------------------------------------------------------------------
 
     #[test]
@@ -1170,10 +1419,10 @@ mod tests {
     }
 
     #[test]
-    fn pub_entry_struct_reachable_by_bare_name() {
-        // Control: a `pub` entry struct IS constructible by bare name from an
-        // imported file — only privacy is gated at the boundary.
-        assert_ok(&[
+    fn pub_entry_struct_not_bare_visible_but_reachable_via_use_root_item() {
+        // A `pub` entry struct is NOT constructible by bare name from an imported
+        // file — there is no ambient cross-file visibility, even for `pub` items.
+        let msg = assert_err(&[
             (
                 vec![],
                 "pub struct Shared { v: i32; } use lib::helper; pub fn main() {}",
@@ -1183,18 +1432,213 @@ mod tests {
                 "pub fn use_it() -> i32 { let s: Shared = Shared { v: 1 }; return s.v; }",
             ),
         ]);
+        assert!(
+            msg.contains("unknown type `Shared`")
+                || msg.contains("struct `Shared` is not defined"),
+            "a pub entry struct is not bare-visible from an imported file, got: {msg}"
+        );
+
+        // It IS reachable through the reserved `use root::{Shared};` item import.
+        assert_ok(&[
+            (
+                vec![],
+                "pub struct Shared { v: i32; } use lib::helper; pub fn main() {}",
+            ),
+            (
+                vec!["lib", "helper"],
+                "use root::{Shared}; pub fn use_it() -> i32 { let s: Shared = Shared { v: 1 }; return s.v; }",
+            ),
+        ]);
     }
 
     #[test]
-    fn pub_entry_const_reachable_by_bare_name() {
-        // Control: a `pub` entry const IS reachable by bare name from an imported
-        // file (through the const-symbol path, which gates on `pub`).
+    fn pub_entry_struct_assoc_fn_not_bare_visible_from_non_entry_file() {
+        // The type-member twin of the literal/`let` boundary above: a bare
+        // `Gizmo::magic()` written in an imported file must NOT resolve to the
+        // entry's same-named struct's associated function. The struct resolver's
+        // first branch used to walk to root ungated and leak it (returning the
+        // entry's value); it is now boundary-aware (#63).
+        let msg = assert_err(&[
+            (
+                vec![],
+                "pub struct Gizmo { v: i32; pub fn magic() -> i32 { return 1234; } } \
+                 use lib::helper; pub fn main() {}",
+            ),
+            (
+                vec!["lib", "helper"],
+                "pub fn use_it() -> i32 { return Gizmo::magic(); }",
+            ),
+        ]);
+        assert!(
+            msg.contains("method `magic` not found on type `Gizmo`")
+                || msg.contains("Gizmo"),
+            "a bare entry assoc fn is not reachable from an imported file, got: {msg}"
+        );
+
+        // It IS reachable through the reserved `use root;` namespace handle.
         assert_ok(&[
+            (
+                vec![],
+                "pub struct Gizmo { v: i32; pub fn magic() -> i32 { return 1234; } } \
+                 use lib::helper; pub fn main() {}",
+            ),
+            (
+                vec!["lib", "helper"],
+                "use root; pub fn use_it() -> i32 { return root::Gizmo::magic(); }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn namespace_qualified_type_member_does_not_fall_through_to_entry() {
+        // `lib::geo::Color::Green` where `geo` has NO `Color` but the entry does.
+        // The namespace resolver's first branch used to walk past `geo` into root
+        // and silently bind the entry's `Color` (a Rule-8/M4 leak); it must now
+        // error rather than fall through (#63).
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; pub enum Color { Red, Green } \
+                 pub fn main() -> i32 { let c: Color = lib::geo::Color::Green; return 0; }",
+            ),
+            (vec!["lib", "geo"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+        assert!(
+            msg.contains("cannot resolve `lib::geo::Color`")
+                || msg.contains("Color"),
+            "a namespace type-member must not fall through to the entry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_entry_file_own_item_import_wins_over_same_named_entry_type() {
+        // Mirror of the leak fix: a non-entry file item-imports its own `Inner`
+        // while the entry defines a same-named `struct Inner`. The file's own
+        // import must win in its own file — gating the entry must not also block
+        // the legitimate own-import (#63).
+        assert_ok(&[
+            (
+                vec![],
+                "use container; pub struct Inner { a: i32; b: i32; } pub fn main() {}",
+            ),
+            (
+                vec!["container"],
+                "use lib::types::{Inner}; \
+                 pub fn mk() -> i32 { let i: Inner = Inner { v: 6 }; return i.v; }",
+            ),
+            (vec!["lib", "types"], "pub struct Inner { v: i32; }"),
+        ]);
+    }
+
+    #[test]
+    fn non_entry_file_bare_assoc_fn_binds_own_import_not_entry() {
+        // N-1: a non-entry file imports its own `Inner` and calls a bare
+        // `Inner::tag()`. With a same-named entry `Inner`, the bare call must bind
+        // the file's OWN imported `Inner`, not the entry's (#63).
+        assert_ok(&[
+            (
+                vec![],
+                "use container; \
+                 pub struct Inner { a: i32; pub fn tag() -> i32 { return 99; } } pub fn main() {}",
+            ),
+            (
+                vec!["container"],
+                "use lib::types::{Inner}; pub fn run() -> i32 { return Inner::tag(); }",
+            ),
+            (
+                vec!["lib", "types"],
+                "pub struct Inner { v: i32; pub fn tag() -> i32 { return 1; } }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn plain_import_type_member_stays_blocked_even_with_same_named_entry_type() {
+        // N-2 (M-C bypass): `lib::mid::Thing::assoc()` where `mid` PLAINLY imports
+        // `Thing` (not `pub use`) must stay blocked even when the entry defines a
+        // same-named `Thing`. The gated first branch must not leak the entry's
+        // `Thing`, so the re-export gate in the second branch is actually reached
+        // and rejects the plain import (#63).
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::mid; \
+                 pub struct Thing { a: i32; pub fn assoc() -> i32 { return 999; } } \
+                 pub fn main() -> i32 { return lib::mid::Thing::assoc(); }",
+            ),
+            (
+                vec!["lib", "mid"],
+                "use lib::source::{Thing}; pub fn placeholder() -> i32 { return 0; }",
+            ),
+            (
+                vec!["lib", "source"],
+                "pub struct Thing { v: i32; pub fn assoc() -> i32 { return 5; } }",
+            ),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "a plainly-imported type-member must stay blocked, got success"
+        );
+
+        // The `pub use` form IS reachable (the re-export gate permits it).
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::mid; \
+                 pub struct Thing { a: i32; pub fn assoc() -> i32 { return 999; } } \
+                 pub fn main() -> i32 { return lib::mid::Thing::assoc(); }",
+            ),
+            (
+                vec!["lib", "mid"],
+                "pub use lib::source::{Thing}; pub fn placeholder() -> i32 { return 0; }",
+            ),
+            (
+                vec!["lib", "source"],
+                "pub struct Thing { v: i32; pub fn assoc() -> i32 { return 5; } }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn non_entry_file_uses_its_own_struct_in_type_member() {
+        // MUST-NOT-break control: a non-entry file calls an associated function on
+        // its OWN struct. The boundary gate hides the *entry's* items, never the
+        // file's own definitions, so this resolves cleanly (#63).
+        assert_ok(&[
+            (vec![], "use lib::b; pub fn main() -> i32 { return lib::b::run(); }"),
+            (
+                vec!["lib", "b"],
+                "pub struct Widget { v: i32; pub fn build() -> i32 { return 77; } } \
+                 pub fn run() -> i32 { return Widget::build(); }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn pub_entry_const_not_bare_visible_but_reachable_via_use_root_item() {
+        // A `pub` entry const is NOT reachable by bare name from an imported file;
+        // it is reached through the reserved `use root::{MAX};` item import.
+        let msg = assert_err(&[
             (
                 vec![],
                 "pub const MAX: i32 = 5; use lib::helper; pub fn main() {}",
             ),
             (vec!["lib", "helper"], "pub fn use_it() -> i32 { return MAX; }"),
+        ]);
+        assert!(
+            msg.contains("use of undeclared variable `MAX`"),
+            "a pub entry const is not bare-visible from an imported file, got: {msg}"
+        );
+
+        assert_ok(&[
+            (
+                vec![],
+                "pub const MAX: i32 = 5; use lib::helper; pub fn main() {}",
+            ),
+            (
+                vec!["lib", "helper"],
+                "use root::{MAX}; pub fn use_it() -> i32 { return MAX; }",
+            ),
         ]);
     }
 
@@ -1224,9 +1668,8 @@ mod tests {
             ),
         ]);
         assert!(
-            !msg.is_empty()
-                && (msg.contains("struct `Secret` is not defined")
-                    || msg.contains("unknown type `Secret`")),
+            msg.contains("struct `Secret` is not defined")
+                || msg.contains("unknown type `Secret`"),
             "a non-entry spec must not reach the entry file's private struct, got: {msg}"
         );
     }
@@ -1473,5 +1916,515 @@ mod tests {
             msg.contains("variant `Blue` not found on enum `Color`"),
             "enum-variant diagnostics are unchanged, got: {msg}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Axis 20 — namespace-qualified type-member access: `geo::Point::new(...)`,
+    // `geo::Color::Green`, `geo::Point { .. }` reach a struct/enum *inside* an
+    // imported file, with the type's cross-file `pub`-ness enforced.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn namespace_qualified_assoc_fn_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Point}; \
+                 pub fn main() -> i32 { let p: Point = geo::Point::new(3, 4); return p.sum(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Point { x: i32; y: i32; \
+                 pub fn new(a: i32, b: i32) -> Point { return Point { x: a, y: b }; } \
+                 pub fn sum(self) -> i32 { return self.x + self.y; } }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn namespace_qualified_assoc_fn_private_type_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; pub fn main() -> i32 { return geo::Point::new(1, 2); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "struct Point { x: i32; y: i32; \
+                 pub fn new(a: i32, b: i32) -> i32 { return a + b; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("cannot access private struct `Point`"),
+            "a private type's assoc fn is not reachable through a namespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_qualified_assoc_fn_private_method_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; pub fn main() -> i32 { return geo::Point::secret(1, 2); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Point { x: i32; y: i32; \
+                 fn secret(a: i32, b: i32) -> i32 { return a + b; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("Point") && msg.contains("secret"),
+            "a private method through a namespace is rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_qualified_enum_variant_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Color}; \
+                 pub fn main() -> i32 { let c: Color = geo::Color::Green; return 0; }",
+            ),
+            (vec!["lib", "geo"], "pub enum Color { Red, Green, Blue }"),
+        ]);
+    }
+
+    #[test]
+    fn namespace_qualified_enum_variant_private_enum_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Color}; \
+                 pub fn main() -> i32 { let c: Color = geo::Color::Green; return 0; }",
+            ),
+            (vec!["lib", "geo"], "enum Color { Red, Green, Blue }"),
+        ]);
+        assert!(
+            msg.contains("item `Color` in file `lib::geo` is private"),
+            "a private enum's variant is not reachable through a namespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_qualified_enum_variant_bad_variant_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Color}; \
+                 pub fn main() -> i32 { let c: Color = geo::Color::Purple; return 0; }",
+            ),
+            (vec!["lib", "geo"], "pub enum Color { Red, Green, Blue }"),
+        ]);
+        assert!(
+            msg.contains("Purple"),
+            "an unknown variant through a namespace names the bad variant, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_qualified_struct_literal_constructs_and_reads_field() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Point}; \
+                 pub fn main() -> i32 { let p: Point = geo::Point { x: 7, y: 8 }; return p.x; }",
+            ),
+            (vec!["lib", "geo"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    #[test]
+    fn namespace_qualified_struct_literal_private_struct_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geo; pub fn main() -> i32 { let p: i32 = geo::Point { x: 7, y: 8 }.x; return p; }",
+            ),
+            (vec!["lib", "geo"], "struct Point { x: i32; y: i32; }"),
+        ]);
+        assert!(
+            msg.contains("cannot access private struct `Point`"),
+            "a private struct is not constructible through a namespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_struct_literal_interops_with_item_imported_type() {
+        // A value built via `geo::Point { .. }` has the same canonical key as one
+        // built from the item-imported `Point`, so the two are mutually assignable.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo; use lib::geo::{Point}; \
+                 pub fn main() -> i32 { \
+                 let a: Point = geo::Point { x: 1, y: 2 }; \
+                 let b: Point = Point { x: 3, y: 4 }; \
+                 let c: Point = a; \
+                 return b.x + c.y; }",
+            ),
+            (vec!["lib", "geo"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    #[test]
+    fn namespace_struct_literal_distinct_from_same_named_other_file() {
+        // A `Point` from file `a` reached via its namespace is NOT assignable where
+        // a same-named `Point` from file `b` is expected — different files,
+        // different canonical keys.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a; use lib::b::{Point}; \
+                 pub fn read(p: Point) -> i32 { return p.x; } \
+                 pub fn main() -> i32 { return read(a::Point { x: 1, y: 2 }); }",
+            ),
+            (vec!["lib", "a"], "pub struct Point { x: i32; y: i32; }"),
+            (vec!["lib", "b"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+        assert!(
+            msg.contains("expected `lib::b::Point`, found `lib::a::Point`"),
+            "a namespace-built Point from file a is not a file-b Point, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_qualified_assoc_fn_via_absolute_path() {
+        // The absolute form `lib::geo::Point::new(...)` (no file import) also
+        // resolves the type member through the namespace path.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo::{Point}; \
+                 pub fn main() -> i32 { let p: Point = lib::geo::Point::new(3, 4); return p.sum(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Point { x: i32; y: i32; \
+                 pub fn new(a: i32, b: i32) -> Point { return Point { x: a, y: b }; } \
+                 pub fn sum(self) -> i32 { return self.x + self.y; } }",
+            ),
+        ]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Axis 20b — namespace type-member access through an INTERMEDIATE file
+    // honors the re-export gate exactly as the free-function path does: a plain
+    // (non-`pub use`) intermediate import blocks traversal to its type members;
+    // a `pub use` re-export permits it. Confirmed at depth-1 (`mid::Point::raw`)
+    // and depth-3 (`lib::sub::mid::Point::raw`) (#63, Rule 5).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn namespace_type_member_through_plain_import_blocked_depth1() {
+        // `mid` plain-imports `Point` (`use lib::a::{Point};`), so the struct is
+        // private to `mid`; reaching `mid::Point::raw()` from another file is a
+        // public-surface leak and must be rejected — consistent with a plain-
+        // imported free function being blocked.
+        let msg = assert_err(&[
+            (vec![], "use lib::mid; pub fn main() -> i32 { return lib::mid::Point::raw(); }"),
+            (
+                vec!["lib", "a"],
+                "pub struct Point { x: i32; pub fn raw() -> i32 { return 99; } }",
+            ),
+            (vec!["lib", "mid"], "use lib::a::{Point};"),
+        ]);
+        assert!(
+            msg.contains("lib::mid::Point::raw"),
+            "a plain-imported type's member is not reachable through a namespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_type_member_through_pub_use_import_resolves_depth1() {
+        // With `pub use lib::a::{Point};` the intermediate re-exports the type, so
+        // `mid::Point::raw()` resolves — the positive counterpart to the plain-
+        // import block.
+        assert_ok(&[
+            (vec![], "use lib::mid; pub fn main() -> i32 { return lib::mid::Point::raw(); }"),
+            (
+                vec!["lib", "a"],
+                "pub struct Point { x: i32; pub fn raw() -> i32 { return 99; } }",
+            ),
+            (vec!["lib", "mid"], "pub use lib::a::{Point};"),
+        ]);
+    }
+
+    #[test]
+    fn namespace_type_member_through_plain_import_blocked_depth3() {
+        // The same gate holds at depth-3 (`lib::sub::mid::Point::raw`): a plain
+        // intermediate import blocks the deeper type-member path.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::sub::mid; pub fn main() -> i32 { return lib::sub::mid::Point::raw(); }",
+            ),
+            (
+                vec!["lib", "a"],
+                "pub struct Point { x: i32; pub fn raw() -> i32 { return 99; } }",
+            ),
+            (vec!["lib", "sub", "mid"], "use lib::a::{Point};"),
+        ]);
+        assert!(
+            msg.contains("lib::sub::mid::Point::raw"),
+            "a depth-3 plain-imported type member is blocked, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_type_member_through_pub_use_import_resolves_depth3() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::sub::mid; pub fn main() -> i32 { return lib::sub::mid::Point::raw(); }",
+            ),
+            (
+                vec!["lib", "a"],
+                "pub struct Point { x: i32; pub fn raw() -> i32 { return 99; } }",
+            ),
+            (vec!["lib", "sub", "mid"], "pub use lib::a::{Point};"),
+        ]);
+    }
+
+    #[test]
+    fn namespace_enum_variant_through_plain_import_blocked() {
+        // The enum-variant type-member path honors the same gate: a plain
+        // intermediate import of the enum blocks `mid::Color::Red`.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::mid; use lib::a::{Color}; \
+                 pub fn main() -> i32 { let c: Color = lib::mid::Color::Red; return 0; }",
+            ),
+            (vec!["lib", "a"], "pub enum Color { Red, Green }"),
+            (vec!["lib", "mid"], "use lib::a::{Color};"),
+        ]);
+        assert!(
+            msg.contains("cannot resolve `lib::mid::Color`"),
+            "a plain-imported enum's variant is not reachable through a namespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn namespace_enum_variant_through_pub_use_import_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::mid; use lib::a::{Color}; \
+                 pub fn main() -> i32 { let c: Color = lib::mid::Color::Red; return 0; }",
+            ),
+            (vec!["lib", "a"], "pub enum Color { Red, Green }"),
+            (vec!["lib", "mid"], "pub use lib::a::{Color};"),
+        ]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Axis 9b — cross-file struct/enum TYPE CONFUSION (the B1 soundness
+    // guard). Same-named struct/enum types from different files are DISTINCT
+    // (identity keyed on the canonical file path, not the bare name), so a
+    // value of one is never assignable where the other is expected — at every
+    // boundary. Each negative compiled-as-bug before the identity fix; if any
+    // starts passing, the type checker has regressed to bare-name unification
+    // and a 12-byte struct can flow into a 4-byte slot (OOB) or a value's
+    // private behavior can run on a forged same-named public twin.
+    // ---------------------------------------------------------------------
+
+    /// `T{x;y;z}` from one file passed where the other file's `T{x}` param is
+    /// expected — the canonical confirmed repro (argument boundary).
+    #[test]
+    fn b1_argument_boundary_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{read_a}; use lib::b::{T}; \
+                 pub fn main() -> i32 { let v: T = T { x: 1, y: 2, z: 3 }; return read_a(v); }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; } pub fn read_a(v: T) -> i32 { return v.x; }"),
+            (vec!["lib", "b"], "pub struct T { x: i32; y: i32; z: i32; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "must reject the cross-file confusion, got: {msg}");
+        assert!(
+            msg.contains("lib::a::T") && msg.contains("lib::b::T"),
+            "diagnostic must name both file-qualified types, got: {msg}"
+        );
+    }
+
+    /// A function returning one file's `T` assigned into a `let` annotated with
+    /// the other file's same-named `T` (return/let-annotation boundary).
+    #[test]
+    fn b1_return_into_other_typed_let_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{make_a}; use lib::b::{T}; \
+                 pub fn main() -> i32 { let v: T = make_a(); return v.x; }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; } pub fn make_a() -> T { return T { x: 1 }; }"),
+            (vec!["lib", "b"], "pub struct T { x: i32; y: i32; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "got: {msg}");
+    }
+
+    /// Calling one file's method on a value of the other file's same-named type
+    /// (instance-method-receiver boundary).
+    #[test]
+    fn b1_method_receiver_boundary_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{T}; use lib::b::{make_b}; \
+                 pub fn main() -> i32 { let v: T = make_b(); return v.deep(); }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; pub fn deep(self) -> i32 { return self.x; } }"),
+            (vec!["lib", "b"], "pub struct T { x: i32; y: i32; z: i32; } pub fn make_b() -> T { return T { x: 1, y: 2, z: 3 }; }"),
+        ]);
+        assert!(msg.contains("type mismatch") || msg.contains("not defined") || msg.contains("no method"), "got: {msg}");
+    }
+
+    /// Same-named enums with DIFFERENT variant order across files — passing one
+    /// where the other is expected would silently flip the discriminant.
+    #[test]
+    fn b1_enum_variant_order_boundary_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{Color}; use lib::b::{classify}; \
+                 pub fn main() -> i32 { let c: Color = Color::Red; return classify(c); }",
+            ),
+            (vec!["lib", "a"], "pub enum Color { Red, Green, Blue }"),
+            (vec!["lib", "b"], "pub enum Color { Blue, Green, Red } pub fn classify(c: Color) -> i32 { return 0; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "got: {msg}");
+    }
+
+    /// A struct whose field type is a same-named-but-different imported struct:
+    /// crossing the OUTER struct must be rejected (compounded-offset guard).
+    #[test]
+    fn b1_nested_struct_boundary_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{Wrap}; use lib::b::{make_b_wrap}; \
+                 pub fn main() -> i32 { let w: Wrap = make_b_wrap(); return w.tag; }",
+            ),
+            (vec!["lib", "a"], "pub struct Small { x: i32; } pub struct Wrap { inner: Small; tag: i32; }"),
+            (vec!["lib", "b"], "pub struct Small { x: i32; y: i32; z: i32; } pub struct Wrap { inner: Small; tag: i32; } pub fn make_b_wrap() -> Wrap { return Wrap { inner: Small { x: 1, y: 2, z: 3 }, tag: 9 }; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "got: {msg}");
+    }
+
+    /// Nominal-by-file, not structural: even when the two same-named structs
+    /// have IDENTICAL layout, they remain distinct types and do not interoperate.
+    #[test]
+    fn b1_identical_layout_still_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a::{read_a}; use lib::b::{T}; \
+                 pub fn main() -> i32 { let v: T = T { x: 1 }; return read_a(v); }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; } pub fn read_a(v: T) -> i32 { return v.x; }"),
+            (vec!["lib", "b"], "pub struct T { x: i32; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "identical layout must still be nominally distinct, got: {msg}");
+    }
+
+    /// Positive control: the SAME type reached via item-import in two files
+    /// interoperates (no false rejection) — guards against over-strictness.
+    #[test]
+    fn b1_same_type_via_import_interoperates() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo::{Point}; use lib::ops::{flip}; \
+                 pub fn main() -> i32 { let p: Point = Point { x: 1, y: 2 }; return flip(p); }",
+            ),
+            (vec!["lib", "geo"], "pub struct Point { x: i32; y: i32; }"),
+            (vec!["lib", "ops"], "use lib::geo::{Point}; pub fn flip(p: Point) -> i32 { return p.y; }"),
+        ]);
+    }
+
+    /// Positive control: a single-file program with one `T` is unaffected.
+    #[test]
+    fn b1_single_file_one_type_unaffected() {
+        assert_ok(&[(
+            vec![],
+            "struct T { x: i32; } fn read(v: T) -> i32 { return v.x; } \
+             pub fn main() -> i32 { return read(T { x: 7 }); }",
+        )]);
+    }
+
+    /// The same imported type passed to a non-entry function reached through a
+    /// *namespace-qualified* call (`ops::flip(p)`) — not an item-imported bare
+    /// call — must also interoperate. The non-entry param is canonicalized at its
+    /// defining file, so the qualified-call reader sees the same key as the value.
+    #[test]
+    fn b1_same_type_via_namespace_qualified_call_interoperates() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo::{Point}; use lib::ops; \
+                 pub fn main() -> i32 { let p: Point = Point { x: 1, y: 2 }; return ops::flip(p); }",
+            ),
+            (vec!["lib", "geo"], "pub struct Point { x: i32; y: i32; }"),
+            (vec!["lib", "ops"], "use lib::geo::{Point}; pub fn flip(p: Point) -> i32 { return p.y; }"),
+        ]);
+    }
+
+    /// A non-entry function whose param is a same-named type imported from a
+    /// *different* file than the caller imports: the param resolves through the
+    /// *defining* file's import (`lib::a::T`), the argument is the caller's
+    /// `lib::b::T`, so the call is still rejected — the fix canonicalizes against
+    /// the definer's scope, never collapsing distinct same-named types.
+    #[test]
+    fn b1_non_entry_param_cross_imported_type_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::b::{T}; use lib::ops::{flip}; \
+                 pub fn main() -> i32 { let v: T = T { x: 1, y: 2 }; return flip(v); }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; }"),
+            (vec!["lib", "b"], "pub struct T { x: i32; y: i32; }"),
+            (vec!["lib", "ops"], "use lib::a::{T}; pub fn flip(p: T) -> i32 { return p.x; }"),
+        ]);
+        assert!(msg.contains("type mismatch"), "got: {msg}");
+        assert!(
+            msg.contains("lib::a::T") && msg.contains("lib::b::T"),
+            "diagnostic must name both file-qualified types, got: {msg}"
+        );
+    }
+
+    /// Counterpart positive control: when the non-entry function and the caller
+    /// import the *same* file's type, the param resolves to that one canonical key
+    /// and the call interoperates.
+    #[test]
+    fn b1_non_entry_param_same_imported_type_interoperates() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::a::{T}; use lib::ops::{flip}; \
+                 pub fn main() -> i32 { let v: T = T { x: 1 }; return flip(v); }",
+            ),
+            (vec!["lib", "a"], "pub struct T { x: i32; }"),
+            (vec!["lib", "ops"], "use lib::a::{T}; pub fn flip(p: T) -> i32 { return p.x; }"),
+        ]);
+    }
+
+    /// A non-entry function whose param is an item-imported *enum* must also
+    /// interoperate when called from the entry file — the param canonicalizes the
+    /// same way a struct param does.
+    #[test]
+    fn b1_non_entry_enum_param_via_import_interoperates() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::col::{Color}; use lib::ops::{paint}; \
+                 pub fn main() -> i32 { let c: Color = Color::Green; return paint(c); }",
+            ),
+            (vec!["lib", "col"], "pub enum Color { Red, Green, Blue }"),
+            (vec!["lib", "ops"], "use lib::col::{Color}; pub fn paint(c: Color) -> i32 { return 0; }"),
+        ]);
     }
 }

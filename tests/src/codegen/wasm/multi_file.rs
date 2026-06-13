@@ -278,3 +278,571 @@ spec LibSpec {
         by_spec.keys().collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn namespace_qualified_assoc_fn_executes() {
+    // The plan's normative `geo::Point::new(...)`: a file-imported namespace
+    // reaches a struct's associated function inside another file. The result is a
+    // `Point` whose `sum()` method runs end to end.
+    let main = "\
+use lib::geo;
+use lib::geo::{Point};
+
+pub fn run() -> i32 {
+    let p: Point = geo::Point::new(3, 4);
+    return p.sum();
+}
+";
+    let geo = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn new(a: i32, b: i32) -> Point {
+        return Point { x: a, y: b };
+    }
+
+    pub fn sum(self) -> i32 {
+        return self.x + self.y;
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geo"], geo),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 7);
+}
+
+#[test]
+fn namespace_qualified_struct_literal_field_read_executes() {
+    // A namespace-qualified struct literal (`geo::Point { .. }`) constructs the
+    // imported struct; its field is read back at the right offset.
+    let main = "\
+use lib::geo;
+use lib::geo::{Point};
+
+pub fn run() -> i32 {
+    let p: Point = geo::Point { x: 10, y: 20 };
+    return p.x + p.y;
+}
+";
+    let geo = "pub struct Point { x: i32; y: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geo"], geo),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 30);
+}
+
+#[test]
+fn namespace_qualified_enum_variant_executes() {
+    // A namespace-qualified enum variant (`geo::Signal::Stop`) lowers to its
+    // declaration-order tag (Go=0, Slow=1, Stop=2).
+    let main = "\
+use lib::geo;
+use lib::geo::{Signal};
+
+pub fn run() -> i32 {
+    let s: Signal = geo::Signal::Stop;
+    return pick(s);
+}
+
+fn pick(s: Signal) -> i32 {
+    return 0;
+}
+";
+    let geo = "pub enum Signal { Go, Slow, Stop }";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geo"], geo),
+    ]);
+
+    // Compiles, validates, and instantiates; the variant lowering is exercised by
+    // the `let s = geo::Signal::Stop` initializer reaching codegen.
+    let (_store, _instance) = instantiate(&wasm);
+}
+
+#[test]
+fn non_entry_fn_imported_struct_param_executes() {
+    // A non-entry file's function takes an item-imported struct by value; the
+    // entry constructs that struct and passes it. The param's type must carry the
+    // imported struct's canonical key so the call type-checks, then the value is
+    // passed and a field read inside the callee returns the right offset (#63).
+    let main = "\
+use lib::geo::{Point};
+use lib::ops::{flip};
+
+pub fn run() -> i32 {
+    let p: Point = Point { x: 1, y: 2 };
+    return flip(p);
+}
+";
+    let geo = "pub struct Point { x: i32; y: i32; }";
+    let ops = "\
+use lib::geo::{Point};
+
+pub fn flip(p: Point) -> i32 {
+    return p.y;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geo"], geo),
+        (vec!["lib", "ops"], ops),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 2);
+}
+
+#[test]
+fn nested_cross_file_struct_field_laid_out_by_definer() {
+    // `Outer` (in `lib/a.inf`) nests an `Inner { a; b }` (8 bytes), so `tag` sits
+    // at offset 8. The entry imports `Outer` and defines its *own* same-named
+    // `Inner { a }` (4 bytes). Reading `o.tag` from the entry must use the
+    // definer's layout (offset 8) rather than the entry's smaller `Inner` (which
+    // would mis-read offset 4 and return the smuggled `Inner.b`). A single shared
+    // layout would also let a larger entry `Inner` write past the struct (#63).
+    let main = "\
+use lib::a::{Outer};
+
+struct Inner {
+    a: i32;
+}
+
+pub fn run() -> i32 {
+    let o: Outer = Outer::make();
+    return o.tag;
+}
+";
+    let lib_a = "\
+struct Inner {
+    a: i32;
+    b: i32;
+}
+
+pub struct Outer {
+    inner: Inner;
+    tag: i32;
+
+    pub fn make() -> Outer {
+        return Outer { inner: Inner { a: 111, b: 222 }, tag: 333 };
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 333);
+}
+
+#[test]
+fn nested_cross_file_struct_read_via_method_laid_out_by_definer() {
+    // The same layout divergence reached through a `&self` method: `read_tag`
+    // loads `self.tag` at the definer's offset 8, so the call returns 333 even
+    // though the entry's same-named `Inner` is a different size (#63).
+    let main = "\
+use lib::a::{Outer};
+
+struct Inner {
+    a: i32;
+}
+
+pub fn run() -> i32 {
+    let o: Outer = Outer::make();
+    return o.read_tag();
+}
+";
+    let lib_a = "\
+struct Inner {
+    a: i32;
+    b: i32;
+}
+
+pub struct Outer {
+    inner: Inner;
+    tag: i32;
+
+    pub fn make() -> Outer {
+        return Outer { inner: Inner { a: 111, b: 222 }, tag: 333 };
+    }
+
+    pub fn read_tag(self) -> i32 {
+        return self.tag;
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 333);
+}
+
+#[test]
+fn depth_two_nested_cross_file_struct_laid_out_by_definer() {
+    // Two levels of cross-file nesting: `Outer { mid: Mid }` and
+    // `Mid { inner: Inner }` all live in `lib/a.inf`, while the entry defines
+    // unrelated same-named `Inner` and `Mid`. Laying `Outer` out must thread each
+    // struct's own defining file at every level, so `tag` lands past `Mid`'s full
+    // 12 bytes and `o.tag` returns 444 (#63).
+    let main = "\
+use lib::a::{Outer};
+
+struct Inner {
+    x: i32;
+}
+
+struct Mid {
+    z: i32;
+}
+
+pub fn run() -> i32 {
+    let o: Outer = Outer::make();
+    return o.tag;
+}
+";
+    let lib_a = "\
+struct Inner {
+    x: i32;
+    y: i32;
+}
+
+struct Mid {
+    inner: Inner;
+    m: i32;
+}
+
+pub struct Outer {
+    mid: Mid;
+    tag: i32;
+
+    pub fn make() -> Outer {
+        return Outer { mid: Mid { inner: Inner { x: 1, y: 2 }, m: 3 }, tag: 444 };
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 444);
+}
+
+#[test]
+fn imported_struct_with_private_field_type_compiles_and_runs() {
+    // The entry imports `Outer` but defines *no* `Inner` of its own. `Outer`'s
+    // field type `Inner` is private to `lib/a.inf`, so resolving it relative to
+    // the entry would fail to find any `Inner`. Laying `Outer` out by its definer
+    // resolves the private `Inner` from `lib/a.inf` regardless of the access site,
+    // so the legitimate program compiles and `o.tag` returns 333 (#63).
+    let main = "\
+use lib::a::{Outer};
+
+pub fn run() -> i32 {
+    let o: Outer = Outer::make();
+    return o.tag;
+}
+";
+    let lib_a = "\
+struct Inner {
+    a: i32;
+    b: i32;
+}
+
+pub struct Outer {
+    inner: Inner;
+    tag: i32;
+
+    pub fn make() -> Outer {
+        return Outer { inner: Inner { a: 111, b: 222 }, tag: 333 };
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 333);
+}
+
+#[test]
+fn entry_self_root_qualified_call_executes() {
+    // `use root;` binds the entry file as a namespace exposing its own `pub`
+    // items; `root::helper()` is an entry-self qualified call whose recorded
+    // target's defining file *is* the entry. It must lower like a bare
+    // `helper()` call rather than be mistaken for a struct associated function
+    // (which previously panicked the code generator) (#63).
+    let main = "\
+use root;
+
+pub fn helper() -> i32 {
+    return 9;
+}
+
+pub fn run() -> i32 {
+    return root::helper();
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 9);
+}
+
+#[test]
+fn nested_cross_file_struct_typed_field_read_uses_definers_layout() {
+    // The gap the prior layout tests missed: they only read `o.tag` (a scalar on
+    // `Outer`, served by the cached frame layout keyed on the identifier `o`).
+    // This reads *through* the nested struct field — `o.mid.a` and `o.mid.b` —
+    // whose receiver `o.mid` is itself a `MemberAccess`, not an identifier, so it
+    // takes the slow path that re-resolves the field's struct by name. `Outer`
+    // (in `lib/a.inf`) nests `lib::b::Mid { a; b }`; the entry imports a *different*
+    // `other::c::Mid { b; a }` with the fields reversed. Reading `o.mid.a` must use
+    // the definer's `b::Mid` (a at offset 0 = 22), not the entry-visible `c::Mid`
+    // (which would read a at offset 4 = 33). The whole value must be 11223344 (#63).
+    let main = "\
+use lib::a::{Outer};
+use lib::a;
+use other::c::{Mid};
+
+pub fn run() -> i32 {
+    let o: Outer = a::make();
+    return o.head*1000000 + o.mid.a*10000 + o.mid.b*100 + o.tail;
+}
+";
+    let lib_a = "\
+use lib::b::{Mid};
+
+pub struct Outer {
+    head: i32;
+    mid: Mid;
+    tail: i32;
+
+    pub fn make_outer() -> Outer {
+        return Outer { head: 11, mid: Mid { a: 22, b: 33 }, tail: 44 };
+    }
+}
+
+pub fn make() -> Outer {
+    return Outer { head: 11, mid: Mid { a: 22, b: 33 }, tail: 44 };
+}
+";
+    let lib_b = "pub struct Mid { a: i32; b: i32; }\n";
+    let other_c = "pub struct Mid { b: i32; a: i32; }\n";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+        (vec!["lib", "b"], lib_b),
+        (vec!["other", "c"], other_c),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 11223344);
+}
+
+#[test]
+fn nested_cross_file_struct_typed_field_read_via_method_uses_definers_layout() {
+    // The same nested-field read reached inside a method body on `Outer`. The
+    // method reads `self.mid.a`/`self.mid.b`, again resolving `mid`'s struct by
+    // the definer's `b::Mid`, so the call returns 11223344 even though the entry
+    // sees a reversed-field `c::Mid` (#63).
+    let main = "\
+use lib::a::{Outer};
+use lib::a;
+use other::c::{Mid};
+
+pub fn run() -> i32 {
+    let o: Outer = a::make();
+    return o.combined();
+}
+";
+    let lib_a = "\
+use lib::b::{Mid};
+
+pub struct Outer {
+    head: i32;
+    mid: Mid;
+    tail: i32;
+
+    pub fn combined(self) -> i32 {
+        return self.head*1000000 + self.mid.a*10000 + self.mid.b*100 + self.tail;
+    }
+}
+
+pub fn make() -> Outer {
+    return Outer { head: 11, mid: Mid { a: 22, b: 33 }, tail: 44 };
+}
+";
+    let lib_b = "pub struct Mid { a: i32; b: i32; }\n";
+    let other_c = "pub struct Mid { b: i32; a: i32; }\n";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+        (vec!["lib", "b"], lib_b),
+        (vec!["other", "c"], other_c),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 11223344);
+}
+
+#[test]
+fn nested_cross_file_struct_typed_field_write_stays_in_bounds() {
+    // A *write* through the nested struct field: `o.mid.b = 999`. The store must
+    // target the definer's `b::Mid` offset for `b` (4), leaving `a` and `tail`
+    // untouched. Against the entry-visible `c::Mid` the field order is reversed,
+    // so the wrong offset would corrupt a sibling. After the write, a=22, b=999,
+    // tail=44, head=11: 11*1000000 + 22*10000 + 999*100 + 44 = 11319944 (#63).
+    let main = "\
+use lib::a::{Outer};
+use lib::a;
+use other::c::{Mid};
+
+pub fn run() -> i32 {
+    let mut o: Outer = a::make();
+    o.mid.b = 999;
+    return o.head*1000000 + o.mid.a*10000 + o.mid.b*100 + o.tail;
+}
+";
+    let lib_a = "\
+use lib::b::{Mid};
+
+pub struct Outer {
+    head: i32;
+    mid: Mid;
+    tail: i32;
+}
+
+pub fn make() -> Outer {
+    return Outer { head: 11, mid: Mid { a: 22, b: 33 }, tail: 44 };
+}
+";
+    let lib_b = "pub struct Mid { a: i32; b: i32; }\n";
+    let other_c = "pub struct Mid { b: i32; a: i32; }\n";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+        (vec!["lib", "b"], lib_b),
+        (vec!["other", "c"], other_c),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 11319944);
+}
+
+#[test]
+fn nested_cross_file_struct_field_read_when_entry_imports_only_outer() {
+    // The over-correction guard: when the entry imports *only* `Outer` (not the
+    // inner `Mid`), `o.mid.a` must still compile and run. `Mid` is `pub` and
+    // reached through the accessible `Outer`, so resolving the field type through
+    // `Outer`'s defining file finds it even though the entry cannot name `Mid`
+    // by itself (Rule 4) (#63).
+    let main = "\
+use lib::a::{Outer};
+use lib::a;
+
+pub fn run() -> i32 {
+    let o: Outer = a::make();
+    return o.head*1000000 + o.mid.a*10000 + o.mid.b*100 + o.tail;
+}
+";
+    let lib_a = "\
+use lib::b::{Mid};
+
+pub struct Outer {
+    head: i32;
+    mid: Mid;
+    tail: i32;
+}
+
+pub fn make() -> Outer {
+    return Outer { head: 11, mid: Mid { a: 22, b: 33 }, tail: 44 };
+}
+";
+    let lib_b = "pub struct Mid { a: i32; b: i32; }\n";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "a"], lib_a),
+        (vec!["lib", "b"], lib_b),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 11223344);
+}
+
+#[test]
+fn entry_type_not_ambiently_reachable_from_non_entry_file_executes_through_own_import() {
+    // FIX 2 executable twin: a non-entry file (`container`) item-imports its own
+    // `Inner` and calls a bare `Inner::tag()`. The entry defines a *same-named*
+    // `Inner` with a different `tag` body. The bare call must bind the file's own
+    // imported `Inner` (returning 1), never leaking to the entry's (which would
+    // return 99) — and must not panic the code generator (#63).
+    let main = "\
+use container;
+
+pub struct Inner {
+    a: i32;
+
+    pub fn tag() -> i32 {
+        return 99;
+    }
+}
+
+pub fn run() -> i32 {
+    return container::run();
+}
+";
+    let container = "\
+use lib::types::{Inner};
+
+pub fn run() -> i32 {
+    return Inner::tag();
+}
+";
+    let lib_types = "\
+pub struct Inner {
+    v: i32;
+
+    pub fn tag() -> i32 {
+        return 1;
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["container"], container),
+        (vec!["lib", "types"], lib_types),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}

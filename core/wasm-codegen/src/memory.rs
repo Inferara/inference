@@ -163,6 +163,26 @@ pub(crate) struct StructSlot {
     pub fields: Vec<StructFieldSlot>,
 }
 
+/// Resolves the struct named `name`, as referenced from `module_path`, into its
+/// [`StructInfo`] paired with the defining file's module path.
+///
+/// The defining-file path is what layout recursion must thread into the struct's
+/// nested fields: a same-named struct in another file has a different layout, so
+/// resolving its fields relative to the access site would compute the wrong
+/// offsets (#63). The path is derived from the struct's own defining scope, so a
+/// bare type name accessed from a file that *imports* it still lays out by the
+/// definer. For a single-file program every struct is defined in the entry file,
+/// so the defining path is empty and resolution is unchanged.
+fn resolve_struct_with_defining_path(
+    name: &str,
+    ctx: &TypedContext,
+    module_path: &[String],
+) -> Option<(StructInfo, Vec<String>)> {
+    let info = ctx.lookup_struct_in(name, module_path)?;
+    let defining_path = ctx.module_path_of_scope(info.definition_scope_id);
+    Some((info, defining_path))
+}
+
 /// Computes the byte layout for a struct's fields.
 ///
 /// Iterates fields in declaration order, aligning each field to its natural
@@ -176,6 +196,13 @@ pub(crate) struct StructSlot {
 /// For compound fields (nested structs or arrays), the field's
 /// [`CompoundFieldLayout`] caches the inner layout so that chained member
 /// access can resolve offsets without recomputation.
+///
+/// The layout is a function of `struct_info` alone — its fields resolve relative
+/// to the file that *defines* the struct, derived from
+/// [`StructInfo::definition_scope_id`](inference_type_checker::StructInfo::definition_scope_id).
+/// The `module_path` argument names the accessing file and does not influence the
+/// result; two files accessing the same struct compute identical offsets, and a
+/// same-named struct in another file never shadows a nested field's type (#63).
 ///
 /// # Errors
 ///
@@ -196,12 +223,18 @@ pub(crate) fn compute_struct_field_layout(
 fn compute_struct_field_layout_with_visited(
     struct_info: &StructInfo,
     ctx: &TypedContext,
-    module_path: &[String],
+    _access_module_path: &[String],
     visited: &FxHashSet<String>,
 ) -> Result<(u32, Vec<StructFieldSlot>), CodegenError> {
     if struct_info.fields.is_empty() {
         return Ok((0, vec![]));
     }
+    // A struct's field types resolve relative to the file that *defines* it, not
+    // the file accessing it: a same-named struct in another file has a different
+    // layout. Re-derive the defining path from the struct itself so the layout is
+    // independent of the access site (#63).
+    let module_path = ctx.module_path_of_scope(struct_info.definition_scope_id);
+    let module_path = module_path.as_slice();
     let mut current_offset: u32 = 0;
     let mut max_align: u32 = 1;
     let mut field_slots = Vec::with_capacity(struct_info.fields.len());
@@ -237,7 +270,7 @@ fn compute_struct_field_layout_with_visited(
 
         let resolved_kind = match &field.type_info.kind {
             TypeInfoKind::Custom(name) if ctx.lookup_enum_in(name, module_path).is_some() => {
-                TypeInfoKind::Enum(name.clone())
+                TypeInfoKind::Enum(name.clone(), name.clone())
             }
             other => other.clone(),
         };
@@ -265,15 +298,17 @@ fn compute_field_layout_with_visited(
     visited: &mut FxHashSet<String>,
 ) -> Result<CompoundFieldLayout, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
-            if let Some(inner_struct) = ctx.lookup_struct_in(name, module_path) {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
+            if let Some((inner_struct, defining_path)) =
+                resolve_struct_with_defining_path(name, ctx, module_path)
+            {
                 if !visited.insert(name.clone()) {
                     return Err(CodegenError::CycleInStructLayout { name: name.clone() });
                 }
                 let (total_size, fields) = compute_struct_field_layout_with_visited(
                     &inner_struct,
                     ctx,
-                    module_path,
+                    &defining_path,
                     visited,
                 )?;
                 Ok(CompoundFieldLayout::NestedStruct { fields, total_size })
@@ -325,7 +360,7 @@ pub(crate) fn element_size(kind: &TypeInfoKind) -> u32 {
     match kind {
         TypeInfoKind::Bool | TypeInfoKind::Number(NumberType::I8 | NumberType::U8) => 1,
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => 2,
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => 4,
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_, _) => 4,
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => 8,
         // The type checker restricts array element types to: bool, i8, u8, i16, u16,
         // i32, u32, i64, u64. This arm is unreachable for valid programs. When
@@ -360,20 +395,22 @@ fn type_byte_size_with_visited(
     visited: &mut FxHashSet<String>,
 ) -> Result<u32, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             if !visited.insert(name.clone()) {
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
-            if let Some(struct_info) = ctx.lookup_struct_in(name, module_path) {
+            if let Some((struct_info, defining_path)) =
+                resolve_struct_with_defining_path(name, ctx, module_path)
+            {
                 let (total_size, _) = compute_struct_field_layout_with_visited(
                     &struct_info,
                     ctx,
-                    module_path,
+                    &defining_path,
                     visited,
                 )?;
                 Ok(total_size)
             } else if ctx.lookup_enum_in(name, module_path).is_some() {
-                Ok(element_size(&TypeInfoKind::Enum(name.clone())))
+                Ok(element_size(&TypeInfoKind::Enum(name.clone(), name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
             }
@@ -416,19 +453,31 @@ pub(crate) fn natural_alignment_for_type(
 ///
 /// Used when computing padding/alignment for struct frame slots so the
 /// struct base address is suitably aligned for every field.
-pub(crate) fn max_struct_alignment(
-    field_slots: &[StructFieldSlot],
-    ctx: &TypedContext,
-    module_path: &[String],
-) -> Result<u32, CodegenError> {
-    let mut max_align = 1u32;
-    for f in field_slots {
-        let align = natural_alignment_for_type(&f.type_kind, ctx, module_path)?;
-        if align > max_align {
-            max_align = align;
-        }
+///
+/// Alignment is derived from each field slot's already-computed
+/// [`CompoundFieldLayout`] rather than re-resolving the field's type by name.
+/// The slots are produced by [`compute_struct_field_layout`], which lays each
+/// nested type out relative to its *defining* file; recovering alignment from
+/// them keeps it independent of the file accessing the struct, so a nested
+/// cross-file field whose type is not visible at the access site still aligns
+/// correctly (#63).
+#[must_use = "returns the struct's overall alignment"]
+pub(crate) fn max_struct_alignment(field_slots: &[StructFieldSlot]) -> u32 {
+    field_slots.iter().map(field_slot_alignment).max().unwrap_or(1)
+}
+
+/// Returns the natural alignment of a single field from its cached layout.
+///
+/// A scalar field aligns to its element size; a nested struct aligns to the
+/// maximum alignment of its own fields; an array aligns to its element's
+/// alignment. This mirrors [`natural_alignment_for_type`] but reads the
+/// pre-computed slot rather than re-resolving the type by name.
+fn field_slot_alignment(slot: &StructFieldSlot) -> u32 {
+    match &slot.layout {
+        CompoundFieldLayout::Scalar => element_size(&slot.type_kind),
+        CompoundFieldLayout::NestedStruct { fields, .. } => max_struct_alignment(fields),
+        CompoundFieldLayout::NestedArray { elem_kind, .. } => element_size(elem_kind),
     }
-    Ok(max_align)
 }
 
 fn natural_alignment_with_visited(
@@ -438,17 +487,19 @@ fn natural_alignment_with_visited(
     visited: &mut FxHashSet<String>,
 ) -> Result<u32, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             if !visited.insert(name.clone()) {
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
-            if let Some(struct_info) = ctx.lookup_struct_in(name, module_path) {
+            if let Some((struct_info, defining_path)) =
+                resolve_struct_with_defining_path(name, ctx, module_path)
+            {
                 let mut max_align = 1u32;
                 for f in &struct_info.fields {
                     let align = natural_alignment_with_visited(
                         &f.type_info.kind,
                         ctx,
-                        module_path,
+                        &defining_path,
                         &mut visited.clone(),
                     )?;
                     if align > max_align {
@@ -457,7 +508,7 @@ fn natural_alignment_with_visited(
                 }
                 Ok(max_align)
             } else if ctx.lookup_enum_in(name, module_path).is_some() {
-                Ok(element_size(&TypeInfoKind::Enum(name.clone())))
+                Ok(element_size(&TypeInfoKind::Enum(name.clone(), name.clone())))
             } else {
                 Err(CodegenError::StructNotFoundInTypeContext { name: name.clone() })
             }
@@ -507,7 +558,7 @@ pub(crate) fn store_instruction(elem_type: &TypeInfoKind) -> Instruction<'static
             Instruction::I32Store8(memarg)
         }
         TypeInfoKind::Number(NumberType::I16 | NumberType::U16) => Instruction::I32Store16(memarg),
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => {
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_, _) => {
             Instruction::I32Store(memarg)
         }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Store(memarg),
@@ -535,7 +586,7 @@ pub(crate) fn load_instruction(elem_type: &TypeInfoKind) -> Instruction<'static>
         TypeInfoKind::Number(NumberType::I8) => Instruction::I32Load8S(memarg),
         TypeInfoKind::Number(NumberType::U16) => Instruction::I32Load16U(memarg),
         TypeInfoKind::Number(NumberType::I16) => Instruction::I32Load16S(memarg),
-        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_) => {
+        TypeInfoKind::Number(NumberType::I32 | NumberType::U32) | TypeInfoKind::Enum(_, _) => {
             Instruction::I32Load(memarg)
         }
         TypeInfoKind::Number(NumberType::I64 | NumberType::U64) => Instruction::I64Load(memarg),
@@ -717,7 +768,7 @@ pub(crate) fn emit_array_param_copy(
 
     let is_compound_element = matches!(
         elem_type,
-        TypeInfoKind::Struct(_) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
+        TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_) | TypeInfoKind::Array(_, _)
     );
 
     if slot.length > UNROLL_THRESHOLD || is_compound_element {
@@ -1446,7 +1497,7 @@ mod tests {
         let info = make_struct_info(
             "Outer",
             vec![
-                make_field("inner", TypeInfoKind::Struct("Inner".to_string())),
+                make_field("inner", TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string())),
                 make_field("val", TypeInfoKind::Number(NumberType::I32)),
             ],
         );
@@ -1497,7 +1548,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            type_byte_size(&TypeInfoKind::Struct("Point".to_string()), &ctx, &[]).unwrap(),
+            type_byte_size(&TypeInfoKind::Struct("Point".to_string(), "Point".to_string()), &ctx, &[]).unwrap(),
             8,
             "Point {{ x: i32, y: i32 }} = 8 bytes"
         );
@@ -1528,7 +1579,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            natural_alignment_for_type(&TypeInfoKind::Struct("Mixed".to_string()), &ctx, &[]).unwrap(),
+            natural_alignment_for_type(&TypeInfoKind::Struct("Mixed".to_string(), "Mixed".to_string()), &ctx, &[]).unwrap(),
             8,
             "Mixed {{ a: bool, b: i64 }} alignment = max(1, 8) = 8"
         );
@@ -1605,7 +1656,7 @@ mod tests {
             }
         }
 
-        assert_within(&TypeInfoKind::Enum("Color".to_string()));
+        assert_within(&TypeInfoKind::Enum("Color".to_string(), "Color".to_string()));
 
         let array_of_i64 = TypeInfoKind::Array(
             Box::new(TypeInfo {
@@ -1616,7 +1667,7 @@ mod tests {
         );
         assert_within(&array_of_i64);
 
-        assert_within(&TypeInfoKind::Struct("Wide".to_string()));
+        assert_within(&TypeInfoKind::Struct("Wide".to_string(), "Wide".to_string()));
     }
 
     #[test]

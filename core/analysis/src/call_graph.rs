@@ -204,7 +204,7 @@ fn resolve_callee_raw(ctx: &TypedContext, function: ExprId) -> Option<String> {
         Expr::MemberAccess { expr, name } => {
             let recv = ctx.get_node_typeinfo(NodeId::Expr(*expr))?;
             let tn = match &recv.kind {
-                TypeInfoKind::Struct(t) => t.clone(),
+                TypeInfoKind::Struct(t, _) => t.clone(),
                 TypeInfoKind::Custom(t) if ctx.lookup_struct(t).is_some() => t.clone(),
                 _ => return None,
             };

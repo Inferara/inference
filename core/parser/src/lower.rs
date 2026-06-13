@@ -238,9 +238,14 @@ impl<'s> Lowering<'s> {
         let name = self.lower_name_or_error(self.first_identifier(node), node);
         let mut defs = Vec::new();
 
-        // The name is the first named child; nested definitions follow it
-        // (mirrors `builder.rs`'s `named_child(1..)`).
-        for child in node.node_children().skip(1) {
+        // Lower only the nested definitions. A spec node's non-definition node
+        // children are the name `Identifier` and, on the `pub spec` error path, a
+        // stray `Visibility` node; both are filtered out so an already-rejected
+        // `pub spec` does not cascade a second diagnostic from re-lowering the
+        // name as if it were a definition.
+        for child in node.node_children().filter(|child| {
+            !matches!(child.kind, SyntaxKind::Identifier | SyntaxKind::Visibility)
+        }) {
             let def_id = self.lower_definition(child);
             defs.push(def_id);
         }
@@ -2554,6 +2559,50 @@ mod tests {
                     arena[*field_value].kind,
                     Expr::NumberLiteral { .. }
                 ));
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_single_segment_qualified_struct_literal() {
+        // `geo::Point { .. }` lowers to a struct literal whose name carries the
+        // whole `::`-qualified head, which the type checker splits.
+        let arena = lower("fn f() { geo::Point { x: 1 }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "geo::Point");
+                assert_eq!(fields.len(), 1);
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_multi_segment_qualified_struct_literal() {
+        // The previously-failing case (#63): a deeper `::` chain before `{` must
+        // produce the same single-qualified-head struct literal as the
+        // single-segment form, so the type checker's `rsplit_once("::")` sees the
+        // whole path.
+        let arena = lower("fn f() { lib::geo::Point { x: 1, y: 2 }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "lib::geo::Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(arena.ident_name(fields[0].0), "x");
+                assert_eq!(arena.ident_name(fields[1].0), "y");
+            }
+            other => panic!("expected struct literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_deep_qualified_struct_literal_empty_body() {
+        let arena = lower("fn f() { a::b::c::Point { }; }");
+        match single_expr(&arena) {
+            Expr::StructLiteral { name, fields } => {
+                assert_eq!(arena.ident_name(*name), "a::b::c::Point");
+                assert!(fields.is_empty());
             }
             other => panic!("expected struct literal, got {other:?}"),
         }

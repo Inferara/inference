@@ -870,8 +870,10 @@ fn out_dir_with_codegen_no_output_flags_creates_no_directory() {
 // the success path (`Parsed:` on stdout), the unreachable-file warning (stderr),
 // and the missing-import error with a nearest-match suggestion (stderr, exit 1).
 //
-// They stay at `--parse` because multi-file codegen is not wired yet; driving
-// the full pipeline here would hit the codegen `todo!()` for >1 file.
+// They stay at `--parse` to isolate the front-end discovery behavior under test
+// (success, warnings, and import errors). Multi-file codegen is fully wired —
+// the import-reachable closure compiles to one artifact — so driving later phases
+// would test codegen, not discovery; the dedicated codegen tests cover that.
 // ---------------------------------------------------------------------------
 
 /// Writes `source` to `<root>/<relative>` (a `/`-joined logical path), creating

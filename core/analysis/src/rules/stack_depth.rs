@@ -292,7 +292,7 @@ fn body_frame_bytes(ctx: &TypedContext, block_id: BlockId) -> u32 {
 /// compound byte size plus the worst-case per-slot leading alignment padding.
 fn slot_bytes(ctx: &TypedContext, kind: &TypeInfoKind) -> u32 {
     match kind {
-        TypeInfoKind::Array(..) | TypeInfoKind::Struct(_) => {
+        TypeInfoKind::Array(..) | TypeInfoKind::Struct(_, _) => {
             exact_byte_size(ctx, kind).saturating_add(MAX_SLOT_PADDING)
         }
         // A `Custom` name gets a slot only when it resolves to a struct; enum
@@ -339,12 +339,12 @@ fn exact_byte_size_visited(
             NumberType::I32 | NumberType::U32 => 4,
             NumberType::I64 | NumberType::U64 => 8,
         },
-        TypeInfoKind::Enum(_) => 4,
+        TypeInfoKind::Enum(_, _) => 4,
         TypeInfoKind::Array(elem, length) => {
             let elem_sz = exact_byte_size_visited(ctx, &elem.kind, visited);
             elem_sz.saturating_mul(*length)
         }
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             if !visited.insert(name.clone()) {
                 return 0;
             }
@@ -396,9 +396,9 @@ fn alignment_of(ctx: &TypedContext, kind: &TypeInfoKind, visited: &mut HashSet<S
             NumberType::I32 | NumberType::U32 => 4,
             NumberType::I64 | NumberType::U64 => 8,
         },
-        TypeInfoKind::Enum(_) => 4,
+        TypeInfoKind::Enum(_, _) => 4,
         TypeInfoKind::Array(elem, _) => alignment_of(ctx, &elem.kind, visited),
-        TypeInfoKind::Struct(name) | TypeInfoKind::Custom(name) => {
+        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             if !visited.insert(name.clone()) {
                 return 1;
             }
@@ -582,7 +582,7 @@ mod tests {
             ],
         )]);
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("S".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("S".to_string(), "S".to_string())),
             24
         );
     }
@@ -594,11 +594,11 @@ mod tests {
     fn exact_byte_size_array_of_structs_is_not_inflated() {
         let ctx = ctx_with_structs(&[("P", &[("a", num(NumberType::I8)), ("b", num(NumberType::I8))])]);
         let elem = TypeInfo {
-            kind: TypeInfoKind::Struct("P".to_string()),
+            kind: TypeInfoKind::Struct("P".to_string(), "P".to_string()),
             type_params: vec![],
         };
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("P".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("P".to_string(), "P".to_string())),
             2,
             "{{ i8, i8 }} packs to 2 bytes"
         );
@@ -618,17 +618,17 @@ mod tests {
             (
                 "Outer",
                 &[
-                    ("inner", TypeInfoKind::Struct("Inner".to_string())),
+                    ("inner", TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string())),
                     ("val", num(NumberType::I32)),
                 ],
             ),
         ]);
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("Inner".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("Inner".to_string(), "Inner".to_string())),
             8
         );
         assert_eq!(
-            exact_byte_size(&ctx, &TypeInfoKind::Struct("Outer".to_string())),
+            exact_byte_size(&ctx, &TypeInfoKind::Struct("Outer".to_string(), "Outer".to_string())),
             12
         );
     }
@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(alignment_of(&ctx, &num(NumberType::I32), &mut v), 4);
         assert_eq!(alignment_of(&ctx, &num(NumberType::I64), &mut v), 8);
         assert_eq!(
-            alignment_of(&ctx, &TypeInfoKind::Struct("S".to_string()), &mut v),
+            alignment_of(&ctx, &TypeInfoKind::Struct("S".to_string(), "S".to_string()), &mut v),
             8,
             "struct alignment = widest field (i64) = 8"
         );

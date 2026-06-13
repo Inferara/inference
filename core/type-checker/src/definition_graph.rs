@@ -20,6 +20,8 @@ use inference_ast::ids::{DefId, ExprId, TypeId};
 use inference_ast::nodes::{Def, Expr, Location, TypeNode};
 use rustc_hash::FxHashMap;
 
+use crate::symbol_table::{ResolvedImportTarget, SymbolTable};
+
 /// A node in the definition-value graph: a top-level `const` or `type` alias.
 #[derive(Debug, Clone)]
 pub(crate) struct DefNode {
@@ -64,13 +66,99 @@ pub(crate) enum GraphOutcome {
     Cyclic { cycle: Vec<String>, location: Location },
 }
 
+/// Cross-file edge discovery via item/namespace imports.
+///
+/// A bare reference (`type A = B;`) or a namespace-qualified one (`const A =
+/// m::C;`) can name a definition in *another* file only through an import — `::`
+/// does not parse in type position, so an item import is the sole way to express
+/// a cross-file type-alias reference. The referrer's own scope chain (`by_key`)
+/// and `::`-canonical paths (`by_path`) never see those bindings, so without this
+/// translation every cross-file definition cycle is invisible to the cycle check
+/// (#63).
+///
+/// This maps a referring file scope's import bindings to the canonical `::`-path
+/// of what they bind, so a reference can be rewritten to a path that `by_path`
+/// resolves:
+/// - an item import `use lib::t::{B};` binds local `B` to canonical `lib::t::B`;
+/// - a namespace import `use lib::m;` binds alias `m` to file path `lib::m`, so a
+///   reference `m::C` rewrites to canonical `lib::m::C`.
+struct ImportBindings {
+    /// `(referring scope id, local item name)` -> canonical `::`-path of the item.
+    items: FxHashMap<(u32, String), String>,
+    /// `(referring scope id, namespace alias)` -> `::`-joined file path the alias
+    /// names, so a qualified reference through the alias rewrites to canonical.
+    namespaces: FxHashMap<(u32, String), String>,
+}
+
+impl ImportBindings {
+    /// Collects the import bindings of every file scope that owns a tracked
+    /// definition. Only those scopes can originate an edge, so unrelated scopes
+    /// are skipped.
+    fn collect(table: &SymbolTable, nodes: &[DefNode]) -> Self {
+        let mut items = FxHashMap::default();
+        let mut namespaces = FxHashMap::default();
+        let mut seen_scopes: Vec<u32> = nodes.iter().map(|n| n.scope_id).collect();
+        seen_scopes.sort_unstable();
+        seen_scopes.dedup();
+        for scope_id in seen_scopes {
+            let Some(scope) = table.get_scope(scope_id) else {
+                continue;
+            };
+            for (local_name, resolved) in &scope.borrow().resolved_imports {
+                match &resolved.target {
+                    ResolvedImportTarget::Item {
+                        definition_scope_id,
+                        ..
+                    } => {
+                        // Import aliasing is unsupported, so the local name equals
+                        // the item's own name; the item's canonical path is thus its
+                        // defining file path joined with the local name.
+                        let file_path = table.module_path_of_scope(*definition_scope_id);
+                        let canonical = if file_path.is_empty() {
+                            local_name.clone()
+                        } else {
+                            format!("{file_path}::{local_name}")
+                        };
+                        items.insert((scope_id, local_name.clone()), canonical);
+                    }
+                    ResolvedImportTarget::Namespace {
+                        scope_id: ns_scope_id,
+                    } => {
+                        let file_path = table.module_path_of_scope(*ns_scope_id);
+                        namespaces.insert((scope_id, local_name.clone()), file_path);
+                    }
+                }
+            }
+        }
+        ImportBindings { items, namespaces }
+    }
+
+    /// Rewrites a bare or namespace-qualified reference made from scope
+    /// `from_scope` to the canonical `::`-path it names through an import, or
+    /// `None` if no import binding applies.
+    fn canonicalize(&self, from_scope: u32, reference: &str) -> Option<String> {
+        if let Some((alias, rest)) = reference.split_once("::") {
+            // `alias::Name` (and deeper) through a namespace import: replace the
+            // alias with the file path it binds, leaving the remaining segments.
+            let file_path = self.namespaces.get(&(from_scope, alias.to_string()))?;
+            if file_path.is_empty() {
+                return Some(rest.to_string());
+            }
+            return Some(format!("{file_path}::{rest}"));
+        }
+        self.items.get(&(from_scope, reference.to_string())).cloned()
+    }
+}
+
 /// Builds and analyzes the definition-value graph for `nodes`.
 ///
 /// `nodes` must list every top-level `const` and `type` alias across all files.
-/// References are resolved against the scope chains carried by each node, so the
-/// builder needs no live symbol table.
-pub(crate) fn analyze(arena: &AstArena, nodes: &[DefNode]) -> GraphOutcome {
-    let graph = DefGraph::build(arena, nodes);
+/// References resolve against the scope chains carried by each node and against
+/// `table`'s resolved import bindings, so a cross-file reference expressed only
+/// through an item or namespace import is discovered as an edge (#63).
+pub(crate) fn analyze(arena: &AstArena, table: &SymbolTable, nodes: &[DefNode]) -> GraphOutcome {
+    let imports = ImportBindings::collect(table, nodes);
+    let graph = DefGraph::build(arena, nodes, &imports);
     graph.analyze()
 }
 
@@ -83,7 +171,7 @@ struct DefGraph<'a> {
 }
 
 impl<'a> DefGraph<'a> {
-    fn build(arena: &AstArena, nodes: &'a [DefNode]) -> Self {
+    fn build(arena: &AstArena, nodes: &'a [DefNode], imports: &ImportBindings) -> Self {
         // Two indexes: bare names by (scope_id, name) for in-file/absolute name
         // lookup, and full canonical paths for qualified (`lib::vals::V`)
         // references.
@@ -110,7 +198,7 @@ impl<'a> DefGraph<'a> {
                 // A self-edge (`const A = A;`) is a degenerate value cycle: the
                 // node's value depends on its own, with no evaluation order. It is
                 // recorded like any other edge so the cycle check rejects it.
-                if let Some(target) = resolve_ref(&by_key, &by_path, node, &name)
+                if let Some(target) = resolve_ref(&by_key, &by_path, imports, node, &name)
                     && !edges[i].contains(&target)
                 {
                     edges[i].push(target);
@@ -202,27 +290,40 @@ impl<'a> DefGraph<'a> {
 
 /// Resolves a referenced name (bare or `::`-qualified) to a node index.
 ///
-/// A `::`-qualified reference (`lib::vals::V`) names a definition's canonical
-/// path directly and resolves by exact match. A bare reference resolves the way
-/// name lookup would: along the referencing node's scope chain (own file first,
-/// then the program root). Returns `None` when the reference names something that
-/// is not a tracked const/type alias (a function, a builtin, a local) — such
+/// Resolution proceeds in the order name lookup would:
+/// 1. an absolute `::`-qualified reference (`lib::vals::V`) names a definition's
+///    canonical path directly and resolves by exact match;
+/// 2. a bare reference resolves along the referencing node's scope chain (own
+///    file first, then the program root);
+/// 3. failing both, the reference is rewritten through the referring file's
+///    import bindings — an item import (`use lib::t::{B};`) or a namespace import
+///    (`use lib::m;` then `m::C`) — and the resulting canonical path is matched.
+///    This is the only way a cross-file type-alias reference can be expressed, so
+///    it is essential for cross-file cycle detection (#63).
+///
+/// Returns `None` when the reference names something that is not a tracked
+/// const/type alias (a function, a builtin, a local, an unimported name) — such
 /// references never participate in a definition-value cycle.
 fn resolve_ref(
     by_key: &FxHashMap<(u32, &str), usize>,
     by_path: &FxHashMap<String, usize>,
+    imports: &ImportBindings,
     from: &DefNode,
     reference: &str,
 ) -> Option<usize> {
     if reference.contains("::") {
-        return by_path.get(reference).copied();
-    }
-    for &scope_id in &from.scope_chain {
-        if let Some(&idx) = by_key.get(&(scope_id, reference)) {
+        if let Some(&idx) = by_path.get(reference) {
             return Some(idx);
         }
+    } else {
+        for &scope_id in &from.scope_chain {
+            if let Some(&idx) = by_key.get(&(scope_id, reference)) {
+                return Some(idx);
+            }
+        }
     }
-    None
+    let canonical = imports.canonicalize(from.scope_id, reference)?;
+    by_path.get(&canonical).copied()
 }
 
 /// Collects names referenced by a const initializer expression: bare
