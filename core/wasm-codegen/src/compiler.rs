@@ -1340,8 +1340,16 @@ impl Compiler {
                                     &elem_type.kind,
                                 );
                             }
-                            // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                            TypeInfoKind::Custom(_) => {
+                            // A struct parameter (bare `Custom` name or a
+                            // `::`-qualified path) has a frame slot allocated in
+                            // `compute_frame_layout`; copy the caller's data into
+                            // it so the callee mutates its own copy (value
+                            // semantics). The slot is keyed by the parameter name,
+                            // so both forms share the same copy once the layout
+                            // pass gave the qualified form a slot.
+                            TypeInfoKind::Custom(_)
+                            | TypeInfoKind::Qualified(_)
+                            | TypeInfoKind::QualifiedName(_) => {
                                 if let Some(slot) = layout.struct_offsets.get(&arg_name) {
                                     emit_struct_param_copy(func, layout, slot, param_local);
                                 }
@@ -1629,9 +1637,22 @@ impl Compiler {
                                 "Frame offset overflow: total array allocation exceeds u32::MAX",
                             );
                         }
-                        // Custom: unresolved AST type (params/returns); Struct: resolved type (body variables via TypedContext)
-                        TypeInfoKind::Custom(custom_name) => {
-                            if let Some(struct_info) = ctx.lookup_struct_in(custom_name, module_path)
+                        // A struct parameter is passed by value, so it needs its
+                        // own frame slot to copy the caller's data into on entry.
+                        // `Custom` carries a bare name and `Qualified`/`QualifiedName`
+                        // a `::`-joined path; both name a struct that must be
+                        // resolved relative to the defining file (a same-named
+                        // struct in another file has a different layout), so the
+                        // shared resolver is used rather than a bare-name lookup.
+                        TypeInfoKind::Custom(_)
+                        | TypeInfoKind::Qualified(_)
+                        | TypeInfoKind::QualifiedName(_) => {
+                            if let Some((struct_info, _defining_path)) =
+                                memory::resolve_struct_with_defining_path(
+                                    &type_info.kind,
+                                    ctx,
+                                    module_path,
+                                )
                             {
                                 let (total_size, field_slots) =
                                     compute_struct_field_layout(&struct_info, ctx, module_path)?;

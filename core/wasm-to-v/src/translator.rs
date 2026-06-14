@@ -315,11 +315,22 @@ impl WasmParseData<'_> {
     /// - Unimplemented instruction opcodes
     #[allow(clippy::too_many_lines)]
     pub(crate) fn translate(&mut self) -> anyhow::Result<String /* WasmModuleParseError*/> {
-        // Spec names reaching this point have already been validated either at
-        // the public-API boundary (`wasm_parser::translate_bytes` validates the
-        // caller-supplied map) or at the decode boundary
-        // (`wasm_parser::decode_spec_funcs_section` validates embedded names).
-        // No third re-validation here.
+        // Spec names reaching this point have already been validated individually
+        // either at the public-API boundary (`wasm_parser::translate_bytes`
+        // validates the caller-supplied map) or at the decode boundary
+        // (`wasm_parser::decode_spec_funcs_section` validates embedded names). What
+        // those per-component checks cannot see is the `__` separator the join
+        // *fabricates* when this module name and a spec name are concatenated into
+        // the `<module>__<spec>_specs` / `valid_<module>__<spec>` grammar below.
+        // Validate that boundary here, where both names are final (the module name
+        // may have been overridden by the custom name section). A trailing-`_`
+        // component is rejected before any output is built, so a contaminated proof
+        // never reaches disk. This is the entry file too: `qualified_spec_name`
+        // leaves the entry's empty module path off the spec name, so codegen's
+        // own `_`-join check never sees a `__`, but the entry stem still joins here.
+        for spec_name in self.spec_funcs_by_spec.keys() {
+            crate::rocq_names::validate_spec_join_boundary(&self.mod_name, spec_name)?;
+        }
         let mut res = String::new();
         res.push_str("Require Import List.\n");
         res.push_str("Require Import String.\n");

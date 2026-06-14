@@ -1779,7 +1779,8 @@ impl SymbolTable {
         path: &[String],
         from_scope_id: u32,
     ) -> Option<ResolvedNominalType> {
-        let (ns_scope, consumed) = self.resolve_longest_namespace_prefix(path, from_scope_id)?;
+        // The final segment is the leaf type; one trailing type-access segment.
+        let (ns_scope, consumed) = self.resolve_longest_namespace_prefix(path, from_scope_id, 1)?;
         // A type path is a namespace chain plus a single leaf; a different shape
         // (a remaining `Type::assoc` pair, or no leaf at all) is not a type
         // reference we resolve here.
@@ -2330,8 +2331,11 @@ impl SymbolTable {
         // local type-member (`Color::Red`, `Vec::new`), not an absolute file path,
         // even when a same-named sibling file is in the import closure. The
         // qualified-path resolvers give the local type precedence at the head, so
-        // this missing-import diagnostic must not pre-empt it.
-        if self.head_type_preempts_sibling_file(&path[0], from_scope_id) {
+        // this missing-import diagnostic must not pre-empt it. The pre-empt applies
+        // only when the head can be a type-access for the whole path — at most two
+        // segments (the type plus an optional member); a head with two or more
+        // further segments is a namespace path whose missing import should report.
+        if path.len() <= 2 && self.head_type_preempts_sibling_file(&path[0], from_scope_id) {
             return None;
         }
         if self.file_may_anchor_absolute_path(path, from_scope_id) {
@@ -2524,32 +2528,24 @@ impl SymbolTable {
         self.walk_qualified_from(start_scope, remaining, from_scope_id)
     }
 
-    /// Whether the file enclosing `from_scope_id` may anchor `path` at the entry
-    /// file (root) as an absolute `dir::file::item` chain.
+    /// Whether the file enclosing `from_scope_id` may anchor `path` as an absolute
+    /// `dir::file::item` chain — i.e. the path is just the long spelling of a
+    /// namespace the file itself imported.
     ///
-    /// The entry file (root) always may: the root-child directory namespaces are
-    /// its own, reached by its own `use lib::geom;`. A non-entry file may only
-    /// when it actually imported a namespace whose module-path key is a prefix of
-    /// `path` — i.e. the absolute path is just the long spelling of a namespace
-    /// the file already holds (a file that wrote `use lib::geom;` may spell
-    /// `lib::geom::Point`). A non-entry file that imported nothing covering the
-    /// prefix is rejected, so it cannot read another file's surface without a
-    /// `use`. This is the same file-scoped import discipline that
+    /// Every file, the entry included, may spell the long form only of a namespace
+    /// it imported: the import's target module-path key, split into segments, must
+    /// be a prefix of `path` (`use lib::geom;` licenses `lib::geom::Point`). A file
+    /// that imported nothing covering the prefix is rejected, so it cannot read
+    /// another file's surface without a `use` — even if some *other* file dragged
+    /// that namespace into the compilation closure. A file's `use` list is its
+    /// complete dependency manifest; there is no ambient cross-file visibility, so
+    /// the entry is held to the same discipline as every other file (#63). Only
+    /// namespace imports written within this file (before the file boundary) count.
+    /// This is the same file-scoped import discipline that
     /// [`Self::namespace_binding_scope`] and [`Self::lookup_symbol_file_scoped_from`]
     /// enforce for the bound-name and bare-name spellings.
     #[must_use = "this is a pure check with no side effects"]
     fn file_may_anchor_absolute_path(&self, path: &[String], from_scope_id: u32) -> bool {
-
-        // The accessing file is the entry file: root's directory namespaces are
-        // its own, reached by its own imports, so an absolute path is always its
-        // own to spell.
-        if Some(self.enclosing_file_scope(from_scope_id)) == self.root_scope_id() {
-            return true;
-        }
-        // A non-entry file may spell the long form of a namespace it imported: the
-        // import's target module-path key, split into segments, must be a prefix
-        // of `path` (`use lib::geom;` licenses `lib::geom::Point`). Only namespace
-        // imports written within this file (before the file boundary) count.
         self.imported_namespace_keys(from_scope_id)
             .iter()
             .any(|key| {
@@ -2740,7 +2736,12 @@ impl SymbolTable {
         // sibling's private `use foo;` would silently rebind this file's own
         // `foo::` — the same precedence the type-path resolver applies, so the two
         // resolvers stay in agreement.
-        if self.head_type_preempts_sibling_file(&prefix[0], from_scope_id) {
+        //
+        // A call's type-access shape is `Type::assoc()` — exactly one qualifier
+        // ahead of the member — so the head can be that type only when the prefix
+        // is a single segment. A longer prefix (`geom::sub::pick()`) cannot be a
+        // type-access, so the head must not pre-empt and the namespace walk decides.
+        if prefix.len() <= 1 && self.head_type_preempts_sibling_file(&prefix[0], from_scope_id) {
             return false;
         }
         let Some((mut current_scope, remaining)) =
@@ -2761,21 +2762,42 @@ impl SymbolTable {
     /// namespaces from `from_scope_id`, returning the file scope it reaches and the
     /// number of segments consumed.
     ///
-    /// `["geo", "Point", "new"]` with a bound `use geo;` returns the `geo` file
-    /// scope and a count of 1: `geo` is a namespace, `Point` is a struct within it,
-    /// not a sub-namespace. The remaining segments (`Point::new`) are then resolved
-    /// as a type member *inside* the returned file scope. Returns `None` when the
-    /// first segment is not a namespace (so `Type::assoc()` / `Enum::Variant`,
-    /// whose head is a type, fall through to the existing single-file handling).
+    /// `["geo", "Point", "new"]` (`type_access_len` 2) with a bound `use geo;`
+    /// returns the `geo` file scope and a count of 1: `geo` is a namespace, `Point`
+    /// is a struct within it, not a sub-namespace. The remaining segments
+    /// (`Point::new`) are then resolved as a type member *inside* the returned file
+    /// scope. Returns `None` when the first segment is not a namespace (so
+    /// `Type::assoc()` / `Enum::Variant`, whose head is a type, fall through to the
+    /// existing single-file handling).
+    ///
+    /// `type_access_len` is how many *trailing* segments the caller will read as a
+    /// type-access (the type itself, plus any member), and is what disambiguates the
+    /// type-vs-sub-file precedence: only the segment that *begins* the type-access
+    /// portion (`path[path.len() - type_access_len]`) may stop the namespace walk on
+    /// a same-named local type. A caller that pre-splits the leaf and passes a
+    /// pure-namespace prefix (`["lib", "geom"]`) uses `0`, so no segment is treated
+    /// as a type and the whole prefix is consumed; a type-annotation full path
+    /// (`["lib", "geom", "Point"]`) uses `1`, so only the leaf `Point` may stop;
+    /// an associated call (`["lib", "Point", "new"]`) uses `2`, so the struct
+    /// `Point` may stop and the trailing `new` stays the member. This is what fixes
+    /// `lib::geom::Point` where the parent file also defines a `struct geom` that
+    /// collides with the *intermediate* segment: `geom` is not the type-access start
+    /// (the leaf `Point` is), so it is consumed as the sub-file namespace.
     #[must_use = "this is a pure lookup with no side effects"]
     pub(crate) fn resolve_longest_namespace_prefix(
         &self,
         path: &[String],
         from_scope_id: u32,
+        type_access_len: usize,
     ) -> Option<(u32, usize)> {
         if path.is_empty() {
             return None;
         }
+        // The index at which the caller's type-access portion begins; a same-named
+        // local type may pre-empt the namespace walk only at this one position.
+        // Saturating so a pre-split prefix (`type_access_len` 0) yields an index past
+        // the end — no segment is ever treated as the type.
+        let type_access_start = path.len().saturating_sub(type_access_len);
         // A struct/enum defined in the accessing file pre-empts a same-named
         // sibling file at the head, so the path is left to single-file type
         // resolution (`Type::assoc()` / `Enum::Variant`). This must be decided
@@ -2784,7 +2806,13 @@ impl SymbolTable {
         // per-segment loop below applies the *tail* precedence against the walked
         // scope (`lib::Point::new` where the walked-into `lib` defines `Point`),
         // which is a different decision.
-        if self.head_type_preempts_sibling_file(&path[0], from_scope_id) {
+        //
+        // The pre-empt only applies when the head *is* the type-access start —
+        // `foo::pick()` (head `foo` is the type) or `Pt` as a bare leaf. A head
+        // ahead of the type-access portion (`lib::geom::Point` where the leaf
+        // `Point` is the type, or `geom::sub::Point`) is a namespace, so the local
+        // type must not stop it.
+        if type_access_start == 0 && self.head_type_preempts_sibling_file(&path[0], from_scope_id) {
             return None;
         }
         // The first segment must name a file namespace (`use a::b;` binding or a
@@ -2813,18 +2841,20 @@ impl SymbolTable {
         // exists means the struct's associated `new`. Consuming `Point` as a
         // namespace would otherwise make the meaning depend on whether the sibling
         // file happens to be in the import closure, so a same-named type defined
-        // here always wins and the remaining `Point::member` is left to type
-        // resolution.
+        // here wins and the remaining `Point::member` is left to type resolution.
         //
-        // This precedence applies to the leaf segment too: a 2-segment type path
-        // `g::Pt` (in a `let p: g::Pt` annotation) leaves `Pt` as the only segment
-        // after the namespace prefix, and `g.inf` may define `struct Pt` while a
-        // sibling `g/Pt.inf` also exists. Stopping here leaves `Pt` for type
-        // resolution rather than consuming it as the sibling file, so the presence
-        // of the sibling in the import closure does not change what the path means.
-        for segment in &path[consumed..] {
+        // The type only wins at the *type-access start* — the position the caller
+        // declared as the beginning of its type-access (`type_access_start`). A
+        // same-named type at an earlier, intermediate segment (`geom` in
+        // `lib::geom::Point`, whose leaf `Point` is the actual type) cannot be a
+        // type-member access — a struct has no member that is itself a type — so it
+        // is consumed as the sub-file namespace. Tying the stop to the caller's
+        // declared boundary, rather than a positional guess, keeps each consuming
+        // context (pure prefix, type leaf, `Type::member`) resolving the shape it
+        // actually reads.
+        for (i, segment) in path.iter().enumerate().skip(consumed) {
             let scope_id = current_scope.borrow().id;
-            if self.scope_defines_type(segment, scope_id) {
+            if i == type_access_start && self.scope_defines_type(segment, scope_id) {
                 break;
             }
             match self.next_namespace_scope(&current_scope, segment) {

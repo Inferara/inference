@@ -13,7 +13,10 @@
 /// *individual* frame but not the *cumulative* depth across a chain.
 #[cfg(test)]
 mod analysis_rules_tests {
-    use crate::utils::{build_ast, codegen_output_no_analysis, try_type_check_multi_file};
+    use crate::utils::{
+        build_ast, codegen_output_multi_file_no_analysis, codegen_output_no_analysis,
+        try_type_check_multi_file,
+    };
     use inference_analysis::errors::{AnalysisDiagnostic, AnalysisErrors, AnalysisResult};
     use inference_type_checker::typed_context::TypedContext;
 
@@ -958,5 +961,55 @@ mod analysis_rules_tests {
             !has_stack_depth_exceeded_multi(files),
             "a small qualified-typed by-value parameter must not trip A036"
         );
+    }
+
+    /// Cross-file frame-size parity for qualified-typed by-value parameters.
+    ///
+    /// A036's soundness rests on its estimate never *under*-counting codegen's
+    /// real frame. The single-file parity corpus in Part B cannot exercise a
+    /// qualified parameter type, which only arises across files. A qualified
+    /// struct parameter is passed by value with its own frame copy, so codegen's
+    /// real frame for the consumer is non-zero; this asserts the analysis estimate
+    /// remains an upper bound of that real frame on a cross-file program.
+    #[test]
+    fn a036_estimate_is_sound_upper_bound_for_qualified_param_frame() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::big;
+                    pub fn consume(p: lib::big::Big) -> i32 { return p.tag; }
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "big"],
+                r#"
+                    pub struct Big { data: [i32; 4000]; tag: i32; }
+                "#,
+            ),
+        ];
+        let ctx = try_type_check_multi_file(files)
+            .expect("multi-file type checking should succeed for parity test input");
+        let estimate = inference_analysis::estimate_frame_sizes(&ctx);
+
+        let output = codegen_output_multi_file_no_analysis(files);
+        let real = output.frame_sizes();
+
+        let consume_real = real
+            .get("consume")
+            .copied()
+            .expect("codegen must emit a frame size for `consume`");
+        assert!(
+            consume_real > 0,
+            "the qualified-typed by-value parameter must give `consume` a real frame copy"
+        );
+        for (key, &real_bytes) in real {
+            let est = estimate.get(key).copied().unwrap_or(0);
+            assert!(
+                est >= real_bytes,
+                "A036 estimate {est} < codegen real frame {real_bytes} for fn `{key}`"
+            );
+        }
     }
 }

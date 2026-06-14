@@ -1210,6 +1210,98 @@ fn valid_non_entry_spec_name_produces_wasm_and_v() {
     assert!(temp.child("out").child("main.v").path().exists());
 }
 
+/// The ENTRY file's spec is checked too: `spec Spec_` in the entry (empty module
+/// path) leaves the entry's qualified spec name as bare `Spec_` — no `__` for
+/// codegen's own join check to catch — but the translator joins it with the entry
+/// stem `main` and the trailing `_specs` into the reserved `main__Spec__specs`.
+/// Rejected in proof mode with the educational message, before any artifact write.
+#[test]
+fn entry_spec_trailing_underscore_rejected_no_stale_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec Spec_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("spec 'Spec_'"))
+        .stderr(predicate::str::contains("main__Spec__specs"))
+        .stderr(predicate::str::contains("'spec Spec_' -> 'spec Spec'"))
+        .stderr(predicate::str::contains("appear verbatim in your .v"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected entry spec name must not leave a stale out/main.wasm behind"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a rejected entry spec name must not leave a stale out/main.v behind"
+    );
+}
+
+/// The ENTRY file's *stem* is checked too: an entry compiled as `app_.inf`
+/// produces output module name `app_`, which joins with any spec via the `__`
+/// separator into the reserved `app___Foo`. Rejected in proof mode, naming the
+/// source file and the rename, before any artifact write.
+#[test]
+fn entry_filename_trailing_underscore_rejected_no_stale_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "app_.inf",
+        "spec Foo { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("output module name 'app_'"))
+        .stderr(predicate::str::contains("app___Foo"))
+        .stderr(predicate::str::contains("'app_.inf' -> 'app.inf'"));
+
+    assert!(
+        !temp.child("out").child("app_.wasm").path().exists(),
+        "a rejected entry stem must not leave a stale out/app_.wasm behind"
+    );
+    assert!(
+        !temp.child("out").child("app_.v").path().exists(),
+        "a rejected entry stem must not leave a stale out/app_.v behind"
+    );
+}
+
+/// The entry-spec rejection is scoped to proof mode: in default `compile` mode no
+/// Rocq name is emitted, so `spec Spec_` in the entry compiles cleanly to `.wasm`
+/// with no `.v`.
+#[test]
+fn entry_spec_trailing_underscore_compiles_in_default_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec Spec_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 0; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "default mode must not emit a .v"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stale-artifact safety: a rejected compile must never leave a runnable
 // `out/<name>.wasm` (or `.v`) on disk for `wasmtime` to execute. After a good

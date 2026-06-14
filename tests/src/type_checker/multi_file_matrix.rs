@@ -3644,6 +3644,110 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // Intermediate-segment precedence: a type defined in the accessing file
+    // pre-empts a same-named sibling file only when the type interpretation is
+    // *viable* for the remaining path (the type is the leaf, or is followed by a
+    // single member). A type name colliding with an *intermediate* `::`-segment —
+    // one followed by a further `::`-segment — cannot be a type-member access, so
+    // the namespace walk must continue and the type must not stop it (#63).
+    // ---------------------------------------------------------------------
+
+    /// `lib::geom::Point` where the parent file `lib.inf` defines a `struct geom`
+    /// that collides with the intermediate `geom` segment. The type interpretation
+    /// of `geom` is impossible (it is followed by `::Point`, another type), so the
+    /// walk consumes `geom` as the sub-file namespace and the qualified annotation
+    /// resolves to the real `Point`.
+    #[test]
+    fn intermediate_segment_collision_with_struct_resolves_namespace() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::geom; \
+                 pub fn main() -> i32 { let p: lib::geom::Point = lib::geom::Point { x: 1, y: 2 }; return p.x + lib::tagval(); }",
+            ),
+            (vec!["lib"], "struct geom { tag: i32; } pub fn tagval() -> i32 { return 0; }"),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// The enum twin: an `enum geom` in the parent file likewise has no member
+    /// type, so the intermediate `geom` segment of `lib::geom::Point` is the
+    /// sub-file namespace and the path resolves.
+    #[test]
+    fn intermediate_segment_collision_with_enum_resolves_namespace() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::geom; \
+                 pub fn main() -> i32 { let p: lib::geom::Point = lib::geom::Point { x: 1, y: 2 }; return p.y + lib::tagval(); }",
+            ),
+            (vec!["lib"], "enum geom { A, B } pub fn tagval() -> i32 { return 0; }"),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// The three-level twin: `lib::sub::geom::Point` where the *mid* intermediate
+    /// segment `sub` collides with a `struct sub` in `lib.inf`. `sub` is followed
+    /// by two more segments, so it cannot be a type-access and the walk continues.
+    #[test]
+    fn intermediate_segment_collision_at_three_levels_resolves_namespace() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::sub::geom; \
+                 pub fn main() -> i32 { let p: lib::sub::geom::Point = lib::sub::geom::Point { x: 1, y: 2 }; return p.x + lib::tagval(); }",
+            ),
+            (vec!["lib"], "struct sub { tag: i32; } pub fn tagval() -> i32 { return 0; }"),
+            (vec!["lib", "sub"], "pub fn placeholder() -> i32 { return 0; }"),
+            (vec!["lib", "sub", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// Even under an intermediate-segment collision, a genuinely unknown leaf type
+    /// still errors cleanly: `lib::geom::Nope` names a real namespace but no type,
+    /// so it is `unknown type`, not silently accepted.
+    #[test]
+    fn intermediate_segment_collision_unknown_leaf_still_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib; use lib::geom; \
+                 pub fn main() -> i32 { let p: lib::geom::Nope = lib::geom::Nope { x: 1 }; return 0; }",
+            ),
+            (vec!["lib"], "struct geom { tag: i32; } pub fn tagval() -> i32 { return 0; }"),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; }"),
+        ]);
+        assert!(
+            msg.contains("unknown type `lib::geom::Nope`"),
+            "an unknown leaf under an intermediate collision must still be reported, got: {msg}"
+        );
+    }
+
+    /// The head case of the same rule from a *non-entry* accessing file: `caller`
+    /// defines `struct geom` and writes `geom::sub::Point`, while a same-named
+    /// sibling `geom.inf` is reachable. The head `geom` is followed by two more
+    /// segments, so the type cannot be the target and the head-veto must not fire —
+    /// the absolute namespace path resolves to the real `Point`. This pins that the
+    /// head precedence is remaining-path-aware, not position-agnostic.
+    #[test]
+    fn head_collision_with_two_trailing_segments_resolves_namespace() {
+        assert_ok(&[
+            (
+                vec![],
+                "use caller; pub fn main() -> i32 { return caller::go(); }",
+            ),
+            (
+                vec!["caller"],
+                "use geom::sub; \
+                 struct geom { tag: i32; } \
+                 pub fn go() -> i32 { let p: geom::sub::Point = geom::sub::Point { x: 4 }; return p.x; }",
+            ),
+            (vec!["geom"], "pub fn touch() -> i32 { return 0; }"),
+            (vec!["geom", "sub"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    // ---------------------------------------------------------------------
     // Recursive-struct detection is by canonical key, not bare name: distinct
     // same-named cross-file structs are not a cycle, and a genuine cross-file
     // cycle is caught at type-check (before codegen) (#63).

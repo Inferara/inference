@@ -336,6 +336,15 @@ fn eprint_translation_error(e: &anyhow::Error) {
                 );
                 return;
             }
+            WasmToVError::SpecNameReservesSeparator {
+                offender_kind,
+                offender,
+                joined,
+                fix_hint,
+            } => {
+                eprint_spec_join_boundary_error(offender_kind, offender, joined, fix_hint);
+                return;
+            }
             WasmToVError::WasmParse(msg) => {
                 eprintln!(
                     "error: malformed WebAssembly binary: {msg}\n\n  \
@@ -364,25 +373,54 @@ fn eprint_translation_error(e: &anyhow::Error) {
     eprintln!("WASM->V translation failed: {e}");
 }
 
+/// Renders the educational diagnostic for a spec/module name whose trailing `_`
+/// fabricates Rocq's reserved `__` separator when joined into the proof grammar.
+/// The fix differs by which component offended (rename the source file vs. the
+/// spec block); both are surfaced as a concrete rename.
+fn eprint_spec_join_boundary_error(
+    offender_kind: &str,
+    offender: &str,
+    joined: &str,
+    fix_hint: &str,
+) {
+    let rename = if offender_kind == "output module name" {
+        format!("Rename the source file: '{offender}.inf' -> '{fix_hint}.inf'.")
+    } else {
+        format!("Rename the spec: 'spec {offender}' -> 'spec {fix_hint}'.")
+    };
+    eprintln!(
+        "error: the {offender_kind} '{offender}' ends with '_', so it joins \
+         into the reserved '__' run in the Rocq proof name '{joined}'.\n\n  \
+         The emitted proof grammar is '<module>__<spec>_specs', where '__' \
+         separates the module from the spec; a trailing '_' on either side \
+         fabricates that separator. {rename}\n\n  \
+         Why not auto-encode: proof-mode names appear verbatim in your .v \
+         file, so they are kept readable rather than escaped into noise."
+    );
+}
+
 /// Removes any pre-existing output artifacts a prior build left, so a compile
 /// that is later rejected leaves no runnable stale file behind, and a plain
 /// compile does not leave a stale proof describing a since-changed program.
 ///
-/// The `.wasm` is cleared when this build produces one (`wants_wasm`). The `.v`
-/// is cleared *unconditionally* whenever codegen runs: a plain compile (no `-v`)
-/// must still invalidate a `.v` written by an earlier `-v` build, because that
-/// proof now describes the old program. Re-running with `-v` rewrites it on the
-/// success path, so always clearing it costs nothing there.
+/// Both the `.wasm` and the `.v` are cleared *unconditionally* whenever codegen
+/// runs, regardless of which artifacts this particular invocation will write.
+/// Any run that reaches codegen recompiles this source name and may be rejected
+/// at codegen or `wasm_to_v`; the would-be `.wasm` and `.v` for that name are
+/// stale the moment the run starts, so a leftover from an earlier build must not
+/// survive — a `--codegen -v` run (which writes only `.v`) must still invalidate
+/// the `.wasm` an earlier `--codegen -o` or default build wrote, or a rejection
+/// would leave a runnable artifact describing the old program. The success path
+/// rewrites whichever artifacts this invocation requests, so clearing both up
+/// front costs nothing there.
 ///
 /// A missing file is not an error (nothing to clear); a removal failure is
 /// ignored because the subsequent write would surface any genuine IO problem
 /// with a precise message, and a transient failure must not abort an
 /// otherwise-valid build. The directory itself is left untouched — it is created
 /// on the success path exactly as before.
-fn clear_stale_outputs(output_dir: &std::path::Path, source_fname: &str, wants_wasm: bool) {
-    if wants_wasm {
-        let _ = fs::remove_file(output_dir.join(format!("{source_fname}.wasm")));
-    }
+fn clear_stale_outputs(output_dir: &std::path::Path, source_fname: &str) {
+    let _ = fs::remove_file(output_dir.join(format!("{source_fname}.wasm")));
     let _ = fs::remove_file(output_dir.join(format!("{source_fname}.v")));
 }
 
@@ -481,14 +519,17 @@ fn main() {
 
     // Clear any artifact a previous build left in the output directory before
     // this build runs, so a compile that is later rejected (by type check,
-    // analysis, external resolution, or codegen) never leaves a runnable stale
-    // `.wasm` (or its `.v`) on disk for `wasmtime` to execute. Removing up front
-    // — only the outputs this invocation would itself write — means every
-    // rejection path exits with no artifact without each `process::exit(1)` site
-    // having to clean up. A parse/analyze-only run produces no outputs and so
-    // must not disturb a previous build's artifacts.
+    // analysis, external resolution, codegen, or `wasm_to_v`) never leaves a
+    // runnable stale `.wasm` (or its `.v`) on disk for `wasmtime` to execute.
+    // Both artifacts are cleared whenever codegen runs — independent of which
+    // ones this invocation will write — because the run recompiles this source
+    // name and any leftover for it is already stale; a `--codegen -v` run that
+    // writes only `.v` must still drop an earlier build's `.wasm`. Clearing up
+    // front means every rejection path exits with no artifact without each
+    // `process::exit(1)` site having to clean up. A parse/analyze-only run
+    // produces no outputs and so must not disturb a previous build's artifacts.
     if need_codegen {
-        clear_stale_outputs(&output_path, &source_fname, args.generate_wasm_output);
+        clear_stale_outputs(&output_path, &source_fname);
     }
 
     let mut t_ast = None;

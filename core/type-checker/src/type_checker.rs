@@ -2602,9 +2602,12 @@ impl TypeChecker {
             return None;
         }
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        // The trailing two segments are the struct and its associated function
+        // (`type_access_len` 2), so a same-named struct at that boundary stops the
+        // namespace walk.
         let (ns_scope, consumed) = self
             .symbol_table
-            .resolve_longest_namespace_prefix(&segments, from_scope)?;
+            .resolve_longest_namespace_prefix(&segments, from_scope, 2)?;
         // After the namespace prefix exactly two segments must remain — the struct
         // and its associated function. A different shape (e.g. a deeper namespace
         // function `a::b::c::fn`) is not ours.
@@ -2760,9 +2763,11 @@ impl TypeChecker {
             return None;
         }
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+        // The trailing two segments are the enum and its variant (`type_access_len`
+        // 2), so a same-named enum at that boundary stops the namespace walk.
         let (ns_scope, consumed) = self
             .symbol_table
-            .resolve_longest_namespace_prefix(&segments, from_scope)?;
+            .resolve_longest_namespace_prefix(&segments, from_scope, 2)?;
         if segments.len() - consumed != 2 {
             return None;
         }
@@ -2827,9 +2832,12 @@ impl TypeChecker {
         let bare = type_name.to_string();
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
         let segments: Vec<String> = prefix.split("::").map(str::to_string).collect();
+        // The leaf type was already split off above, so `segments` is a pure
+        // namespace prefix: no segment is a type-access and the whole prefix must be
+        // consumed (`type_access_len` 0).
         let Some((ns_scope, consumed)) = self
             .symbol_table
-            .resolve_longest_namespace_prefix(&segments, from_scope)
+            .resolve_longest_namespace_prefix(&segments, from_scope, 0)
         else {
             return (bare, None);
         };

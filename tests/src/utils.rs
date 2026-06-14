@@ -274,6 +274,26 @@ pub(crate) fn wasm_codegen_multi_file_no_analysis(files: &[(Vec<&str>, &str)]) -
 }
 
 fn wasm_codegen_multi_file_impl(files: &[(Vec<&str>, &str)], analysis: AnalysisMode) -> Vec<u8> {
+    codegen_output_multi_file_impl(files, analysis)
+        .wasm()
+        .to_vec()
+}
+
+/// Multi-file codegen that returns the full [`CodegenOutput`], skipping analysis.
+///
+/// The multi-file analogue of [`codegen_output_no_analysis`]: tests that need
+/// codegen metadata across files (e.g. per-function `frame_sizes()`) use this so
+/// the codegen invocation and its `"output"` module name live in one place.
+pub(crate) fn codegen_output_multi_file_no_analysis(
+    files: &[(Vec<&str>, &str)],
+) -> inference_wasm_codegen::CodegenOutput {
+    codegen_output_multi_file_impl(files, AnalysisMode::Skip)
+}
+
+fn codegen_output_multi_file_impl(
+    files: &[(Vec<&str>, &str)],
+    analysis: AnalysisMode,
+) -> inference_wasm_codegen::CodegenOutput {
     let mut arena = inference_ast::arena::AstArena::default();
     for (module_path, source) in files {
         let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
@@ -295,8 +315,6 @@ fn wasm_codegen_multi_file_impl(files: &[(Vec<&str>, &str)], analysis: AnalysisM
     let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level(), "output")
         .expect("multi-file codegen should succeed")
-        .wasm()
-        .to_vec()
 }
 
 /// Resolves the on-disk directory for a multi-file golden fixture.

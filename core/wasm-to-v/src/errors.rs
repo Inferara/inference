@@ -48,6 +48,32 @@ pub enum WasmToVError {
     #[error("`{name}` would shadow a Rocq standard-library type")]
     RocqStdlibShadow { name: String },
 
+    /// Joining the output module name and a spec name into the emitted
+    /// `<module>__<spec>_specs` / `valid_<module>__<spec>` grammar would
+    /// fabricate Rocq's reserved `__` separator. Each component is individually a
+    /// legal identifier (no internal `__`), but a component that *ends* with `_`
+    /// abuts the join separator — the module name abuts `__` (yielding `___`), the
+    /// spec name abuts the trailing `_specs` (yielding `__`). The `__` run is
+    /// reserved so the `<module>__<spec>` split stays unambiguous, so the name is
+    /// rejected with a rename hint rather than auto-escaped: proof-mode names
+    /// appear verbatim in the generated `.v`, and escaping would make them
+    /// unreadable.
+    #[error(
+        "the {offender_kind} `{offender}` ends with `_`, so joining it into the Rocq proof name \
+         `{joined}` fabricates the reserved `__` separator; rename it to `{fix_hint}`"
+    )]
+    SpecNameReservesSeparator {
+        /// `output module name` (the entry file stem) or `spec`.
+        offender_kind: String,
+        /// The offending component as written.
+        offender: String,
+        /// The fabricated joined name (`main__Spec__specs`, `app___Foo`), shown so
+        /// the user sees exactly what the join produces.
+        joined: String,
+        /// A concrete renamed form (the offender with its trailing `_` trimmed).
+        fix_hint: String,
+    },
+
     /// `translate_bytes` was called with an explicit non-empty spec map and the
     /// WASM binary also embeds an `inference.spec_funcs` section, but the two
     /// disagree. We refuse to silently override either side.

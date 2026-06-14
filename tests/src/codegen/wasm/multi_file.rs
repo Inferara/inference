@@ -2271,3 +2271,522 @@ pub fn run() -> i32 {
     let (mut store, instance) = instantiate(&wasm);
     assert_eq!(call_i32(&mut store, &instance, "run"), 14);
 }
+
+#[test]
+fn intermediate_namespace_segment_collides_with_parent_struct() {
+    // `lib::geom::Point` where the parent file `lib.inf` defines a `struct geom`
+    // that collides with the *intermediate* path segment `geom`. An intermediate
+    // segment followed by a further `::Point` cannot be a type-member access (a
+    // struct has no member that is itself a type), so `geom` must be consumed as
+    // the sub-file namespace `lib/geom.inf`, not the parent's `struct geom`. The
+    // qualified type, literal, and method call all resolve to the real `Point`.
+    let main = "\
+use lib;
+use lib::geom;
+
+pub fn run() -> i32 {
+    let p: lib::geom::Point = lib::geom::Point { x: 100, y: 23 };
+    return p.sum() + lib::tagval();
+}
+";
+    let lib = "\
+struct geom { tag: i32; }
+pub fn tagval() -> i32 { return 1; }
+";
+    let geom = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn sum(self) -> i32 { return self.x + self.y; }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], geom),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 124);
+}
+
+#[test]
+fn intermediate_namespace_segment_collides_with_parent_enum() {
+    // Same intermediate-segment collision as above, but the colliding parent
+    // definition is an `enum geom`. An enum has no member type either, so the
+    // intermediate `geom` is still the sub-file namespace and `lib::geom::Point`
+    // resolves to the real struct.
+    let main = "\
+use lib;
+use lib::geom;
+
+pub fn run() -> i32 {
+    let p: lib::geom::Point = lib::geom::Point { x: 10, y: 4 };
+    return p.sum() + lib::tagval();
+}
+";
+    let lib = "\
+enum geom { A, B }
+pub fn tagval() -> i32 { return 1; }
+";
+    let geom = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn sum(self) -> i32 { return self.x + self.y; }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], geom),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 15);
+}
+
+#[test]
+fn intermediate_namespace_segment_collides_at_three_levels() {
+    // A three-level path `lib::sub::geom::Point` where the mid-level intermediate
+    // segment `sub` collides with a `struct sub` declared in the parent file
+    // `lib.inf`. `sub` is followed by two more `::`-segments, so the type reading
+    // is impossible and the namespace walk must continue through `lib/sub.inf`.
+    let main = "\
+use lib;
+use lib::sub::geom;
+
+pub fn run() -> i32 {
+    let p: lib::sub::geom::Point = lib::sub::geom::Point { x: 100, y: 23 };
+    return p.sum() + lib::tagval();
+}
+";
+    let lib = "\
+struct sub { tag: i32; }
+pub fn tagval() -> i32 { return 1; }
+";
+    let sub = "pub fn placeholder() -> i32 { return 0; }";
+    let geom = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn sum(self) -> i32 { return self.x + self.y; }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "sub"], sub),
+        (vec!["lib", "sub", "geom"], geom),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 124);
+}
+
+#[test]
+fn collision_free_intermediate_namespace_path_executes() {
+    // The control for the intermediate-collision repros: with no same-named
+    // `struct`/`enum` in the parent file, the path resolves the same way, proving
+    // the collision (not the path shape) is what the fix addresses.
+    let main = "\
+use lib;
+use lib::geom;
+
+pub fn run() -> i32 {
+    let p: lib::geom::Point = lib::geom::Point { x: 100, y: 23 };
+    return p.sum() + lib::tagval();
+}
+";
+    let lib = "\
+struct other { tag: i32; }
+pub fn tagval() -> i32 { return 1; }
+";
+    let geom = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+
+    pub fn sum(self) -> i32 { return self.x + self.y; }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], geom),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 124);
+}
+
+#[test]
+fn leaf_struct_assoc_still_wins_over_sibling_file() {
+    // FIX-3 regression guard: `lib::Point::new()` where `lib.inf` defines a
+    // `struct Point` *and* a sibling `lib/Point.inf` exists. Here `Point` is the
+    // second-to-last segment with a single trailing `new`, so the type
+    // interpretation is viable and the struct's associated `new` wins (returns 1),
+    // not the sibling file's free `new` (1000). The intermediate-collision fix
+    // must not weaken this leaf precedence.
+    let main = "\
+use lib;
+
+pub fn run() -> i32 {
+    return lib::Point::new();
+}
+";
+    let lib = "\
+pub struct Point {
+    x: i32;
+
+    pub fn new() -> i32 { return 1; }
+}
+";
+    let sibling = "pub fn new() -> i32 { return 1000; }";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "Point"], sibling),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+#[test]
+fn qualified_struct_param_is_passed_by_value_not_aliased() {
+    // Soundness: a parameter typed with a `::`-qualified path (`p: lib::big::Big`)
+    // is passed by value, exactly like a bare item-imported struct parameter.
+    // Mutating a field of the parameter inside the callee must not be observable
+    // in the caller's struct. A regression aliased the caller's storage (no frame
+    // slot, no copy), so the mutation through the parameter clobbered the caller's
+    // value and `run` returned the mutated 999 instead of the original 1.
+    cov_mark::check!(wasm_codegen_emit_struct_param_copy);
+
+    let main = "\
+use lib::big;
+
+pub fn mutate(mut p: lib::big::Big) -> i32 {
+    p.a = 999;
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let mut orig: lib::big::Big = lib::big::Big { a: 1, b: 2 };
+    let inside: i32 = mutate(orig);
+    return orig.a;
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "big"], big)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+#[test]
+fn qualified_struct_param_by_value_with_multiple_args() {
+    // The by-value copy must apply per qualified-struct parameter, not only to a
+    // single one: mutating both parameters leaves both caller structs intact, so
+    // their original fields sum to the pre-call total.
+    let main = "\
+use lib::big;
+
+pub fn mutate_both(mut p: lib::big::Big, mut q: lib::big::Big) -> i32 {
+    p.a = 999;
+    q.a = 888;
+    return p.a + q.a;
+}
+
+pub fn run() -> i32 {
+    let first: lib::big::Big = lib::big::Big { a: 1, b: 0 };
+    let second: lib::big::Big = lib::big::Big { a: 2, b: 0 };
+    let touched: i32 = mutate_both(first, second);
+    return first.a + second.a;
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "big"], big)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 3);
+}
+
+#[test]
+fn qualified_struct_param_read_only_reads_correct_fields() {
+    // A read-only qualified-struct parameter must still read the caller's field
+    // values correctly through its copy. This guards the read path the by-value
+    // fix shares with the original qualified-parameter support.
+    let main = "\
+use lib::big;
+
+pub fn total(p: lib::big::Big) -> i32 {
+    return p.a + p.b;
+}
+
+pub fn run() -> i32 {
+    let v: lib::big::Big = lib::big::Big { a: 10, b: 7 };
+    return total(v);
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "big"], big)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 17);
+}
+
+#[test]
+fn qualified_struct_param_matches_item_import_form_at_runtime() {
+    // The same program written with a `::`-qualified parameter type and with a
+    // braced item import (`use lib::big::{Big};`) must produce identical runtime
+    // behavior: both forms name the same struct and both pass it by value with a
+    // frame copy, so a mutation in the callee is invisible to the caller either way.
+    let qualified_main = "\
+use lib::big;
+
+pub fn mutate(mut p: lib::big::Big) -> i32 {
+    p.a = 999;
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let mut orig: lib::big::Big = lib::big::Big { a: 5, b: 6 };
+    let inside: i32 = mutate(orig);
+    return orig.a;
+}
+";
+    let item_import_main = "\
+use lib::big::{Big};
+
+pub fn mutate(mut p: Big) -> i32 {
+    p.a = 999;
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let mut orig: Big = Big { a: 5, b: 6 };
+    let inside: i32 = mutate(orig);
+    return orig.a;
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let qualified_wasm =
+        wasm_codegen_multi_file(&[(vec![], qualified_main), (vec!["lib", "big"], big)]);
+    let item_import_wasm =
+        wasm_codegen_multi_file(&[(vec![], item_import_main), (vec!["lib", "big"], big)]);
+
+    let (mut q_store, q_instance) = instantiate(&qualified_wasm);
+    let (mut i_store, i_instance) = instantiate(&item_import_wasm);
+    assert_eq!(
+        call_i32(&mut q_store, &q_instance, "run"),
+        call_i32(&mut i_store, &i_instance, "run"),
+    );
+    assert_eq!(call_i32(&mut q_store, &q_instance, "run"), 5);
+}
+
+#[test]
+fn mutable_self_method_on_qualified_type_copies_receiver() {
+    // A method receiver derived from a qualified-type struct must still copy on a
+    // `mut self` call: mutating the receiver inside the method leaves the caller's
+    // struct untouched. This guards that the by-value parameter fix does not
+    // regress the `mut self` copy path.
+    let main = "\
+use lib::counter;
+
+pub fn run() -> i32 {
+    let mut c: lib::counter::Counter = lib::counter::Counter { value: 1 };
+    let bumped: i32 = c.bump();
+    return c.value;
+}
+";
+    let counter = "\
+pub struct Counter {
+    value: i32;
+
+    pub fn bump(mut self) -> i32 {
+        self.value = 100;
+        return self.value;
+    }
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "counter"], counter)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+/// Extracts the printed `(func $name ...)` text for one function from a module's
+/// WAT, so two programs can be compared on a single function body rather than the
+/// whole module (which differs in unrelated functions). Returns the substring
+/// from the matching `(func $name` up to the matching closing paren, found by
+/// paren-depth tracking.
+fn function_wat(wasm_bytes: &[u8], name: &str) -> String {
+    let wat = wasmprinter::print_bytes(wasm_bytes).expect("module should print to WAT");
+    let start = wat
+        .find(&format!("(func ${name} "))
+        .unwrap_or_else(|| panic!("function `{name}` not found in WAT:\n{wat}"));
+    let mut depth = 0usize;
+    for (offset, ch) in wat[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return wat[start..=start + offset].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced parentheses extracting `{name}` from WAT:\n{wat}");
+}
+
+#[test]
+fn qualified_struct_param_body_is_byte_identical_to_item_import_form() {
+    // The fix's thesis: a `::`-qualified struct parameter must lower exactly like
+    // the braced item-import form. Comparing the emitted `mutate` body directly
+    // (not just the runtime result) guards against a divergence that happens to
+    // return the same value — both forms must produce the same frame prologue,
+    // `memory.copy`, parameter-rebind, and body.
+    let qualified_main = "\
+use lib::big;
+
+pub fn mutate(mut p: lib::big::Big) -> i32 {
+    p.a = 999;
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let mut orig: lib::big::Big = lib::big::Big { a: 1, b: 2 };
+    let inside: i32 = mutate(orig);
+    return orig.a;
+}
+";
+    let item_import_main = "\
+use lib::big::{Big};
+
+pub fn mutate(mut p: Big) -> i32 {
+    p.a = 999;
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let mut orig: Big = Big { a: 1, b: 2 };
+    let inside: i32 = mutate(orig);
+    return orig.a;
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let qualified_wasm =
+        wasm_codegen_multi_file(&[(vec![], qualified_main), (vec!["lib", "big"], big)]);
+    let item_import_wasm =
+        wasm_codegen_multi_file(&[(vec![], item_import_main), (vec!["lib", "big"], big)]);
+
+    assert_eq!(
+        function_wat(&qualified_wasm, "mutate"),
+        function_wat(&item_import_wasm, "mutate"),
+        "the qualified-parameter `mutate` body must be byte-identical to the item-import form"
+    );
+}
+
+#[test]
+fn qualified_enum_param_is_not_copied() {
+    // An enum reached through a `::`-qualified parameter type is a scalar tag, not
+    // a struct: it must get NO frame slot and NO `memory.copy`. The fix widened
+    // the slot-allocation arms to include the qualified carrier, gated on the path
+    // resolving to a *struct*; this guards that an enum carrier is turned away, so
+    // a qualified-enum parameter stays a bare i32 like the bare-enum form.
+    cov_mark::check_count!(wasm_codegen_emit_struct_param_copy, 0);
+
+    let main = "\
+use lib::sig;
+
+pub fn classify(s: lib::sig::Signal) -> i32 {
+    return 0;
+}
+
+pub fn run() -> i32 {
+    let s: lib::sig::Signal = lib::sig::Signal::Stop;
+    return classify(s);
+}
+";
+    let sig = "pub enum Signal { Go, Slow, Stop }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "sig"], sig)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 0);
+}
+
+#[test]
+fn qualified_struct_param_lays_out_by_definer_despite_same_named_local_struct() {
+    // The qualified parameter must lay out by its *defining* file even when the
+    // entry file declares a same-named struct with a different field order. A
+    // bare-name layout lookup against the access site would pick the entry's
+    // `Big { b; a }` (so `p.a` would read offset 4), miscompiling the field read.
+    // Resolving through the qualified path keeps the definer's `Big { a; b }`
+    // layout, so `p.a` reads offset 0.
+    let main = "\
+use lib::big;
+
+struct Big { b: i32; a: i32; }
+
+pub fn first_field(p: lib::big::Big) -> i32 {
+    return p.a;
+}
+
+pub fn run() -> i32 {
+    let v: lib::big::Big = lib::big::Big { a: 11, b: 22 };
+    return first_field(v);
+}
+";
+    let big = "pub struct Big { a: i32; b: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "big"], big)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 11);
+}
+
+#[test]
+fn three_segment_qualified_struct_param_is_passed_by_value() {
+    // A three-segment qualified parameter type (`lib::geom::Point`) must walk the
+    // full namespace path to its struct and still be copied by value. Mutating the
+    // parameter leaves the caller's struct intact, exactly as for the two-segment
+    // form, exercising the multi-hop path walk on the parameter copy path.
+    let main = "\
+use lib::geom;
+
+pub fn shift(mut p: lib::geom::Point) -> i32 {
+    p.x = 999;
+    return p.x;
+}
+
+pub fn run() -> i32 {
+    let mut origin: lib::geom::Point = lib::geom::Point { x: 3, y: 4 };
+    let moved: i32 = shift(origin);
+    return origin.x;
+}
+";
+    let geom = "pub struct Point { x: i32; y: i32; }";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main), (vec!["lib", "geom"], geom)]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 3);
+}

@@ -192,10 +192,27 @@ pub(crate) fn resolve_struct_with_defining_path(
             .lookup_struct(key)
             .or_else(|| ctx.lookup_struct_in(name, module_path)),
         TypeInfoKind::Custom(name) => ctx.lookup_struct_in(name, module_path),
+        // A `::`-qualified annotation (`p: lib::geom::Point`) names a struct by
+        // its file path rather than a bare name; the leaf is not bound by name in
+        // the accessing file, so a bare-name lookup would miss it. Walking the
+        // path from the accessing file recovers the same struct a bare or
+        // canonical-key form would, keeping a by-value qualified parameter on the
+        // same slot+copy path as a bare struct parameter.
+        TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+            ctx.lookup_struct_by_qualified_path(&split_qualified_path(path), module_path)
+        }
         _ => None,
     }?;
     let defining_path = ctx.module_path_of_scope(info.definition_scope_id);
     Some((info, defining_path))
+}
+
+/// Splits a `::`-joined type path (`lib::geom::Point`) into its segments, the
+/// form [`TypedContext::lookup_struct_by_qualified_path`] expects. A
+/// [`TypeInfoKind::Qualified`]/[`TypeInfoKind::QualifiedName`] carries its path
+/// as a single joined string.
+fn split_qualified_path(path: &str) -> Vec<String> {
+    path.split("::").map(ToString::to_string).collect()
 }
 
 /// Computes the byte layout for a struct's fields.

@@ -403,17 +403,33 @@ fn segment_reserves_separator(segment: &str) -> Option<&'static str> {
 }
 
 /// Builds a [`CodegenError::SpecNameReservesSeparator`] for the first segment of
-/// `spec` (a path stem, then the spec name) that fabricates or carries a `__`
-/// run, or `None` when the joined name has no `__` run. The path stems are
+/// `spec` (a path stem, then the spec name) that fabricates or carries the
+/// reserved `__` separator, or `None` when no segment offends. The path stems are
 /// checked before the spec name so a file-stem offense (the common case) names
 /// the file.
 ///
-/// Gated on the joined name actually carrying a `__` run: a leading `_` on the
-/// *first* segment only makes the whole name start with `_` (a non-letter start,
-/// not a `__` run), which the generic Rocq-identifier check reports instead.
+/// Two offense shapes are caught here, both before any artifact is written so the
+/// diagnostic names the source the user wrote rather than the flattened key:
+///
+/// 1. The codegen `_`-join itself carries a `__` run (`qualified.contains("__")`):
+///    a leading `_` on a non-first segment, a trailing `_` on a non-last segment,
+///    or a `__` run anywhere in the source. A leading `_` on the *first* segment
+///    is excluded — it only makes the whole name start with `_` (a non-letter
+///    start, not a `__` run), which the generic Rocq-identifier check reports.
+/// 2. An imported file's spec name (the last segment) *ends* with `_` while the
+///    `_`-join carries no `__`. The trailing `_` is the final character of
+///    `qualified`, so it abuts nothing in the codegen join — but the Rocq
+///    translator joins the file-qualified name into `<module>__<spec>_specs` and
+///    `valid_<module>__<spec>`, where that trailing `_` lands next to the reserved
+///    `__` separator. Caught here (not only downstream) so the message names the
+///    source spec and its file instead of the joined key the translator sees.
+///    The entry case (empty module path) is left to the translator, which has the
+///    output module name needed to render its own join.
 fn spec_reserves_separator(spec: &VisitedSpec) -> Option<CodegenError> {
     let qualified = qualified_spec_name(&spec.module_path, &spec.spec_name);
-    if !qualified.contains("__") {
+    let trailing_underscore_spec_in_subfile =
+        !spec.module_path.is_empty() && spec.spec_name.ends_with('_');
+    if !qualified.contains("__") && !trailing_underscore_spec_in_subfile {
         return None;
     }
 
@@ -902,6 +918,46 @@ mod spec_name_tests {
         assert!(
             check_spec_names_valid(&specs).is_ok(),
             "an interior single `_` must not be rejected"
+        );
+    }
+
+    #[test]
+    fn trailing_underscore_spec_name_in_subfile_reserves_separator() {
+        // `spec Invariant_` in `lib/geom.inf` joins to `lib_geom_Invariant_`,
+        // which carries no `__` of its own — the trailing `_` is the final
+        // character. But the Rocq translator joins it into `<module>__<spec>_specs`
+        // and `valid_<module>__<spec>`, where that trailing `_` abuts the reserved
+        // `__` separator. Codegen catches it here so the diagnostic names the
+        // SOURCE spec (`lib::geom::Invariant_`) the user wrote, not the flattened
+        // key the translator would otherwise report.
+        let specs = vec![visited(&["lib", "geom"], "Invariant_")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a trailing-underscore spec name in an imported file must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.spec_source, "lib::geom::Invariant_");
+                assert_eq!(d.qualified, "lib_geom_Invariant_");
+                assert_eq!(d.offender_kind, "spec name");
+                assert_eq!(d.offender, "Invariant_");
+                assert_eq!(d.offender_cause, "ends with `_`");
+                assert_eq!(d.fix_hint, "Invariant_ -> Invariant");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_file_trailing_underscore_spec_name_left_to_translator() {
+        // An entry-file `spec Spec_` keeps its bare name `Spec_` (empty module
+        // path), so codegen's `_`-join produces no `__` and the trailing `_` only
+        // abuts the translator's `<module>__<spec>_specs` join, which needs the
+        // output module name codegen does not have. Codegen passes it through; the
+        // translator's `validate_spec_join_boundary` rejects it with the output
+        // module name in hand. The subfile case is the one codegen owns.
+        let specs = vec![visited(&[], "Spec_")];
+        assert!(
+            check_spec_names_valid(&specs).is_ok(),
+            "an entry-file trailing-underscore spec is left to the translator's join check"
         );
     }
 

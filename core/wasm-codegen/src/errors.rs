@@ -88,13 +88,15 @@ pub(crate) enum CodegenError {
     )]
     SpecNameInvalid { spec: String, reason: String },
 
-    /// A proof-mode spec's file-qualified name would carry a `__` run, which Rocq
-    /// reserves as the `<module>__<spec>` separator. The run is fabricated when a
-    /// path segment (file stem) or the spec name begins or ends with `_` — the
-    /// `_` that joins the segments lands next to the boundary `_` — or carries a
-    /// `__` run in the source itself. Reported at the source level, naming the
-    /// offending file or spec rather than the flattened internal key, and before
-    /// any artifact is written so a rejected name leaves no stale `.wasm`/`.v`.
+    /// A proof-mode spec's file-qualified name would fabricate (or carry) a `__`
+    /// run, which Rocq reserves as the `<module>__<spec>` separator. The run is
+    /// fabricated when a path segment (file stem) or the spec name begins or ends
+    /// with `_` — the `_` that joins the segments, or that abuts the translator's
+    /// own `<module>__<spec>_specs` join, lands next to the boundary `_` — or when
+    /// a segment carries a `__` run in the source itself. Reported at the source
+    /// level, naming the offending file or spec rather than the flattened internal
+    /// key, and before any artifact is written so a rejected name leaves no stale
+    /// `.wasm`/`.v`.
     ///
     /// Deliberately a rejection rather than an auto-escape: the file-qualified
     /// name is emitted verbatim into the proof artifact (`Definition
@@ -110,9 +112,11 @@ pub(crate) enum CodegenError {
          with `_`:\n\
          \n    {join_lhs} -> {qualified}\n\
          \n\
-         The `__` run in `{qualified}` is reserved in Rocq as the module/spec \
-         separator, so the name is ambiguous and rejected. The {offender_kind} \
-         `{offender}` (which {offender_cause}) is what creates it.\n\
+         Rocq reserves `__` as the module/spec separator in the generated proof \
+         names (`<module>__{qualified}_specs` and `valid_<module>__{qualified}`), \
+         so a file-qualified name that begins or ends with `_`, or carries a `__` \
+         run, fabricates that separator and is ambiguous, so it is rejected. The \
+         {offender_kind} `{offender}` (which {offender_cause}) is what creates it.\n\
          \n\
          How to fix: rename so no path segment or spec name begins with `_`, ends \
          with `_`, or contains a `__` run (e.g. `{fix_hint}`).\n\
