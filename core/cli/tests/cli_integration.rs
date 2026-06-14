@@ -991,6 +991,90 @@ fn parse_multi_file_syntax_error_in_import_names_module() {
         .stderr(predicate::str::contains("lib::broken"));
 }
 
+/// A syntax error in the ENTRY file names its real path and must NOT use the
+/// "imported file" wording — the entry is the file the user compiled, not an
+/// import. (The imported-file channel keeps its own wording, asserted above.)
+#[test]
+fn parse_entry_syntax_error_names_real_path_not_imported() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "pub fn main() -> i32 { let x: i32 = ; return x; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--parse");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Parse error"))
+        .stderr(predicate::str::contains("main.inf"))
+        .stderr(predicate::str::contains("imported file").not())
+        .stderr(predicate::str::contains("<entry>").not());
+}
+
+/// A type error inside an IMPORTED file is reported by the file's `::`-joined
+/// module path, so the user is not misdirected to the entry file. Source
+/// locations are per-file-local, so a bare `line:col` would otherwise read as
+/// the entry.
+#[test]
+fn type_check_error_in_import_names_module() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::geom;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/geom.inf",
+        "pub struct Point { x: i32; y: i32; }\npub fn bad() -> i32 { return Point { x: 1, y: 2 }; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--analyze");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Type checking failed"))
+        .stderr(predicate::str::contains("lib::geom:"));
+}
+
+/// An analysis finding (A037) inside an IMPORTED file is reported by the file's
+/// module path, matching the type-check and parse channels.
+#[test]
+fn analysis_finding_in_import_names_module() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "use lib::a;\npub fn main() -> i32 { return lib::a::oob(); }",
+    );
+    write_source(
+        temp.path(),
+        "lib/a.inf",
+        "pub fn oob() -> i32 { let a: [i32; 3] = [1,2,3]; return a[5]; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--analyze");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("[A037]"))
+        .stderr(predicate::str::contains("lib::a:"));
+}
+
+/// Regression: a single-file type error stays a bare `line:col` (no file prefix),
+/// so existing single-file diagnostics are unchanged.
+#[test]
+fn type_check_error_in_single_file_stays_bare() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "solo.inf", "pub fn main() -> i32 { return true; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--analyze");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Type checking failed"))
+        .stderr(predicate::str::contains("type mismatch"))
+        .stderr(predicate::str::contains("<entry>").not());
+}
+
 /// Regression: a single-file input with no imports still parses through the
 /// multi-file front end exactly as before, with no spurious warnings on stderr.
 #[test]
@@ -1005,4 +1089,445 @@ fn parse_single_file_through_project_front_end_is_quiet() {
         .success()
         .stdout(predicate::str::contains("Parsed:"))
         .stderr(predicate::str::is_empty());
+}
+
+/// A proof-mode spec whose file-qualified name would fabricate a reserved `__`
+/// run (here `spec _S`, whose leading `_` lands next to the module-path join `_`)
+/// is rejected during codegen — before any artifact is written — with an
+/// educational, source-level message: it names the SOURCE spec (`lib::geo::_S`),
+/// shows the flattening so the user sees *why* (`lib_geo__S`), and points at the
+/// rename. Crucially, no stale `out/main.wasm` is left behind: the codegen
+/// failure precedes the WASM write.
+#[test]
+fn invalid_spec_name_rejected_early_leaves_no_stale_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::geo;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/geo.inf",
+        "spec _S { fn obligation() -> i32 { return 7; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        // Names the source spec, shows the flattening so the cause is visible, and
+        // explains the readability rationale for rejecting rather than escaping.
+        .stderr(predicate::str::contains("lib::geo::_S"))
+        .stderr(predicate::str::contains("lib_geo__S"))
+        .stderr(predicate::str::contains("reserves `__`"))
+        .stderr(predicate::str::contains("appear verbatim in your .v"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected spec name must not leave a stale out/main.wasm behind"
+    );
+}
+
+/// A proof-mode spec in a file whose stem ends in `_` (here `lib/x_.inf`) is
+/// rejected with the same educational message, which blames the FILE stem (not
+/// the spec) and suggests the rename `x_.inf -> x.inf`. No stale artifact remains.
+#[test]
+fn trailing_underscore_file_stem_spec_rejected_no_stale_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::x_;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/x_.inf",
+        "spec S { fn obligation() -> i32 { return 1; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("lib::x_::S"))
+        .stderr(predicate::str::contains("file stem `x_`"))
+        .stderr(predicate::str::contains("x_.inf -> x.inf"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected file-stem spec name must not leave a stale out/main.wasm behind"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a rejected file-stem spec name must not leave a stale out/main.v behind"
+    );
+}
+
+/// Default `compile` mode (no `-v`) does not emit any Rocq name, so a file stem
+/// ending in `_` that would be rejected in proof mode compiles cleanly here — the
+/// rejection is scoped to where the name is actually emitted.
+#[test]
+fn trailing_underscore_file_stem_spec_compiles_in_default_mode() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::x_;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/x_.inf",
+        "spec S { fn obligation() -> i32 { return 1; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "default mode must not emit a .v"
+    );
+}
+
+/// Companion to [`invalid_spec_name_rejected_early_leaves_no_stale_wasm`]: a
+/// legal spec name in a non-entry file still compiles and produces both the WASM
+/// and the Rocq `.v` artifact in proof mode.
+#[test]
+fn valid_non_entry_spec_name_produces_wasm_and_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::geo;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/geo.inf",
+        "spec S { fn obligation() -> i32 { return 7; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(temp.child("out").child("main.v").path().exists());
+}
+
+// ---------------------------------------------------------------------------
+// Stale-artifact safety: a rejected compile must never leave a runnable
+// `out/<name>.wasm` (or `.v`) on disk for `wasmtime` to execute. After a good
+// build, a later edit that fails any rejection channel (type check, analysis,
+// codegen) must clear the previous artifact rather than leave it behind, in both
+// single-file and multi-file modes.
+// ---------------------------------------------------------------------------
+
+/// Builds `entry` in the given temp dir and asserts the build succeeded and wrote
+/// `out/<stem>.wasm`. Shared first half of every stale-artifact test.
+fn build_ok_and_assert_wasm(temp: &assert_fs::TempDir, entry: &std::path::Path, stem: &str) {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(entry);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    assert!(
+        temp.child("out").child(format!("{stem}.wasm")).path().exists(),
+        "a successful build must write out/{stem}.wasm"
+    );
+}
+
+/// Multi-file, type-check channel: a good build writes the WASM; editing an
+/// imported file to call an undefined function makes the recompile fail type
+/// checking, and the previously-written `out/main.wasm` must be gone.
+#[test]
+fn rejected_typecheck_clears_stale_multi_file_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "use lib::a;\npub fn main() -> i32 { return lib::a::seven(); }",
+    );
+    write_source(temp.path(), "lib/a.inf", "pub fn seven() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "main");
+
+    // Break the imported file: a call to an undefined function fails type check.
+    write_source(temp.path(), "lib/a.inf", "pub fn seven() -> i32 { return nope(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Type checking failed"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a type-check rejection must not leave a runnable stale out/main.wasm"
+    );
+}
+
+/// Multi-file, analysis channel (A035 recursion): a good build writes the WASM;
+/// rewriting an imported file into a self-recursive function makes the recompile
+/// fail analysis, and the previously-written `out/main.wasm` must be gone.
+#[test]
+fn rejected_analysis_clears_stale_multi_file_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "use lib::r;\npub fn main() -> i32 { return lib::r::go(); }",
+    );
+    write_source(temp.path(), "lib/r.inf", "pub fn go() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "main");
+
+    // Recursion is forbidden (A035); the recompile fails the analysis channel.
+    write_source(temp.path(), "lib/r.inf", "pub fn go() -> i32 { return go(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("A035"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "an analysis rejection must not leave a runnable stale out/main.wasm"
+    );
+}
+
+/// Single-file, type-check channel: the same guarantee holds without any imports.
+#[test]
+fn rejected_typecheck_clears_stale_single_file_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "prog");
+
+    write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return nope(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("Type checking failed"));
+
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a single-file type-check rejection must not leave a stale out/prog.wasm"
+    );
+}
+
+/// Single-file, analysis channel: a recursive single-file program clears the
+/// stale artifact too.
+#[test]
+fn rejected_analysis_clears_stale_single_file_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "prog");
+
+    write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return main(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("A035"));
+
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a single-file analysis rejection must not leave a stale out/prog.wasm"
+    );
+}
+
+/// The stale-artifact guard must also clear the `.v` of a rejected proof-mode
+/// build: with `-v`, both `out/main.wasm` and `out/main.v` of a previous good
+/// build are removed when the recompile is rejected.
+#[test]
+fn rejected_build_clears_stale_v_with_dash_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "use lib::a;\npub fn main() -> i32 { return lib::a::seven(); }",
+    );
+    write_source(temp.path(), "lib/a.inf", "pub fn seven() -> i32 { return 7; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(temp.child("out").child("main.v").path().exists());
+
+    write_source(temp.path(), "lib/a.inf", "pub fn seven() -> i32 { return nope(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert().failure();
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected proof-mode build must not leave a stale out/main.wasm"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a rejected proof-mode build must not leave a stale out/main.v"
+    );
+}
+
+/// A parse-only or analyze-only run must NOT disturb a previous full build's
+/// artifacts: the stale-artifact guard only clears outputs a codegen invocation
+/// would itself write. Build fully, then run `--analyze` and confirm the WASM
+/// from the earlier build is still on disk.
+#[test]
+fn analyze_only_does_not_clear_previous_build_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "prog");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--analyze");
+    cmd.assert().success();
+
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "an --analyze run must not clear a previous build's artifact"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// wasm_to_v rejection ordering: the Rocq translation runs before any artifact
+// is written, so a `-v` build rejected by `wasm_to_v` (e.g. a spec named after a
+// Rocq stdlib type, a keyword, or a `__`-containing name) leaves NO runnable
+// `.wasm` behind. A `wasm_to_v` rejection at a non-zero exit must not be runnable.
+// ---------------------------------------------------------------------------
+
+/// A spec named `list` shadows the Rocq stdlib type and is rejected by
+/// `wasm_to_v`. Because the translation runs before the WASM is written, no
+/// runnable `out/main.wasm` (nor a `.v`) is left at the failing exit.
+#[test]
+fn wasm_to_v_stdlib_collision_leaves_no_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec list { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("list"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a wasm_to_v rejection must not leave a runnable out/main.wasm"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a wasm_to_v rejection must not leave an out/main.v"
+    );
+}
+
+/// A spec named after a Rocq keyword (`match`) is rejected by `wasm_to_v`; no
+/// runnable WASM is left behind.
+#[test]
+fn wasm_to_v_keyword_spec_name_leaves_no_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec match { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert().failure();
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a Rocq-keyword spec name rejection must not leave a runnable out/main.wasm"
+    );
+}
+
+/// The same guard under `--out-dir`: a `wasm_to_v` rejection leaves no runnable
+/// artifact in the requested directory either.
+#[test]
+fn wasm_to_v_rejection_leaves_no_wasm_under_out_dir() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec list { fn ob() -> i32 { return 7; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path())
+        .arg(&entry)
+        .arg("-v")
+        .arg("--out-dir")
+        .arg("build");
+    cmd.assert().failure();
+
+    assert!(
+        !temp.child("build").child("main.wasm").path().exists(),
+        "a wasm_to_v rejection under --out-dir must not leave a runnable build/main.wasm"
+    );
+    assert!(
+        !temp.child("build").child("main.v").path().exists(),
+        "a wasm_to_v rejection under --out-dir must not leave a build/main.v"
+    );
+}
+
+/// A plain compile (no `-v`) after an earlier `-v` build must not leave a stale
+/// `.v` describing the old program: the proof artifact is invalidated by the
+/// since-changed source. The fresh `.wasm` is still written.
+#[test]
+fn plain_compile_clears_stale_v_from_prior_proof_build() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "pub fn main() -> i32 { return 1; }");
+
+    // First, a proof build writes both artifacts.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert().success();
+    assert!(temp.child("out").child("main.v").path().exists());
+
+    // Edit the program and rebuild WITHOUT -v.
+    write_source(temp.path(), "main.inf", "pub fn main() -> i32 { return 42; }");
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+
+    assert!(
+        temp.child("out").child("main.wasm").path().exists(),
+        "a plain compile must still write out/main.wasm"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a plain compile must not leave a stale out/main.v from a prior -v build"
+    );
+}
+
+/// The success path is unchanged: a clean `-v` build writes both the `.wasm` and
+/// the `.v`, and the `.wasm` is valid (the deferred-write ordering does not alter
+/// a successful build).
+#[test]
+fn dash_v_success_still_writes_both_artifacts() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "pub fn main() -> i32 { return 7; }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(temp.child("out").child("main.v").path().exists());
 }

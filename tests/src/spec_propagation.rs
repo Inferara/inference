@@ -236,6 +236,56 @@ mod scenario_2_export_gating {
 }
 
 // ============================================================================
+// Field-position uzumaki inside a spec compiles in proof mode
+// ============================================================================
+#[cfg(test)]
+mod spec_field_position_uzumaki {
+    use super::helpers::compile;
+    use inference_wasm_codegen::CompilationMode;
+
+    /// A field-position uzumaki (`Point { x: @, y: @ }`) inside a spec's `forall`
+    /// must compile in proof mode. The field's declared type is threaded onto the
+    /// uzumaki node during type-checking, so proof-mode codegen finds the type info
+    /// and emits the right uzumaki opcode rather than panicking on a missing type.
+    #[test]
+    fn field_position_uzumaki_in_spec_forall_proof_mode_compiles() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            spec S {
+                fn prop() forall {
+                    let p: Point = Point { x: @, y: @ };
+                    assert(p.x == p.x);
+                }
+            }
+        "#;
+        let output = compile(source, CompilationMode::Proof);
+        inf_wasmparser::validate(output.wasm())
+            .expect("field-position uzumaki in a spec must produce valid proof-mode WASM");
+    }
+
+    /// The typed-let form (`let a: i32 = @; Point { x: a }`) is the established
+    /// workaround; it must keep compiling so the field-position fix is an addition,
+    /// not a replacement.
+    #[test]
+    fn typed_let_uzumaki_in_spec_forall_proof_mode_still_compiles() {
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            spec S {
+                fn prop() forall {
+                    let a: i32 = @;
+                    let b: i32 = @;
+                    let p: Point = Point { x: a, y: b };
+                    assert(p.x == p.x);
+                }
+            }
+        "#;
+        let output = compile(source, CompilationMode::Proof);
+        inf_wasmparser::validate(output.wasm())
+            .expect("typed-let uzumaki in a spec must still produce valid proof-mode WASM");
+    }
+}
+
+// ============================================================================
 // Scenario 3: Custom WASM section round-trip
 // ============================================================================
 #[cfg(test)]

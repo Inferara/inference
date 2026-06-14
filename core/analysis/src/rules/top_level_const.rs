@@ -14,7 +14,7 @@ use inference_ast::arena::AstArena;
 use inference_ast::ids::DefId;
 use inference_ast::nodes::Def;
 
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Module-scope `const` declarations are not yet supported.
@@ -22,11 +22,11 @@ crate::rule! {
     #[name = "Top-level const not supported"]
     #[severity = error]
     pub struct TopLevelConstNotSupported;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
         for source_file in ctx.source_files() {
-            check_defs(arena, &source_file.defs, &mut errors);
+            check_defs(arena, &source_file.module_path, &source_file.defs, &mut errors);
         }
         errors
     }
@@ -34,18 +34,19 @@ crate::rule! {
 
 fn check_defs(
     arena: &AstArena,
+    module_path: &[String],
     defs: &[DefId],
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     for &def_id in defs {
         match &arena[def_id].kind {
             Def::Constant { name, .. } => {
-                errors.push(AnalysisDiagnostic::TopLevelConstNotSupported {
+                errors.push(LabeledDiagnostic::new(module_path.to_vec(), AnalysisDiagnostic::TopLevelConstNotSupported {
                     name: arena[*name].name.clone(),
                     location: arena[def_id].location,
-                });
+                }));
             }
-            Def::Spec { defs, .. } => check_defs(arena, defs, errors),
+            Def::Spec { defs, .. } => check_defs(arena, module_path, defs, errors),
             _ => {}
         }
     }

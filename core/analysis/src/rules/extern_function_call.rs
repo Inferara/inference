@@ -29,7 +29,10 @@ use inference_ast::ids::DefId;
 use inference_ast::nodes::{Def, Expr};
 use inference_type_checker::typed_context::TypedContext;
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// Calls to unbound external functions are not supported in codegen.
@@ -37,12 +40,19 @@ crate::rule! {
     #[name = "External function call"]
     #[severity = error]
     pub struct ExternFunctionCall;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let arena = ctx.arena();
         let mut errors = Vec::new();
         let mut scopes: Vec<HashMap<&str, DefId>> = Vec::new();
         for source_file in ctx.source_files() {
-            check_defs(arena, ctx, &source_file.defs, &mut scopes, &mut errors);
+            check_defs(
+                arena,
+                ctx,
+                &source_file.module_path,
+                &source_file.defs,
+                &mut scopes,
+                &mut errors,
+            );
         }
         errors
     }
@@ -58,25 +68,26 @@ crate::rule! {
 fn check_defs<'a>(
     arena: &'a AstArena,
     ctx: &TypedContext,
+    module_path: &[String],
     defs: &[DefId],
     scopes: &mut Vec<HashMap<&'a str, DefId>>,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     scopes.push(collect_extern_decls(arena, defs));
     for &def_id in defs {
         match &arena[def_id].kind {
             Def::Function { body, .. } => {
-                check_function_body(arena, ctx, *body, scopes, errors);
+                check_function_body(arena, ctx, module_path, *body, scopes, errors);
             }
             Def::Struct { methods, .. } => {
                 for &method_id in methods {
                     if let Def::Function { body, .. } = &arena[method_id].kind {
-                        check_function_body(arena, ctx, *body, scopes, errors);
+                        check_function_body(arena, ctx, module_path, *body, scopes, errors);
                     }
                 }
             }
             Def::Spec { defs, .. } => {
-                check_defs(arena, ctx, defs, scopes, errors);
+                check_defs(arena, ctx, module_path, defs, scopes, errors);
             }
             _ => {}
         }
@@ -108,9 +119,10 @@ fn resolve_extern_decl(scopes: &[HashMap<&str, DefId>], name: &str) -> Option<De
 fn check_function_body(
     arena: &AstArena,
     ctx: &TypedContext,
+    module_path: &[String],
     body: inference_ast::ids::BlockId,
     scopes: &[HashMap<&str, DefId>],
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     walker::walk_block_stmts(arena, body, &mut |stmt_id| {
         walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
@@ -122,10 +134,13 @@ fn check_function_body(
                     if let Some(decl) = resolve_extern_decl(scopes, callee_name)
                         && ctx.extern_origin_by_decl(decl).is_none()
                     {
-                        errors.push(AnalysisDiagnostic::ExternFunctionCall {
-                            name: callee_name.clone(),
-                            location: arena[sub_id].location,
-                        });
+                        errors.push(LabeledDiagnostic::new(
+                            module_path.to_vec(),
+                            AnalysisDiagnostic::ExternFunctionCall {
+                                name: callee_name.clone(),
+                                location: arena[sub_id].location,
+                            },
+                        ));
                     }
                 }
             });

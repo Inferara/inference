@@ -662,6 +662,28 @@ impl Compiler {
                     );
                 }
             }
+            // A `::`-qualified return type names a cross-file struct by its path
+            // rather than a bare name. Resolving it here recovers the same
+            // `StructInfo` a bare return would, so a function returning a qualified
+            // struct uses the sret convention instead of falling through to the
+            // non-sret path (which would panic on the returned struct literal).
+            TypeInfoKind::Qualified(path) | TypeInfoKind::QualifiedName(path) => {
+                let segments: Vec<String> = path.split("::").map(ToString::to_string).collect();
+                if let Some(struct_info) =
+                    ctx.lookup_struct_by_qualified_path(&segments, module_path)
+                {
+                    let (total_size, field_slots) =
+                        compute_struct_field_layout(&struct_info, ctx, module_path)?;
+                    self.func_struct_returns.insert(
+                        key,
+                        StructReturnInfo {
+                            total_size,
+                            field_slots,
+                            struct_name: struct_info.name,
+                        },
+                    );
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1002,8 +1024,27 @@ impl Compiler {
             TypeNode::Simple(SimpleTypeKind::I64 | SimpleTypeKind::U64) => Ok(Some(ValType::I64)),
             TypeNode::Generic { .. } => todo!(),
             TypeNode::Function { .. } => todo!(),
-            TypeNode::QualifiedName { .. } => todo!(),
-            TypeNode::Qualified { .. } => todo!(),
+            // `TypeQualifiedName` is the dead AST variant; the parser produces
+            // `Qualified` for every `::`-qualified type. It stays an error rather
+            // than a panic for defense-in-depth.
+            TypeNode::QualifiedName { .. } => Err(CodegenError::UnsupportedType {
+                rendered: arena[ty_id].kind.qualified_path(arena).unwrap_or_default(),
+            }),
+            TypeNode::Qualified { .. } => {
+                // A `::`-qualified type that resolves to a struct or enum is an I32
+                // pointer, like a bare struct/enum reference. The type-checker has
+                // already validated and bound the path; re-resolving here mirrors
+                // the `Custom` arm's defense-in-depth so a malformed path errors at
+                // the codegen boundary instead of emitting plausible WASM.
+                let path = arena[ty_id].kind.qualified_segments(arena).unwrap_or_default();
+                if ctx.qualified_type_is_nominal(&path, module_path) {
+                    Ok(Some(ValType::I32))
+                } else {
+                    Err(CodegenError::UnsupportedType {
+                        rendered: path.join("::"),
+                    })
+                }
+            }
             TypeNode::Custom(ident_id) => {
                 let name = &arena[*ident_id].name;
                 if ctx.lookup_struct_in(name, module_path).is_some()
@@ -1710,7 +1751,18 @@ impl Compiler {
                 );
             }
             TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name) => {
-                let struct_info = ctx.lookup_struct_in(struct_name, module_path);
+                // A `Struct` carries the defining-file canonical key; prefer it.
+                // The bare name alone is not enough when the binding's type was
+                // reached by a `::`-qualifier (`let p: lib::geom::Point`): the leaf
+                // `Point` is not bound by name in the accessing file, so resolving
+                // the bare name against `module_path` would miss the layout. The
+                // canonical key identifies the struct by its defining file (#63).
+                let struct_info = match type_kind {
+                    TypeInfoKind::Struct(_, key) => ctx
+                        .lookup_struct(key)
+                        .or_else(|| ctx.lookup_struct_in(struct_name, module_path)),
+                    _ => ctx.lookup_struct_in(struct_name, module_path),
+                };
                 debug_assert!(
                     struct_info.is_some()
                         || matches!(type_kind, TypeInfoKind::Custom(_))
@@ -2324,12 +2376,30 @@ impl Compiler {
                         }
                     }
                     Some(ResolvedCallee::QualifiedFunction(ref key)) => {
-                        self.lower_qualified_function_call(arena, key, &args, ctx);
+                        match self.lower_qualified_function_call(arena, key, &args, ctx) {
+                            Ok(()) => {}
+                            Err(CodegenError::UnknownFunction(key)) => {
+                                panic!(
+                                    "Function '{key}' not found in name-to-index map; \
+                                     the type-checker should have caught this — a qualified \
+                                     path to a proof-only spec function is rejected there"
+                                )
+                            }
+                            Err(e) => panic!("qualified function call lowering failed: {e}"),
+                        }
                     }
                     None => {
-                        todo!(
-                            "Non-identifier function calls (higher-order) \
-                             are not yet implemented"
+                        // The callee did not resolve to any known call form. The
+                        // only way to reach here is a call the type-checker should
+                        // have rejected — notably a qualified path to a proof-only
+                        // `spec`-inner function or `spec`-inner-struct associated
+                        // function, which has no executable index. Higher-order
+                        // calls are not a language feature, so this is never valid
+                        // input; fail loudly rather than emit a malformed module.
+                        panic!(
+                            "function call callee did not resolve to a lowerable form; \
+                             the type-checker should have rejected this call (a qualified \
+                             path to a proof-only spec function is rejected there)"
                         )
                     }
                 }
@@ -2464,8 +2534,18 @@ impl Compiler {
         // (`geo::Point::new`) is not a plain type the bare-name resolution can
         // read, so the recorded target — carrying the struct name and defining
         // file — is the source of truth.
+        // A cross-file associated call — a namespace-qualified `geo::Point::new`,
+        // an item-imported `A::make()` whose `A` is defined elsewhere, or an
+        // entry-file assoc reached via `root::Type::m()`. The recorded target
+        // names the struct's defining file, which the call site's bare-name
+        // resolution cannot reach. A *same-file* associated call (`module_path ==
+        // current`) is left to the `TypeMemberAccess` arm below so its spec-aware
+        // lookup still finds a spec-inner struct's associated function (registered
+        // as a `SpecMethod`, not a top-level `Method`); routing it by a plain
+        // `method_in` key here would miss that registration.
         if let Some(target) = ctx.call_target(function_expr_id)
             && let Some(struct_name) = &target.receiver_struct
+            && target.module_path != self.current_module_path
             && matches!(&arena[function_expr_id].kind, Expr::TypeMemberAccess { .. })
         {
             let key = FnKey::method_in(
@@ -2475,7 +2555,13 @@ impl Compiler {
             );
             return Some(ResolvedCallee::AssociatedFunction { key });
         }
+        // A cross-file *free* function reached by item import or bare path. An
+        // instance-method call (`recv.method()`) also records a cross-file target
+        // now that dispatch is canonical-key-driven, but it carries a receiver
+        // struct and must lower as a method (via the `MemberAccess` arm below),
+        // not a free function — so this free-function branch excludes it.
         if let Some(target) = ctx.call_target(function_expr_id)
+            && target.receiver_struct.is_none()
             && target.module_path != self.current_module_path
         {
             let key = FnKey::free_in(target.module_path.clone(), target.name.clone());
@@ -2563,13 +2649,20 @@ impl Compiler {
     /// Lowers a call whose target was resolved by the type checker to a specific
     /// (possibly cross-file) function, identified by its already file-qualified
     /// [`FnKey`]. Used for item-imported bare calls and qualified paths.
+    ///
+    /// A missing index is an internal invariant violation: the type checker
+    /// rejects every call it cannot lower (a qualified path to a proof-only spec
+    /// function among them), so by the time codegen runs the key must be
+    /// registered. This returns [`CodegenError::UnknownFunction`] rather than
+    /// panicking on a miss, keeping codegen from crashing if a future change ever
+    /// reopens a path the type checker forgot to gate.
     fn lower_qualified_function_call(
         &mut self,
         arena: &AstArena,
         key: &FnKey,
         call_args: &[(Option<IdentId>, ExprId)],
         ctx: &TypedContext,
-    ) {
+    ) -> Result<(), CodegenError> {
         cov_mark::hit!(wasm_codegen_emit_qualified_function_call);
 
         for (_label, arg_expr_id) in call_args {
@@ -2578,9 +2671,10 @@ impl Compiler {
 
         let func_idx = self
             .resolve_idx_by_key(key)
-            .unwrap_or_else(|| panic!("Function '{key}' not found in func_name_to_idx"));
+            .ok_or_else(|| CodegenError::UnknownFunction(key.to_string()))?;
 
         self.func().instruction(&Instruction::Call(func_idx));
+        Ok(())
     }
 
     /// Resolves a free-function bare name to its WASM function index,
@@ -2668,12 +2762,21 @@ impl Compiler {
     ) -> Option<FnKey> {
         let method_name = &arena[method_name_id].name;
         let receiver_type = ctx.get_node_typeinfo(NodeId::Expr(receiver_expr_id))?;
-        let (TypeInfoKind::Struct(struct_name, _) | TypeInfoKind::Custom(struct_name)) =
-            &receiver_type.kind
-        else {
-            return None;
-        };
-        self.lookup_method_fn_key(struct_name, method_name, ctx)
+        // The receiver carries its struct's canonical identity (`Struct(bare, key)`).
+        // Resolving the method by the key — rather than the bare name from the call
+        // site's scope — keeps dispatch on the value's actual struct when a
+        // same-named struct exists in another file. A keyless `Custom` receiver
+        // (spec-inner or forward reference) has no canonical key, so it falls back to
+        // the call-site bare-name path.
+        match &receiver_type.kind {
+            TypeInfoKind::Struct(struct_name, canonical_key) => {
+                self.lookup_method_fn_key_by_key(struct_name, canonical_key, method_name, ctx)
+            }
+            TypeInfoKind::Custom(struct_name) => {
+                self.lookup_method_fn_key(struct_name, method_name, ctx)
+            }
+            _ => None,
+        }
     }
 
     /// Returns the defining-file module path of the struct named `struct_name`
@@ -2712,6 +2815,60 @@ impl Compiler {
         self.func_name_to_idx
             .contains_key(&candidate)
             .then_some(candidate)
+    }
+
+    /// Spec-aware method lookup keyed by the receiver's **canonical struct key**.
+    ///
+    /// Unlike [`Self::lookup_method_fn_key`], the file-qualified `Method`
+    /// candidate is tried *before* the active spec's `SpecMethod` candidate. The
+    /// receiver's canonical key (`lib::ext::Helper`) names the exact struct the
+    /// value has, so the method registered under that struct's own defining file
+    /// is the authoritative target — even inside a spec that happens to define its
+    /// own same-named struct. Probing the spec first would resolve a cross-file
+    /// `lib::ext::Helper.tag` to the spec's own `Helper.tag` (a wrong callee, and
+    /// an out-of-bounds field load when the layouts differ), since the spec probe
+    /// keys only by the bare name.
+    ///
+    /// The spec probe is reached only as a fallback, when no file-qualified
+    /// `Method` candidate exists for the receiver's struct: that is exactly the
+    /// case of a spec-inner struct (whose methods register as `SpecMethod`, never
+    /// as a top-level `Method`), so the spec's own inner-struct method still
+    /// dispatches to itself with no over-correction.
+    ///
+    /// A key that does not resolve to a defining file (defensive: it always should
+    /// post-type-check) falls back to the bare-name path so behavior is never
+    /// worse than before.
+    fn lookup_method_fn_key_by_key(
+        &self,
+        struct_name: &str,
+        canonical_key: &str,
+        method_name: &str,
+        ctx: &TypedContext,
+    ) -> Option<FnKey> {
+        let Some(module_path) = ctx.module_path_of_struct_key(canonical_key) else {
+            // A struct receiver always carries a key that resolves post-type-check;
+            // a miss means an upstream invariant broke. The bare-name path is the
+            // safe degrade, but surface the violation in test/debug builds.
+            debug_assert!(
+                false,
+                "struct receiver `{struct_name}` has canonical key `{canonical_key}` \
+                 with no resolvable defining struct after type-checking"
+            );
+            return self.lookup_method_fn_key(struct_name, method_name, ctx);
+        };
+        let method_candidate = FnKey::method_in(module_path, struct_name, method_name);
+        if self.func_name_to_idx.contains_key(&method_candidate) {
+            return Some(method_candidate);
+        }
+        // No top-level method for this struct identity: the receiver is the active
+        // spec's own inner struct (its methods register only as `SpecMethod`).
+        if let Some(spec) = self.current_spec.as_deref() {
+            let candidate = FnKey::spec_method(spec, struct_name, method_name);
+            if self.func_name_to_idx.contains_key(&candidate) {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     /// Lowers an instance method call (`receiver.method(args)`) to WASM instructions.
@@ -4122,14 +4279,23 @@ impl Compiler {
         // For a struct leaf (reached only via the `Array` arm's recursion on a
         // nested array-of-structs literal), the field layout is constant for this
         // recursion level, so compute it once. Mirrors `compute_element_layout_if_struct`.
+        //
+        // The leaf is resolved by its canonical key, not by bare name: a
+        // `::`-qualified element type (`[[lib::geom::Pt; 2]; 1]`) carries a
+        // `Struct(name, key)` whose leaf name is not bound in the accessing file,
+        // so a bare-name lookup against `current_module_path` would miss it (or, with
+        // a same-named local struct in scope, find the wrong layout and store the
+        // literal's fields at the wrong offsets — a silent miscompile). Laying out
+        // by the element's defining file keeps stores and member reads in agreement.
         let struct_leaf_layout = match elem_kind {
             TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
-                ctx.lookup_struct_in(name, &self.current_module_path).map(|struct_info| {
-                    let (total_size, field_slots) =
-                        memory::compute_struct_field_layout(&struct_info, ctx, &self.current_module_path)
-                            .expect("struct field layout must be computable for array literal leaves");
-                    (name.clone(), total_size, field_slots)
-                })
+                memory::resolve_struct_with_defining_path(elem_kind, ctx, &self.current_module_path)
+                    .map(|(struct_info, defining_path)| {
+                        let (total_size, field_slots) =
+                            memory::compute_struct_field_layout(&struct_info, ctx, &defining_path)
+                                .expect("struct field layout must be computable for array literal leaves");
+                        (name.clone(), total_size, field_slots)
+                    })
             }
             _ => None,
         };
@@ -4818,11 +4984,21 @@ fn compute_element_layout_if_struct(
     module_path: &[String],
 ) -> Result<Option<Vec<memory::StructFieldSlot>>, CodegenError> {
     match kind {
-        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
-            let Some(struct_info) = ctx.lookup_struct_in(name, module_path) else {
+        TypeInfoKind::Struct(..) | TypeInfoKind::Custom(_) => {
+            // Resolve the element struct by its canonical key, not by bare name.
+            // A `::`-qualified element type (`[lib::geom::Point; 2]`) carries a
+            // `Struct(_, key)` whose leaf name is not bound in the accessing file,
+            // so a bare-name lookup against `module_path` would miss it and the
+            // struct-element path would be skipped. Mirrors the scalar-struct field
+            // resolution so an array-of-struct local lays out by the element's
+            // defining file regardless of how its type was named (#63).
+            let Some((struct_info, defining_path)) =
+                memory::resolve_struct_with_defining_path(kind, ctx, module_path)
+            else {
                 return Ok(None);
             };
-            let (_, field_slots) = compute_struct_field_layout(&struct_info, ctx, module_path)?;
+            let (_, field_slots) =
+                compute_struct_field_layout(&struct_info, ctx, &defining_path)?;
             Ok(Some(field_slots))
         }
         _ => Ok(None),

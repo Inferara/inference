@@ -7,6 +7,7 @@
 use inference_ast::arena::AstArena;
 use inference_ast::ids::{BlockId, DefId, ExprId, NodeId, StmtId};
 use inference_ast::nodes::{BlockKind, Def, Expr, Stmt};
+use inference_type_checker::StructInfo;
 use inference_type_checker::type_info::TypeInfoKind;
 use inference_type_checker::typed_context::TypedContext;
 
@@ -15,6 +16,10 @@ pub(crate) struct WalkContext {
     pub loop_depth: u32,
     pub nondet_depth: u32,
     pub nondet_block_kind: Option<&'static str>,
+    /// Module path of the file whose body is currently being walked (empty for
+    /// the entry file). A rule pairs each finding with this so the report names
+    /// the file it belongs to.
+    pub module_path: Vec<String>,
 }
 
 fn block_kind_label(kind: BlockKind) -> &'static str {
@@ -40,9 +45,11 @@ pub(crate) fn walk_function_bodies(
         loop_depth: 0,
         nondet_depth: 0,
         nondet_block_kind: None,
+        module_path: Vec::new(),
     };
 
     for source_file in typed_context.source_files() {
+        walk_ctx.module_path.clone_from(&source_file.module_path);
         for_each_function_body(arena, &source_file.defs, &mut |body_id| {
             assert_eq!(walk_ctx.loop_depth, 0, "loop_depth leaked");
             assert_eq!(walk_ctx.nondet_depth, 0, "nondet_depth leaked");
@@ -171,22 +178,36 @@ fn is_compound_type(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
 #[must_use]
 pub(crate) fn has_compound_fields(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
-        TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
-            ctx.lookup_struct(name).is_some_and(|s| {
-                s.fields.iter().any(|f| match &f.type_info.kind {
-                    TypeInfoKind::Struct(_, _) => true,
-                    TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
-                    TypeInfoKind::Array(_, _) => {
-                        is_compound_type(ctx, &f.type_info.kind)
-                            || array_nesting_depth(&f.type_info.kind) > 1
-                    }
-                    _ => false,
-                })
-            })
-        }
+        // A resolved struct carries its canonical, file-qualified key; look it up
+        // by that key so a field typed as a cross-file struct reaches the right
+        // definition. A same-named struct in another file has a distinct key, so a
+        // bare-name lookup would otherwise land on the wrong struct and misjudge
+        // its nesting depth. `Custom` is an unresolved (or alias) name with no key,
+        // for which the bare name is the only handle.
+        TypeInfoKind::Struct(_, key) => ctx
+            .lookup_struct(key)
+            .is_some_and(|s| struct_has_compound_field(ctx, &s)),
+        TypeInfoKind::Custom(name) => ctx
+            .lookup_struct(name)
+            .is_some_and(|s| struct_has_compound_field(ctx, &s)),
         TypeInfoKind::Array(elem, _) => has_compound_fields(ctx, &elem.kind),
         _ => false,
     }
+}
+
+/// Whether any field of `s` is itself a compound type (a struct, an array of
+/// structs, or a multidimensional array), which would push nesting past the one
+/// supported level.
+#[must_use = "this is a pure check with no side effects"]
+fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
+    s.fields.iter().any(|f| match &f.type_info.kind {
+        TypeInfoKind::Struct(_, _) => true,
+        TypeInfoKind::Custom(n) => ctx.lookup_enum(n).is_none(),
+        TypeInfoKind::Array(_, _) => {
+            is_compound_type(ctx, &f.type_info.kind) || array_nesting_depth(&f.type_info.kind) > 1
+        }
+        _ => false,
+    })
 }
 
 /// Returns `true` when `expr_id` is a function call that returns a compound

@@ -4,7 +4,7 @@
 //! type information for all value expressions in the AST after type checking completes.
 
 use crate::{
-    symbol_table::{EnumInfo, ExternOrigin, StructInfo, SymbolTable},
+    symbol_table::{EnumInfo, ExternOrigin, ResolvedNominalType, StructInfo, SymbolTable},
     type_info::{NumberType, TypeInfo, TypeInfoKind},
 };
 
@@ -270,6 +270,90 @@ impl TypedContext {
         self.lookup_enum(&file_local_key(bare_name, from_module_path))
     }
 
+    /// Whether the `::`-qualified type path (`geo::Level`, `lib::geom::Point`)
+    /// names a struct or enum as referenced from the file whose module path is
+    /// `from_module_path`.
+    ///
+    /// A qualified type annotation that resolves to a nominal type is represented
+    /// in WASM as an `I32` pointer (like a bare struct/enum reference). Code
+    /// generation asks this to confirm a qualified parameter or return type is a
+    /// resolvable nominal type before treating it as a pointer, so a malformed
+    /// path fails at the codegen boundary rather than emitting plausible WASM.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn qualified_type_is_nominal(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> bool {
+        let Some(from_scope) = self.symbol_table.find_module_scope(from_module_path) else {
+            return false;
+        };
+        self.symbol_table
+            .resolve_qualified_type_path(path, from_scope)
+            .is_some()
+    }
+
+    /// Resolves the `::`-qualified type path (`lib::geom::Point`) to the
+    /// [`StructInfo`] it names, as referenced from the file whose module path is
+    /// `from_module_path`, or `None` if the path does not name a struct.
+    ///
+    /// A function returning a struct uses the sret calling convention, which code
+    /// generation decides from the declared return type. A `::`-qualified return
+    /// type carries the struct's path rather than a bare name, so codegen resolves
+    /// it here to recover the same [`StructInfo`] a bare return type would yield.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn lookup_struct_by_qualified_path(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> Option<StructInfo> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        match self.symbol_table.resolve_qualified_type_path(path, from_scope)? {
+            ResolvedNominalType::Struct(info, _) => Some(info),
+            ResolvedNominalType::Enum(..) => None,
+        }
+    }
+
+    /// Resolves the `::`-qualified type path (`lib::big::Big`) to the
+    /// [`StructInfo`] it names *and its canonical key*, as referenced from the
+    /// file whose module path is `from_module_path`, or `None` if the path does
+    /// not name a struct.
+    ///
+    /// A qualified type annotation reaches analysis as an unresolved path carrier
+    /// (the type checker canonicalizes it in a function's stored signature, but a
+    /// pass that re-derives a type from the raw AST sees the carrier). Sizing such
+    /// a type for the shadow-stack budget needs both the layout (`StructInfo`) and
+    /// the canonical key (to key a cyclic-definition visited set), so this returns
+    /// both — the key the same identity codegen lays the struct out under.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn resolve_struct_by_qualified_path(
+        &self,
+        path: &[String],
+        from_module_path: &[String],
+    ) -> Option<(StructInfo, String)> {
+        let from_scope = self.symbol_table.find_module_scope(from_module_path)?;
+        match self.symbol_table.resolve_qualified_type_path(path, from_scope)? {
+            ResolvedNominalType::Struct(info, key) => Some((info, key)),
+            ResolvedNominalType::Enum(..) => None,
+        }
+    }
+
+    /// Whether the `::`-qualified type path names an enum as referenced from the
+    /// file whose module path is `from_module_path`. Mirrors
+    /// [`Self::resolve_struct_by_qualified_path`] for the enum case, used by the
+    /// stack-depth estimator to size a qualified-typed enum binding (a 4-byte tag,
+    /// no frame slot) rather than treating the unresolved carrier as zero.
+    #[must_use = "this is a pure check with no side effects"]
+    pub fn qualified_path_is_enum(&self, path: &[String], from_module_path: &[String]) -> bool {
+        let Some(from_scope) = self.symbol_table.find_module_scope(from_module_path) else {
+            return false;
+        };
+        matches!(
+            self.symbol_table.resolve_qualified_type_path(path, from_scope),
+            Some(ResolvedNominalType::Enum(..))
+        )
+    }
+
     /// Returns the canonical key of the struct named `bare_name` as referenced
     /// from the file whose module path is `from_module_path`.
     ///
@@ -328,6 +412,23 @@ impl TypedContext {
                 self.symbol_table
                     .file_module_path_of_scope(info.definition_scope_id)
             })
+    }
+
+    /// Returns the defining-file module path of the struct identified by its
+    /// `canonical_key` (`lib::geo::Inner`, or the bare name for an entry-file
+    /// struct), or `None` if no struct has that key.
+    ///
+    /// A method's mangled WASM name is qualified by its **struct's** defining
+    /// file. Dispatch must derive that file from the receiver's canonical identity
+    /// — never from a bare name re-resolved at the call site, which can name a
+    /// different same-named struct. This is the single mapping from a canonical key
+    /// to a defining module path that code generation uses to rebuild a method's
+    /// [`FnKey`](inference_wasm_codegen) key. The result is empty for an entry-file
+    /// struct (its methods stay unqualified), matching how methods are registered.
+    #[must_use = "this is a pure lookup with no side effects"]
+    pub fn module_path_of_struct_key(&self, canonical_key: &str) -> Option<Vec<String>> {
+        self.lookup_struct(canonical_key)
+            .map(|info| self.module_path_of_scope(info.definition_scope_id))
     }
 
     /// Returns the source-root-relative module path of the file that contains the

@@ -99,7 +99,7 @@ pub fn parse_project(entry: &Path) -> anyhow::Result<ProjectParse> {
         .to_path_buf();
 
     let discovered = discover_files(entry, &src_root)?;
-    let arena = lower_in_canonical_order(discovered)?;
+    let arena = lower_in_canonical_order(discovered, entry)?;
     let warnings = collect_unreachable_warnings(&arena, &src_root, entry);
 
     Ok(ProjectParse { arena, warnings })
@@ -132,7 +132,7 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
         // glob diagnostic. Reporting the parse error first means the user sees why
         // their directive is invalid rather than a misleading missing-file path.
         if !parsed.errors.is_empty() {
-            return Err(parse_error(&module_path, &parsed.errors));
+            return Err(parse_error(&module_path, entry, &parsed.errors));
         }
 
         for segments in path_form_imports(&parsed.arena)? {
@@ -171,15 +171,16 @@ fn discover_files(entry: &Path, src_root: &Path) -> anyhow::Result<Vec<Discovere
     Ok(files)
 }
 
-/// Builds an [`InferenceError::ImportedFileParse`] for `errors`, labelling it by
-/// the file's canonical `module_path` (the entry uses the `<entry>` placeholder).
-/// Shared by discovery and lowering so both report syntax errors identically.
-fn parse_error(module_path: &[String], errors: &[inference_parser::ParseError]) -> anyhow::Error {
-    let label = if module_path.is_empty() {
-        "<entry>".to_string()
-    } else {
-        module_path.join("::")
-    };
+/// Builds a parse-failure error for `errors`. An imported (non-entry) file is
+/// named by its canonical `module_path`; the entry file is named by its real
+/// `entry` path with non-"imported" wording, because it is the file the user
+/// compiled. Shared by discovery and lowering so both report syntax errors
+/// identically.
+fn parse_error(
+    module_path: &[String],
+    entry: &Path,
+    errors: &[inference_parser::ParseError],
+) -> anyhow::Error {
     let details = errors
         .iter()
         .map(|error| {
@@ -190,16 +191,28 @@ fn parse_error(module_path: &[String], errors: &[inference_parser::ParseError]) 
         })
         .collect::<Vec<_>>()
         .join("\n");
-    anyhow!(InferenceError::ImportedFileParse {
-        module_path: label,
-        details,
-    })
+    // The entry file has the empty module path. `file_label` returns `None` for
+    // it, signalling the entry case: report it with its real path so the user is
+    // pointed at the file they named rather than at the `<entry>` placeholder.
+    match inference_ast::nodes::file_label(module_path) {
+        Some(label) => anyhow!(InferenceError::ImportedFileParse {
+            module_path: label,
+            details,
+        }),
+        None => anyhow!(InferenceError::EntryFileParse {
+            path: entry.to_path_buf(),
+            details,
+        }),
+    }
 }
 
 /// Lowers every discovered file into one arena in canonical order: entry first,
 /// then imported files sorted lexicographically by module path. The stored order
 /// is what later phases consume, so it is independent of discovery order.
-fn lower_in_canonical_order(mut files: Vec<DiscoveredFile>) -> anyhow::Result<AstArena> {
+fn lower_in_canonical_order(
+    mut files: Vec<DiscoveredFile>,
+    entry: &Path,
+) -> anyhow::Result<AstArena> {
     files.sort_by(|a, b| {
         // The entry (empty path) sorts first; the empty Vec already compares
         // less than any non-empty one, so a plain lexicographic order suffices.
@@ -225,7 +238,7 @@ fn lower_in_canonical_order(mut files: Vec<DiscoveredFile>) -> anyhow::Result<As
         let parse = inference_parser::parse_into(arena, &file.source, file.module_path);
         arena = parse.arena;
         if !parse.errors.is_empty() {
-            return Err(parse_error(&module_path, &parse.errors));
+            return Err(parse_error(&module_path, entry, &parse.errors));
         }
     }
     Ok(arena)
@@ -656,11 +669,10 @@ mod tests {
             .downcast_ref::<InferenceError>()
             .expect("error is an InferenceError");
         match inference_err {
-            InferenceError::ImportedFileParse {
-                module_path,
-                details,
-            } => {
-                assert_eq!(module_path, "<entry>");
+            // The entry file's own parse error is surfaced through the entry
+            // template (named by its real path), not the imported-file wording.
+            InferenceError::EntryFileParse { path, details } => {
+                assert_eq!(path, &entry);
                 assert!(
                     details.contains("glob imports are not supported"),
                     "the educational glob message must be surfaced, got: {details}"
@@ -674,15 +686,25 @@ mod tests {
     }
 
     #[test]
-    fn syntax_error_in_entry_file_reports_entry_label() {
+    fn syntax_error_in_entry_file_reports_real_path_not_imported_wording() {
         let project = TempProject::new("entry-parse");
         let entry = project.write("main.inf", "pub fn main( { return 0; }");
 
         let err = parse_project(&entry).expect_err("a syntax error in the entry must error");
         let inference_err = err.downcast_ref::<InferenceError>().unwrap();
         match inference_err {
-            InferenceError::ImportedFileParse { module_path, .. } => {
-                assert_eq!(module_path, "<entry>");
+            // The entry must name its real path and must NOT be reported as an
+            // "imported file" — it is the file the user compiled.
+            InferenceError::EntryFileParse { path, .. } => {
+                assert_eq!(path, &entry);
+                assert!(
+                    !err.to_string().contains("imported file"),
+                    "the entry parse error must not use the imported-file wording, got: {err}"
+                );
+                assert!(
+                    err.to_string().contains(&entry.display().to_string()),
+                    "the entry parse error must name the real entry path, got: {err}"
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }

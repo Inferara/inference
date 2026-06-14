@@ -15,9 +15,12 @@
 //! ## Behaviors pinned here that are surprising or limiting (probed from the
 //! current implementation; asserted as the actual behavior):
 //!
-//! - **`::` does not parse in type position.** A cross-file type can be named in a
-//!   `let` binding only after an *item import* brings its bare name into scope;
-//!   `let x: a::b::T` is a parse error, so those forms are never written here.
+//! - **A `::`-qualified type resolves to its canonical identity in type
+//!   position.** A cross-file type can be named directly by its qualified path
+//!   (`let x: a::b::T`, a parameter, or a return type) — not only after an item
+//!   import brings its bare name into scope. The qualified annotation resolves to
+//!   the same nominal identity the value carries (see the
+//!   `qualified_*_annotation_*` tests).
 //! - **Type aliases are nominal, not transparent, even single-file** (`expected
 //!   Id, found i32`). A pre-existing type-checker trait, not a multi-file
 //!   regression. Pinned by [`type_alias_is_nominal_not_transparent`].
@@ -103,6 +106,65 @@ mod tests {
         assert_ok(&[
             (vec![], "pub fn main() -> i32 { return a::b::c::add(1, 2); }"),
             (vec!["a", "b", "c"], "pub fn add(x: i32, y: i32) -> i32 { return x + y; }"),
+        ]);
+    }
+
+    #[test]
+    fn absolute_call_path_from_non_importing_file_rejected() {
+        // A non-entry file reaching another file's surface by an absolute
+        // `dir::file::fn` path it never imported is an encapsulation leak: there is
+        // no ambient cross-file visibility (the leaf-alias `geom::val()` is already
+        // rejected, and the long spelling is not an exception). The diagnostic
+        // names the unimported namespace and points at the `use` to add.
+        let msg = assert_err(&[
+            (vec![], "use lib::geom; use helper; pub fn main() -> i32 { return helper::go(); }"),
+            (vec!["lib", "geom"], "pub fn val() -> i32 { return 7; }"),
+            (vec!["helper"], "pub fn go() -> i32 { return lib::geom::val(); }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;"),
+            "the leak names the unimported namespace and the fix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn absolute_type_path_from_non_importing_file_rejected() {
+        // The same discipline on the type path: a non-entry file using a
+        // `::`-qualified cross-file type it never imported is rejected.
+        let msg = assert_err(&[
+            (vec![], "use lib::geom; use helper; pub fn main() -> i32 { return helper::go(); }"),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+            (
+                vec!["helper"],
+                "pub fn go() -> i32 { let p: lib::geom::Point = lib::geom::Point { x: 5, y: 6 }; return p.x; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("lib::geom::Point"),
+            "the leaked type path is rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn absolute_path_from_importing_non_entry_file_resolves() {
+        // The complete fix licenses the long spelling for a file that DID import
+        // the namespace: `lib/helper.inf` writes `use lib::geom;` and may then
+        // spell the deep `lib::geom::val()` it already holds.
+        assert_ok(&[
+            (vec![], "use helper; pub fn main() -> i32 { return helper::go(); }"),
+            (vec!["lib", "geom"], "pub fn val() -> i32 { return 7; }"),
+            (vec!["helper"], "use lib::geom; pub fn go() -> i32 { return lib::geom::val(); }"),
+        ]);
+    }
+
+    #[test]
+    fn absolute_path_from_entry_file_resolves() {
+        // The entry file owns root's directory namespaces, so its own absolute
+        // path resolves (this is the case the gate must never over-reject).
+        assert_ok(&[
+            (vec![], "use lib::geom; pub fn main() -> i32 { return lib::geom::val(); }"),
+            (vec!["lib", "geom"], "pub fn val() -> i32 { return 7; }"),
         ]);
     }
 
@@ -611,6 +673,161 @@ mod tests {
             "struct Point { x: i32; fn get_x(self) -> i32 { return self.x; } } \
              pub fn main() -> i32 { let p: Point = Point { x: 3 }; return p.get_x(); }",
         )]);
+    }
+
+    #[test]
+    fn method_resolves_on_receiver_canonical_identity_not_call_site_name() {
+        // The receiver `o.inner` carries the canonical identity `lib::geo::Inner`,
+        // whose `get()` exists. The entry defines its own same-named `Inner` (also
+        // with `get`), but resolution must follow the receiver's canonical struct,
+        // not the bare name at the call site. The program type-checks because the
+        // *receiver's* struct genuinely has the method.
+        assert_ok(&[
+            (
+                vec![],
+                "struct Inner { a: i32; pub fn get(self) -> i32 { return self.a; } } \
+                 use lib::geo::{Outer, build}; \
+                 pub fn main() -> i32 { let o: Outer = build(); return o.inner.get(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Inner { v: i32; pub fn get(self) -> i32 { return self.v; } } \
+                 pub struct Outer { inner: Inner; } \
+                 pub fn build() -> Outer { return Outer { inner: Inner { v: 1 } }; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn method_missing_on_receiver_canonical_struct_rejected_despite_same_named_local() {
+        // The receiver `o.inner` is a `lib::geo::Inner` that has *no* `get` method.
+        // The entry defines a same-named `Inner` that *does* have `get`. Dispatch by
+        // bare name would silently hijack the entry's `get` and mis-compile; the
+        // type checker must instead reject the call because the receiver's canonical
+        // struct lacks the method.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "struct Inner { a: i32; pub fn get(self) -> i32 { return self.a; } } \
+                 use lib::geo::{Outer, build}; \
+                 pub fn main() -> i32 { let o: Outer = build(); return o.inner.get(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Inner { v: i32; } \
+                 pub struct Outer { inner: Inner; } \
+                 pub fn build() -> Outer { return Outer { inner: Inner { v: 1 } }; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("method `get` not found on type `Inner`"),
+            "a method absent on the receiver's canonical struct must be rejected even \
+             when a same-named local struct has it, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn method_on_imported_fn_return_value_resolves_by_canonical_identity() {
+        // The receiver is an imported function's return value (`pt()`), not a let
+        // binding. Its canonical type is `lib::geo::Point`; `.sum()` resolves on
+        // that struct even though the entry defines a same-named `Point` without
+        // `sum`. Resolving by the call-site bare name would find the entry's
+        // method-less `Point` and wrongly reject — or, worse, hijack a same-named
+        // method. The receiver's canonical identity drives resolution.
+        assert_ok(&[
+            (
+                vec![],
+                "struct Point { a: i32; } \
+                 use lib::geo::{pt}; \
+                 pub fn run() -> i32 { return pt().sum(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Point { x: i32; pub fn sum(self) -> i32 { return self.x; } } \
+                 pub fn pt() -> Point { return Point { x: 5 }; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn same_named_method_different_arity_checks_against_receiver_canonical_signature() {
+        // Both files define `Inner::get`, but with DIFFERENT arities: the entry's
+        // takes an extra `i32`, the canonical `lib::geo::Inner`'s takes none. The
+        // call `o.inner.get()` passes zero user args. If dispatch resolved by the
+        // call-site bare name, the arg-count check would fire against the entry's
+        // one-extra-arg signature ("expected 1, found 0"). It type-checks because
+        // the fix dispatches to the receiver's canonical `lib::geo::Inner::get`
+        // first, and the arg-count check then validates against THAT signature.
+        // This pins that the fix — not the arity check — selects the body; the
+        // arity check merely validates the already-correct signature.
+        assert_ok(&[
+            (
+                vec![],
+                "struct Inner { a: i32; pub fn get(self, extra: i32) -> i32 { return self.a + extra; } } \
+                 use lib::geo::{Outer, build}; \
+                 pub fn main() -> i32 { let o: Outer = build(); return o.inner.get(); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Inner { v: i32; pub fn get(self) -> i32 { return self.v; } } \
+                 pub struct Outer { inner: Inner; } \
+                 pub fn build() -> Outer { return Outer { inner: Inner { v: 5 } }; }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn same_named_method_different_arity_rejects_wrong_arg_count_for_canonical_sig() {
+        // The negative twin: the same divergent-arity setup, but the call now
+        // passes ONE arg. The canonical `lib::geo::Inner::get` takes zero, so the
+        // arg-count check must reject against the canonical signature — proving the
+        // arity is validated on the body the fix selected, not the entry's
+        // one-arg `get` (which would have wrongly accepted the call).
+        let msg = assert_err(&[
+            (
+                vec![],
+                "struct Inner { a: i32; pub fn get(self, extra: i32) -> i32 { return self.a + extra; } } \
+                 use lib::geo::{Outer, build}; \
+                 pub fn main() -> i32 { let o: Outer = build(); return o.inner.get(7); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Inner { v: i32; pub fn get(self) -> i32 { return self.v; } } \
+                 pub struct Outer { inner: Inner; } \
+                 pub fn build() -> Outer { return Outer { inner: Inner { v: 5 } }; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("Inner::get") && msg.contains("expects 0 arguments"),
+            "the call must be checked against the canonical zero-arg `get`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn method_argument_of_cross_file_struct_type_checks() {
+        // A method whose ARGUMENT is itself a cross-file struct type, with the
+        // receiver also a cross-file struct. `Sink::take` (on the imported `Sink`)
+        // accepts a `lib::geo::Item`; the entry item-imports both `Sink` and `Item`,
+        // constructs the item via an imported constructor, and passes it. Both the
+        // receiver dispatch (`s.take`) and the argument typing must resolve through
+        // canonical identity for the call to check. (No same-named entry `Item` is
+        // introduced: an entry-local same-named struct would item-import-collide and
+        // trip the pre-existing `Custom`-vs-`Struct` nominal-equality quirk, which is
+        // a separate limitation, not part of the dispatch fix.)
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo::{Sink, Item, make_item, make_sink}; \
+                 pub fn run() -> i32 { let s: Sink = make_sink(); let it: Item = make_item(); return s.take(it); }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Item { v: i32; } \
+                 pub struct Sink { acc: i32; pub fn take(self, it: Item) -> i32 { return it.v; } } \
+                 pub fn make_item() -> Item { return Item { v: 9 }; } \
+                 pub fn make_sink() -> Sink { return Sink { acc: 0 }; }",
+            ),
+        ]);
     }
 
     // ---------------------------------------------------------------------
@@ -1128,6 +1345,389 @@ mod tests {
         );
     }
 
+    // A spec-inner struct/enum and a top-level one with the same bare name in the
+    // same file map to one canonical key, so accepting both would let codegen index
+    // one layout for two definitions. The collision is rejected regardless of which
+    // is written first: top-level types register before the file's spec blocks, so
+    // the spec definition is the one rejected either way. A same-named type in a
+    // *different* file is keyed distinctly and never collides (the no-collision
+    // control above).
+
+    #[test]
+    fn spec_struct_collides_with_top_level_struct_spec_first() {
+        let msg = assert_err(&[(
+            vec![],
+            "spec S { struct Point { a: i32; } } pub struct Point { v: i32; } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering struct `Point`")
+                && msg.contains("within a file's spec scopes"),
+            "spec-before-top-level same-name struct must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_struct_collides_with_top_level_struct_top_level_first() {
+        let msg = assert_err(&[(
+            vec![],
+            "pub struct Point { v: i32; } spec S { struct Point { a: i32; } } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering struct `Point`")
+                && msg.contains("within a file's spec scopes"),
+            "top-level-before-spec same-name struct must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_enum_collides_with_top_level_enum_spec_first() {
+        let msg = assert_err(&[(
+            vec![],
+            "spec S { enum Color { Red } } pub enum Color { Blue } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering enum `Color`")
+                && msg.contains("within a file's spec scopes"),
+            "spec-before-top-level same-name enum must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_enum_collides_with_top_level_enum_top_level_first() {
+        let msg = assert_err(&[(
+            vec![],
+            "pub enum Color { Blue } spec S { enum Color { Red } } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("error registering enum `Color`")
+                && msg.contains("within a file's spec scopes"),
+            "top-level-before-spec same-name enum must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_struct_collides_with_top_level_struct_cross_file_spec_first() {
+        // The collision is per-file, so it is rejected the same way in a non-entry
+        // file as in the entry file.
+        let msg = assert_err(&[
+            (vec![], "use lib::a; pub fn main() -> i32 { return lib::a::make(); }"),
+            (
+                vec!["lib", "a"],
+                "spec MySpec { struct Point { a: i32; } } pub struct Point { v: i32; } \
+                 pub fn make() -> i32 { let p: Point = Point { v: 41 }; return p.v; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("error registering struct `Point`")
+                && msg.contains("within a file's spec scopes"),
+            "cross-file spec-before-top-level same-name struct must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_struct_collides_with_top_level_struct_cross_file_top_level_first() {
+        let msg = assert_err(&[
+            (vec![], "use lib::a; pub fn main() -> i32 { return lib::a::make(); }"),
+            (
+                vec!["lib", "a"],
+                "pub struct Point { v: i32; } spec MySpec { struct Point { a: i32; } } \
+                 pub fn make() -> i32 { let p: Point = Point { v: 41 }; return p.v; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("error registering struct `Point`")
+                && msg.contains("within a file's spec scopes"),
+            "cross-file top-level-before-spec same-name struct must collide, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_helper_and_top_level_distinct_names_compile() {
+        // The no-collision control: a spec helper whose name differs from the
+        // top-level type registers cleanly and the program type-checks.
+        assert_ok(&[(
+            vec![],
+            "spec S { struct Inner { a: i32; } } pub struct Point { v: i32; } \
+             pub fn main() -> i32 { let p: Point = Point { v: 41 }; return p.v; }",
+        )]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Axis — spec-inner / top-level function shadowing is a SAME-FILE relation.
+    // A spec-inner fn shadows a top-level fn only when both are in the same file;
+    // the colliding top-level name is resolved in the spec's own file scope, never
+    // the entry file's. The diagnostic carries the file the collision lives in.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn spec_inner_fn_matching_entry_top_level_fn_in_another_file_ok() {
+        // A spec in an imported file whose inner fn shares a name with an
+        // entry-file top-level fn is NOT a shadow: they live in distinct files. The
+        // shadow check is keyed to the spec's own file scope, so this must compile
+        // rather than be wrongly rejected against the entry's top-level surface.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::checks; \
+                 pub fn compute() -> i32 { return 1; } \
+                 pub fn main() -> i32 { return compute(); }",
+            ),
+            (
+                vec!["lib", "checks"],
+                "spec S { fn compute() -> i32 { return 2; } \
+                 fn check() -> i32 { return compute(); } }",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn same_file_top_level_and_spec_inner_shadow_in_imported_file_rejected() {
+        // A genuine same-file collision inside a *non-entry* file: a top-level fn
+        // and a spec-inner fn of the same name in `lib::checks`. The entry-scoped
+        // check missed this because it only consulted the entry file's root; the
+        // per-file check catches it, and the diagnostic carries the `lib::checks`
+        // label so it is attributed to the file that owns the collision.
+        let msg = assert_err(&[
+            (vec![], "use lib::checks; pub fn main() -> i32 { return 0; }"),
+            (
+                vec!["lib", "checks"],
+                "pub fn helper() -> i32 { return 1; } \
+                 spec S { fn helper() -> i32 { return 2; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("function `helper` inside spec `S` shadows a top-level function"),
+            "a same-file shadow in an imported file must be rejected, got: {msg}"
+        );
+        assert!(
+            msg.contains("lib::checks:"),
+            "the non-entry shadow diagnostic must carry its file label, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn entry_file_same_file_shadow_still_rejected_and_bare() {
+        // The entry-file case is unchanged: a same-file top-level + spec-inner
+        // collision is still rejected, and its diagnostic stays bare (the entry
+        // file's label is `None`, matching every other entry diagnostic).
+        let msg = assert_err(&[(
+            vec![],
+            "pub fn helper() -> i32 { return 1; } \
+             spec S { fn helper() -> i32 { return 2; } } \
+             pub fn main() -> i32 { return 0; }",
+        )]);
+        assert!(
+            msg.contains("function `helper` inside spec `S` shadows a top-level function"),
+            "an entry-file same-file shadow must still be rejected, got: {msg}"
+        );
+        assert!(
+            !msg.contains("::"),
+            "the entry-file shadow diagnostic must stay bare (no file label), got: {msg}"
+        );
+    }
+
+    // A spec function is proof-only: calling one through a qualified path
+    // (`Check::fn`, `lib::Check::fn`, `lib::checks::Check::fn`) is rejected by the
+    // type checker rather than type-checking and then panicking in codegen, which
+    // assigns spec functions no executable index. Rejection is wholesale — any
+    // caller, any path length — because the qualified form never lowers; only a
+    // bare-name call from within the same spec is supported.
+
+    #[test]
+    fn spec_fn_called_from_executable_via_qualified_path_rejected() {
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { fn verify_inner() -> i32 { return 42; } } \
+             pub fn run() -> i32 { return Check::verify_inner(); }",
+        )]);
+        assert!(
+            msg.contains("cannot call spec function `Check::verify_inner`")
+                && msg.contains("proof-only"),
+            "executable code must not call a spec fn by qualified path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_fn_called_from_executable_cross_file_via_qualified_path_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::checks; \
+                 pub fn run() -> i32 { return lib::checks::Check::verify_inner(); }",
+            ),
+            (
+                vec!["lib", "checks"],
+                "spec Check { fn verify_inner() -> i32 { return 42; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("cannot call spec function `lib::checks::Check::verify_inner`")
+                && msg.contains("proof-only"),
+            "executable code must not call a cross-file spec fn by qualified path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_fn_called_from_executable_three_segment_path_rejected() {
+        // The struct of the path (`lib::Check::verify_inner`) where the spec lives
+        // directly in `lib.inf` — a three-segment path that the namespace-qualified
+        // associated-call handler sees first; it must fall through (a spec is not a
+        // struct) to the qualified-call rejection rather than mis-resolving.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib; pub fn run() -> i32 { return lib::Check::verify_inner(); }",
+            ),
+            (
+                vec!["lib"],
+                "spec Check { fn verify_inner() -> i32 { return 42; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("cannot call spec function `lib::Check::verify_inner`")
+                && msg.contains("proof-only"),
+            "executable code must not call a spec fn by a three-segment path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_fn_called_from_another_spec_via_qualified_path_rejected() {
+        // The qualified form is rejected regardless of caller — even a spec calling
+        // a sibling spec fn must use the bare name, since `Check::inner()` has no
+        // emittable callee in proof mode either.
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { fn inner() -> i32 { return 42; } \
+             fn outer() -> i32 { return Check::inner(); } } pub fn main() {}",
+        )]);
+        assert!(
+            msg.contains("cannot call spec function `Check::inner`")
+                && msg.contains("proof-only"),
+            "a spec must not call a sibling spec fn by qualified path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_fn_called_by_bare_name_from_sibling_spec_fn_ok() {
+        // The supported intra-spec call form: a bare-name call to a sibling spec
+        // function. This must keep type-checking — it is the path proof-mode codegen
+        // relies on, resolved inside the spec scope.
+        assert_ok(&[(
+            vec![],
+            "spec Check { fn inner() -> i32 { return 42; } \
+             fn outer() -> i32 { return inner(); } } pub fn main() {}",
+        )]);
+    }
+
+    #[test]
+    fn spec_fn_called_from_executable_with_wrong_arg_count_rejected_as_spec() {
+        // The spec rejection takes precedence over the arity check: a qualified
+        // spec call with the wrong number of arguments is still rejected as a
+        // proof-only-boundary violation (not `ArgumentCountMismatch`), because the
+        // qualified form never lowers regardless of how it is called. The point is
+        // that it rejects with a coherent diagnostic and never reaches codegen — a
+        // mismatched-arity qualified spec call must not slip past into a panic.
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { fn verify_inner(a: i32) -> i32 { return a; } } \
+             pub fn run() -> i32 { return Check::verify_inner(); }",
+        )]);
+        assert!(
+            msg.contains("cannot call spec function `Check::verify_inner`")
+                && msg.contains("proof-only"),
+            "wrong-arity qualified spec call must reject as a spec violation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn nonexistent_fn_under_spec_name_rejected_as_undefined() {
+        // A qualified path whose head names a real spec but whose leaf does not
+        // exist must fall through to the plain undefined-function diagnostic — the
+        // spec rejection only fires when resolution actually lands on a spec-inner
+        // function. The contrast with `spec_fn_called_from_executable_*` confirms
+        // the spec branch is keyed on a resolved spec callee, not merely on the
+        // prefix matching a spec name, and that the miss is reported rather than
+        // carried into codegen.
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { fn verify_inner() -> i32 { return 42; } } \
+             pub fn run() -> i32 { return Check::does_not_exist(); }",
+        )]);
+        assert!(
+            msg.contains("undefined function `Check::does_not_exist`"),
+            "nonexistent leaf under a spec name must be an undefined-function error, got: {msg}"
+        );
+        assert!(
+            !msg.contains("proof-only"),
+            "a nonexistent leaf must not borrow the spec proof-only diagnostic, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_inner_struct_assoc_fn_called_from_executable_rejected() {
+        // A three-segment `Spec::Struct::assoc()` reaches an associated function on
+        // a struct *inside* a spec. That function is proof-only — codegen assigns
+        // it no executable index — so an executable-code call must be a clean
+        // type-check rejection, not a codegen panic. The two-segment spec-fn form is
+        // already rejected; this pins the three-segment spec-inner-struct path.
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { struct Helper { v: i32; pub fn make() -> i32 { return 1; } } } \
+             pub fn run() -> i32 { return Check::Helper::make(); }",
+        )]);
+        assert!(
+            msg.contains("cannot call spec function `Check::Helper::make`")
+                && msg.contains("proof-only"),
+            "a spec-inner-struct assoc fn must be rejected from executable code, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn spec_inner_struct_assoc_fn_called_cross_file_rejected() {
+        // The cross-file form of the spec-inner-struct assoc rejection: the path
+        // walks the file namespace into the spec and onto the struct's associated
+        // function. It resolves through the namespace-qualified associated-call
+        // handler (distinct from the single-file qualified-call handler), so both
+        // handlers must enforce the proof-only boundary.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::specs; \
+                 pub fn run() -> i32 { return lib::specs::Check::Helper::make(); }",
+            ),
+            (
+                vec!["lib", "specs"],
+                "spec Check { struct Helper { v: i32; pub fn make() -> i32 { return 1; } } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("cannot call spec function `lib::specs::Check::Helper::make`")
+                && msg.contains("proof-only"),
+            "a cross-file spec-inner-struct assoc fn must be rejected, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn top_level_struct_assoc_fn_still_callable_alongside_spec_rejection() {
+        // The spec rejection must not over-fire: a legitimate top-level
+        // `Type::assoc()` is not inside any spec and stays callable, both bare and
+        // namespace-qualified across files. This is the positive control for the
+        // proof-only boundary — it draws the line at spec membership, not at the
+        // associated-call form.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geo; \
+                 pub fn run() -> i32 { return lib::geo::Counter::seed() + Helper::base(); } \
+                 struct Helper { v: i32; pub fn base() -> i32 { return 10; } }",
+            ),
+            (
+                vec!["lib", "geo"],
+                "pub struct Counter { n: i32; pub fn seed() -> i32 { return 7; } }",
+            ),
+        ]);
+    }
+
     // ---------------------------------------------------------------------
     // Axis 11 — CircularDefinition over const / type-alias value graphs.
     // File-import cycles are legal; only value cycles are rejected.
@@ -1183,6 +1783,30 @@ mod tests {
         assert!(
             msg.contains('A') && msg.contains('B') && msg.contains('C') && msg.contains('D'),
             "names all four members, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn const_cycle_entirely_within_non_entry_file_carries_file_label() {
+        // A value cycle confined to one non-entry file must be attributed to that
+        // file. The definition graph runs at the root cursor, so without stamping
+        // the cycle's home file the diagnostic would render a bare `line:col` and
+        // misattribute the cycle to the entry. Here `A`/`B` cycle entirely within
+        // `lib::consts`, so the diagnostic carries the `lib::consts` label.
+        let msg = assert_err(&[
+            (vec![], "use lib::consts; pub fn main() -> i32 { return 0; }"),
+            (
+                vec!["lib", "consts"],
+                "pub const A: i32 = B; pub const B: i32 = A;",
+            ),
+        ]);
+        assert!(
+            msg.contains("circular definition detected"),
+            "a non-entry-file value cycle is rejected, got: {msg}"
+        );
+        assert!(
+            msg.contains("lib::consts:"),
+            "the cycle diagnostic must carry its home-file label, got: {msg}"
         );
     }
 
@@ -1806,10 +2430,13 @@ mod tests {
     #[test]
     fn acyclic_cross_file_const_chain_orders_dependency_first() {
         // C <- B <- A across three files; the chain type-checks and
-        // `definition_order()` puts each dependency before its dependent.
+        // `definition_order()` puts each dependency before its dependent. Each
+        // non-entry file imports the namespace it reads from, since a const
+        // initializer obeys the same import discipline as any other cross-file
+        // reference — a file may not reach another file's surface without a `use`.
         let ctx = try_type_check_multi_file(&[
             (vec![], "const A: i32 = lib::b::B; pub fn main() -> i32 { return A; }"),
-            (vec!["lib", "b"], "pub const B: i32 = lib::c::C;"),
+            (vec!["lib", "b"], "use lib::c; pub const B: i32 = lib::c::C;"),
             (vec!["lib", "c"], "pub const C: i32 = 1;"),
         ])
         .expect("an acyclic cross-file const chain should type-check");
@@ -1828,6 +2455,23 @@ mod tests {
         };
         assert!(pos("C") < pos("B"), "C before B");
         assert!(pos("B") < pos("A"), "B before A");
+    }
+
+    #[test]
+    fn const_initializer_absolute_path_without_use_rejected() {
+        // A const initializer in a non-entry file reaching another file's const by
+        // an absolute `dir::file::const` path it never imported is the same
+        // encapsulation leak the call and type paths forbid: no file reads another
+        // file's surface without a `use`. The fix is to add the import.
+        let msg = assert_err(&[
+            (vec![], "use lib::b; pub fn main() -> i32 { return lib::b::B; }"),
+            (vec!["lib", "b"], "pub const B: i32 = lib::c::C;"),
+            (vec!["lib", "c"], "pub const C: i32 = 1;"),
+        ]);
+        assert!(
+            msg.contains("lib::c"),
+            "the rejection names the unimported namespace `lib::c`, got: {msg}"
+        );
     }
 
     #[test]
@@ -2427,4 +3071,652 @@ mod tests {
             (vec!["lib", "ops"], "use lib::col::{Color}; pub fn paint(c: Color) -> i32 { return 0; }"),
         ]);
     }
+
+    // ---------------------------------------------------------------------
+    // Axis — `::`-qualified type annotations resolve to canonical identity.
+    //
+    // A qualified type (`geo::Level`, `root::T`, `lib::geom::Point`) names a
+    // cross-file type through its namespace chain. The annotation must resolve
+    // to the same canonical nominal identity a constructor or bare reference
+    // produces, so it *equals* the matching value type rather than staying an
+    // opaque qualified-name. These cover let / parameter / return / receiver
+    // positions, for both struct and enum, at 2- and 3-segment depths and via
+    // `root::`, plus the cross-form identity, visibility, and negatives.
+    // ---------------------------------------------------------------------
+
+    /// A namespace-qualified enum annotation in a `let` binding equals the
+    /// qualified value, so the binding type-checks and the `==` unifies.
+    #[test]
+    fn qualified_enum_annotation_in_let_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo; \
+                 pub fn run() -> i32 { \
+                   let x: geo::Level = geo::Level::High; \
+                   if x == geo::Level::High { return 2; } return 0; }",
+            ),
+            (vec!["geo"], "pub enum Level { Low, Med, High }"),
+        ]);
+    }
+
+    /// A namespace-qualified struct annotation in a `let` binding equals the
+    /// qualified constructor's type.
+    #[test]
+    fn qualified_struct_annotation_in_let_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo; \
+                 pub fn run() -> i32 { \
+                   let p: geo::Point = geo::Point { x: 5 }; return p.x; }",
+            ),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// A 3-segment qualified struct annotation (`lib::geom::Point`) resolves
+    /// through the two-hop namespace chain bound by `use lib::geom;`.
+    #[test]
+    fn three_segment_qualified_struct_annotation_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; \
+                 pub fn run() -> i32 { \
+                   let p: lib::geom::Point = lib::geom::Point { x: 8, y: 9 }; return p.x; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// A 2-segment qualified type annotation (`let p: g::Pt`) must resolve to the
+    /// type `g.inf` defines even when a sibling file `g/Pt.inf` is pulled into the
+    /// import closure by another file. The sibling's presence must not turn the
+    /// leaf `Pt` into a sub-file namespace; the type defined in `g` wins, mirroring
+    /// the precedence the associated-function path already honors. Without this, the
+    /// annotation fails with a self-contradictory `expected g::Pt, found g::Pt`.
+    #[test]
+    fn two_segment_qualified_annotation_resolves_with_same_named_sibling_file() {
+        assert_ok(&[
+            (
+                vec![],
+                "use g; use z; \
+                 pub fn main() -> i32 { let p: g::Pt = g::Pt::make(); return p.x + z::touch(); }",
+            ),
+            (vec!["g"], "pub struct Pt { x: i32; pub fn make() -> Pt { return Pt { x: 5 }; } }"),
+            (vec!["z"], "use g::Pt; pub fn touch() -> i32 { return 0; }"),
+            (vec!["g", "Pt"], "pub fn make() -> i32 { return 999; }"),
+        ]);
+    }
+
+    /// The 3-level twin: `a::b::c::Node` resolves to the type `a/b/c.inf` defines
+    /// even though a sibling `a/b/c/Node.inf` is in the closure. The leaf type
+    /// resolution is independent of how deep the namespace prefix runs.
+    #[test]
+    fn three_level_qualified_annotation_resolves_with_same_named_sibling_file() {
+        assert_ok(&[
+            (
+                vec![],
+                "use a::b::c; use z; \
+                 pub fn main() -> i32 { \
+                   let n: a::b::c::Node = a::b::c::Node::make(); return n.v + z::touch(); }",
+            ),
+            (
+                vec!["a", "b", "c"],
+                "pub struct Node { v: i32; pub fn make() -> Node { return Node { v: 7 }; } }",
+            ),
+            (vec!["z"], "use a::b::c::Node; pub fn touch() -> i32 { return 0; }"),
+            (vec!["a", "b", "c", "Node"], "pub fn make() -> i32 { return 999; }"),
+        ]);
+    }
+
+    /// The associated-function form of the same path must keep resolving with the
+    /// sibling file present: `g::Pt::make()` is the struct's associated function,
+    /// not the sibling `g/Pt.inf`'s free `make`. This is the value-position twin of
+    /// the annotation test and guards that the leaf-segment precedence change does
+    /// not alter the (already-correct) non-leaf assoc behavior.
+    #[test]
+    fn qualified_assoc_call_resolves_with_same_named_sibling_file() {
+        assert_ok(&[
+            (
+                vec![],
+                "use g; use z; pub fn main() -> i32 { return g::Pt::make().x + z::touch(); }",
+            ),
+            (vec!["g"], "pub struct Pt { x: i32; pub fn make() -> Pt { return Pt { x: 5 }; } }"),
+            (vec!["z"], "use g::Pt; pub fn touch() -> i32 { return 0; }"),
+            (vec!["g", "Pt"], "pub fn make() -> i32 { return 999; }"),
+        ]);
+    }
+
+    /// A `root::`-qualified annotation names a type in the *entry* file from a
+    /// non-entry file; its canonical key is the bare name (entry = empty path).
+    #[test]
+    fn root_qualified_annotation_resolves_to_entry_type() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::b::{describe}; \
+                 pub struct Pt { x: i32; } \
+                 pub fn run() -> i32 { let p: Pt = Pt { x: 4 }; return describe(p); }",
+            ),
+            (
+                vec!["lib", "b"],
+                "use root; pub fn describe(p: root::Pt) -> i32 { return p.x; }",
+            ),
+        ]);
+    }
+
+    /// A 2-segment qualified type in *parameter* position resolves and the
+    /// caller's matching value interoperates.
+    #[test]
+    fn qualified_struct_annotation_in_param_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::b; use lib::shapes::{Q}; \
+                 pub fn run() -> i32 { let q: Q = Q { x: 3 }; return lib::b::describe(q); }",
+            ),
+            (vec!["lib", "shapes"], "pub struct Q { x: i32; }"),
+            (
+                vec!["lib", "b"],
+                "use lib::shapes; pub fn describe(q: lib::shapes::Q) -> i32 { return q.x; }",
+            ),
+        ]);
+    }
+
+    /// A qualified type in *return* position resolves and unifies with the
+    /// returned constructor value.
+    #[test]
+    fn qualified_struct_annotation_in_return_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; \
+                 pub fn make() -> lib::geom::Point { return lib::geom::Point { x: 1, y: 2 }; } \
+                 pub fn run() -> i32 { let p: lib::geom::Point = make(); return p.y; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// A qualified type used as a *method parameter* (a method is defined inside
+    /// its struct body) resolves the same as a free-function parameter, so the
+    /// `self`-bearing method can accept a cross-file value named by qualifier.
+    #[test]
+    fn qualified_struct_annotation_in_method_param_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo; \
+                 pub struct Holder { \
+                   v: i32; \
+                   pub fn add(self, p: geo::Point) -> i32 { return self.v + p.x; } \
+                 } \
+                 pub fn run() -> i32 { \
+                   let h: Holder = Holder { v: 1 }; \
+                   let p: geo::Point = geo::Point { x: 6 }; \
+                   return h.add(p); }",
+            ),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// A namespace-qualified annotation and the matching *item-imported* value
+    /// name the same canonical type, so the two forms are interchangeable.
+    #[test]
+    fn qualified_annotation_equals_item_imported_value() {
+        assert_ok(&[
+            (
+                vec![],
+                "use geo; use geo::{Point}; \
+                 pub fn run() -> i32 { \
+                   let a: geo::Point = Point { x: 7 }; \
+                   let b: Point = geo::Point { x: 8 }; \
+                   return a.x + b.x; }",
+            ),
+            (vec!["geo"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// Reaching a *private* entry-file type through `root::` is rejected with a
+    /// visibility diagnostic pointing at the declaration — never silently
+    /// accepted.
+    #[test]
+    fn root_qualified_private_type_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::b::{describe}; \
+                 struct Secret { x: i32; } \
+                 pub fn run() -> i32 { return 0; }",
+            ),
+            (
+                vec!["lib", "b"],
+                "use root; pub fn describe(s: root::Secret) -> i32 { return s.x; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("cannot access private struct `Secret`"),
+            "private entry type reached via `root::` must be rejected, got: {msg}"
+        );
+    }
+
+    /// A qualifier naming a real namespace but a non-existent leaf type fails
+    /// with a clean `unknown type` diagnostic naming the full path.
+    #[test]
+    fn qualified_annotation_unknown_leaf_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use geo; \
+                 pub fn run() -> i32 { let x: geo::Nope = geo::Level::Low; return 0; }",
+            ),
+            (vec!["geo"], "pub enum Level { Low, High }"),
+        ]);
+        assert!(
+            msg.contains("unknown type `geo::Nope`"),
+            "unknown qualified leaf must be reported, got: {msg}"
+        );
+    }
+
+    /// A qualifier naming a non-existent namespace fails with a clean `unknown
+    /// type` diagnostic rather than a silent acceptance.
+    #[test]
+    fn qualified_annotation_unknown_namespace_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use geo; \
+                 pub fn run() -> i32 { let x: nope::Level = geo::Level::Low; return 0; }",
+            ),
+            (vec!["geo"], "pub enum Level { Low, High }"),
+        ]);
+        assert!(
+            msg.contains("unknown type `nope::Level`"),
+            "unknown qualified namespace must be reported, got: {msg}"
+        );
+    }
+
+    /// An *uncalled* non-entry function whose parameter is a qualified type still
+    /// type-checks: the signature's qualified annotation resolves the same way a
+    /// used one does, regardless of call sites.
+    #[test]
+    fn uncalled_fn_with_qualified_param_type_checks() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::b::{unused}; \
+                 pub struct Pt { x: i32; } \
+                 pub fn run() -> i32 { return 1; }",
+            ),
+            (
+                vec!["lib", "b"],
+                "use root; pub fn unused(o: root::Pt) -> i32 { return 7; }",
+            ),
+        ]);
+    }
+
+    /// Two files each define a same-named struct. A qualified annotation that
+    /// names one file's `Cell` must not be accepted for the other file's `Cell`
+    /// value — nominal-by-file identity holds through the qualified form.
+    #[test]
+    fn qualified_annotation_keeps_same_named_types_distinct() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use b; \
+                 pub fn run() -> i32 { let c: a::Cell = b::Cell { v: 1 }; return c.v; }",
+            ),
+            (vec!["a"], "pub struct Cell { v: i32; }"),
+            (vec!["b"], "pub struct Cell { v: i32; }"),
+        ]);
+        assert!(
+            msg.contains("type mismatch") || msg.contains("a::Cell"),
+            "same-named cross-file structs must stay distinct through a qualified \
+             annotation, got: {msg}"
+        );
+    }
+
+    /// A struct *field* declared with a `::`-qualified cross-file type resolves to
+    /// the field type's canonical identity, so the struct definition type-checks
+    /// and the nested field is readable.
+    #[test]
+    fn qualified_struct_field_type_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; \
+                 pub struct Wrapper { p: lib::geom::Point; } \
+                 pub fn run() -> i32 { \
+                   let w: Wrapper = Wrapper { p: lib::geom::Point { x: 3, y: 4 } }; \
+                   return w.p.x; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// A struct field declared with a qualified path whose leaf does not exist is
+    /// rejected with a clean `unknown type` diagnostic — never silently accepted
+    /// (which previously let a bad field type reach codegen and panic).
+    #[test]
+    fn qualified_struct_field_unknown_type_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; \
+                 pub struct Wrapper { p: lib::geom::Nope; } \
+                 pub fn run() -> i32 { return 0; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; }"),
+        ]);
+        assert!(
+            msg.contains("unknown type `lib::geom::Nope`"),
+            "a bad qualified field type must be reported, got: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Axis — file-namespace bindings are private to the file that wrote them.
+    // A brace-free `use a::b;` binds `b` only within its own file; a different
+    // file (including a non-entry one) never resolves a bare qualified call
+    // through another file's binding, even though their scope chains share an
+    // ancestor (#63).
+    // ---------------------------------------------------------------------
+
+    /// The leak's root: an entry-file `use lib::Point;` must not make a bare
+    /// `Point::new()` inside `lib.inf` mean the sibling file `lib/Point.inf`. The
+    /// program type-checks because `Point::new()` binds the local struct's
+    /// associated function whose signature matches the use; resolving the leaked
+    /// file's `i32`-returning `new` instead would surface a return-type mismatch.
+    #[test]
+    fn entry_namespace_import_does_not_leak_into_lib_bare_assoc_call() {
+        assert_ok(&[
+            (vec![], "use lib; use lib::Point; pub fn main() -> i32 { return lib::build(); }"),
+            (
+                vec!["lib"],
+                "pub struct Point { x: i32; y: i32; \
+                 pub fn new() -> Point { return Point { x: 1, y: 2 }; } } \
+                 pub fn build() -> i32 { let p: Point = Point::new(); return p.x + p.y; }",
+            ),
+            (vec!["lib", "Point"], "pub fn new() -> i32 { return 0; }"),
+        ]);
+    }
+
+    /// A non-entry file that does not itself import a namespace `n` cannot reach an
+    /// entry-file `use a::n;` binding: the binding is private to the entry. The bare
+    /// `n::value()` in `lib.inf` must fail to resolve, never silently bind the
+    /// entry's `n`. With the binding blocked, `n` is no longer a bound namespace in
+    /// `lib.inf` — but `a::n` is a real file in the project, so the call is
+    /// rejected as a missing import (the head names a namespace, not a type),
+    /// pointing at the fix rather than at a nonexistent method. This is the
+    /// negative twin of the same-alias independence test.
+    #[test]
+    fn non_entry_file_cannot_use_entry_namespace_binding() {
+        let msg = assert_err(&[
+            (vec![], "use lib; use a::n; pub fn main() -> i32 { return lib::run(); }"),
+            (vec!["lib"], "pub fn run() -> i32 { return n::value(); }"),
+            (vec!["a", "n"], "pub fn value() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `n` is not imported") && msg.contains("n::value"),
+            "the leaked binding must not resolve; expected a missing-import rejection \
+             for `n`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn qualified_call_via_unimported_namespace_reports_missing_import() {
+        // A bare `util::helper()` whose head names a real file in the project but is
+        // not imported in the calling file is a missing-import error, not a "method
+        // not found on type `util`". The head is a namespace, so the fix is a `use`;
+        // routing it to method dispatch would point at a nonexistent method on a
+        // type that does not exist. The target is reachable (another file imports
+        // it), so it is in the project's namespace set.
+        let msg = assert_err(&[
+            (vec![], "use lib::other; pub fn main() -> i32 { return util::helper(); }"),
+            (vec!["lib", "other"], "use lib::util; pub fn bridge() -> i32 { return util::helper(); }"),
+            (vec!["lib", "util"], "pub fn helper() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `util` is not imported")
+                && msg.contains("util::helper"),
+            "an unimported-namespace call must report the missing import, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not found on type"),
+            "the call must not be routed to method dispatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn qualified_call_on_genuine_unknown_type_still_method_not_found() {
+        // The contrast: a head that names neither a type nor a project file is a
+        // genuine `Type::method()` miss and still reports `method not found on type`
+        // — the missing-import diagnostic only fires when the head names a real
+        // file namespace.
+        let msg = assert_err(&[(
+            vec![],
+            "pub fn main() -> i32 { return Bogus::method(); }",
+        )]);
+        assert!(
+            msg.contains("method `method` not found on type `Bogus`"),
+            "a genuine unknown type must still be a method-not-found error, got: {msg}"
+        );
+    }
+
+    /// Two non-entry files each bind the same local alias `n` to a *different* file
+    /// (`use a::n;` vs `use b::n;`). Each file's bare `n::value()` resolves against
+    /// its own import; neither sees the other's binding through the shared root
+    /// ancestor. Both callable paths type-check.
+    #[test]
+    fn same_alias_in_two_non_entry_files_resolves_independently() {
+        assert_ok(&[
+            (
+                vec![],
+                "use left; use right; \
+                 pub fn main() -> i32 { return left::pick() + right::pick(); }",
+            ),
+            (vec!["left"], "use a::n; pub fn pick() -> i32 { return n::value(); }"),
+            (vec!["right"], "use b::n; pub fn pick() -> i32 { return n::value(); }"),
+            (vec!["a", "n"], "pub fn value() -> i32 { return 11; }"),
+            (vec!["b", "n"], "pub fn value() -> i32 { return 22; }"),
+        ]);
+    }
+
+    /// A type defined in a file wins over a same-named sibling file when a qualified
+    /// `parent::Name::member` path is resolved: zero-argument `lib::Point::new()` is
+    /// the struct's associated function, not the sibling file `lib/Point.inf`'s free
+    /// `new`. The sibling takes one argument, so a leak to the file would surface an
+    /// argument-count mismatch on the zero-argument call; a clean type-check pins the
+    /// struct-precedence choice.
+    #[test]
+    fn qualified_path_prefers_struct_over_same_named_sibling_file() {
+        assert_ok(&[
+            (vec![], "use lib; use lib::Point; pub fn main() -> i32 { return lib::Point::new(); }"),
+            (vec!["lib"], "pub struct Point { v: i32; pub fn new() -> i32 { return 1; } }"),
+            (vec!["lib", "Point"], "pub fn new(unused: i32) -> i32 { return 1000; }"),
+        ]);
+    }
+
+    /// The negative complement: when the qualified path's leaf names a member that
+    /// the struct lacks, resolution does *not* silently fall back to the same-named
+    /// sibling file's free function. `lib::Point::missing()` is rejected even though
+    /// `lib/Point.inf` defines a `missing` — the struct's identity is what the path
+    /// addresses (#63).
+    #[test]
+    fn qualified_path_struct_member_miss_does_not_fall_back_to_sibling_file() {
+        let msg = assert_err(&[
+            (vec![], "use lib; use lib::Point; pub fn main() -> i32 { return lib::Point::missing(); }"),
+            (vec!["lib"], "pub struct Point { v: i32; pub fn new() -> i32 { return 1; } }"),
+            (vec!["lib", "Point"], "pub fn missing() -> i32 { return 9; }"),
+        ]);
+        assert!(
+            msg.contains("missing"),
+            "a struct member miss must not fall back to the sibling file, got: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Head precedence (the 2-segment call gate): a struct/enum defined in the
+    // accessing file pre-empts a same-named sibling FILE at the *head* of a
+    // qualified call, so `foo::pick()` / `Vec::new()` / `Color::Red` mean the
+    // local type even when an unrelated sibling drags the same-named file into the
+    // import closure. This is the value-position counterpart to the leaf/non-leaf
+    // type-path precedence above, decided through the shared head-precedence
+    // helper so the two resolvers never disagree (#63).
+    // ---------------------------------------------------------------------
+
+    /// A local `struct Vec` with associated `new() -> Vec`, used in a `let v: Vec =
+    /// Vec::new()`, must type-check even when a sibling pulls a root-child `Vec.inf`
+    /// (free `new() -> i32`) into the closure. Resolving the call to the file would
+    /// give `i32` and surface a self-contradictory `expected Vec, found i32`.
+    #[test]
+    fn local_struct_assoc_call_wins_over_sibling_file_in_let() {
+        assert_ok(&[
+            (vec![], "use bar; use puller; pub fn main() -> i32 { return bar::make(); }"),
+            (
+                vec!["bar"],
+                "pub struct Vec { len: i32; pub fn new() -> Vec { return Vec { len: 7 }; } } \
+                 pub fn make() -> i32 { let v: Vec = Vec::new(); return v.len; }",
+            ),
+            (vec!["Vec"], "pub fn new() -> i32 { return 999; }"),
+            (vec!["puller"], "use Vec; pub fn p() -> i32 { return Vec::new(); }"),
+        ]);
+    }
+
+    /// A local `enum Color { Red }`, referenced as `Color::Red`, must resolve to the
+    /// variant — not be mistaken for a sibling `Color.inf`'s free `Red()` — when the
+    /// sibling is in the closure. Resolving to the file would reject the variant use
+    /// with `Color::Red names a function, not a value`.
+    #[test]
+    fn local_enum_variant_wins_over_sibling_file() {
+        assert_ok(&[
+            (vec![], "use bar; use puller; pub fn main() -> i32 { return bar::make(); }"),
+            (
+                vec!["bar"],
+                "pub enum Color { Red, Green } \
+                 pub fn make() -> i32 { let c: Color = Color::Red; return 5; }",
+            ),
+            (vec!["Color"], "pub fn Red() -> i32 { return 999; }"),
+            (vec!["puller"], "use Color; pub fn p() -> i32 { return Color::Red(); }"),
+        ]);
+    }
+
+    /// A control without the sibling file: `bar`'s `Vec::new()` resolves to its local
+    /// struct on its own. Paired with [`local_struct_assoc_call_wins_over_sibling_file_in_let`],
+    /// it pins that adding the sibling to the closure does not change resolution.
+    #[test]
+    fn local_struct_assoc_call_resolves_without_sibling_file_present() {
+        assert_ok(&[
+            (vec![], "use bar; pub fn main() -> i32 { return bar::make(); }"),
+            (
+                vec!["bar"],
+                "pub struct Vec { len: i32; pub fn new() -> Vec { return Vec { len: 7 }; } } \
+                 pub fn make() -> i32 { let v: Vec = Vec::new(); return v.len; }",
+            ),
+        ]);
+    }
+
+    /// A legitimate two-segment namespace call (`util::helper()`, no local type
+    /// shadowing the head) must still resolve through the import after the head-veto
+    /// is added — the veto fires only when the accessing file defines the head type.
+    #[test]
+    fn plain_two_segment_namespace_call_still_resolves_after_head_veto() {
+        assert_ok(&[
+            (vec![], "use util; pub fn main() -> i32 { return util::helper(); }"),
+            (vec!["util"], "pub fn helper() -> i32 { return 99; }"),
+        ]);
+    }
+
+    /// A legitimate multi-segment namespace traversal from a *non-entry* file whose
+    /// head is a `use`-bound namespace (not a locally-defined type) must keep
+    /// resolving: the head-veto must not fire for a namespace head. `math` re-exports
+    /// `lib::arith`, and a non-entry `caller` reaches `math::arith::add` through it.
+    #[test]
+    fn namespace_traversal_from_non_entry_file_unaffected_by_head_veto() {
+        assert_ok(&[
+            (vec![], "use caller; pub fn main() -> i32 { return caller::go(); }"),
+            (vec!["caller"], "use math; pub fn go() -> i32 { return math::arith::add(3, 4); }"),
+            (vec!["math"], "pub use lib::arith;"),
+            (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
+        ]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Recursive-struct detection is by canonical key, not bare name: distinct
+    // same-named cross-file structs are not a cycle, and a genuine cross-file
+    // cycle is caught at type-check (before codegen) (#63).
+    // ---------------------------------------------------------------------
+
+    /// A genuine cross-file struct cycle — `root::Outer` contains `lib::m::Inner`,
+    /// which contains `root::Outer` back — must be rejected at type-check with the
+    /// `recursive struct definition` diagnostic, not slip through to a codegen
+    /// layout failure.
+    #[test]
+    fn genuine_cross_file_struct_cycle_rejected_at_type_check() {
+        let msg = assert_err(&[
+            (vec![], "use lib::m; pub struct Outer { inner: lib::m::Inner; } pub fn main() -> i32 { return 0; }"),
+            (vec!["lib", "m"], "use root; pub struct Inner { back: root::Outer; }"),
+        ]);
+        assert!(
+            msg.contains("recursive struct definition"),
+            "a genuine cross-file struct cycle must be rejected at type-check, got: {msg}"
+        );
+    }
+
+    /// Distinct same-named cross-file structs are *not* a cycle: the entry `Wrap`
+    /// has a field typed as a different `lib::m::Wrap`. The bare-name comparison
+    /// would falsely flag this; keying by canonical identity accepts it.
+    #[test]
+    fn distinct_same_named_cross_file_struct_field_is_not_a_cycle() {
+        assert_ok(&[
+            (vec![], "use lib::m; pub struct Wrap { inner: lib::m::Wrap; tag: i32; } pub fn main() -> i32 { let w: Wrap = Wrap { inner: lib::m::Wrap { v: 5 }, tag: 9 }; return w.inner.v + w.tag; }"),
+            (vec!["lib", "m"], "pub struct Wrap { v: i32; }"),
+        ]);
+    }
+
+    /// A cross-file cycle that closes through an ARRAY field must be caught: the
+    /// `Array` recursion arm of the cycle check must thread the canonical key as
+    /// the direct-field arm does. `Outer` holds `[lib::m::Inner; 2]`, and `Inner`
+    /// holds `root::Outer` back.
+    #[test]
+    fn cross_file_struct_cycle_through_array_field_rejected() {
+        let msg = assert_err(&[
+            (vec![], "use lib::m; pub struct Outer { items: [lib::m::Inner; 2]; } pub fn main() -> i32 { return 0; }"),
+            (vec!["lib", "m"], "use root; pub struct Inner { back: root::Outer; }"),
+        ]);
+        assert!(
+            msg.contains("recursive struct definition"),
+            "a cross-file cycle through an array field must be rejected, got: {msg}"
+        );
+    }
+
+    /// The array-field control: a distinct same-named cross-file struct reached
+    /// through an array field is not a cycle, so it must type-check — the array arm
+    /// must not re-introduce the bare-name false positive.
+    #[test]
+    fn distinct_same_named_cross_file_struct_through_array_is_not_a_cycle() {
+        assert_ok(&[
+            (vec![], "use lib::m; pub struct Wrap { inners: [lib::m::Wrap; 2]; } pub fn main() -> i32 { return 0; }"),
+            (vec!["lib", "m"], "pub struct Wrap { v: i32; }"),
+        ]);
+    }
+
+    /// A three-file cross-file cycle (`root::A` -> `lib::b::B` -> `lib::c::C` ->
+    /// `root::A`) must be caught: the multi-hop `lookup_struct_by_key` traversal
+    /// with its `visited` set has to close the loop across three distinct files.
+    #[test]
+    fn three_file_cross_file_struct_cycle_rejected() {
+        let msg = assert_err(&[
+            (vec![], "use lib::b; pub struct A { b: lib::b::B; } pub fn main() -> i32 { return 0; }"),
+            (vec!["lib", "b"], "use lib::c; pub struct B { c: lib::c::C; }"),
+            (vec!["lib", "c"], "use root; pub struct C { a: root::A; }"),
+        ]);
+        assert!(
+            msg.contains("recursive struct definition"),
+            "a three-file struct cycle must be rejected at type-check, got: {msg}"
+        );
+    }
+
 }

@@ -61,9 +61,15 @@ pub(crate) enum GraphOutcome {
     /// No value cycle. Carries a topological order of the definitions (`DefId`s),
     /// dependencies first, for a later phase to emit in a computable order.
     Acyclic { topo_order: Vec<DefId> },
-    /// A value cycle. Carries the members in cycle order and the location of the
-    /// entry member, for the diagnostic.
-    Cyclic { cycle: Vec<String>, location: Location },
+    /// A value cycle. Carries the members in cycle order, the location of the
+    /// entry member, and the scope that member is defined in — so the diagnostic
+    /// is stamped with the file the cycle lives in rather than rendering bare when
+    /// the cycle is entirely within a non-entry file.
+    Cyclic {
+        cycle: Vec<String>,
+        location: Location,
+        scope_id: u32,
+    },
 }
 
 /// Cross-file edge discovery via item/namespace imports.
@@ -284,7 +290,12 @@ impl<'a> DefGraph<'a> {
         let mut cycle: Vec<String> = path.iter().map(|&i| self.nodes[i].name.clone()).collect();
         cycle.push(self.nodes[to].name.clone());
         let location = self.nodes[to].location;
-        GraphOutcome::Cyclic { cycle, location }
+        let scope_id = self.nodes[to].scope_id;
+        GraphOutcome::Cyclic {
+            cycle,
+            location,
+            scope_id,
+        }
     }
 }
 
@@ -395,13 +406,19 @@ fn flatten_path(arena: &AstArena, expr_id: ExprId) -> Option<String> {
 
 /// Collects type-alias references from a type node: `Custom`, `QualifiedName`,
 /// and `Qualified` names, recursing into arrays.
+///
+/// A `::`-qualified reference is collected as its full `::`-joined path so it
+/// matches the by-path index a qualified definition is keyed under; collecting
+/// only the leaf would miss the edge to a cross-file type alias.
 fn collect_type_refs(arena: &AstArena, ty_id: TypeId, out: &mut Vec<String>) {
-    match &arena[ty_id].kind {
+    let kind = &arena[ty_id].kind;
+    match kind {
         TypeNode::Custom(ident_id) => out.push(arena[*ident_id].name.clone()),
-        TypeNode::QualifiedName { qualifier, name } => {
-            out.push(format!("{}::{}", arena[*qualifier].name, arena[*name].name));
+        TypeNode::QualifiedName { .. } | TypeNode::Qualified { .. } => {
+            if let Some(path) = kind.qualified_path(arena) {
+                out.push(path);
+            }
         }
-        TypeNode::Qualified { name, .. } => out.push(arena[*name].name.clone()),
         TypeNode::Array { element, .. } => collect_type_refs(arena, *element, out),
         _ => {}
     }

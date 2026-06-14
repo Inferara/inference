@@ -16,7 +16,10 @@ use inference_ast::ids::NodeId;
 use inference_ast::nodes::Expr;
 use inference_type_checker::type_info::TypeInfoKind;
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// Constant array index must be within the array's bounds.
@@ -24,10 +27,11 @@ crate::rule! {
     #[name = "Array index const out of bounds"]
     #[severity = error]
     pub struct ArrayIndexConstOob;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
+        walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
+            let module_path = walk_ctx.module_path.clone();
             walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
                     if let Expr::ArrayIndexAccess { array, index } = &arena[sub_id].kind
@@ -40,11 +44,14 @@ crate::rule! {
                             Err(_) => true,
                         };
                         if out_of_bounds {
-                            errors.push(AnalysisDiagnostic::ArrayIndexConstOutOfBounds {
-                                index: value.clone(),
-                                length,
-                                location: arena[sub_id].location,
-                            });
+                            errors.push(LabeledDiagnostic::new(
+                                module_path.clone(),
+                                AnalysisDiagnostic::ArrayIndexConstOutOfBounds {
+                                    index: value.clone(),
+                                    length,
+                                    location: arena[sub_id].location,
+                                },
+                            ));
                         }
                     }
                 });

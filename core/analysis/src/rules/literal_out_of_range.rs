@@ -9,7 +9,10 @@ use inference_ast::nodes::Expr;
 use inference_type_checker::type_info::{NumberType, TypeInfoKind};
 use inference_type_checker::typed_context::TypedContext;
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{
+    errors::{AnalysisDiagnostic, LabeledDiagnostic},
+    walker,
+};
 
 crate::rule! {
     /// Numeric literal value must be within the range of its target type.
@@ -17,13 +20,14 @@ crate::rule! {
     #[name = "Literal out of range"]
     #[severity = error]
     pub struct LiteralOutOfRange;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
+        walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
+            let module_path = walk_ctx.module_path.clone();
             walker::for_each_stmt_expr(&arena[stmt_id].kind, arena, &mut |expr_id| {
                 walker::walk_expr(arena, expr_id, &mut |sub_id| {
-                    check_number_literal(ctx, sub_id, &mut errors);
+                    check_number_literal(ctx, &module_path, sub_id, &mut errors);
                 });
             });
         });
@@ -33,22 +37,24 @@ crate::rule! {
 
 fn check_number_literal(
     ctx: &TypedContext,
+    module_path: &[String],
     expr_id: ExprId,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     let arena = ctx.arena();
     if let Expr::NumberLiteral { value } = &arena[expr_id].kind
         && let Some(ti) = ctx.get_node_typeinfo(NodeId::Expr(expr_id))
     {
-        validate_literal_range(value, &ti.kind, arena[expr_id].location, errors);
+        validate_literal_range(value, module_path, &ti.kind, arena[expr_id].location, errors);
     }
 }
 
 fn validate_literal_range(
     value: &str,
+    module_path: &[String],
     target_kind: &TypeInfoKind,
     location: inference_ast::nodes::Location,
-    errors: &mut Vec<AnalysisDiagnostic>,
+    errors: &mut Vec<LabeledDiagnostic>,
 ) {
     let TypeInfoKind::Number(number_type) = target_kind else {
         return;
@@ -68,12 +74,15 @@ fn validate_literal_range(
         Err(_) => true,
     };
     if out_of_range {
-        errors.push(AnalysisDiagnostic::LiteralOutOfRange {
-            value: value.to_string(),
-            type_name: type_name.to_string(),
-            min,
-            max,
-            location,
-        });
+        errors.push(LabeledDiagnostic::new(
+            module_path.to_vec(),
+            AnalysisDiagnostic::LiteralOutOfRange {
+                value: value.to_string(),
+                type_name: type_name.to_string(),
+                min,
+                max,
+                location,
+            },
+        ));
     }
 }

@@ -927,12 +927,32 @@ mod type_info_from_ast {
         let ty_id = arena.types.alloc(TypeData {
             location: dummy_location(),
             kind: TypeNode::Qualified {
-                alias: alias_id,
+                qualifier: vec![alias_id],
                 name: name_id,
             },
         });
         let ti = TypeInfo::from_type_id(&arena, ty_id);
-        assert_eq!(ti.kind, TypeInfoKind::Qualified("Type".to_string()));
+        assert_eq!(ti.kind, TypeInfoKind::Qualified("Module::Type".to_string()));
+    }
+
+    #[test]
+    fn test_new_from_multi_segment_qualified() {
+        let mut arena = AstArena::default();
+        let lib_id = alloc_ident(&mut arena, "lib");
+        let geom_id = alloc_ident(&mut arena, "geom");
+        let name_id = alloc_ident(&mut arena, "Point");
+        let ty_id = arena.types.alloc(TypeData {
+            location: dummy_location(),
+            kind: TypeNode::Qualified {
+                qualifier: vec![lib_id, geom_id],
+                name: name_id,
+            },
+        });
+        let ti = TypeInfo::from_type_id(&arena, ty_id);
+        assert_eq!(
+            ti.kind,
+            TypeInfoKind::Qualified("lib::geom::Point".to_string())
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use inference_ast::nodes::Location;
 
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
-use crate::errors::AnalysisDiagnostic;
+use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
 
 crate::rule! {
     /// Direct and mutual recursion is forbidden (Power of 10, Rule 1).
@@ -24,14 +24,17 @@ crate::rule! {
     #[name = "Recursion detected"]
     #[severity = error]
     pub struct RecursionDetected;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let nodes = build_call_graph(ctx);
         detect_cycles(&nodes)
     }
 }
 
 /// Detects every call cycle in the graph and emits one diagnostic per cycle.
-fn detect_cycles(nodes: &[FnNode]) -> Vec<AnalysisDiagnostic> {
+///
+/// The diagnostic points at the call site that closes the cycle, which lives in
+/// the body of node `u`; that node's defining file names the finding.
+fn detect_cycles(nodes: &[FnNode]) -> Vec<LabeledDiagnostic> {
     let adj = resolve_adjacency(nodes);
 
     let mut color = vec![WHITE; nodes.len()];
@@ -61,7 +64,7 @@ fn dfs(
     color: &mut [u8],
     stack: &mut Vec<usize>,
     reported: &mut HashSet<Vec<usize>>,
-    diags: &mut Vec<AnalysisDiagnostic>,
+    diags: &mut Vec<LabeledDiagnostic>,
 ) {
     color[u] = GRAY;
     stack.push(u);
@@ -71,10 +74,13 @@ fn dfs(
                 if let Some(canon) = cycle_from_back_edge(stack, v)
                     && reported.insert(canon.clone())
                 {
-                    diags.push(AnalysisDiagnostic::RecursionDetected {
-                        cycle: render_cycle(nodes, &canon),
-                        location: call_loc,
-                    });
+                    diags.push(LabeledDiagnostic::new(
+                        nodes[u].module_path.clone(),
+                        AnalysisDiagnostic::RecursionDetected {
+                            cycle: render_cycle(nodes, &canon),
+                            location: call_loc,
+                        },
+                    ));
                 }
             }
             WHITE => dfs(v, adj, nodes, color, stack, reported, diags),
@@ -127,10 +133,10 @@ mod tests {
         Location::default()
     }
 
-    fn cycles(diags: &[AnalysisDiagnostic]) -> Vec<String> {
+    fn cycles(diags: &[LabeledDiagnostic]) -> Vec<String> {
         diags
             .iter()
-            .map(|d| match d {
+            .map(|d| match &d.diagnostic {
                 AnalysisDiagnostic::RecursionDetected { cycle, .. } => cycle.clone(),
                 other => panic!("unexpected diagnostic: {other:?}"),
             })
@@ -214,12 +220,14 @@ mod tests {
                 display: "S.f".to_string(),
                 edges: vec![CallEdge {
                     callee_raw: "f".to_string(),
+                    module_path: Vec::new(),
                     spec: Some("S".to_string()),
                     location: loc(),
                 }],
                 def_id: idx_from_u32(0),
                 body: idx_from_u32(0),
                 location: loc(),
+                module_path: Vec::new(),
                 struct_name: None,
             },
             test_node("f", &[]),
@@ -237,12 +245,14 @@ mod tests {
             display: "T.m".to_string(),
             edges: vec![CallEdge {
                 callee_raw: "T.m".to_string(),
+                module_path: Vec::new(),
                 spec: None,
                 location: loc(),
             }],
             def_id: idx_from_u32(0),
             body: idx_from_u32(0),
             location: loc(),
+            module_path: Vec::new(),
             struct_name: None,
         }];
         let diags = detect_cycles(&nodes);

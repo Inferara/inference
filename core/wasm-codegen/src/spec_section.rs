@@ -91,6 +91,43 @@ pub(crate) struct SpecNameTooLong {
     pub(crate) len: usize,
 }
 
+/// Returns a human-readable reason if `qualified` is not a legal Rocq identifier,
+/// or `None` when it is valid.
+///
+/// The file-qualified spec name is emitted verbatim into the
+/// `<module>__<spec>_specs` definition and `valid_<module>__<spec>` theorem the
+/// Rocq translator produces, so it must satisfy the translator's identifier
+/// rules. This mirrors the load-bearing rules of
+/// `wasm-to-v`'s `validate_rocq_identifier` — leading letter, allowed chars, and
+/// no `__` run — so codegen can reject a bad name *before* writing any artifact
+/// (the translator runs downstream of the `.wasm` write). The rules are
+/// duplicated rather than imported because codegen sits upstream of `wasm-to-v`
+/// in the pipeline and must not depend on it; the length and stdlib/keyword
+/// denylist checks stay in their existing places ([`check_spec_name_lengths`] and
+/// the translator) so this covers only the structural rules a spec name can trip
+/// at the source level — chiefly the `__` run a leading-underscore spec name
+/// (`spec _S` → `lib_geo__S`) produces after the module-path join.
+#[must_use = "the reason is the return value"]
+pub(crate) fn spec_name_rocq_invalidity_reason(qualified: &str) -> Option<String> {
+    let mut chars = qualified.chars();
+    match chars.next() {
+        None => return Some("name is empty".to_string()),
+        Some(first) if !first.is_ascii_alphabetic() => {
+            return Some(format!("must start with a letter, found `{first}`"));
+        }
+        Some(_) => {}
+    }
+    for c in chars {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            return Some(format!("contains the invalid character `{c}`"));
+        }
+    }
+    if qualified.contains("__") {
+        return Some("contains a `__` run, which Rocq reserves as the module/spec separator".to_string());
+    }
+    None
+}
+
 /// Encodes the spec map into the canonical payload bytes.
 pub(crate) fn encode_payload(map: &FxHashMap<String, Vec<u32>>) -> Vec<u8> {
     let mut entries: Vec<(&str, &[u32])> = map

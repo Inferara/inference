@@ -170,6 +170,32 @@ mod analysis_rules_tests {
     }
 
     #[test]
+    fn a015_struct_literal_as_method_receiver_rejected() {
+        // A struct literal used directly as a method receiver is an unsupported
+        // compound-literal position, so it defers to A015 rather than producing a
+        // spurious "method not found" — the method `sum` does exist. The supported
+        // form binds the literal to a local first (see
+        // `reexport_qualified_struct_literal_method_call_executes` in the codegen
+        // multi-file suite).
+        let source = r#"
+            struct Point {
+                x: i32;
+                y: i32;
+                pub fn sum(self) -> i32 { return self.x + self.y; }
+            }
+            fn test() -> i32 { return Point { x: 30, y: 12 }.sum(); }
+        "#;
+        let errors = expect_errors(source);
+        let has_a015 = errors
+            .iter()
+            .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralInUnsupportedPosition { .. }));
+        assert!(
+            has_a015,
+            "a struct-literal method receiver must defer to A015, got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn a015_struct_literal_in_let_binding_accepted() {
         let source = r#"
             struct Point { x: i32; y: i32; }

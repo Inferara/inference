@@ -37,12 +37,22 @@ pub enum InferenceError {
         segment: String,
     },
 
-    /// A project source file failed to parse. `module_path` is its
-    /// `::`-joined namespace name (the entry file is labeled `<entry>`) and
-    /// `details` aggregates the syntax errors.
+    /// An imported (non-entry) project file failed to parse. `module_path` is its
+    /// `::`-joined namespace name and `details` aggregates the syntax errors. The
+    /// entry file is reported as [`Self::EntryFileParse`] instead, because it is
+    /// the file the user named — calling it an "imported file" would be wrong.
     #[error("failed to parse imported file `{module_path}`:\n{details}")]
     ImportedFileParse {
         module_path: String,
+        details: String,
+    },
+
+    /// The entry file (the one the user named on the command line) failed to
+    /// parse. Reported with its real path rather than the imported-file wording so
+    /// a single-file build points the user straight at the file they compiled.
+    #[error("failed to parse `{}`:\n{details}", path.display())]
+    EntryFileParse {
+        path: PathBuf,
         details: String,
     },
 

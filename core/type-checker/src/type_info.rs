@@ -314,10 +314,19 @@ impl TypeInfo {
                 )),
                 type_params: vec![],
             },
-            TypeNode::Qualified { alias: _, name } => Self {
-                kind: TypeInfoKind::Qualified(arena[*name].name.clone()),
-                type_params: vec![],
-            },
+            TypeNode::Qualified { .. } => {
+                // Carry the full `::`-joined path (`lib::geom::Point`), not just
+                // the leaf: the qualifier names the file-namespace chain the type
+                // is reached through, and resolution needs every segment to walk
+                // it. The string is a pre-resolution carrier; `resolve_custom_type`
+                // rewrites it to a canonical `Struct`/`Enum` once the path is bound.
+                Self {
+                    kind: TypeInfoKind::Qualified(
+                        type_data.kind.qualified_path(arena).unwrap_or_default(),
+                    ),
+                    type_params: vec![],
+                }
+            }
             TypeNode::Array { element, size } => {
                 let array_size = extract_array_size_from_arena(arena, *size);
                 Self {

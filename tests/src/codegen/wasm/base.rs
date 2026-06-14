@@ -4122,6 +4122,43 @@ mod base_codegen_tests {
     }
 
     #[test]
+    fn struct_literal_field_position_uzumaki_inline_validation() {
+        // A field-position uzumaki (`Point { x: @, y: @ }`) carries no type of its
+        // own; it inherits the field's declared type during type-checking, so
+        // codegen finds the type info and emits the right-width uzumaki per field
+        // rather than panicking on a missing type. This is the literal form of the
+        // whole-struct `let p: Point = @;` above, narrowed to individual fields.
+        let source = r#"
+            struct Point { x: i32; y: i32; }
+            pub fn test() {
+                forall {
+                    let p: Point = Point { x: @, y: @ };
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Field-position uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn struct_literal_field_position_uzumaki_mixed_widths_inline_validation() {
+        // The field's declared type drives the uzumaki width independently per
+        // field: a bool, an i32, and an i64 each pick their own opcode.
+        let source = r#"
+            struct Mixed { flag: bool; count: i32; big: i64; }
+            pub fn test() {
+                forall {
+                    let m: Mixed = Mixed { flag: @, count: @, big: @ };
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("Mixed-width field uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
     fn struct_with_array_field_uzumaki_inline_validation() {
         cov_mark::check_count!(wasm_codegen_emit_struct_uzumaki, 1);
         let source = r#"

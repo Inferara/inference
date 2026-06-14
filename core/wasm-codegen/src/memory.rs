@@ -173,12 +173,27 @@ pub(crate) struct StructSlot {
 /// bare type name accessed from a file that *imports* it still lays out by the
 /// definer. For a single-file program every struct is defined in the entry file,
 /// so the defining path is empty and resolution is unchanged.
-fn resolve_struct_with_defining_path(
-    name: &str,
+/// Resolves a struct *field/element* type to its definition and defining-file
+/// path, preferring the canonical key.
+///
+/// A `Struct` kind carries the defining-file canonical key; a `::`-qualified
+/// field type (`p: lib::geom::Point`) resolves to one whose leaf name is not
+/// bound by name in the accessing file, so a bare-name lookup against
+/// `module_path` would miss it. The key identifies the struct by its defining
+/// file, so it is tried first, with the bare-name lookup as the fallback for a
+/// `Custom` kind (which carries no key).
+pub(crate) fn resolve_struct_with_defining_path(
+    kind: &TypeInfoKind,
     ctx: &TypedContext,
     module_path: &[String],
 ) -> Option<(StructInfo, Vec<String>)> {
-    let info = ctx.lookup_struct_in(name, module_path)?;
+    let info = match kind {
+        TypeInfoKind::Struct(name, key) => ctx
+            .lookup_struct(key)
+            .or_else(|| ctx.lookup_struct_in(name, module_path)),
+        TypeInfoKind::Custom(name) => ctx.lookup_struct_in(name, module_path),
+        _ => None,
+    }?;
     let defining_path = ctx.module_path_of_scope(info.definition_scope_id);
     Some((info, defining_path))
 }
@@ -300,7 +315,7 @@ fn compute_field_layout_with_visited(
     match kind {
         TypeInfoKind::Struct(name, _) | TypeInfoKind::Custom(name) => {
             if let Some((inner_struct, defining_path)) =
-                resolve_struct_with_defining_path(name, ctx, module_path)
+                resolve_struct_with_defining_path(kind, ctx, module_path)
             {
                 if !visited.insert(name.clone()) {
                     return Err(CodegenError::CycleInStructLayout { name: name.clone() });
@@ -323,6 +338,7 @@ fn compute_field_layout_with_visited(
             elem_size: type_byte_size_with_visited(&elem_type.kind, ctx, module_path, visited)?,
             length: *length,
         }),
+        // An `Enum` (incl. a resolved qualified enum) is a scalar i32 tag.
         _ => Ok(CompoundFieldLayout::Scalar),
     }
 }
@@ -400,7 +416,7 @@ fn type_byte_size_with_visited(
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
             if let Some((struct_info, defining_path)) =
-                resolve_struct_with_defining_path(name, ctx, module_path)
+                resolve_struct_with_defining_path(kind, ctx, module_path)
             {
                 let (total_size, _) = compute_struct_field_layout_with_visited(
                     &struct_info,
@@ -492,7 +508,7 @@ fn natural_alignment_with_visited(
                 return Err(CodegenError::CycleInStructLayout { name: name.clone() });
             }
             if let Some((struct_info, defining_path)) =
-                resolve_struct_with_defining_path(name, ctx, module_path)
+                resolve_struct_with_defining_path(kind, ctx, module_path)
             {
                 let mut max_align = 1u32;
                 for f in &struct_info.fields {

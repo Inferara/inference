@@ -74,4 +74,80 @@ pub(crate) enum CodegenError {
         second: String,
         qualified: String,
     },
+    /// A spec's file-qualified name is not a legal Rocq identifier, so the
+    /// emitted `<module>__<spec>_specs` definition and `valid_<module>__<spec>`
+    /// theorem would be rejected by the Rocq translator. The most common cause is
+    /// a leading underscore in the spec name, which the module-path join turns
+    /// into a `__` run (`spec _S` in `lib/geo.inf` → `lib_geo__S`). The diagnostic
+    /// names the source spec (`lib::geo::_S`), not the joined internal key, so the
+    /// user sees what they wrote. Caught in codegen before any artifact is
+    /// written, so a rejected spec name leaves no stale `.wasm` behind.
+    #[error(
+        "spec name `{spec}` is not a valid name for Rocq translation ({reason}); \
+         rename the spec (Rocq names must start with a letter and contain no `__` run)"
+    )]
+    SpecNameInvalid { spec: String, reason: String },
+
+    /// A proof-mode spec's file-qualified name would carry a `__` run, which Rocq
+    /// reserves as the `<module>__<spec>` separator. The run is fabricated when a
+    /// path segment (file stem) or the spec name begins or ends with `_` — the
+    /// `_` that joins the segments lands next to the boundary `_` — or carries a
+    /// `__` run in the source itself. Reported at the source level, naming the
+    /// offending file or spec rather than the flattened internal key, and before
+    /// any artifact is written so a rejected name leaves no stale `.wasm`/`.v`.
+    ///
+    /// Deliberately a rejection rather than an auto-escape: the file-qualified
+    /// name is emitted verbatim into the proof artifact (`Definition
+    /// output__<name>_specs`, `Theorem valid_output__<name>`), so an escaped form
+    /// like `lib_x_1U_S` would make the proof harder to read. Renaming keeps the
+    /// proof names legible.
+    #[error(
+        "proof-mode spec name reserves `__`\n\
+         \n\
+         The spec `{spec_source}` is fine, but in proof mode each spec is given a \
+         file-qualified name so two specs with the same name in different files do \
+         not collide in the generated Rocq (.v). That name joins the path segments \
+         with `_`:\n\
+         \n    {join_lhs} -> {qualified}\n\
+         \n\
+         The `__` run in `{qualified}` is reserved in Rocq as the module/spec \
+         separator, so the name is ambiguous and rejected. The {offender_kind} \
+         `{offender}` (which {offender_cause}) is what creates it.\n\
+         \n\
+         How to fix: rename so no path segment or spec name begins with `_`, ends \
+         with `_`, or contains a `__` run (e.g. `{fix_hint}`).\n\
+         \n\
+         Why not auto-encode: proof-mode names appear verbatim in your .v file, so \
+         they are kept readable rather than escaped into noise.",
+        spec_source = .0.spec_source,
+        join_lhs = .0.join_lhs,
+        qualified = .0.qualified,
+        offender_kind = .0.offender_kind,
+        offender = .0.offender,
+        offender_cause = .0.offender_cause,
+        fix_hint = .0.fix_hint,
+    )]
+    SpecNameReservesSeparator(Box<SpecNameSeparatorDetails>),
+}
+
+/// The boxed payload of [`CodegenError::SpecNameReservesSeparator`]. Boxed so the
+/// seven diagnostic strings do not enlarge `CodegenError` (and every
+/// `Result<_, CodegenError>` it flows through) — the variant is rare and only ever
+/// rendered, so the indirection costs nothing on the hot path.
+#[derive(Debug)]
+pub(crate) struct SpecNameSeparatorDetails {
+    /// The source-level spec identity (`lib::x_::S`), for the lead line.
+    pub(crate) spec_source: String,
+    /// The `dir / stem / spec` rendering of the join inputs.
+    pub(crate) join_lhs: String,
+    /// The flattened qualified name that carries the `__` run.
+    pub(crate) qualified: String,
+    /// Whether the offender is a `file stem` or a `spec name`.
+    pub(crate) offender_kind: String,
+    /// The offending segment text.
+    pub(crate) offender: String,
+    /// The phrasing of why it offends — "ends with an underscore", and so on.
+    pub(crate) offender_cause: String,
+    /// A concrete renamed form to point at.
+    pub(crate) fix_hint: String,
 }

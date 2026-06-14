@@ -535,4 +535,388 @@ mod tests {
             result.err().map(|e| e.to_string())
         );
     }
+
+    /// A brace-free file import in the entry (`use lib::Point;`) must not leak its
+    /// file-namespace binding across the file boundary: inside `lib.inf`, a bare
+    /// `Point::new()` is the local struct's associated function, not the sibling
+    /// file `lib/Point.inf`. The struct's `new` returns `Point`, matching the
+    /// `let p: Point` binding; the leaked file's `new` returns `i32`, which would
+    /// surface a type mismatch — so a clean type-check pins the boundary (#63).
+    #[test]
+    fn entry_file_namespace_import_does_not_leak_into_lib() {
+        let files = [
+            (
+                vec![],
+                "use lib; use lib::Point; pub fn main() -> i32 { return lib::build(); }",
+            ),
+            (
+                vec!["lib"],
+                "pub struct Point { x: i32; y: i32; \
+                 pub fn new() -> Point { return Point { x: 1, y: 2 }; } } \
+                 pub fn build() -> i32 { let p: Point = Point::new(); return p.x + p.y; }",
+            ),
+            (vec!["lib", "Point"], "pub fn new() -> i32 { return 0; }"),
+        ];
+        let result = try_type_check_multi_file(&files);
+        assert!(
+            result.is_ok(),
+            "the entry's `use lib::Point;` must not hijack `lib.inf`'s bare `Point::new()`, got: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+    }
+
+    /// Two item imports of the *same* canonical target under one name — `f`
+    /// imported directly from `orig` and again through `proxy`'s `pub use
+    /// orig::{f}` re-export — are a benign duplicate, not a collision. Both name
+    /// the identical function `orig::f`, so binding it once and resolving the
+    /// bare call is correct.
+    #[test]
+    fn duplicate_item_imports_of_same_target_are_benign() {
+        let files = [
+            (
+                vec![],
+                "use orig::{f}; use proxy::{f}; pub fn main() -> i32 { return f(); }",
+            ),
+            (vec!["orig"], "pub fn f() -> i32 { return 42; }"),
+            (vec!["proxy"], "pub use orig::{f};"),
+        ];
+        let result = try_type_check_multi_file(&files);
+        assert!(
+            result.is_ok(),
+            "two imports of the same canonical target must not collide, got: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+    }
+
+    /// Two item imports binding one name to *different* canonical targets — `f`
+    /// from `one` and a different `f` from `two` — are a genuine clash and must be
+    /// rejected; the benign-duplicate rule applies only to identical targets.
+    #[test]
+    fn duplicate_item_imports_of_different_targets_collide() {
+        let files = [
+            (
+                vec![],
+                "use one::{f}; use two::{f}; pub fn main() -> i32 { return f(); }",
+            ),
+            (vec!["one"], "pub fn f() -> i32 { return 1; }"),
+            (vec!["two"], "pub fn f() -> i32 { return 2; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("two different targets under one name must collide")
+            .to_string();
+        assert!(
+            msg.contains("collides with another import"),
+            "different-target name clash must still be reported, got: {msg}"
+        );
+    }
+
+    /// An item import binding a name equal to a builtin type is rejected, and the
+    /// rejection is identical whether the import sits in the entry file or a
+    /// non-entry file. Builtins live only in the entry (root) scope, so without a
+    /// uniform check the entry rejects while a non-entry file silently lets the
+    /// builtin shadow the imported struct.
+    #[test]
+    fn import_of_builtin_type_name_rejected_in_entry_file() {
+        let files = [
+            (vec![], "use lib::types::{string}; pub fn main() {}"),
+            (vec!["lib", "types"], "pub struct string { v: i32; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("importing a builtin-named type must be rejected")
+            .to_string();
+        assert!(
+            msg.contains("collides with a builtin type"),
+            "entry-file builtin-named import must be rejected, got: {msg}"
+        );
+    }
+
+    /// Companion to [`import_of_builtin_type_name_rejected_in_entry_file`]: the
+    /// byte-identical directive in a *non-entry* file is rejected with the same
+    /// message, so entry and non-entry files behave consistently.
+    #[test]
+    fn import_of_builtin_type_name_rejected_in_non_entry_file() {
+        let files = [
+            (vec![], "use lib::mid; pub fn main() -> i32 { return lib::mid::go(); }"),
+            (
+                vec!["lib", "mid"],
+                "use lib::types::{string}; \
+                 pub fn go() -> i32 { let s: string = string { v: 9 }; return s.v; }",
+            ),
+            (vec!["lib", "types"], "pub struct string { v: i32; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("importing a builtin-named type must be rejected in a non-entry file")
+            .to_string();
+        assert!(
+            msg.contains("collides with a builtin type"),
+            "non-entry-file builtin-named import must be rejected the same way, got: {msg}"
+        );
+    }
+
+    /// A method call on a re-export-qualified struct value whose method genuinely
+    /// does not exist produces the *accurate* "method not found" diagnostic — the
+    /// canonical-key method dispatch reports the real absence rather than a
+    /// spurious miss or silent acceptance. The struct does define `sum`, but not
+    /// the called `nope`.
+    #[test]
+    fn reexport_qualified_value_missing_method_reports_accurately() {
+        let files = [
+            (
+                vec![],
+                "use math; pub fn run() -> i32 { \
+                 let p: math::geo::Point = math::geo::Point { x: 1, y: 2 }; return p.nope(); }",
+            ),
+            (vec!["math"], "pub use lib::geo;"),
+            (
+                vec!["lib", "geo"],
+                "pub struct Point { x: i32; y: i32; \
+                 pub fn sum(self) -> i32 { return self.x + self.y; } }",
+            ),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("calling a non-existent method must fail")
+            .to_string();
+        assert!(
+            msg.contains("method `nope` not found on type `Point`"),
+            "a genuinely-absent method must be reported accurately, got: {msg}"
+        );
+    }
+
+    /// A cyclic, unresolvable item re-export (`main` imports `lib::a::{deep}`,
+    /// `a` re-exports from `b`, `b` re-exports from `a`) reports the
+    /// `deep`-not-found-in-`lib::a` diagnostic exactly once, even though two
+    /// distinct import sites (main's import and `b`'s `pub use`) both fail to find
+    /// `deep` in `lib::a`. Deduping by `(item, file)` collapses the identical text.
+    #[test]
+    fn cyclic_unresolvable_reexport_reports_each_target_once() {
+        let files = [
+            (vec![], "use lib::a::{deep}; pub fn run() -> i32 { return deep(); }"),
+            (vec!["lib", "a"], "pub use lib::b::{deep};"),
+            (vec!["lib", "b"], "pub use lib::a::{deep};"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("a cyclic unresolvable re-export must fail")
+            .to_string();
+        let a_count = msg.matches("item `deep` not found in file `lib::a`").count();
+        assert_eq!(
+            a_count, 1,
+            "the `deep`-not-found-in-`lib::a` diagnostic must appear exactly once, got {a_count} in: {msg}"
+        );
+    }
+
+    /// An unresolvable re-export raised by a *non-entry* file carries that file's
+    /// `::`-joined label (e.g. `lib::a:`), not a bare `line:col`, matching every
+    /// other diagnostic produced in that file. Here `lib::a`'s `pub use
+    /// lib::b::{x}` cannot find `x` in `lib::b`, so its diagnostic is labeled
+    /// `lib::a`.
+    #[test]
+    fn cyclic_unresolvable_reexport_carries_importing_file_label() {
+        let files = [
+            (vec![], "use lib::a::{x}; pub fn run() -> i32 { return x(); }"),
+            (vec!["lib", "a"], "pub use lib::b::{x};"),
+            (vec!["lib", "b"], "pub use lib::a::{x};"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("a cyclic unresolvable re-export must fail")
+            .to_string();
+        assert!(
+            msg.contains("lib::a:") && msg.contains("item `x` not found in file `lib::b`"),
+            "a non-entry file's unresolvable re-export must carry its file label, got: {msg}"
+        );
+    }
+
+    /// An unresolvable *file* import (a Plain `use` naming a missing namespace)
+    /// raised by a non-entry file also carries that file's label, exercising the
+    /// file-import diagnostic channel rather than the item-import one.
+    #[test]
+    fn unresolvable_file_import_in_non_entry_file_carries_label() {
+        let files = [
+            (vec![], "use lib::a; pub fn run() -> i32 { return lib::a::go(); }"),
+            (vec!["lib", "a"], "use lib::missing; pub fn go() -> i32 { return 0; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("an unresolvable file import must fail")
+            .to_string();
+        assert!(
+            msg.contains("lib::a:"),
+            "a non-entry file's unresolvable file import must carry its file label, got: {msg}"
+        );
+    }
+
+    /// Two different imported files each call an undefined `missing()`. The
+    /// undefined-function diagnostic is per call site, so BOTH files must report
+    /// it: a name-only dedup key would swallow the second file's error (leaving
+    /// only a downstream type-mismatch there) and misdirect the user.
+    #[test]
+    fn undefined_function_in_two_files_reports_both() {
+        let files = [
+            (
+                vec![],
+                "use lib::a; use lib::b; \
+                 pub fn main() -> i32 { return lib::a::fa() + lib::b::fb(); }",
+            ),
+            (vec!["lib", "a"], "pub fn fa() -> i32 { return missing(); }"),
+            (vec!["lib", "b"], "pub fn fb() -> i32 { return missing(); }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("two undefined-function calls must fail type check")
+            .to_string();
+        assert!(
+            msg.contains("lib::a:") && msg.contains("call to undefined function `missing`"),
+            "the first file's undefined-function error must be reported, got: {msg}"
+        );
+        // The second file's error is the one the old name-only dedup dropped.
+        assert!(
+            msg.contains("lib::b:")
+                && msg
+                    .matches("call to undefined function `missing`")
+                    .count()
+                    >= 2,
+            "both files' undefined-function errors must be reported, got: {msg}"
+        );
+    }
+
+    /// A single file calling the same undefined function twice still reports it
+    /// once: the registration and inference passes both visit the call, and the
+    /// file-aware dedup key collapses the same-site repeat. This guards against
+    /// the file-folding fix accidentally splitting a genuine single-site
+    /// duplicate.
+    #[test]
+    fn undefined_function_same_site_still_dedups_once() {
+        let files = [(
+            vec![],
+            "pub fn main() -> i32 { \
+             let a: i32 = missing(); let b: i32 = missing(); return a + b; }",
+        )];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("an undefined-function call must fail type check")
+            .to_string();
+        let count = msg.matches("call to undefined function `missing`").count();
+        assert_eq!(
+            count, 1,
+            "a same-site repeated undefined function must report exactly once, got {count} in: {msg}"
+        );
+    }
+
+    /// Two different files each directly import the same missing item from the same
+    /// target (`use shared::data::{Missing};` in both `lib1::a` and `lib2::b`).
+    /// The item-not-found diagnostic is per importing file, so BOTH must report —
+    /// a target-only dedup key would swallow the second importer's error. The two
+    /// distinct importing-file labels are what keep them apart.
+    #[test]
+    fn same_missing_item_imported_by_two_files_reports_both() {
+        let files = [
+            (vec![], "use lib1::a; use lib2::b; pub fn main() -> i32 { return 0; }"),
+            (vec!["lib1", "a"], "use shared::data::{Missing}; pub fn fa() -> i32 { return 1; }"),
+            (vec!["lib2", "b"], "use shared::data::{Missing}; pub fn fb() -> i32 { return 2; }"),
+            (vec!["shared", "data"], "pub fn present() -> i32 { return 0; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("two missing item imports must fail type check")
+            .to_string();
+        assert!(
+            msg.contains("lib1::a:") && msg.contains("lib2::b:"),
+            "both importers' labels must appear, got: {msg}"
+        );
+        let count = msg
+            .matches("item `Missing` not found in file `shared::data`")
+            .count();
+        assert_eq!(
+            count, 2,
+            "each of the two importers must report the missing item, got {count} in: {msg}"
+        );
+    }
+
+    /// A single importer naming the same missing item twice in one `use` still
+    /// reports it once: the importer-keyed dedup collapses the same file's repeat,
+    /// so the two-importers fix does not split a genuine single-importer duplicate.
+    #[test]
+    fn same_missing_item_imported_twice_by_one_file_dedups_once() {
+        let files = [
+            (vec![], "use lib::a; pub fn main() -> i32 { return 0; }"),
+            (
+                vec!["lib", "a"],
+                "use shared::data::{Missing}; use shared::data::{Missing}; \
+                 pub fn fa() -> i32 { return 1; }",
+            ),
+            (vec!["shared", "data"], "pub fn present() -> i32 { return 0; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("a missing item import must fail type check")
+            .to_string();
+        let count = msg
+            .matches("item `Missing` not found in file `shared::data`")
+            .count();
+        assert_eq!(
+            count, 1,
+            "one importer naming the same missing item twice must report once, got {count} in: {msg}"
+        );
+    }
+
+    /// An import collision reported in a NON-entry file carries that file's label
+    /// (`lib::mid:`), consistent with every other diagnostic in the same file. The
+    /// collision is reported outside the per-file inference loop (at the root), so
+    /// it must be stamped with the importing scope's own file rather than rendered
+    /// bare.
+    #[test]
+    fn non_entry_import_collision_is_file_labeled() {
+        let files = [
+            (vec![], "use lib::mid; pub fn main() -> i32 { return 0; }"),
+            (
+                vec!["lib", "mid"],
+                "pub use lib::thing::Thing; struct Thing { x: i32; } pub fn use_it() -> i32 { return 0; }",
+            ),
+            (vec!["lib", "thing"], "pub struct Thing { y: i32; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("an import colliding with a local definition must fail")
+            .to_string();
+        assert!(
+            msg.contains("imported name `Thing` collides"),
+            "the collision must be reported, got: {msg}"
+        );
+        assert!(
+            msg.contains("lib::mid:") && msg.contains("imported name `Thing` collides"),
+            "a non-entry import collision must carry its file label, got: {msg}"
+        );
+    }
+
+    /// An import collision in the ENTRY file stays bare (no file prefix), matching
+    /// every other entry-file diagnostic — the user named the entry, so labelling
+    /// it would add only noise.
+    #[test]
+    fn entry_import_collision_stays_bare() {
+        let files = [
+            (
+                vec![],
+                "use lib::thing::Thing; struct Thing { x: i32; } pub fn main() -> i32 { return 0; }",
+            ),
+            (vec!["lib", "thing"], "pub struct Thing { y: i32; }"),
+        ];
+        let msg = try_type_check_multi_file(&files)
+            .err()
+            .expect("an entry import colliding with a local definition must fail")
+            .to_string();
+        assert!(
+            msg.contains("imported name `Thing` collides"),
+            "the collision must be reported, got: {msg}"
+        );
+        // The entry collision must not be prefixed by any non-entry file label.
+        assert!(
+            !msg.contains("lib::thing:") && !msg.contains("::Thing:"),
+            "an entry-file import collision must stay bare, got: {msg}"
+        );
+    }
 }

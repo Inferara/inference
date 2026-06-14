@@ -222,6 +222,14 @@ fn traverse_t_ast_with_compiler(
     // post-join check could not tell a collision from a single entry.
     check_spec_name_collisions(&buckets.visited_specs)?;
 
+    // Reject a spec whose file-qualified name is not a legal Rocq identifier
+    // (chiefly a leading-underscore spec name, which the module-path join turns
+    // into a `__` run) before any artifact is written. Running it here — rather
+    // than letting the downstream Rocq translator reject the already-written
+    // `.wasm` — keeps a bad spec name from leaving a stale `.wasm` behind and
+    // points the diagnostic at the source spec the user wrote.
+    check_spec_names_valid(&buckets.visited_specs)?;
+
     // Register every visited spec (even with zero emittable inner defs) so
     // user-authored `spec MySpec { }` still surfaces a per-spec entry that
     // the Rocq translator turns into `Definition output__MySpec_specs` and
@@ -337,6 +345,123 @@ fn check_spec_name_collisions(specs: &[VisitedSpec]) -> Result<(), CodegenError>
         }
     }
     Ok(())
+}
+
+/// Rejects any spec whose file-qualified name is not a legal Rocq identifier.
+///
+/// The file-qualified name (`qualified_spec_name`) is what the Rocq translator
+/// emits into its `<module>__<spec>_specs` definition and theorem, so it must
+/// satisfy the translator's identifier rules. Checking here lets codegen surface
+/// a clean, source-level diagnostic (naming the file or spec the user wrote, not
+/// the joined internal key) and — crucially — fail *before* any `.wasm` is
+/// written, so a rejected spec name never leaves a stale artifact behind.
+///
+/// Two failure families are distinguished so each gets the right message:
+///
+/// 1. A `__`-run fabricated by the underscore join. A path segment (file stem)
+///    or the spec name that begins or ends with `_`, or carries a `__` run in the
+///    source itself, makes the joined name reserve Rocq's `<module>__<spec>`
+///    separator. This is reported per offending segment with a
+///    [`CodegenError::SpecNameReservesSeparator`] that names the file/spec and
+///    shows the flattening, because the join is unchanged (kept readable) and the
+///    fix is a rename. Single underscores *inside* a segment are fine — the join
+///    only fabricates a run at a boundary.
+/// 2. Any other Rocq invalidity of the joined name (an invalid character, or a
+///    non-letter, non-`_` start), reported with the generic
+///    [`CodegenError::SpecNameInvalid`].
+fn check_spec_names_valid(specs: &[VisitedSpec]) -> Result<(), CodegenError> {
+    for spec in specs {
+        if let Some(err) = spec_reserves_separator(spec) {
+            return Err(err);
+        }
+        let qualified = qualified_spec_name(&spec.module_path, &spec.spec_name);
+        if let Some(reason) = spec_section::spec_name_rocq_invalidity_reason(&qualified) {
+            return Err(CodegenError::SpecNameInvalid {
+                spec: spec.render_source(),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether a path segment or spec name would fabricate (or carry) a `__` run when
+/// joined, returning the offense phrasing for the diagnostic. A leading or
+/// trailing `_` lands next to the join separator (or the next segment's leading
+/// `_`); a `__` run in the source is carried verbatim. A single underscore in the
+/// interior is fine — it never abuts a join boundary.
+fn segment_reserves_separator(segment: &str) -> Option<&'static str> {
+    if segment.contains("__") {
+        Some("contains a `__` run")
+    } else if segment.starts_with('_') {
+        Some("begins with `_`")
+    } else if segment.ends_with('_') {
+        Some("ends with `_`")
+    } else {
+        None
+    }
+}
+
+/// Builds a [`CodegenError::SpecNameReservesSeparator`] for the first segment of
+/// `spec` (a path stem, then the spec name) that fabricates or carries a `__`
+/// run, or `None` when the joined name has no `__` run. The path stems are
+/// checked before the spec name so a file-stem offense (the common case) names
+/// the file.
+///
+/// Gated on the joined name actually carrying a `__` run: a leading `_` on the
+/// *first* segment only makes the whole name start with `_` (a non-letter start,
+/// not a `__` run), which the generic Rocq-identifier check reports instead.
+fn spec_reserves_separator(spec: &VisitedSpec) -> Option<CodegenError> {
+    let qualified = qualified_spec_name(&spec.module_path, &spec.spec_name);
+    if !qualified.contains("__") {
+        return None;
+    }
+
+    let segments: Vec<(&str, &str)> = spec
+        .module_path
+        .iter()
+        .map(|s| ("file stem", s.as_str()))
+        .chain(std::iter::once(("spec name", spec.spec_name.as_str())))
+        .collect();
+
+    let (offender_kind, offender, offender_cause) = segments
+        .iter()
+        .find_map(|(kind, seg)| segment_reserves_separator(seg).map(|cause| (*kind, *seg, cause)))?;
+
+    // `dir / stem / spec`, the visual the message renders as the join's left side.
+    let join_lhs = segments
+        .iter()
+        .map(|(_, seg)| *seg)
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let fix_hint = suggest_clean_segment(offender_kind, offender);
+
+    Some(CodegenError::SpecNameReservesSeparator(Box::new(
+        crate::errors::SpecNameSeparatorDetails {
+            spec_source: spec.render_source(),
+            join_lhs,
+            qualified,
+            offender_kind: offender_kind.to_string(),
+            offender: offender.to_string(),
+            offender_cause: offender_cause.to_string(),
+            fix_hint,
+        },
+    )))
+}
+
+/// A concrete renamed form to point the user at: trims boundary underscores and
+/// collapses internal `__` runs, suffixing `.inf` for a file stem so the hint
+/// reads as a filename (`x_` -> `x.inf`).
+fn suggest_clean_segment(offender_kind: &str, offender: &str) -> String {
+    let mut cleaned = offender.trim_matches('_').to_string();
+    while cleaned.contains("__") {
+        cleaned = cleaned.replace("__", "_");
+    }
+    if offender_kind == "file stem" {
+        format!("{offender}.inf -> {cleaned}.inf")
+    } else {
+        format!("{offender} -> {cleaned}")
+    }
 }
 
 /// Stage 1: register every WASM function index up front so forward references
@@ -594,7 +719,7 @@ fn collect_emittable_functions(
 
 #[cfg(test)]
 mod spec_name_tests {
-    use super::{check_spec_name_collisions, qualified_spec_name, VisitedSpec};
+    use super::{check_spec_name_collisions, check_spec_names_valid, qualified_spec_name, VisitedSpec};
     use crate::errors::CodegenError;
 
     fn visited(segments: &[&str], spec: &str) -> VisitedSpec {
@@ -683,5 +808,137 @@ mod spec_name_tests {
         let err = check_spec_name_collisions(&specs)
             .expect_err("trailing-underscore collision must be rejected");
         assert!(matches!(err, CodegenError::SpecNameCollision { .. }));
+    }
+
+    #[test]
+    fn valid_spec_names_pass_validity_check() {
+        let specs = vec![
+            visited(&[], "EntrySpec"),
+            visited(&["lib", "geo"], "GeoSpec"),
+            visited(&["math"], "Sp"),
+        ];
+        assert!(check_spec_names_valid(&specs).is_ok());
+    }
+
+    #[test]
+    fn leading_underscore_spec_name_in_subfile_reserves_separator() {
+        // `spec _S` in `lib/geo.inf` joins to `lib_geo__S`: the join `_` lands
+        // next to the spec name's leading `_`, fabricating a reserved `__`. The
+        // diagnostic names the SOURCE spec and blames the spec name, not the
+        // flattened key.
+        let specs = vec![visited(&["lib", "geo"], "_S")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a leading-underscore spec name must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.spec_source, "lib::geo::_S");
+                assert_eq!(d.qualified, "lib_geo__S");
+                assert_eq!(d.offender_kind, "spec name");
+                assert_eq!(d.offender, "_S");
+                assert_eq!(d.offender_cause, "begins with `_`");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_underscore_file_stem_reserves_separator() {
+        // `spec S` in `lib/x_.inf` joins to `lib_x__S`: the stem's trailing `_`
+        // lands next to the join `_`. The diagnostic blames the FILE stem.
+        let specs = vec![visited(&["lib", "x_"], "S")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a trailing-underscore file stem must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.qualified, "lib_x__S");
+                assert_eq!(d.offender_kind, "file stem");
+                assert_eq!(d.offender, "x_");
+                assert_eq!(d.offender_cause, "ends with `_`");
+                assert_eq!(d.fix_hint, "x_.inf -> x.inf");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn internal_double_underscore_segment_reserves_separator() {
+        // A `__` run is legal in an Inference identifier, so a file stem `a__b`
+        // or a spec `S__T` carries the reserved run into the joined name verbatim
+        // and must be rejected. Here the stem offends.
+        let specs = vec![visited(&["lib", "a__b"], "S")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("an internal `__` run must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.offender_kind, "file stem");
+                assert_eq!(d.offender, "a__b");
+                assert_eq!(d.offender_cause, "contains a `__` run");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn internal_double_underscore_spec_name_reserves_separator() {
+        // The spec name itself carries the run when no path stem offends first.
+        let specs = vec![visited(&["lib", "geo"], "S__T")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a `__` run in the spec name must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.offender_kind, "spec name");
+                assert_eq!(d.offender, "S__T");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interior_single_underscore_segment_is_fine() {
+        // A single underscore in the interior of a segment never abuts the join
+        // boundary, so it does not fabricate a `__` run: `lib_my_geo_MySpec` is a
+        // legal Rocq identifier.
+        let specs = vec![visited(&["lib", "my_geo"], "MySpec")];
+        assert!(
+            check_spec_names_valid(&specs).is_ok(),
+            "an interior single `_` must not be rejected"
+        );
+    }
+
+    #[test]
+    fn entry_file_leading_underscore_spec_name_rejected() {
+        // An entry-file `spec _S` keeps its bare name `_S`: there is no join, so
+        // no `__` run is fabricated — it is simply a non-letter start, which the
+        // generic Rocq-identifier check rejects.
+        let specs = vec![visited(&[], "_S")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a bare leading-underscore spec name must be rejected");
+        match err {
+            CodegenError::SpecNameInvalid { spec, reason } => {
+                assert_eq!(spec, "_S");
+                assert!(
+                    reason.contains("start with a letter"),
+                    "reason must explain the leading non-letter, got: {reason}"
+                );
+            }
+            other => panic!("expected SpecNameInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_file_internal_double_underscore_spec_name_reserves_separator() {
+        // An entry-file `spec S__T` carries the `__` run with no join at all, so
+        // it is reported as reserving the separator (the spec name is the
+        // offender).
+        let specs = vec![visited(&[], "S__T")];
+        let err = check_spec_names_valid(&specs)
+            .expect_err("a bare `__`-run spec name must be rejected");
+        match err {
+            CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.offender_kind, "spec name");
+                assert_eq!(d.offender, "S__T");
+            }
+            other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
+        }
     }
 }

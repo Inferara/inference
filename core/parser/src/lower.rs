@@ -1232,24 +1232,41 @@ impl<'s> Lowering<'s> {
                 })
             }
             SyntaxKind::TypeQualifiedName => {
-                let mut idents = node.children_of(SyntaxKind::Identifier);
-                // guaranteed: `name` parses the alias via `identifier`, which
-                // always completes an `Identifier` node before the `::`.
-                let alias_node = idents.next().expect("qualified name has an alias");
-                let alias = self.lower_identifier(alias_node);
-                // The name comes from `qualified_simple_name`, whose error path
+                // `name` emits one child per `::`-separated segment: every segment
+                // but the last is a namespace qualifier, the last is the leaf type.
+                // A valid path has at least two segments (a bare type lowers to
+                // `Custom`), so the leaf is the final segment and the qualifier is
+                // everything before it.
+                //
+                // The leaf is usually an `Identifier`, but the grammar also accepts
+                // a `generic_name` (`lib::geom::Point i32'`) in this position. Its
+                // base identifier is what names the leaf type; the type arguments
+                // are not a supported feature in a qualified type and are dropped,
+                // but the base must be kept so the path the user wrote is preserved
+                // rather than the qualifier being mis-reported as the whole path.
+                // Every node-child is walked in source order (not only the
+                // `Identifier` ones) so a `generic_name` leaf is not silently
+                // skipped.
+                let mut segments: Vec<IdentId> = node
+                    .node_children()
+                    .filter_map(|seg| self.qualified_segment_ident(seg))
+                    .collect();
+                // The leaf comes from `qualified_simple_name`, whose error path
                 // completes no node; synthesize an `<error>` ident so lowering
                 // stays total (design §8) without perturbing valid-input arenas.
-                let name = match idents.next() {
-                    Some(name_node) => self.lower_identifier(name_node),
-                    None => {
+                let name = match segments.pop() {
+                    Some(name) if !segments.is_empty() => name,
+                    _ => {
                         self.push_error(node, "Qualified name is missing a name".to_string());
                         self.error_ident(location)
                     }
                 };
                 self.arena.types.alloc(TypeData {
                     location,
-                    kind: TypeNode::Qualified { alias, name },
+                    kind: TypeNode::Qualified {
+                        qualifier: segments,
+                        name,
+                    },
                 })
             }
             SyntaxKind::TypeFn => {
@@ -1322,6 +1339,30 @@ impl<'s> Lowering<'s> {
         let location = node.loc;
         let name = node.text(self.src).to_string();
         self.arena.idents.alloc(Ident { location, name })
+    }
+
+    /// Lowers one `::`-separated segment of a `TypeQualifiedName` to its name
+    /// ident. A segment is normally an `Identifier`; the grammar also accepts a
+    /// `GenericName` (`lib::geom::Point i32'`) here. Generic type arguments are not
+    /// a supported feature in a qualified type, so a `GenericName` segment is
+    /// rejected with a clear diagnostic at its own span — but its base identifier
+    /// is still returned so the segment list reflects the leaf the user wrote
+    /// (`lib::geom::Point`) rather than dropping it and mis-reporting the qualifier
+    /// as the whole path. Returns `None` for any other child kind so the segment
+    /// list stays exactly the named segments.
+    fn qualified_segment_ident(&mut self, node: &SyntaxNode) -> Option<IdentId> {
+        match node.kind {
+            SyntaxKind::Identifier => Some(self.lower_identifier(node)),
+            SyntaxKind::GenericName => {
+                self.push_error(
+                    node,
+                    "generic type arguments are not supported in a qualified type"
+                        .to_string(),
+                );
+                Some(self.lower_name_or_error(self.first_identifier(node), node))
+            }
+            _ => None,
+        }
     }
 
     /// The location spanning the whole source, matching tree-sitter's root node.
@@ -2800,9 +2841,24 @@ mod tests {
     fn lowers_qualified_type() {
         let arena = lower("fn f() { let v: ns::Type = x; }");
         match let_type(&arena) {
-            TypeNode::Qualified { alias, name } => {
-                assert_eq!(arena.ident_name(*alias), "ns");
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 1);
+                assert_eq!(arena.ident_name(qualifier[0]), "ns");
                 assert_eq!(arena.ident_name(*name), "Type");
+            }
+            other => panic!("expected qualified type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_multi_segment_qualified_type() {
+        let arena = lower("fn f() { let v: lib::geom::Point = x; }");
+        match let_type(&arena) {
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 2);
+                assert_eq!(arena.ident_name(qualifier[0]), "lib");
+                assert_eq!(arena.ident_name(qualifier[1]), "geom");
+                assert_eq!(arena.ident_name(*name), "Point");
             }
             other => panic!("expected qualified type, got {other:?}"),
         }
@@ -2814,6 +2870,37 @@ mod tests {
         match let_type(&arena) {
             TypeNode::Custom(id) => assert_eq!(arena.ident_name(*id), "MyType"),
             other => panic!("expected custom type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generic_leaf_in_qualified_type_reports_and_preserves_leaf() {
+        // A `generic_name` leaf in a qualified type (`lib::geom::Point i32'`) is
+        // not a supported feature, so it is rejected with a clear diagnostic. The
+        // leaf's base identifier is still kept as the qualified type's leaf so the
+        // written path (`lib::geom::Point`) is preserved rather than the qualifier
+        // being mis-reported as the whole path.
+        let result = parse("fn f() { let v: lib::geom::Point i32' = x; }");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("generic type arguments are not supported")),
+            "a generic leaf in a qualified type must be rejected, got: {:?}",
+            result.errors
+        );
+        match let_type(&result.arena) {
+            TypeNode::Qualified { qualifier, name } => {
+                assert_eq!(qualifier.len(), 2, "qualifier keeps `lib::geom`");
+                assert_eq!(result.arena.ident_name(qualifier[0]), "lib");
+                assert_eq!(result.arena.ident_name(qualifier[1]), "geom");
+                assert_eq!(
+                    result.arena.ident_name(*name),
+                    "Point",
+                    "the generic base must be kept as the leaf"
+                );
+            }
+            other => panic!("expected qualified type, got {other:?}"),
         }
     }
 

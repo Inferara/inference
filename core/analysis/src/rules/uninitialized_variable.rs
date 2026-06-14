@@ -6,7 +6,7 @@
 
 use inference_ast::nodes::Stmt;
 
-use crate::{errors::AnalysisDiagnostic, walker};
+use crate::{errors::{AnalysisDiagnostic, LabeledDiagnostic}, walker};
 
 crate::rule! {
     /// Variable declarations must have an initializer.
@@ -14,15 +14,16 @@ crate::rule! {
     #[name = "Uninitialized variable"]
     #[severity = error]
     pub struct UninitializedVariable;
-    fn check(ctx: &TypedContext) -> Vec<AnalysisDiagnostic> {
+    fn check(ctx: &TypedContext) -> Vec<LabeledDiagnostic> {
         let mut errors = Vec::new();
         let arena = ctx.arena();
-        walker::walk_function_bodies(ctx, &mut |stmt_id, _walk_ctx| {
+        walker::walk_function_bodies(ctx, &mut |stmt_id, walk_ctx| {
+            let module_path = walk_ctx.module_path.clone();
             if let Stmt::VarDef { name, value: None, .. } = &arena[stmt_id].kind {
-                errors.push(AnalysisDiagnostic::UninitializedVariable {
+                errors.push(LabeledDiagnostic::new(module_path.clone(), AnalysisDiagnostic::UninitializedVariable {
                     name: arena[*name].name.clone(),
                     location: arena[stmt_id].location,
-                });
+                }));
             }
         });
         errors

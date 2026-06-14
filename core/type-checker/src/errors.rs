@@ -229,6 +229,7 @@ pub(crate) enum DedupKind {
     UndefinedStruct,
     UndefinedEnum,
     SpecFunctionShadowsTopLevel,
+    ImportedItemNotFound,
 }
 
 /// Represents a type checking error with source location.
@@ -387,6 +388,34 @@ pub enum TypeCheckError {
     )]
     FileImportWithoutProjectContext { path: String, location: Location },
 
+    /// A qualified call `ns::fn()` whose head `ns` names a file in the project but
+    /// was never bound by a `use` in the calling file. The head is a namespace, not
+    /// a type, so a "method not found on type `ns`" diagnostic would point at the
+    /// wrong fix; the fix is to import the namespace.
+    #[error(
+        "{location}: namespace `{namespace}` is not imported; add `use ...::{namespace};` to call `{namespace}::{function}`"
+    )]
+    UnimportedNamespaceCall {
+        namespace: String,
+        function: String,
+        location: Location,
+    },
+
+    /// An absolute `dir::file::item` reference whose namespace prefix names a real
+    /// project file the accessing file never imported. The full namespace path is
+    /// known here, so the fix is exact (`use lib::geom;`). A file may only reach
+    /// another file's surface through a `use`; an absolute path — whether a call,
+    /// a type, or a const value — is not an exception to that, which is why this
+    /// is reported rather than silently resolved.
+    #[error(
+        "{location}: namespace `{namespace}` is not imported; add `use {namespace};` to reach `{namespace}::{item}`"
+    )]
+    UnimportedAbsoluteNamespacePath {
+        namespace: String,
+        item: String,
+        location: Location,
+    },
+
     /// An item import `use a::b::{x};` named an item `x` that does not exist in
     /// file `a::b`.
     #[error("{location}: item `{item}` not found in file `{file}`")]
@@ -516,6 +545,23 @@ pub enum TypeCheckError {
         location: Location,
         definition_location: Location,
         definition_file: String,
+    },
+
+    /// A `spec`-inner function reached through a qualified path (`Check::verify`,
+    /// `lib::Check::verify`). `spec` blocks are proof-only: their functions exist
+    /// for verification and are never assigned an executable index, so a qualified
+    /// call to one would type-check and then have no callee to lower. A spec
+    /// function is reached only by its bare name from within the same spec; this
+    /// rejects every qualified form so the proof-only boundary is explicit. The
+    /// message names the bare function so the fix (drop the qualifier, call from
+    /// within the spec) is concrete.
+    #[error(
+        "{location}: cannot call spec function `{path}` through a qualified path; spec functions are proof-only and are reached only by their bare name `{function_name}` within the spec"
+    )]
+    SpecFunctionNotCallable {
+        path: String,
+        function_name: String,
+        location: Location,
     },
 
     /// Instance method called as associated function.
@@ -707,6 +753,8 @@ impl TypeCheckError {
             | TypeCheckError::QualifiedPathNotAValue { location, .. }
             | TypeCheckError::QualifiedPathNotReexported { location, .. }
             | TypeCheckError::FileImportWithoutProjectContext { location, .. }
+            | TypeCheckError::UnimportedNamespaceCall { location, .. }
+            | TypeCheckError::UnimportedAbsoluteNamespacePath { location, .. }
             | TypeCheckError::ImportedItemNotFound { location, .. }
             | TypeCheckError::ImportedItemPrivate { location, .. }
             | TypeCheckError::ImportNameCollision { location, .. }
@@ -722,6 +770,7 @@ impl TypeCheckError {
             | TypeCheckError::CannotInferTypeParameter { location, .. }
             | TypeCheckError::ConflictingTypeInference { location, .. }
             | TypeCheckError::PrivateAccessViolation { location, .. }
+            | TypeCheckError::SpecFunctionNotCallable { location, .. }
             | TypeCheckError::InstanceMethodCalledAsAssociated { location, .. }
             | TypeCheckError::AssociatedFunctionCalledAsMethod { location, .. }
             | TypeCheckError::AssignToImmutable { location, .. }
@@ -772,6 +821,15 @@ impl TypeCheckError {
             } => Some((
                 DedupKind::SpecFunctionShadowsTopLevel,
                 format!("{spec_name}:{function_name}"),
+            )),
+            // A cyclic or transitive unresolvable item re-export is reported from
+            // every failing import site that names the same target file, producing
+            // identical "item X not found in file Y" text. Dedup by `(item, file)`
+            // — deliberately excluding the location — so each unresolved item is
+            // surfaced once regardless of how many import sites hit it.
+            TypeCheckError::ImportedItemNotFound { item, file, .. } => Some((
+                DedupKind::ImportedItemNotFound,
+                format!("{item}@{file}"),
             )),
             _ => None,
         }

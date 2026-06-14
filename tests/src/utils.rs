@@ -263,6 +263,17 @@ pub(crate) fn wasm_codegen_no_analysis(source_code: &str) -> Vec<u8> {
 /// Panics if any file has a syntax error, type checking fails, analysis fails,
 /// or codegen fails.
 pub(crate) fn wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
+    wasm_codegen_multi_file_impl(files, AnalysisMode::Run)
+}
+
+/// Multi-file codegen that skips the analysis pass, for codegen-layout tests that
+/// exercise a shape analysis legitimately rejects (e.g. nesting past A026's one
+/// supported level). The codegen path itself is what is under test.
+pub(crate) fn wasm_codegen_multi_file_no_analysis(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
+    wasm_codegen_multi_file_impl(files, AnalysisMode::Skip)
+}
+
+fn wasm_codegen_multi_file_impl(files: &[(Vec<&str>, &str)], analysis: AnalysisMode) -> Vec<u8> {
     let mut arena = inference_ast::arena::AstArena::default();
     for (module_path, source) in files {
         let module_path: Vec<String> = module_path.iter().map(|s| (*s).to_string()).collect();
@@ -277,7 +288,9 @@ pub(crate) fn wasm_codegen_multi_file(files: &[(Vec<&str>, &str)]) -> Vec<u8> {
     let typed_context = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena)
         .expect("multi-file type check should succeed")
         .typed_context();
-    inference_analysis::analyze(&typed_context).expect("multi-file analysis should succeed");
+    if let AnalysisMode::Run = analysis {
+        inference_analysis::analyze(&typed_context).expect("multi-file analysis should succeed");
+    }
     let target = inference_wasm_codegen::Target::default();
     let mode = inference_wasm_codegen::CompilationMode::default();
     inference_wasm_codegen::codegen(&typed_context, target, mode, target.default_opt_level(), "output")

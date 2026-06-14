@@ -142,6 +142,51 @@ mod codegen_validation_tests {
         );
     }
 
+    #[test]
+    fn proof_mode_spec_fn_calls_sibling_spec_fn_by_bare_name() {
+        // A spec function calling a sibling spec function by its bare name is the
+        // supported intra-spec call form. Proof mode emits the spec bodies, so this
+        // is where the call is actually lowered; it must produce a valid module and
+        // never miss its callee index. (The qualified `Spec::fn()` form is rejected
+        // at type-check, so it never reaches codegen.)
+        let source = r#"
+            spec Check {
+                fn inner() -> i32 { return 42; }
+                fn outer() -> i32 { return inner(); }
+            }
+            pub fn main() -> i32 { return 0; }
+        "#;
+        let output = codegen_output_with_mode(source, CompilationMode::Proof);
+        let wasm = output.wasm();
+        inf_wasmparser::validate(wasm)
+            .unwrap_or_else(|e| panic!("Proof-mode spec sibling-call WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn proof_mode_qualified_spec_call_stops_at_type_check_not_codegen() {
+        // End-to-end regression guard for the original bug: a qualified call to a
+        // spec function from executable code used to type-check and then PANIC in
+        // codegen ("not found in func_name_to_idx") because spec functions get no
+        // executable index. Proof mode is the mode that actually lowers spec bodies,
+        // so it is the mode in which the panic could fire — the codegen guard alone
+        // is invisible unless the type checker is verified to stop the program first.
+        // Driving the real pipeline (type-check -> Proof codegen) confirms the
+        // failure now surfaces as a clean type error and codegen is never entered.
+        let source = "spec Check { fn verify_inner() -> i32 { return 42; } } \
+                      pub fn run() -> i32 { return Check::verify_inner(); }";
+        let arena = crate::utils::build_ast(source.to_string());
+        let tc = inference_type_checker::TypeCheckerBuilder::build_typed_context(arena);
+        let err = tc
+            .err()
+            .expect("qualified spec call must fail type-check before codegen")
+            .to_string();
+        assert!(
+            err.contains("cannot call spec function `Check::verify_inner`")
+                && err.contains("proof-only"),
+            "expected the proof-only spec diagnostic, got: {err}"
+        );
+    }
+
     // --- has_main detection tests ---
 
     #[test]
