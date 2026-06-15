@@ -1593,6 +1593,221 @@ pub fn new() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run"), 1);
 }
 
+// =====================================================================
+// FIX-17 Defect 2 — closure-dependent tail-precedence flip (#63).
+//
+// `a::mid::make()` written with `use a::mid;` (the SUB-FILE) must reach
+// `a/mid.inf`'s free `make` (2), never `a.inf`'s `struct mid` associated
+// `make` (1). The accessing file imported the sub-file, not its parent `a`,
+// so a same-named `struct mid` in the parent the walk lands in must not flip
+// the meaning. Critically, the meaning must be DETERMINISTIC: it must not
+// depend on whether a *third* file dragged `a.inf` into the import closure.
+//
+// The fix gates the tail type-precedence break on the accessing file having
+// imported the parent file the walk stands in (`file_imports_namespace_key`),
+// so the flip can no longer be triggered by another file's `use a;`.
+// =====================================================================
+
+/// The third-file-cannot-flip pin: `main` imports only `a::mid` (the sub-file),
+/// while `other` imports the parent `a`, dragging `a.inf` into the closure.
+/// `a::mid::make()` must still resolve to the sub-file's free `make` (2) — the
+/// parent's `struct mid::make` (1) must not win, because `main` never imported
+/// `a`. Before the fix this returned 1, flipped by `other`'s `use a;`.
+#[test]
+fn sub_file_call_not_flipped_by_third_file_importing_parent() {
+    let main = "\
+use a::mid;
+use other;
+
+pub fn entry() -> i32 {
+    return a::mid::make();
+}
+";
+    let a = "\
+pub struct mid {
+    junk: i32;
+
+    pub fn make() -> i32 {
+        return 1;
+    }
+}
+";
+    let a_mid = "\
+pub fn make() -> i32 {
+    return 2;
+}
+";
+    let other = "\
+use a;
+
+pub fn touch() -> i32 {
+    return 0;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["a"], a),
+        (vec!["a", "mid"], a_mid),
+        (vec!["other"], other),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "entry"), 2);
+}
+
+/// The no-third-file determinism pin: the identical program WITHOUT the
+/// parent-importing third file must give the SAME answer (2). Pairing this with
+/// [`sub_file_call_not_flipped_by_third_file_importing_parent`] proves the
+/// resolution is closure-independent — the two halves of the architect's matrix.
+#[test]
+fn sub_file_call_resolves_to_sub_file_without_third_file() {
+    let main = "\
+use a::mid;
+
+pub fn entry() -> i32 {
+    return a::mid::make();
+}
+";
+    let a = "\
+pub struct mid {
+    junk: i32;
+
+    pub fn make() -> i32 {
+        return 1;
+    }
+}
+";
+    let a_mid = "\
+pub fn make() -> i32 {
+    return 2;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["a"], a),
+        (vec!["a", "mid"], a_mid),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "entry"), 2);
+}
+
+/// Struct-wins-with-parent: the companion to the flip pin. When the accessing
+/// file DOES import the parent (`use lib;`), the walked-into parent's same-named
+/// `struct Point` correctly pre-empts the sibling file at the tail —
+/// `lib::Point::new()` is the struct's associated `new` (1), not the sibling
+/// `lib/Point.inf`'s free `new` (1000). This mirrors the existing pinning test
+/// and confirms the tail conjunct still fires when the parent IS imported.
+#[test]
+fn struct_wins_at_tail_when_parent_is_imported() {
+    let main = "\
+use lib;
+use lib::Point;
+
+pub fn run() -> i32 {
+    return lib::Point::new();
+}
+";
+    let lib = "\
+pub struct Point {
+    v: i32;
+
+    pub fn new() -> i32 {
+        return 1;
+    }
+}
+";
+    let lib_point = "\
+pub fn new() -> i32 {
+    return 1000;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "Point"], lib_point),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+/// A NON-entry accessor pins the same property off the entry file: a coverage
+/// gap the architect flagged (all existing flip tests put the accessor in the
+/// entry). `consumer.inf` imports only `a::mid` and calls `a::mid::make()`; the
+/// entry separately imports the parent `a` (dragging `a.inf` into the closure).
+/// The non-entry consumer must still reach the sub-file's `make` (2).
+#[test]
+fn non_entry_sub_file_call_not_flipped_by_entry_importing_parent() {
+    let main = "\
+use a;
+use consumer;
+
+pub fn entry() -> i32 {
+    return consumer::run();
+}
+";
+    let a = "\
+pub struct mid {
+    junk: i32;
+
+    pub fn make() -> i32 {
+        return 1;
+    }
+}
+";
+    let a_mid = "\
+pub fn make() -> i32 {
+    return 2;
+}
+";
+    let consumer = "\
+use a::mid;
+
+pub fn run() -> i32 {
+    return a::mid::make();
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["a"], a),
+        (vec!["a", "mid"], a_mid),
+        (vec!["consumer"], consumer),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "entry"), 2);
+}
+
+/// A single-file byte-identity guard: a lone entry file with a `Type::assoc()`
+/// call (no imports, no sibling files) must compile to exactly the same module
+/// the tail-precedence conjunct never touches. This pins that the FIX-17 changes
+/// are inert for the common single-file shape.
+#[test]
+fn single_file_assoc_call_unaffected_by_fix17() {
+    let main = "\
+pub struct Counter {
+    v: i32;
+
+    pub fn start() -> i32 {
+        return 42;
+    }
+}
+
+pub fn run() -> i32 {
+    return Counter::start();
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[(vec![], main)]);
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 42);
+}
+
 #[test]
 fn non_entry_files_resolve_namespace_aliases_against_their_own_imports() {
     // A direct file-boundary regression: two non-entry files each import a

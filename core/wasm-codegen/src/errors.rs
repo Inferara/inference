@@ -94,36 +94,37 @@ pub(crate) enum CodegenError {
     /// with `_` — the `_` that joins the segments, or that abuts the translator's
     /// own `<module>__<spec>_specs` join, lands next to the boundary `_` — or when
     /// a segment carries a `__` run in the source itself. Reported at the source
-    /// level, naming the offending file or spec rather than the flattened internal
-    /// key, and before any artifact is written so a rejected name leaves no stale
-    /// `.wasm`/`.v`.
+    /// level: it leads with the spec and its file as the user wrote them
+    /// (`spec 'S' in file 'lib::checks'`), and shows the *generated* Rocq name only
+    /// as the consequence, never as the subject. Caught before any artifact is
+    /// written so a rejected name leaves no stale `.wasm`/`.v`.
     ///
     /// Deliberately a rejection rather than an auto-escape: the file-qualified
     /// name is emitted verbatim into the proof artifact (`Definition
-    /// output__<name>_specs`, `Theorem valid_output__<name>`), so an escaped form
-    /// like `lib_x_1U_S` would make the proof harder to read. Renaming keeps the
-    /// proof names legible.
+    /// <module>__<name>_specs`, `Theorem valid_<module>__<name>`), so an escaped
+    /// form like `lib_x_1U_S` would make the proof harder to read. Renaming keeps
+    /// the proof names legible.
     #[error(
-        "proof-mode spec name reserves `__`\n\
+        "spec '{spec_name}'{in_file} has a name that collides with the reserved \
+         '__' separator in generated Rocq proof names.\n\
          \n\
-         The spec `{spec_source}` is fine, but in proof mode each spec is given a \
-         file-qualified name so two specs with the same name in different files do \
-         not collide in the generated Rocq (.v). That name joins the path segments \
-         with `_`:\n\
-         \n    {join_lhs} -> {qualified}\n\
+         In proof mode each spec is given a file-qualified name so two specs with \
+         the same name in different files do not collide in the generated Rocq \
+         (.v). That name joins the path segments with '_', then the translator \
+         joins it with the module name to form the proof definitions:\n\
+         \n    {join_lhs} -> proof name '<module>__{qualified}_specs'\n\
          \n\
-         Rocq reserves `__` as the module/spec separator in the generated proof \
-         names (`<module>__{qualified}_specs` and `valid_<module>__{qualified}`), \
-         so a file-qualified name that begins or ends with `_`, or carries a `__` \
-         run, fabricates that separator and is ambiguous, so it is rejected. The \
-         {offender_kind} `{offender}` (which {offender_cause}) is what creates it.\n\
+         Rocq reserves '__' there as the module/spec separator, so a file-qualified \
+         name that begins or ends with '_', or carries a '__' run, fabricates that \
+         separator and is rejected. The {offender_kind} '{offender}' (which \
+         {offender_cause}) is what creates it.\n\
          \n\
-         How to fix: rename so no path segment or spec name begins with `_`, ends \
-         with `_`, or contains a `__` run (e.g. `{fix_hint}`).\n\
+         How to fix: {fix_hint}\n\
          \n\
-         Why not auto-encode: proof-mode names appear verbatim in your .v file, so \
-         they are kept readable rather than escaped into noise.",
-        spec_source = .0.spec_source,
+         note: proof-mode names appear verbatim in your generated .v, so they are \
+         renamed rather than escaped into noise.",
+        spec_name = .0.spec_name,
+        in_file = .0.in_file_clause(),
         join_lhs = .0.join_lhs,
         qualified = .0.qualified,
         offender_kind = .0.offender_kind,
@@ -135,23 +136,38 @@ pub(crate) enum CodegenError {
 }
 
 /// The boxed payload of [`CodegenError::SpecNameReservesSeparator`]. Boxed so the
-/// seven diagnostic strings do not enlarge `CodegenError` (and every
+/// diagnostic strings do not enlarge `CodegenError` (and every
 /// `Result<_, CodegenError>` it flows through) — the variant is rare and only ever
 /// rendered, so the indirection costs nothing on the hot path.
 #[derive(Debug)]
 pub(crate) struct SpecNameSeparatorDetails {
-    /// The source-level spec identity (`lib::x_::S`), for the lead line.
-    pub(crate) spec_source: String,
+    /// The source spec name as the user wrote it (`Invariant_`), for the lead line.
+    pub(crate) spec_name: String,
+    /// The `::`-joined source path of the declaring file (`lib::checks`), or `None`
+    /// for the entry file (which has no path prefix). Rendered as ` in file 'X'`.
+    pub(crate) file_label: Option<String>,
     /// The `dir / stem / spec` rendering of the join inputs.
     pub(crate) join_lhs: String,
-    /// The flattened qualified name that carries the `__` run.
+    /// The flattened file-qualified name, shown only as the generated consequence.
     pub(crate) qualified: String,
     /// Whether the offender is a `file stem` or a `spec name`.
     pub(crate) offender_kind: String,
     /// The offending segment text.
     pub(crate) offender: String,
-    /// The phrasing of why it offends — "ends with an underscore", and so on.
+    /// The phrasing of why it offends — "ends with `_`", and so on.
     pub(crate) offender_cause: String,
-    /// A concrete renamed form to point at.
+    /// An imperative fix, e.g. `rename the spec 'Invariant_' to 'Invariant' (drop
+    /// the trailing '_')`.
     pub(crate) fix_hint: String,
+}
+
+impl SpecNameSeparatorDetails {
+    /// The ` in file 'lib::checks'` clause for an imported file, or the empty
+    /// string for an entry-file spec (which has no file path to name).
+    fn in_file_clause(&self) -> String {
+        match &self.file_label {
+            Some(label) => format!(" in file '{label}'"),
+            None => String::new(),
+        }
+    }
 }

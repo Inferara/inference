@@ -393,7 +393,7 @@ pub enum TypeCheckError {
     /// a type, so a "method not found on type `ns`" diagnostic would point at the
     /// wrong fix; the fix is to import the namespace.
     #[error(
-        "{location}: namespace `{namespace}` is not imported; add `use ...::{namespace};` to call `{namespace}::{function}`"
+        "{location}: namespace `{namespace}` is not imported; add `use {namespace};` to call `{namespace}::{function}`"
     )]
     UnimportedNamespaceCall {
         namespace: String,
@@ -413,6 +413,23 @@ pub enum TypeCheckError {
     UnimportedAbsoluteNamespacePath {
         namespace: String,
         item: String,
+        location: Location,
+    },
+
+    /// A `::`-qualified path whose namespace portion is not an imported namespace,
+    /// and whose target file is not in the compilation closure (no `mod_scopes`
+    /// key covers the namespace portion). Unlike
+    /// [`Self::UnimportedAbsoluteNamespacePath`], the namespace cannot be *proven*
+    /// to exist here, so the suggestion is hedged: if `{namespace}` does name a
+    /// source file, importing it is the fix; if it is a typo, the path is simply
+    /// wrong. The hedged wording keeps the confident variant's "the namespace
+    /// provably exists; this exact `use` resolves it" contract intact.
+    #[error(
+        "{location}: could not resolve `{path}`: `{namespace}` is not an imported namespace. if `{namespace}` names a source file, import it with `use {namespace};`"
+    )]
+    UnresolvedNamespacePath {
+        path: String,
+        namespace: String,
         location: Location,
     },
 
@@ -755,6 +772,7 @@ impl TypeCheckError {
             | TypeCheckError::FileImportWithoutProjectContext { location, .. }
             | TypeCheckError::UnimportedNamespaceCall { location, .. }
             | TypeCheckError::UnimportedAbsoluteNamespacePath { location, .. }
+            | TypeCheckError::UnresolvedNamespacePath { location, .. }
             | TypeCheckError::ImportedItemNotFound { location, .. }
             | TypeCheckError::ImportedItemPrivate { location, .. }
             | TypeCheckError::ImportNameCollision { location, .. }

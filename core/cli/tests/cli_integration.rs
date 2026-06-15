@@ -862,6 +862,42 @@ fn out_dir_with_codegen_no_output_flags_creates_no_directory() {
     );
 }
 
+/// FIX-17c: a `--codegen` dry run (neither `-o` nor `-v`) must NOT delete a
+/// pre-existing artifact a prior build wrote. The stale-clearing step runs only
+/// when the run will write at least one artifact; a dry run writes nothing, so an
+/// earlier `out/trivial.wasm` survives. A FIX-16 regression deleted it
+/// unconditionally on `--codegen`, leaving no artifact even though the dry run
+/// "succeeded".
+#[test]
+fn codegen_dry_run_preserves_existing_artifact() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let src = example_file("trivial.inf");
+    let dest = temp.child("trivial.inf");
+    std::fs::copy(&src, dest.path()).unwrap();
+
+    // A default build first writes out/trivial.wasm.
+    let mut build = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    build.current_dir(temp.path()).arg(dest.path());
+    build
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"));
+    let artifact = temp.child("out").child("trivial.wasm");
+    assert!(artifact.path().exists(), "default build must write the .wasm");
+
+    // A `--codegen` dry run (no -o/-v) succeeds but writes nothing.
+    let mut dry = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    dry.current_dir(temp.path()).arg(dest.path()).arg("--codegen");
+    dry.assert()
+        .success()
+        .stdout(predicate::str::contains("Codegen complete"));
+
+    assert!(
+        artifact.path().exists(),
+        "a --codegen dry run writes nothing, so the pre-existing out/trivial.wasm must survive"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Multi-file front end (issue #63).
 //
@@ -1094,10 +1130,10 @@ fn parse_single_file_through_project_front_end_is_quiet() {
 /// A proof-mode spec whose file-qualified name would fabricate a reserved `__`
 /// run (here `spec _S`, whose leading `_` lands next to the module-path join `_`)
 /// is rejected during codegen — before any artifact is written — with an
-/// educational, source-level message: it names the SOURCE spec (`lib::geo::_S`),
-/// shows the flattening so the user sees *why* (`lib_geo__S`), and points at the
-/// rename. Crucially, no stale `out/main.wasm` is left behind: the codegen
-/// failure precedes the WASM write.
+/// educational, source-level message: it leads with the SOURCE spec and its file
+/// (`spec '_S' in file 'lib::geo'`), shows the flattening so the user sees *why*
+/// (`lib_geo__S`), and points at the rename. Crucially, no stale `out/main.wasm`
+/// is left behind: the codegen failure precedes the WASM write.
 #[test]
 fn invalid_spec_name_rejected_early_leaves_no_stale_wasm() {
     let temp = assert_fs::TempDir::new().unwrap();
@@ -1113,12 +1149,12 @@ fn invalid_spec_name_rejected_early_leaves_no_stale_wasm() {
 
     cmd.assert()
         .failure()
-        // Names the source spec, shows the flattening so the cause is visible, and
-        // explains the readability rationale for rejecting rather than escaping.
-        .stderr(predicate::str::contains("lib::geo::_S"))
+        // Leads with the source spec and its file; shows the flattening so the
+        // cause is visible; explains the readability rationale for rejecting.
+        .stderr(predicate::str::contains("spec '_S' in file 'lib::geo'"))
         .stderr(predicate::str::contains("lib_geo__S"))
-        .stderr(predicate::str::contains("reserves `__`"))
-        .stderr(predicate::str::contains("appear verbatim in your .v"));
+        .stderr(predicate::str::contains("reserved '__' separator"))
+        .stderr(predicate::str::contains("appear verbatim in your generated .v"));
 
     assert!(
         !temp.child("out").child("main.wasm").path().exists(),
@@ -1128,7 +1164,8 @@ fn invalid_spec_name_rejected_early_leaves_no_stale_wasm() {
 
 /// A proof-mode spec in a file whose stem ends in `_` (here `lib/x_.inf`) is
 /// rejected with the same educational message, which blames the FILE stem (not
-/// the spec) and suggests the rename `x_.inf -> x.inf`. No stale artifact remains.
+/// the spec) and gives the imperative rename `rename the file 'x_.inf' to
+/// 'x.inf'`. No stale artifact remains.
 #[test]
 fn trailing_underscore_file_stem_spec_rejected_no_stale_wasm() {
     let temp = assert_fs::TempDir::new().unwrap();
@@ -1144,9 +1181,9 @@ fn trailing_underscore_file_stem_spec_rejected_no_stale_wasm() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("lib::x_::S"))
-        .stderr(predicate::str::contains("file stem `x_`"))
-        .stderr(predicate::str::contains("x_.inf -> x.inf"));
+        .stderr(predicate::str::contains("spec 'S' in file 'lib::x_'"))
+        .stderr(predicate::str::contains("file stem 'x_'"))
+        .stderr(predicate::str::contains("rename the file 'x_.inf' to 'x.inf'"));
 
     assert!(
         !temp.child("out").child("main.wasm").path().exists(),
@@ -1183,6 +1220,118 @@ fn trailing_underscore_file_stem_spec_compiles_in_default_mode() {
         !temp.child("out").child("main.v").path().exists(),
         "default mode must not emit a .v"
     );
+}
+
+/// The imported-file *trailing*-underscore spec (`spec Invariant_` in
+/// `lib/geom.inf`). Its `_`-join `lib_geom_Invariant_` carries no `__` of its own
+/// — the trailing `_` only abuts the translator's downstream `_specs` join — so an
+/// earlier build let it through codegen and reported the internal joined name
+/// (`lib_geom_Invariant_`) with no file label. It is now caught at the source
+/// level: the message names the SOURCE spec (`Invariant_`) and its file
+/// (`lib::geom`), gives the imperative rename, and (per the show-the-flattening
+/// policy) still shows the generated name as the consequence. No stale artifact.
+#[test]
+fn imported_trailing_underscore_spec_rejected_with_source_level_message() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::geom;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/geom.inf",
+        "spec Invariant_ { fn obligation() -> i32 { return 7; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .failure()
+        // The source spec name and the file label both appear, leading the message.
+        .stderr(predicate::str::contains("spec 'Invariant_'"))
+        .stderr(predicate::str::contains("in file 'lib::geom'"))
+        // The imperative fix names the source spec and the exact edit.
+        .stderr(predicate::str::contains(
+            "rename the spec 'Invariant_' to 'Invariant' (drop the trailing '_')",
+        ))
+        .stderr(predicate::str::contains("appear verbatim in your generated .v"));
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected imported-file spec name must not leave a stale out/main.wasm behind"
+    );
+    assert!(
+        !temp.child("out").child("main.v").path().exists(),
+        "a rejected imported-file spec name must not leave a stale out/main.v behind"
+    );
+}
+
+/// The sibling imported-file offenses — a leading `_` (`_x`), an internal `__`
+/// run (`a__b`), and a `__` run in the spec name (`S__T`) — all route through the
+/// same source-level diagnostic, each naming the source spec and the file
+/// `lib::geom`, never leading with the internal joined key. Run as one test over a
+/// table so the uniform shape is asserted in one place.
+#[test]
+fn imported_spec_underscore_offenses_all_source_labeled() {
+    // (spec name, the exact edit phrasing the imperative fix should carry)
+    let cases = [
+        ("_x", "drop the leading '_'"),
+        ("a__b", "collapse the '__' run"),
+        ("S__T", "collapse the '__' run"),
+    ];
+    for (spec_name, edit) in cases {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let entry = write_source(
+            temp.path(),
+            "main.inf",
+            "use lib::geom;\npub fn main() -> i32 { return 0; }",
+        );
+        write_source(
+            temp.path(),
+            "lib/geom.inf",
+            &format!("spec {spec_name} {{ fn obligation() -> i32 {{ return 1; }} }}"),
+        );
+
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+        cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains(format!("spec '{spec_name}'")))
+            .stderr(predicate::str::contains("in file 'lib::geom'"))
+            .stderr(predicate::str::contains(format!(
+                "rename the spec '{spec_name}'"
+            )))
+            .stderr(predicate::str::contains(edit));
+
+        assert!(
+            !temp.child("out").child("main.wasm").path().exists(),
+            "a rejected spec `{spec_name}` must not leave a stale out/main.wasm behind"
+        );
+    }
+}
+
+/// A clean imported-file spec name still compiles to both artifacts in proof mode:
+/// the trailing-`_` rejection is scoped to the offending names, not all imported
+/// specs.
+#[test]
+fn imported_clean_spec_name_produces_wasm_and_v() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "main.inf", "use lib::geom;\npub fn main() -> i32 { return 0; }");
+    write_source(
+        temp.path(),
+        "lib/geom.inf",
+        "spec Invariant { fn obligation() -> i32 { return 7; } }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("-v");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("WASM generated"))
+        .stdout(predicate::str::contains("V generated"));
+
+    assert!(temp.child("out").child("main.wasm").path().exists());
+    assert!(temp.child("out").child("main.v").path().exists());
 }
 
 /// Companion to [`invalid_spec_name_rejected_early_leaves_no_stale_wasm`]: a
@@ -1486,6 +1635,120 @@ fn analyze_only_does_not_clear_previous_build_artifact() {
         temp.child("out").child("prog.wasm").path().exists(),
         "an --analyze run must not clear a previous build's artifact"
     );
+}
+
+/// `--codegen -v` writes only the `.v` (no `.wasm`), so a previous build's
+/// `out/main.wasm` is not the artifact this invocation rewrites. The stale guard
+/// must still clear it: a `--codegen -v` rebuild rejected at `wasm_to_v` (here a
+/// proof-name reservation) must leave NO runnable `out/main.wasm` behind from the
+/// earlier good build. This is the specific gap the old `wants_wasm`-gated clear
+/// missed.
+#[test]
+fn rejected_codegen_v_rebuild_clears_prior_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec Good { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    // A prior default build writes out/main.wasm.
+    build_ok_and_assert_wasm(&temp, &entry, "main");
+
+    // Introduce a proof-mode rejection and rebuild with --codegen -v (writes .v,
+    // not .wasm — yet the prior .wasm must be cleared).
+    write_source(
+        temp.path(),
+        "main.inf",
+        "spec Bad_ { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--codegen").arg("-v");
+    cmd.assert().failure();
+
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "a rejected --codegen -v rebuild must clear the prior out/main.wasm"
+    );
+}
+
+/// A plain `--codegen` rebuild (no `-o`, no `-v`) is a non-destructive dry run:
+/// it writes no artifact, so it must not disturb a previous build's output — even
+/// when the dry run is itself rejected. The stale-clear fires only when the run
+/// will write at least one artifact (`generate_wasm_output || generate_v_output`);
+/// a bare `--codegen` requests neither, so the earlier good build's `out/prog.wasm`
+/// survives. Contrast the default and `--codegen -v` rejections below, which do
+/// request output and so clear the now-stale prior artifact.
+#[test]
+fn rejected_codegen_only_rebuild_preserves_prior_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "prog");
+
+    write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return nope(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--codegen");
+    cmd.assert().failure();
+
+    assert!(
+        temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected --codegen-only dry run writes nothing, so the prior out/prog.wasm must survive"
+    );
+}
+
+/// The default (no phase flags) rejected rebuild clears the prior `.wasm`: it
+/// requests `.wasm` output, so the now-stale prior artifact must not be left
+/// runnable. Pinned here alongside the `--codegen -v` rejection (which also
+/// requests output and clears) and the bare `--codegen` dry run above (which
+/// requests nothing and preserves), so all three rejection shapes are fixed
+/// together.
+#[test]
+fn rejected_default_rebuild_clears_prior_wasm() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return 7; }");
+
+    build_ok_and_assert_wasm(&temp, &entry, "prog");
+
+    write_source(temp.path(), "prog.inf", "pub fn main() -> i32 { return nope(); }");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry);
+    cmd.assert().failure();
+
+    assert!(
+        !temp.child("out").child("prog.wasm").path().exists(),
+        "a rejected default rebuild must clear the prior out/prog.wasm"
+    );
+}
+
+/// The success path is unchanged by the stale-clear behavior: a `--codegen -v`
+/// success writes the `.v`, and a subsequent default success writes the `.wasm`.
+#[test]
+fn codegen_v_success_then_default_success_both_write_artifacts() {
+    let temp = assert_fs::TempDir::new().unwrap();
+    let entry = write_source(
+        temp.path(),
+        "main.inf",
+        "spec Good { fn obligation() -> i32 { return 1; } }\npub fn main() -> i32 { return 7; }",
+    );
+
+    // --codegen -v writes the .v but not the .wasm.
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("infc"));
+    cmd.current_dir(temp.path()).arg(&entry).arg("--codegen").arg("-v");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("V generated"));
+    assert!(temp.child("out").child("main.v").path().exists());
+    assert!(
+        !temp.child("out").child("main.wasm").path().exists(),
+        "--codegen -v must not write a .wasm"
+    );
+
+    // A following default build writes the .wasm (and clears the prior .v).
+    build_ok_and_assert_wasm(&temp, &entry, "main");
 }
 
 // ---------------------------------------------------------------------------

@@ -68,15 +68,21 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Axis 1 — absolute cross-file paths (no import) × item visibility.
-    // A `pub` fn in another file is reachable by its absolute `a::b::fn` path;
-    // a private one is rejected with the dual-location diagnostic.
+    // Axis 1 — absolute cross-file paths × item visibility. The absolute
+    // `a::b::fn` spelling is the long form of a namespace the accessing file
+    // imported: a file (the entry included) reaches another file's surface only
+    // through its own `use`, so each absolute path is paired with the `use` that
+    // licenses it. A `pub` fn is then reachable by the path; a private one is
+    // rejected with the dual-location diagnostic.
     // ---------------------------------------------------------------------
 
     #[test]
     fn absolute_path_pub_fn_resolves() {
         assert_ok(&[
-            (vec![], "pub fn main() -> i32 { return lib::arith::add(1, 2); }"),
+            (
+                vec![],
+                "use lib::arith; pub fn main() -> i32 { return lib::arith::add(1, 2); }",
+            ),
             (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
         ]);
     }
@@ -84,7 +90,10 @@ mod tests {
     #[test]
     fn absolute_path_private_fn_rejected_dual_location() {
         let msg = assert_err(&[
-            (vec![], "pub fn main() -> i32 { return lib::arith::secret(); }"),
+            (
+                vec![],
+                "use lib::arith; pub fn main() -> i32 { return lib::arith::secret(); }",
+            ),
             (vec!["lib", "arith"], "fn secret() -> i32 { return 0; }"),
         ]);
         assert!(
@@ -104,7 +113,10 @@ mod tests {
     #[test]
     fn absolute_path_deep_namespace_three_dirs() {
         assert_ok(&[
-            (vec![], "pub fn main() -> i32 { return a::b::c::add(1, 2); }"),
+            (
+                vec![],
+                "use a::b::c; pub fn main() -> i32 { return a::b::c::add(1, 2); }",
+            ),
             (vec!["a", "b", "c"], "pub fn add(x: i32, y: i32) -> i32 { return x + y; }"),
         ]);
     }
@@ -160,12 +172,89 @@ mod tests {
 
     #[test]
     fn absolute_path_from_entry_file_resolves() {
-        // The entry file owns root's directory namespaces, so its own absolute
-        // path resolves (this is the case the gate must never over-reject).
+        // The entry file imports the namespace and may then spell its absolute
+        // path, exactly as a non-entry file does (this is the entry's own imported
+        // path, which the gate must never over-reject).
         assert_ok(&[
             (vec![], "use lib::geom; pub fn main() -> i32 { return lib::geom::val(); }"),
             (vec!["lib", "geom"], "pub fn val() -> i32 { return 7; }"),
         ]);
+    }
+
+    #[test]
+    fn entry_absolute_path_to_namespace_imported_only_by_another_file_rejected() {
+        // The entry is held to the same import discipline as every other file: it
+        // may absolute-spell `lib::secret::val()` only if the *entry itself*
+        // imported a covering namespace. Here the entry imports `lib::a`, and only
+        // `lib/a.inf` imports `lib::secret` — so `lib::secret` is in the closure but
+        // is not the entry's to spell. Without this, the entry could borrow a
+        // namespace some other file (even via a private `use`) dragged in, defeating
+        // the rule that a file's `use` list is its complete dependency manifest.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a; pub fn entry() -> i32 { return lib::secret::val(); }",
+            ),
+            (vec!["lib", "a"], "use lib::secret;"),
+            (vec!["lib", "secret"], "pub fn val() -> i32 { return 99; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::secret` is not imported")
+                && msg.contains("use lib::secret;"),
+            "the entry's unlicensed absolute path names the unimported namespace and the fix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn entry_absolute_path_to_self_imported_namespace_resolves() {
+        // The companion to the rejection: when the *entry* writes the `use`, its
+        // own absolute path resolves — the import licenses the long spelling.
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::secret; pub fn entry() -> i32 { return lib::secret::val(); }",
+            ),
+            (vec!["lib", "secret"], "pub fn val() -> i32 { return 99; }"),
+        ]);
+    }
+
+    #[test]
+    fn entry_absolute_path_to_namespace_imported_only_privately_by_another_file_rejected() {
+        // The discipline holds even when the other file's import is private (a
+        // plain `use`, not `pub use`): a private import never re-exports the
+        // namespace to the entry, so the entry still needs its own `use`.
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use helper; pub fn entry() -> i32 { return lib::secret::val() + helper::go(); }",
+            ),
+            (vec!["helper"], "use lib::secret; pub fn go() -> i32 { return 0; }"),
+            (vec!["lib", "secret"], "pub fn val() -> i32 { return 99; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::secret` is not imported")
+                && msg.contains("use lib::secret;"),
+            "another file's private import does not license the entry's absolute path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn entry_qualified_path_to_own_root_spec_still_resolves() {
+        // Removing the entry's blanket root-anchor must not break the entry
+        // reaching its *own* root-scope definitions by qualified path. An entry
+        // `spec` is a non-directory root child, not another file's surface, so
+        // `Check::verify_inner()` still resolves (and is rejected as proof-only, not
+        // as an unknown method) without any `use`.
+        let msg = assert_err(&[(
+            vec![],
+            "spec Check { fn verify_inner() -> i32 { return 42; } } \
+             pub fn run() -> i32 { return Check::verify_inner(); }",
+        )]);
+        assert!(
+            msg.contains("cannot call spec function `Check::verify_inner`")
+                && msg.contains("proof-only"),
+            "an entry's own root-scope spec resolves by qualified path (no use needed), got: {msg}"
+        );
     }
 
     #[test]
@@ -297,9 +386,13 @@ mod tests {
     #[test]
     fn cross_file_const_consumed_inside_its_own_file() {
         // A top-level const is resolved at its use site within its defining file;
-        // a public fn there returns it, and that fn is callable cross-file.
+        // a public fn there returns it, and that fn is callable cross-file once the
+        // entry imports the namespace.
         assert_ok(&[
-            (vec![], "pub fn main() -> i32 { return lib::vals::get_max(); }"),
+            (
+                vec![],
+                "use lib::vals; pub fn main() -> i32 { return lib::vals::get_max(); }",
+            ),
             (
                 vec!["lib", "vals"],
                 "pub const MAX: i32 = 10; pub fn get_max() -> i32 { return MAX; }",
@@ -335,11 +428,13 @@ mod tests {
     fn item_import_pub_enum_construct_via_constructor() {
         // `match` is unimplemented in the parser, so the variant is constructed
         // and the value bound; the enum type is usable as a `let` type after the
-        // item import, fed by a cross-file constructor fn returning the enum.
+        // item import, fed by a cross-file constructor fn returning the enum. The
+        // item import binds `Color`; the absolute call `lib::col::first()` needs
+        // the namespace import too, so the entry imports both.
         assert_ok(&[
             (
                 vec![],
-                "use lib::col::{Color}; pub fn main() -> i32 { let c: Color = lib::col::first(); return 0; }",
+                "use lib::col; use lib::col::{Color}; pub fn main() -> i32 { let c: Color = lib::col::first(); return 0; }",
             ),
             (
                 vec!["lib", "col"],
@@ -449,9 +544,13 @@ mod tests {
 
     #[test]
     fn const_reachable_via_namespace_qualified_path() {
-        // `lib::vals::MAX` resolves as a qualified path to the pub const.
+        // `lib::vals::MAX` resolves as a qualified path to the pub const, once the
+        // entry imports the namespace that licenses the absolute spelling.
         assert_ok(&[
-            (vec![], "pub fn main() -> i32 { return lib::vals::MAX; }"),
+            (
+                vec![],
+                "use lib::vals; pub fn main() -> i32 { return lib::vals::MAX; }",
+            ),
             (vec!["lib", "vals"], "pub const MAX: i32 = 10;"),
         ]);
     }
@@ -459,7 +558,10 @@ mod tests {
     #[test]
     fn private_const_qualified_path_rejected_dual_location() {
         let msg = assert_err(&[
-            (vec![], "pub fn main() -> i32 { return lib::vals::MAX; }"),
+            (
+                vec![],
+                "use lib::vals; pub fn main() -> i32 { return lib::vals::MAX; }",
+            ),
             (vec!["lib", "vals"], "const MAX: i32 = 10;"),
         ]);
         assert!(
@@ -1197,7 +1299,7 @@ mod tests {
         let msg = assert_err(&[
             (
                 vec![],
-                "spec S { fn check() -> i32 { return lib::arith::secret(); } } pub fn main() {}",
+                "use lib::arith; spec S { fn check() -> i32 { return lib::arith::secret(); } } pub fn main() {}",
             ),
             (vec!["lib", "arith"], "fn secret() -> i32 { return 0; }"),
         ]);
@@ -2393,7 +2495,7 @@ mod tests {
         assert_ok(&[
             (
                 vec![],
-                "const DERIVED: i32 = lib::limits::BASE; pub fn main() -> i32 { return DERIVED; }",
+                "use lib::limits; const DERIVED: i32 = lib::limits::BASE; pub fn main() -> i32 { return DERIVED; }",
             ),
             (vec!["lib", "limits"], "pub const BASE: i32 = 10;"),
         ]);
@@ -2413,11 +2515,13 @@ mod tests {
 
     #[test]
     fn const_initializer_references_private_cross_file_const_rejected() {
-        // A const initializer cannot reach another file's *private* const.
+        // A const initializer cannot reach another file's *private* const, even
+        // when the entry imports the namespace (the import licenses the path; the
+        // const's privacy is what rejects it).
         let msg = assert_err(&[
             (
                 vec![],
-                "const DERIVED: i32 = lib::limits::BASE; pub fn main() -> i32 { return DERIVED; }",
+                "use lib::limits; const DERIVED: i32 = lib::limits::BASE; pub fn main() -> i32 { return DERIVED; }",
             ),
             (vec!["lib", "limits"], "const BASE: i32 = 10;"),
         ]);
@@ -2430,12 +2534,16 @@ mod tests {
     #[test]
     fn acyclic_cross_file_const_chain_orders_dependency_first() {
         // C <- B <- A across three files; the chain type-checks and
-        // `definition_order()` puts each dependency before its dependent. Each
-        // non-entry file imports the namespace it reads from, since a const
-        // initializer obeys the same import discipline as any other cross-file
-        // reference — a file may not reach another file's surface without a `use`.
+        // `definition_order()` puts each dependency before its dependent. Every
+        // file — the entry included — imports the namespace it reads from, since a
+        // const initializer obeys the same import discipline as any other
+        // cross-file reference: a file may not reach another file's surface without
+        // a `use`.
         let ctx = try_type_check_multi_file(&[
-            (vec![], "const A: i32 = lib::b::B; pub fn main() -> i32 { return A; }"),
+            (
+                vec![],
+                "use lib::b; const A: i32 = lib::b::B; pub fn main() -> i32 { return A; }",
+            ),
             (vec!["lib", "b"], "use lib::c; pub const B: i32 = lib::c::C;"),
             (vec!["lib", "c"], "pub const C: i32 = 1;"),
         ])
@@ -2507,8 +2615,10 @@ mod tests {
 
     #[test]
     fn qualified_path_unknown_final_segment_diagnostic() {
+        // The entry imports the namespace so the path is licensed; the diagnostic
+        // under test is the *bad final segment* one, not the missing-import one.
         let msg = assert_err(&[
-            (vec![], "const X: i32 = lib::vals::NOPE; pub fn main() {}"),
+            (vec![], "use lib::vals; const X: i32 = lib::vals::NOPE; pub fn main() {}"),
             (vec!["lib", "vals"], "pub const BASE: i32 = 10;"),
         ]);
         assert!(
@@ -2523,8 +2633,10 @@ mod tests {
 
     #[test]
     fn qualified_path_names_function_not_value_diagnostic() {
+        // The entry imports the namespace so the path is licensed; the diagnostic
+        // under test is the *function-in-value-position* one.
         let msg = assert_err(&[
-            (vec![], "const X: i32 = lib::vals::add; pub fn main() {}"),
+            (vec![], "use lib::vals; const X: i32 = lib::vals::add; pub fn main() {}"),
             (vec!["lib", "vals"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
         ]);
         assert!(
@@ -2735,12 +2847,13 @@ mod tests {
 
     #[test]
     fn namespace_qualified_assoc_fn_via_absolute_path() {
-        // The absolute form `lib::geo::Point::new(...)` (no file import) also
-        // resolves the type member through the namespace path.
+        // The absolute form `lib::geo::Point::new(...)` resolves the type member
+        // through the namespace path. The item import binds `Point`; the absolute
+        // assoc call needs the namespace import too, so the entry imports both.
         assert_ok(&[
             (
                 vec![],
-                "use lib::geo::{Point}; \
+                "use lib::geo; use lib::geo::{Point}; \
                  pub fn main() -> i32 { let p: Point = lib::geo::Point::new(3, 4); return p.sum(); }",
             ),
             (
@@ -3820,6 +3933,333 @@ mod tests {
         assert!(
             msg.contains("recursive struct definition"),
             "a three-file struct cycle must be rejected at type-check, got: {msg}"
+        );
+    }
+
+    // =====================================================================
+    // FIX-17 — round-13 ambient-visibility defects (#63).
+    //
+    // Defect 1: the absolute-anchor gate licensed a path if ANY imported
+    // namespace key was a *prefix* of the whole path, so `use lib::geom;`
+    // leaked `lib::geom::sub::deep` — a deeper namespace only another file
+    // dragged into the closure. The gate now licenses iff an imported key
+    // *equals* the path's Deepest Registered Namespace Prefix (DRNP): each
+    // `use` imports exactly one namespace, never its sub-namespaces.
+    //
+    // Defect 5: the qualified-type and qualified-struct-literal positions
+    // routed an unimported-namespace leak through a generic "unknown
+    // type" / "struct X is not defined", hiding the missing import. Both now
+    // mirror the call/const sites — uniform missing-import diagnostics.
+    //
+    // Defects 6/7: when the target sibling file is uncompiled, the rev-scan
+    // fell back to a shorter directory key (`lib`), suggesting the
+    // unparseable `use lib;`. The hedged diagnostic now offers the path's
+    // namespace portion (always a parseable file namespace) instead.
+    // =====================================================================
+
+    // ---- Defect 1: anchor-gate leak is closed (DRNP-equality) ----
+
+    /// The leak repro: the entry imports only `lib::geom`, while `helper`
+    /// imports `lib::geom::sub`, dragging the deeper namespace into the closure.
+    /// `use lib::geom;` must NOT license the entry to spell `lib::geom::sub::deep`
+    /// — `sub` is a deeper namespace the entry never imported. The deeper file IS
+    /// in the closure, so the diagnostic is the confident missing-import naming
+    /// the exact `use`.
+    #[test]
+    fn deeper_namespace_not_licensed_by_shallower_import() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; use helper; pub fn entry() -> i32 { return lib::geom::sub::deep() + helper::go(); }",
+            ),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 1; }"),
+            (vec!["lib", "geom", "sub"], "pub fn deep() -> i32 { return 99; }"),
+            (
+                vec!["helper"],
+                "use lib::geom::sub; pub fn go() -> i32 { return lib::geom::sub::deep(); }",
+            ),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom::sub` is not imported")
+                && msg.contains("use lib::geom::sub;")
+                && msg.contains("lib::geom::sub::deep"),
+            "a shallower `use lib::geom;` must not license the deeper `lib::geom::sub`, got: {msg}"
+        );
+    }
+
+    /// Accept: a surface call into the imported namespace itself. `lib::geom::area`
+    /// has DRNP `lib::geom` (its leaf `area` is a function, not a namespace), which
+    /// the entry imported, so it resolves.
+    #[test]
+    fn direct_surface_call_into_imported_namespace_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; pub fn entry() -> i32 { return lib::geom::area(); }",
+            ),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 7; }"),
+        ]);
+    }
+
+    /// Accept: an associated call whose type segment is NOT a namespace.
+    /// `lib::geom::Point::new` has DRNP `lib::geom` — `Point` is a type, never a
+    /// `mod_scopes` key — so `use lib::geom;` licenses it without needing the
+    /// nonexistent `use lib::geom::Point;`.
+    #[test]
+    fn assoc_call_through_type_in_imported_namespace_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; pub fn entry() -> i32 { return lib::geom::Point::make(); }",
+            ),
+            (
+                vec!["lib", "geom"],
+                "pub struct Point { x: i32; pub fn make() -> i32 { return 5; } }",
+            ),
+        ]);
+    }
+
+    /// Accept: a qualified struct literal whose namespace the entry imported.
+    /// `lib::geom::Point { .. }` has the pure-namespace prefix `lib::geom`, the
+    /// whole of which the entry imported, so the literal resolves (the inclusive
+    /// DRNP scan handles the pre-split-prefix shape).
+    #[test]
+    fn qualified_struct_literal_into_imported_namespace_resolves() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; pub fn entry() -> i32 { let p: lib::geom::Point = lib::geom::Point { x: 3, y: 4 }; return p.x; }",
+            ),
+            (vec!["lib", "geom"], "pub struct Point { x: i32; y: i32; }"),
+        ]);
+    }
+
+    /// Reject: a file that imported NEITHER the namespace nor any covering parent
+    /// may not spell the absolute path. `helper` imports nothing under `lib`, so
+    /// `lib::geom::area()` is an encapsulation leak even though the entry's
+    /// `use lib::geom;` put it in the closure.
+    #[test]
+    fn no_parent_import_does_not_license_absolute_path() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; use helper; pub fn entry() -> i32 { return helper::go(); }",
+            ),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 1; }"),
+            (vec!["helper"], "pub fn go() -> i32 { return lib::geom::area(); }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;"),
+            "a file importing nothing under `lib` may not spell `lib::geom::area`, got: {msg}"
+        );
+    }
+
+    /// Reject (intended-stricter): importing the CHILD namespace does not license
+    /// spelling the PARENT surface. `use lib::geom::sub;` imports exactly
+    /// `lib::geom::sub`; the entry may not borrow its parent `lib::geom` to call
+    /// `lib::geom::area` — that parent is a different namespace it never imported.
+    #[test]
+    fn child_import_does_not_license_parent_surface() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom::sub; pub fn entry() -> i32 { return lib::geom::area() + lib::geom::sub::deep(); }",
+            ),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 1; }"),
+            (vec!["lib", "geom", "sub"], "pub fn deep() -> i32 { return 2; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;"),
+            "importing the child `lib::geom::sub` must not license the parent surface `lib::geom::area`, got: {msg}"
+        );
+    }
+
+    /// Reject: an *item* import contributes no namespace key, so it never
+    /// licenses an absolute path. `use lib::geom::{area};` brings `area` into bare
+    /// scope but does not let the entry spell `lib::geom::other()` in long form.
+    #[test]
+    fn item_import_does_not_license_absolute_sibling_path() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom::{area}; pub fn entry() -> i32 { return lib::geom::other(); }",
+            ),
+            (
+                vec!["lib", "geom"],
+                "pub fn area() -> i32 { return 1; } pub fn other() -> i32 { return 2; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;"),
+            "an item import grants no namespace key, so it must not license `lib::geom::other`, got: {msg}"
+        );
+    }
+
+    // ---- Defect 5: type-annotation & struct-literal positions report the
+    // missing import, not a generic unknown-type / struct-not-defined ----
+
+    /// A leaked qualified TYPE annotation (`let p: lib::geom::Point`) reports the
+    /// missing import — not "struct Point is not defined". `helper` drags
+    /// `lib::geom` into the closure; the entry never imported it.
+    #[test]
+    fn leaked_qualified_type_annotation_reports_missing_import() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use helper; pub fn entry() -> i32 { let p: lib::geom::Point = helper::mk(); return p.x; }",
+            ),
+            (
+                vec!["lib", "geom"],
+                "pub struct Point { x: i32; y: i32; }",
+            ),
+            (
+                vec!["helper"],
+                "use lib::geom; pub fn mk() -> lib::geom::Point { return lib::geom::Point { x: 1, y: 2 }; }",
+            ),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;")
+                && msg.contains("lib::geom::Point"),
+            "a leaked qualified type annotation must name the missing import, got: {msg}"
+        );
+        assert!(
+            !msg.contains("struct `Point` is not defined"),
+            "the annotation must not cascade a misleading struct-not-defined, got: {msg}"
+        );
+    }
+
+    /// A leaked qualified STRUCT LITERAL (`lib::geom::Point { .. }`) reports the
+    /// missing import — not "struct Point is not defined" — restoring full
+    /// call/type/literal/const uniformity. This is the residual the annotation fix
+    /// alone left, since the literal position is a separate consumer.
+    #[test]
+    fn leaked_qualified_struct_literal_reports_missing_import() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::wrap; pub fn entry() -> i32 { return lib::geom::mk(lib::geom::Point { x: 3, y: 4 }); }",
+            ),
+            (
+                vec!["lib", "geom"],
+                "pub struct Point { x: i32; y: i32; } pub fn mk(p: Point) -> i32 { return p.x; }",
+            ),
+            (vec!["lib", "wrap"], "use lib::geom; pub fn t() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom` is not imported")
+                && msg.contains("use lib::geom;")
+                && msg.contains("lib::geom::Point"),
+            "a leaked qualified struct literal must name the missing import, got: {msg}"
+        );
+        assert!(
+            !msg.contains("struct `Point` is not defined"),
+            "the struct literal must not cascade a misleading struct-not-defined, got: {msg}"
+        );
+    }
+
+    /// The corrected program — once the suggested `use lib::geom;` is added — type
+    /// checks cleanly, proving the hint the leak diagnostics emit is itself
+    /// parseable and resolves the reference.
+    #[test]
+    fn corrected_qualified_struct_literal_compiles_with_suggested_use() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; pub fn entry() -> i32 { let p: lib::geom::Point = lib::geom::Point { x: 3, y: 4 }; return lib::geom::mk(p); }",
+            ),
+            (
+                vec!["lib", "geom"],
+                "pub struct Point { x: i32; y: i32; } pub fn mk(p: Point) -> i32 { return p.x; }",
+            ),
+        ]);
+    }
+
+    // ---- Defect 2 wording: single-segment unimported namespace CALL ----
+
+    /// A bare `other::thing()` call from a file that did not import `other`, where
+    /// another file (`bridge`) dragged `other` into the closure, reports the
+    /// reworded `UnimportedNamespaceCall`: `add use other; to call other::thing`
+    /// — no unparseable `...::` placeholder.
+    #[test]
+    fn unimported_single_segment_namespace_call_parseable_hint() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use bridge; pub fn entry() -> i32 { return other::thing(); }",
+            ),
+            (vec!["bridge"], "use other; pub fn b() -> i32 { return other::thing(); }"),
+            (vec!["other"], "pub fn thing() -> i32 { return 5; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `other` is not imported")
+                && msg.contains("add `use other;` to call `other::thing`")
+                && !msg.contains("..."),
+            "the unimported-call hint must read `add use other; to call other::thing` with no `...`, got: {msg}"
+        );
+    }
+
+    /// The corrected call — once `use other;` is added — type checks, proving the
+    /// suggested import is parseable.
+    #[test]
+    fn corrected_single_segment_namespace_call_compiles() {
+        assert_ok(&[
+            (
+                vec![],
+                "use other; pub fn entry() -> i32 { return other::thing(); }",
+            ),
+            (vec!["other"], "pub fn thing() -> i32 { return 5; }"),
+        ]);
+    }
+
+    // ---- Defects 6/7: uncompiled-file fallback gives a parseable hedged hint ----
+
+    /// When the target sibling file is not in the closure (uncompiled), the rev-
+    /// scan would otherwise fall back to the shallow directory key `lib`,
+    /// suggesting the unparseable `use lib;`. The hedged diagnostic instead offers
+    /// the namespace portion `lib::other` (a parseable file namespace), with the
+    /// "could not resolve" / "if … names a source file" hedge.
+    #[test]
+    fn uncompiled_namespace_call_gives_hedged_parseable_hint() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a; pub fn entry() -> i32 { return lib::other::val(); }",
+            ),
+            (vec!["lib", "a"], "pub fn helper() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("could not resolve `lib::other::val`")
+                && msg.contains("`lib::other` is not an imported namespace")
+                && msg.contains("import it with `use lib::other;`"),
+            "an uncompiled-target call must give the hedged hint naming `lib::other`, got: {msg}"
+        );
+        assert!(
+            !msg.contains("use lib;"),
+            "the hedged hint must not suggest the unparseable directory `use lib;`, got: {msg}"
+        );
+    }
+
+    /// The deeper uncompiled case (`lib::b::g`, `b.inf` absent): the hedged hint
+    /// names `lib::b`, not the directory `lib`.
+    #[test]
+    fn uncompiled_deeper_namespace_call_names_namespace_portion() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::a; pub fn entry() -> i32 { return lib::b::g(); }",
+            ),
+            (vec!["lib", "a"], "pub fn helper() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("could not resolve `lib::b::g`")
+                && msg.contains("`lib::b` is not an imported namespace")
+                && msg.contains("import it with `use lib::b;`")
+                && !msg.contains("use lib;"),
+            "the hedged hint must name `lib::b`, not the directory `lib`, got: {msg}"
         );
     }
 

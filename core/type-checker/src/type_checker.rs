@@ -45,7 +45,7 @@ use crate::{
     errors::{DedupKind, RegistrationKind, TypeCheckError, TypeMismatchContext, VisibilityContext},
     symbol_table::{
         ExternOrigin, FuncInfo, FuncKind, Import, ImportItem, ImportKind, ResolvedImport,
-        ResolvedImportTarget, ResolvedNominalType, SymbolTable,
+        ResolvedImportTarget, ResolvedNominalType, SymbolTable, UnimportedNamespace,
     },
     type_info::{NumberType, TypeInfo, TypeInfoKind},
     typed_context::{CallTarget, TypedContext},
@@ -1344,10 +1344,14 @@ impl TypeChecker {
     /// A path that does not resolve to a nominal type is reported as an
     /// [`TypeCheckError::UnknownType`] — the same diagnostic a bad bare type gets —
     /// so a typo in the qualifier or leaf fails cleanly instead of silently leaving
-    /// an unresolved annotation. A resolved-but-private type is reported through the
-    /// shared visibility gate, pointing at its declaration, so reaching another
-    /// file's private type by qualifier is rejected the way every other cross-file
-    /// private access is.
+    /// an unresolved annotation. When the failure is instead a missing import — the
+    /// path's namespace prefix names a real project file the accessing file never
+    /// imported — it is reported as that missing import (mirroring the call and
+    /// const sites), so a leaked `lib::geom::Point` annotation points at the `use`
+    /// to add rather than cascading a misleading "struct Point is not defined". A
+    /// resolved-but-private type is reported through the shared visibility gate,
+    /// pointing at its declaration, so reaching another file's private type by
+    /// qualifier is rejected the way every other cross-file private access is.
     fn validate_qualified_type(&mut self, path: &[String], location: Location) {
         let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
         match self.symbol_table.resolve_qualified_type_path(path, from_scope) {
@@ -1370,10 +1374,16 @@ impl TypeChecker {
                 );
             }
             None => {
-                self.push_error_dedup(TypeCheckError::UnknownType {
-                    name: path.join("::"),
-                    location,
-                });
+                if let Some(diagnosis) =
+                    self.symbol_table.unimported_namespace_prefix(path, from_scope)
+                {
+                    self.report_unimported_namespace(diagnosis, path, location);
+                } else {
+                    self.push_error_dedup(TypeCheckError::UnknownType {
+                        name: path.join("::"),
+                        location,
+                    });
+                }
             }
         }
     }
@@ -2217,6 +2227,24 @@ impl TypeChecker {
                     ctx.set_node_typeinfo(NodeId::Expr(expr_id), struct_type.clone());
                     return Some(struct_type);
                 }
+                // A qualified struct literal (`lib::geom::Point { .. }`) that did not
+                // resolve may be an unimported-namespace leak rather than an unknown
+                // struct: when the namespace prefix names a real project file the
+                // accessing file never imported, report the missing import so the fix
+                // points at the `use` — keeping the literal position uniform with the
+                // call, type-annotation, and const positions, none of which cascade a
+                // misleading "struct `Point` is not defined" (#63).
+                let from_scope = self.symbol_table.current_scope_id().unwrap_or(0);
+                let segments: Vec<String> =
+                    qualified_name.split("::").map(str::to_string).collect();
+                if segments.len() >= 2
+                    && let Some(diagnosis) = self
+                        .symbol_table
+                        .unimported_namespace_prefix(&segments, from_scope)
+                {
+                    self.report_unimported_namespace(diagnosis, &segments, location);
+                    return None;
+                }
                 self.push_error_dedup(TypeCheckError::UndefinedStruct {
                     name: struct_name,
                     location,
@@ -2546,15 +2574,11 @@ impl TypeChecker {
         // namespace stops resolving (so `prefix_is_namespace` is false), and the
         // enum-variant fallback would emit the misleading "enum `lib` is not
         // defined". Diagnose it as the missing import it is, pointing at the `use`.
-        if let Some(namespace) = self
+        if let Some(diagnosis) = self
             .symbol_table
             .unimported_namespace_prefix(&segments, from_scope)
         {
-            self.push_error_dedup(TypeCheckError::UnimportedAbsoluteNamespacePath {
-                namespace,
-                item: segments.last().cloned().unwrap_or_default(),
-                location,
-            });
+            self.report_unimported_namespace(diagnosis, &segments, location);
             return Some(None);
         }
         if !self.symbol_table.prefix_is_namespace(&segments, from_scope) {
@@ -2969,15 +2993,11 @@ impl TypeChecker {
                 // is an encapsulation leak the file-boundary discipline blocks — the
                 // fix is to add the `use`, so point at that rather than reporting a
                 // bare "undefined function" that hides the missing import.
-                if let Some(namespace) = self
+                if let Some(diagnosis) = self
                     .symbol_table
                     .unimported_namespace_prefix(&segments, from_scope)
                 {
-                    self.push_error_dedup(TypeCheckError::UnimportedAbsoluteNamespacePath {
-                        namespace,
-                        item: segments.last().cloned().unwrap_or_default(),
-                        location,
-                    });
+                    self.report_unimported_namespace(diagnosis, &segments, location);
                 } else if self
                     .symbol_table
                     .qualified_function_reachable_ignoring_reexport(&segments, from_scope)
@@ -4470,6 +4490,37 @@ impl TypeChecker {
             cov_mark::hit!(type_checker_error_dedup_first_occurrence);
         }
         self.push_error(error);
+    }
+
+    /// Reports the missing-import diagnosis for a `::`-qualified path
+    /// [`SymbolTable::unimported_namespace_prefix`] returned, choosing the precise
+    /// variant for each case: a confident missing-import names the exact `use`,
+    /// while a hedged one (the target file is not in the closure) offers the
+    /// namespace portion as a best-guess. The three value/type sites that gate an
+    /// absolute path through the missing-import diagnostic share this so the
+    /// wording stays consistent.
+    fn report_unimported_namespace(
+        &mut self,
+        diagnosis: UnimportedNamespace,
+        path: &[String],
+        location: Location,
+    ) {
+        match diagnosis {
+            UnimportedNamespace::Confident { namespace } => {
+                self.push_error_dedup(TypeCheckError::UnimportedAbsoluteNamespacePath {
+                    namespace,
+                    item: path.last().cloned().unwrap_or_default(),
+                    location,
+                });
+            }
+            UnimportedNamespace::Hedged { namespace } => {
+                self.push_error_dedup(TypeCheckError::UnresolvedNamespacePath {
+                    path: path.join("::"),
+                    namespace,
+                    location,
+                });
+            }
+        }
     }
 
     /// Records an error, stamping it with the file currently being checked so the

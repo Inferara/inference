@@ -454,7 +454,8 @@ fn spec_reserves_separator(spec: &VisitedSpec) -> Option<CodegenError> {
 
     Some(CodegenError::SpecNameReservesSeparator(Box::new(
         crate::errors::SpecNameSeparatorDetails {
-            spec_source: spec.render_source(),
+            spec_name: spec.spec_name.clone(),
+            file_label: spec.file_label(),
             join_lhs,
             qualified,
             offender_kind: offender_kind.to_string(),
@@ -465,18 +466,27 @@ fn spec_reserves_separator(spec: &VisitedSpec) -> Option<CodegenError> {
     )))
 }
 
-/// A concrete renamed form to point the user at: trims boundary underscores and
-/// collapses internal `__` runs, suffixing `.inf` for a file stem so the hint
-/// reads as a filename (`x_` -> `x.inf`).
+/// An imperative fix naming the offender and the concrete rename: trims boundary
+/// underscores and collapses internal `__` runs to get the clean form, then
+/// phrases it as `rename the file 'x_.inf' to 'x.inf' ...` or `rename the spec
+/// 'Invariant_' to 'Invariant' ...`, with a parenthetical naming the exact edit
+/// (drop the trailing `_`, drop the leading `_`, or collapse the `__` run).
 fn suggest_clean_segment(offender_kind: &str, offender: &str) -> String {
     let mut cleaned = offender.trim_matches('_').to_string();
     while cleaned.contains("__") {
         cleaned = cleaned.replace("__", "_");
     }
-    if offender_kind == "file stem" {
-        format!("{offender}.inf -> {cleaned}.inf")
+    let edit = if offender.contains("__") {
+        "collapse the '__' run"
+    } else if offender.starts_with('_') {
+        "drop the leading '_'"
     } else {
-        format!("{offender} -> {cleaned}")
+        "drop the trailing '_'"
+    };
+    if offender_kind == "file stem" {
+        format!("rename the file '{offender}.inf' to '{cleaned}.inf' ({edit}).")
+    } else {
+        format!("rename the spec '{offender}' to '{cleaned}' ({edit}).")
     }
 }
 
@@ -625,6 +635,18 @@ impl VisitedSpec {
             self.spec_name.clone()
         } else {
             format!("{}::{}", self.module_path.join("::"), self.spec_name)
+        }
+    }
+
+    /// The `::`-joined source path of the file the spec is declared in
+    /// (`lib::checks`), or `None` for the entry file (which has no path prefix).
+    /// Lets a diagnostic name the file separately from the spec, so the message
+    /// reads `spec 'S' in file 'lib::checks'` rather than splicing them.
+    fn file_label(&self) -> Option<String> {
+        if self.module_path.is_empty() {
+            None
+        } else {
+            Some(self.module_path.join("::"))
         }
     }
 }
@@ -847,11 +869,13 @@ mod spec_name_tests {
             .expect_err("a leading-underscore spec name must be rejected");
         match err {
             CodegenError::SpecNameReservesSeparator(d) => {
-                assert_eq!(d.spec_source, "lib::geo::_S");
+                assert_eq!(d.spec_name, "_S");
+                assert_eq!(d.file_label.as_deref(), Some("lib::geo"));
                 assert_eq!(d.qualified, "lib_geo__S");
                 assert_eq!(d.offender_kind, "spec name");
                 assert_eq!(d.offender, "_S");
                 assert_eq!(d.offender_cause, "begins with `_`");
+                assert_eq!(d.fix_hint, "rename the spec '_S' to 'S' (drop the leading '_').");
             }
             other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
         }
@@ -866,11 +890,13 @@ mod spec_name_tests {
             .expect_err("a trailing-underscore file stem must be rejected");
         match err {
             CodegenError::SpecNameReservesSeparator(d) => {
+                assert_eq!(d.spec_name, "S");
+                assert_eq!(d.file_label.as_deref(), Some("lib::x_"));
                 assert_eq!(d.qualified, "lib_x__S");
                 assert_eq!(d.offender_kind, "file stem");
                 assert_eq!(d.offender, "x_");
                 assert_eq!(d.offender_cause, "ends with `_`");
-                assert_eq!(d.fix_hint, "x_.inf -> x.inf");
+                assert_eq!(d.fix_hint, "rename the file 'x_.inf' to 'x.inf' (drop the trailing '_').");
             }
             other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
         }
@@ -935,12 +961,16 @@ mod spec_name_tests {
             .expect_err("a trailing-underscore spec name in an imported file must be rejected");
         match err {
             CodegenError::SpecNameReservesSeparator(d) => {
-                assert_eq!(d.spec_source, "lib::geom::Invariant_");
+                assert_eq!(d.spec_name, "Invariant_");
+                assert_eq!(d.file_label.as_deref(), Some("lib::geom"));
                 assert_eq!(d.qualified, "lib_geom_Invariant_");
                 assert_eq!(d.offender_kind, "spec name");
                 assert_eq!(d.offender, "Invariant_");
                 assert_eq!(d.offender_cause, "ends with `_`");
-                assert_eq!(d.fix_hint, "Invariant_ -> Invariant");
+                assert_eq!(
+                    d.fix_hint,
+                    "rename the spec 'Invariant_' to 'Invariant' (drop the trailing '_')."
+                );
             }
             other => panic!("expected SpecNameReservesSeparator, got {other:?}"),
         }

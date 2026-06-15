@@ -403,16 +403,18 @@ fn eprint_spec_join_boundary_error(
 /// that is later rejected leaves no runnable stale file behind, and a plain
 /// compile does not leave a stale proof describing a since-changed program.
 ///
-/// Both the `.wasm` and the `.v` are cleared *unconditionally* whenever codegen
-/// runs, regardless of which artifacts this particular invocation will write.
-/// Any run that reaches codegen recompiles this source name and may be rejected
-/// at codegen or `wasm_to_v`; the would-be `.wasm` and `.v` for that name are
-/// stale the moment the run starts, so a leftover from an earlier build must not
-/// survive — a `--codegen -v` run (which writes only `.v`) must still invalidate
-/// the `.wasm` an earlier `--codegen -o` or default build wrote, or a rejection
-/// would leave a runnable artifact describing the old program. The success path
-/// rewrites whichever artifacts this invocation requests, so clearing both up
-/// front costs nothing there.
+/// Both the `.wasm` and the `.v` are cleared together whenever the run will write
+/// *at least one* artifact, regardless of which one. A run that writes any output
+/// recompiles this source name and may be rejected at codegen or `wasm_to_v`; the
+/// would-be `.wasm` and `.v` for that name are stale the moment such a run starts,
+/// so a leftover from an earlier build must not survive — a `--codegen -v` run
+/// (which writes only `.v`) must still invalidate the `.wasm` an earlier
+/// `--codegen -o` or default build wrote, or a rejection would leave a runnable
+/// artifact describing the old program. The success path rewrites whichever
+/// artifacts this invocation requests, so clearing both up front costs nothing
+/// there. A no-output dry run (`--codegen` with neither `-o` nor `-v`) writes
+/// nothing, so its caller does not invoke this — a dry run leaves existing
+/// artifacts untouched.
 ///
 /// A missing file is not an error (nothing to clear); a removal failure is
 /// ignored because the subsequent write would surface any genuine IO problem
@@ -521,14 +523,16 @@ fn main() {
     // this build runs, so a compile that is later rejected (by type check,
     // analysis, external resolution, codegen, or `wasm_to_v`) never leaves a
     // runnable stale `.wasm` (or its `.v`) on disk for `wasmtime` to execute.
-    // Both artifacts are cleared whenever codegen runs — independent of which
-    // ones this invocation will write — because the run recompiles this source
+    // Both artifacts are cleared whenever this run will write at least one of
+    // them — independent of which one — because the run recompiles this source
     // name and any leftover for it is already stale; a `--codegen -v` run that
     // writes only `.v` must still drop an earlier build's `.wasm`. Clearing up
     // front means every rejection path exits with no artifact without each
-    // `process::exit(1)` site having to clean up. A parse/analyze-only run
-    // produces no outputs and so must not disturb a previous build's artifacts.
-    if need_codegen {
+    // `process::exit(1)` site having to clean up. A run that writes no output —
+    // a parse/analyze-only run, or a `--codegen` dry run with neither `-o` nor
+    // `-v` — must not disturb a previous build's artifacts, so clearing is gated
+    // on this run actually emitting something.
+    if need_codegen && (args.generate_wasm_output || args.generate_v_output) {
         clear_stale_outputs(&output_path, &source_fname);
     }
 

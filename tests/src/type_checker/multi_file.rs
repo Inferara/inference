@@ -47,13 +47,14 @@ mod tests {
     }
 
     /// A direct absolute path to a public function in another file resolves
-    /// through the file scope tree without any import.
+    /// through the file scope tree, once the accessing file imports the namespace
+    /// that licenses the absolute spelling.
     #[test]
     fn absolute_path_to_public_function_resolves() {
         let files = [
             (
                 vec![],
-                "pub fn main() { let r: i32 = lib::arith::add(1, 2); }",
+                "use lib::arith; pub fn main() { let r: i32 = lib::arith::add(1, 2); }",
             ),
             (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
         ];
@@ -236,7 +237,7 @@ mod tests {
         let files = [
             (
                 vec![],
-                "pub fn main() { let r: i32 = lib::arith::secret(); }",
+                "use lib::arith; pub fn main() { let r: i32 = lib::arith::secret(); }",
             ),
             (vec!["lib", "arith"], "fn secret() -> i32 { return 0; }"),
         ];
@@ -259,13 +260,14 @@ mod tests {
     }
 
     /// A `pub` cross-file function called by absolute path resolves — the public
-    /// surface crosses the file boundary.
+    /// surface crosses the file boundary once the accessing file imports the
+    /// namespace.
     #[test]
     fn cross_file_public_function_call_resolves() {
         let files = [
             (
                 vec![],
-                "pub fn main() { let r: i32 = lib::arith::add(1, 2); }",
+                "use lib::arith; pub fn main() { let r: i32 = lib::arith::add(1, 2); }",
             ),
             (vec!["lib", "arith"], "pub fn add(a: i32, b: i32) -> i32 { return a + b; }"),
         ];
