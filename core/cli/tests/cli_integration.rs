@@ -862,12 +862,11 @@ fn out_dir_with_codegen_no_output_flags_creates_no_directory() {
     );
 }
 
-/// FIX-17c: a `--codegen` dry run (neither `-o` nor `-v`) must NOT delete a
-/// pre-existing artifact a prior build wrote. The stale-clearing step runs only
-/// when the run will write at least one artifact; a dry run writes nothing, so an
-/// earlier `out/trivial.wasm` survives. A FIX-16 regression deleted it
-/// unconditionally on `--codegen`, leaving no artifact even though the dry run
-/// "succeeded".
+/// A `--codegen` dry run (neither `-o` nor `-v`) must NOT delete a pre-existing
+/// artifact a prior build wrote. The stale-clearing step runs only when the run
+/// will write at least one artifact; a dry run writes nothing, so an earlier
+/// `out/trivial.wasm` survives. (Clearing it unconditionally on `--codegen` would
+/// leave no artifact even though the dry run "succeeded".)
 #[test]
 fn codegen_dry_run_preserves_existing_artifact() {
     let temp = assert_fs::TempDir::new().unwrap();

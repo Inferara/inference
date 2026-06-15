@@ -801,7 +801,7 @@ mod analysis_rules_tests {
         assert_eq!(diag.rule_id(), "A035");
     }
 
-    // --- FIX-19a (#63): injective spec FnKey defeats the fold-collision escape --
+    // --- Injective spec FnKey defeats the fold-collision recursion escape (#63) --
     //
     // The spec-name fold is lossy: `lib/checks` + spec `S` and the sibling file
     // `lib_checks` + spec `S` both render `lib_checks_S`. When the spec key folded

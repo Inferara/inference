@@ -2454,7 +2454,7 @@ impl SymbolTable {
         // shapes holds. When `deep_key` is *not* imported, the path is a genuine
         // missing-import leak the hint must report — importing an *ancestor*
         // (`use a;` for `a::b`) does not read the descendant's surface, so it does
-        // not suppress (that is the very leak the FIX-18/19 gates close).
+        // not suppress (that is the very leak the cross-file descent gate closes).
         if self.file_imports_namespace_key(from_scope_id, &deep_key) {
             // (a) The leaf is read *directly* in the imported `deep_key` (the walk
             // consumed every segment but the leaf). A genuinely-unknown leaf there
@@ -2476,8 +2476,8 @@ impl SymbolTable {
             // *past* non-viably: when `path[k]` is a type defined in `deep` but the
             // remaining suffix is not a viable type-access on it (the same
             // [`Self::type_shadow_viable_for_suffix`] decision the resolver applies
-            // in FIX-19b), the resolver consumes `path[k]` as a sub-file namespace
-            // and descends into a deeper, *uncompiled* file — so the leak is a
+            // to the type-shadow break), the resolver consumes `path[k]` as a
+            // sub-file namespace and descends into a deeper, *uncompiled* file — so the leak is a
             // missing import of that deeper file, which the shadowing type must not
             // mask. `lib::b::Point::make` where `lib` defines `struct b` and the
             // un-imported `lib/b.inf` defines `Point::make`: `b::Point::make` is not

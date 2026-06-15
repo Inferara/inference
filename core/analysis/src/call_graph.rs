@@ -351,7 +351,7 @@ pub(crate) fn resolve_adjacency(nodes: &[FnNode]) -> Vec<Vec<(usize, Location)>>
     // Build the key → index map with an explicit insert so a duplicate key is a
     // loud failure rather than a silent last-wins overwrite. Two nodes sharing a
     // key would mean a recursive function's self-edge could resolve to a
-    // different node, masking the cycle from A035 — exactly the FIX-19a escape.
+    // different node, masking the cycle from the recursion check (A035).
     // `FnKey` is injective by construction and the type checker rejects genuine
     // duplicate definitions first, so a collision here is an upstream invariant
     // break; surface it in debug builds and keep the first node in release so the

@@ -1594,7 +1594,7 @@ pub fn new() -> i32 {
 }
 
 // =====================================================================
-// FIX-17 Defect 2 — closure-dependent tail-precedence flip (#63).
+// Closure-dependent tail-precedence flip (#63).
 //
 // `a::mid::make()` written with `use a::mid;` (the SUB-FILE) must reach
 // `a/mid.inf`'s free `make` (2), never `a.inf`'s `struct mid` associated
@@ -1694,14 +1694,14 @@ pub fn make() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "entry"), 2);
 }
 
-/// FIX-21: a same-named parent struct whose only matching member is an INSTANCE
-/// method must NOT pre-empt the sub-file namespace segment. `lib` defines
-/// `struct geom` with an instance `mk(self)`, but `lib::geom::mk` is a free fn in
-/// the sub-file `lib/geom.inf`. `lib::geom::mk()` is an associated-style call: an
-/// instance method can never satisfy it, so the viability probe must reject the
-/// type-shadow break and consume `geom` as the sub-file namespace, resolving the
-/// free `mk` (77). Before FIX-21 the instance method was wrongly treated as viable
-/// and the call was rejected as "instance method requires a receiver".
+/// A same-named parent struct whose only matching member is an INSTANCE method
+/// must NOT pre-empt the sub-file namespace segment. `lib` defines `struct geom`
+/// with an instance `mk(self)`, but `lib::geom::mk` is a free fn in the sub-file
+/// `lib/geom.inf`. `lib::geom::mk()` is an associated-style call: an instance
+/// method can never satisfy it, so the viability probe must reject the type-shadow
+/// break and consume `geom` as the sub-file namespace, resolving the free `mk`
+/// (77). Treating the instance method as viable would instead reject the call as
+/// "instance method requires a receiver".
 #[test]
 fn instance_method_shadow_resolves_sub_file_free_fn() {
     let main = "\
@@ -1748,7 +1748,7 @@ pub fn mk() -> Widget {
     assert_eq!(call_i32(&mut store, &instance, "entry"), 77);
 }
 
-/// FIX-21 closure-independence: the same `lib::geom::mk()` resolves to the sub-file
+/// Closure-independence: the same `lib::geom::mk()` resolves to the sub-file
 /// free `mk` (77) whether or not the unrelated `use lib;` (which drags the
 /// same-named `struct geom` into scope) is present — the instance method must
 /// never flip the resolution. Companion to
@@ -1889,8 +1889,8 @@ pub fn run() -> i32 {
 
 /// A single-file byte-identity guard: a lone entry file with a `Type::assoc()`
 /// call (no imports, no sibling files) must compile to exactly the same module
-/// the tail-precedence conjunct never touches. This pins that the FIX-17 changes
-/// are inert for the common single-file shape.
+/// the tail-precedence conjunct never touches. This pins that the cross-file
+/// precedence changes are inert for the common single-file shape.
 #[test]
 fn single_file_assoc_call_unaffected_by_fix17() {
     let main = "\
@@ -2748,7 +2748,7 @@ pub struct Point {
 
 #[test]
 fn leaf_struct_assoc_still_wins_over_sibling_file() {
-    // FIX-3 regression guard: `lib::Point::new()` where `lib.inf` defines a
+    // Regression guard: `lib::Point::new()` where `lib.inf` defines a
     // `struct Point` *and* a sibling `lib/Point.inf` exists. Here `Point` is the
     // second-to-last segment with a single trailing `new`, so the type
     // interpretation is viable and the struct's associated `new` wins (returns 1),
@@ -3111,14 +3111,14 @@ pub fn run() -> i32 {
 }
 
 // =====================================================================
-// FIX-18 Family 1 — the cross-file descent gate must not over-reject legitimate
-// resolution. These compile AND run through Wasmtime, so they pin not only that
-// the gate admits the hop but that the resolved target is the right one (#63).
+// The cross-file descent gate must not over-reject legitimate resolution. These
+// compile AND run through Wasmtime, so they pin not only that the gate admits the
+// hop but that the resolved target is the right one (#63).
 // The rejection / closure-independence / diagnostic-quality halves live in the
 // type-checker matrix; here we prove the no-over-rejection controls execute.
 // =====================================================================
 
-/// FIX-14 leaf-type-wins with the sibling file present: `main` imports the parent
+/// Leaf-type-wins with the sibling file present: `main` imports the parent
 /// file `a::b::c` directly, so the bound name anchors INSIDE `a::b::c` and the leaf
 /// `Node` is the struct defined there — no cross-file hop, so the descent gate is
 /// never consulted, and the sibling `a/b/c/Node.inf` must not shadow the type. The
@@ -3221,8 +3221,8 @@ pub fn deep() -> i32 {
 }
 
 // =====================================================================
-// FIX-19b — the viability-gated type-shadow break must resolve the RIGHT target,
-// not merely accept. These compile AND run through Wasmtime so the resolved value
+// The viability-gated type-shadow break must resolve the RIGHT target, not merely
+// accept. These compile AND run through Wasmtime so the resolved value
 // distinguishes the sub-file's free fn from a same-named struct's assoc fn (#63).
 // =====================================================================
 
@@ -3230,7 +3230,7 @@ pub fn deep() -> i32 {
 /// intermediate segment) and `lib/geom.inf` defines the free `mk` returning a
 /// `Point`. `mk` is not an assoc of `struct geom`, so the walk consumes `geom` as
 /// the sub-file and resolves the free `mk`; `p.x` (9) + `lib::helper()` (1) = 10.
-/// Before FIX-19b this was rejected as `undefined function lib::geom::mk`.
+/// Without the viability gate this is rejected as `undefined function lib::geom::mk`.
 #[test]
 fn intermediate_struct_shadow_resolves_free_fn_runs() {
     let main = "\
@@ -3351,7 +3351,7 @@ pub fn deep() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run"), 1);
 }
 
-/// The flipped member-miss case (FIX-19b): `lib::Point::missing()` where
+/// The member-miss case: `lib::Point::missing()` where
 /// `struct Point` has no `missing` but the sibling `lib/Point.inf` does. The type
 /// interpretation is not viable (missing is not an assoc of Point), so the walk
 /// consumes `Point` as the sub-file namespace and resolves the sibling's free

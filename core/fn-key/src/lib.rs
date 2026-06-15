@@ -328,11 +328,11 @@ mod tests {
         );
     }
 
-    /// FIX-19a: the spec fold is non-injective (`[lib,checks]+S` and
-    /// `[lib_checks]+S` both render `lib_checks_S`), so spec identity must live in
-    /// the structured key, not the folded string. Two such files must produce
-    /// *distinct* keys (or a recursive spec function in one would have its
-    /// call-graph self-edge masked by a same-folded sibling, escaping A035).
+    /// The spec fold is non-injective (`[lib,checks]+S` and `[lib_checks]+S` both
+    /// render `lib_checks_S`), so spec identity must live in the structured key,
+    /// not the folded string. Two such files must produce *distinct* keys (or a
+    /// recursive spec function in one would have its call-graph self-edge masked by
+    /// a same-folded sibling, escaping the recursion check).
     #[test]
     fn spec_key_distinguishes_files_that_fold_to_the_same_name() {
         let nested = FnKey::spec_free_folded(&path(&["lib", "checks"]), "S", "rec");
