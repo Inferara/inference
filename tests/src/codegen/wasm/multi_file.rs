@@ -1694,6 +1694,110 @@ pub fn make() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "entry"), 2);
 }
 
+/// FIX-21: a same-named parent struct whose only matching member is an INSTANCE
+/// method must NOT pre-empt the sub-file namespace segment. `lib` defines
+/// `struct geom` with an instance `mk(self)`, but `lib::geom::mk` is a free fn in
+/// the sub-file `lib/geom.inf`. `lib::geom::mk()` is an associated-style call: an
+/// instance method can never satisfy it, so the viability probe must reject the
+/// type-shadow break and consume `geom` as the sub-file namespace, resolving the
+/// free `mk` (77). Before FIX-21 the instance method was wrongly treated as viable
+/// and the call was rejected as "instance method requires a receiver".
+#[test]
+fn instance_method_shadow_resolves_sub_file_free_fn() {
+    let main = "\
+use lib;
+use lib::geom;
+
+pub fn entry() -> i32 {
+    let r: lib::geom::Widget = lib::geom::mk();
+    return r.size();
+}
+";
+    let lib = "\
+pub struct geom {
+    junk: i32;
+
+    pub fn mk(self) -> i32 {
+        return 1;
+    }
+}
+
+pub fn unused() -> i32 {
+    return 0;
+}
+";
+    let lib_geom = "\
+pub struct Widget {
+    s: i32;
+
+    pub fn size(self) -> i32 {
+        return self.s;
+    }
+}
+
+pub fn mk() -> Widget {
+    return Widget { s: 77 };
+}
+";
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], lib_geom),
+    ]);
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "entry"), 77);
+}
+
+/// FIX-21 closure-independence: the same `lib::geom::mk()` resolves to the sub-file
+/// free `mk` (77) whether or not the unrelated `use lib;` (which drags the
+/// same-named `struct geom` into scope) is present — the instance method must
+/// never flip the resolution. Companion to
+/// [`instance_method_shadow_resolves_sub_file_free_fn`] (the WITH-`use lib;` half).
+#[test]
+fn instance_method_shadow_resolution_is_closure_independent() {
+    let main = "\
+use lib::geom;
+
+pub fn entry() -> i32 {
+    let r: lib::geom::Widget = lib::geom::mk();
+    return r.size();
+}
+";
+    let lib = "\
+pub struct geom {
+    junk: i32;
+
+    pub fn mk(self) -> i32 {
+        return 1;
+    }
+}
+
+pub fn unused() -> i32 {
+    return 0;
+}
+";
+    let lib_geom = "\
+pub struct Widget {
+    s: i32;
+
+    pub fn size(self) -> i32 {
+        return self.s;
+    }
+}
+
+pub fn mk() -> Widget {
+    return Widget { s: 77 };
+}
+";
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], lib_geom),
+    ]);
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "entry"), 77);
+}
+
 /// Struct-wins-with-parent: the companion to the flip pin. When the accessing
 /// file DOES import the parent (`use lib;`), the walked-into parent's same-named
 /// `struct Point` correctly pre-empts the sibling file at the tail —

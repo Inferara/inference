@@ -4351,14 +4351,17 @@ mod tests {
 
     /// LEAK-CLOSED F5 — free function call where the parent file ALSO defines a
     /// colliding `struct b`. `main` imports only `a` and calls `a::b::deep()`, a
-    /// free fn in the un-imported sibling `a/b.inf`. Because `a` defines `struct b`
-    /// AND `main` imported `a`, the tail type-precedence (FIX-17b) claims the path
-    /// as `a`'s `struct b` associated fn `deep`, which does not exist — so the
-    /// rejection is "undefined function", NOT a missing-import hint, and the
-    /// sibling `a/b.inf::deep` (4242) is correctly never reached. The missing-import
-    /// hint would be wrong here: the file *did* import `a` and `b` is a visible type
-    /// in it. The pure-namespace leak (no colliding struct) is pinned by
-    /// [`leak_f5b_parent_import_pure_namespace_free_fn_rejected`].
+    /// free fn in the un-imported sibling `a/b.inf`. The VERDICT is unchanged and
+    /// closure-independent: `b::deep` is not a viable associated access on `struct b`
+    /// (no such method), so the resolver consumes `b` as the sub-file namespace and
+    /// the descent gate rejects the un-imported `a::b` — the sibling `a/b.inf::deep`
+    /// (4242) is never reached. The DIAGNOSTIC is the missing-import hint naming
+    /// `a::b` (the precise, parseable fix — adding `use a::b;` compiles): the
+    /// intermediate `struct b` no longer SUPPRESSES the hint into a bare "undefined
+    /// function". `a::b` *is* a real un-imported namespace, so the hint is honest,
+    /// and this is now identical to the pure-namespace
+    /// [`leak_f5b_parent_import_pure_namespace_free_fn_rejected`] — the incidental
+    /// `struct b` changes neither verdict nor message.
     #[test]
     fn leak_f5_parent_import_does_not_reach_sibling_free_fn() {
         let msg = assert_err(&[
@@ -4371,8 +4374,8 @@ mod tests {
             (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
         ]);
         assert!(
-            msg.contains("undefined function") && msg.contains("a::b::deep"),
-            "the parent's `struct b` claims `a::b::deep` as a struct-assoc with no such method; the sibling free fn must not be reached, got: {msg}"
+            msg.contains("namespace `a::b` is not imported") && msg.contains("use a::b;"),
+            "the un-imported sibling `a/b.inf::deep` must not be reached, and the hint must name the real un-imported namespace `a::b` (the `struct b` must not suppress it into a bare undefined-function error), got: {msg}"
         );
     }
 
@@ -4418,6 +4421,139 @@ mod tests {
         assert!(
             msg.contains("namespace `lib::geom::sub` is not imported"),
             "a qualified type + assoc into an un-imported grandchild must be rejected, got: {msg}"
+        );
+    }
+
+    // ---- FIX-20 diagnostic polish: the missing-import hint is honest and
+    //      parseable even when the target sub-file is OUTSIDE the compile closure
+    //      (uncompiled). The closure boundary is the line between a Confident hint
+    //      ("add use X;", the file is proven to exist) and a Hedged best-guess
+    //      ("if X names a source file, import it with use X;"); a path that descends
+    //      past an imported ancestor into an uncompiled file must get the Hedged
+    //      hint naming the longest plausible FILE namespace, never a false
+    //      "unknown type", a bare "undefined function", or an unparseable
+    //      type-carrying `use`. Every verdict here is unchanged (still rejected);
+    //      only the message improves. ----
+
+    /// FIX-20 — value path into an UNCOMPILED sibling (only the parent `lib` is
+    /// imported; `lib/b.inf` is in no closure). The hint must name the real file
+    /// namespace `lib::b` and be parseable — never the type-carrying
+    /// `use lib::b::Point;` (the whole type-access tail `Point::make` is stripped),
+    /// and never a bare "undefined function".
+    #[test]
+    fn fix20_value_path_uncompiled_sibling_hint_names_file_namespace() {
+        let msg = assert_err(&[
+            (vec![], "use lib; pub fn entry() -> i32 { return lib::b::Point::make(); }"),
+            (vec!["lib"], "pub struct b { x: i32; }"),
+            (vec!["lib", "b"], "pub struct Point { x: i32; pub fn make() -> i32 { return 7; } }"),
+        ]);
+        assert!(
+            msg.contains("`lib::b`") && msg.contains("use lib::b;"),
+            "the hint must name the file namespace lib::b, got: {msg}"
+        );
+        assert!(
+            !msg.contains("use lib::b::Point;"),
+            "the hint must strip the whole type-access tail (never suggest importing a type), got: {msg}"
+        );
+    }
+
+    /// FIX-20 — following the emitted `use lib::b;` makes the program type-check.
+    /// Proves the suggested import is parseable and resolves (the copy-pasteable
+    /// contract).
+    #[test]
+    fn fix20_value_path_hint_applies_and_resolves() {
+        assert_ok(&[
+            (vec![], "use lib; use lib::b; pub fn entry() -> i32 { return lib::b::Point::make(); }"),
+            (vec!["lib"], "pub struct b { x: i32; }"),
+            (vec!["lib", "b"], "pub struct Point { x: i32; pub fn make() -> i32 { return 7; } }"),
+        ]);
+    }
+
+    /// FIX-20 — a TYPE annotation naming a type in an UNCOMPILED sibling must NOT
+    /// emit the false "unknown type `lib::b::Point`" (the type exists, it is merely
+    /// un-imported); it gets the same honest missing-import hint as the value path.
+    #[test]
+    fn fix20_type_annotation_uncompiled_not_false_unknown_type() {
+        let msg = assert_err(&[
+            (vec![], "use lib; pub fn mk() -> i32 { return 0; } pub fn entry() -> i32 { let p: lib::b::Point = mk(); return p; }"),
+            (vec!["lib"], "pub struct b { x: i32; }"),
+            (vec!["lib", "b"], "pub struct Point { x: i32; }"),
+        ]);
+        assert!(
+            msg.contains("`lib::b`") && msg.contains("use lib::b;"),
+            "the type-annotation path must name the missing namespace lib::b, got: {msg}"
+        );
+        assert!(
+            !msg.contains("unknown type `lib::b::Point`"),
+            "the type EXISTS (merely un-imported), so the false 'unknown type' must be gone, got: {msg}"
+        );
+    }
+
+    /// FIX-20 — following the type-annotation hint type-checks.
+    #[test]
+    fn fix20_type_annotation_hint_applies_and_resolves() {
+        assert_ok(&[
+            (vec![], "use lib; use lib::b; pub fn entry() -> i32 { let p: lib::b::Point = lib::b::Point { x: 5 }; return p.x; }"),
+            (vec!["lib"], "pub struct b { x: i32; }"),
+            (vec!["lib", "b"], "pub struct Point { x: i32; }"),
+        ]);
+    }
+
+    /// FIX-20 control — an unknown leaf in a namespace the file DID import is NOT a
+    /// missing import: it defers to the precise "undefined function" error, never a
+    /// spurious namespace hint. (`deep_key == namespace_portion` suppression.)
+    #[test]
+    fn fix20_unknown_leaf_in_imported_namespace_defers() {
+        let msg = assert_err(&[
+            (vec![], "use geo; pub fn entry() -> i32 { return geo::Nope(); }"),
+            (vec!["geo"], "pub fn area() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("undefined function") && msg.contains("geo::Nope"),
+            "an unknown leaf in an imported namespace must defer to undefined-function, got: {msg}"
+        );
+        assert!(
+            !msg.contains("is not an imported namespace"),
+            "must not emit a spurious missing-import hint for an imported namespace, got: {msg}"
+        );
+    }
+
+    /// FIX-20 over-confidence control — a path into a namespace that does NOT exist
+    /// on disk (a genuine typo, `lib/nope.inf` absent) must get the HEDGED best-guess
+    /// ("if `lib::nope` names a source file"), never a Confident "namespace
+    /// `lib::nope` is not imported; add" claim it provably exists.
+    #[test]
+    fn fix20_absent_deeper_namespace_is_hedged_not_confident() {
+        let msg = assert_err(&[
+            (vec![], "use lib; pub fn entry() -> i32 { return lib::nope::x(); }"),
+            (vec!["lib"], "pub fn here() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("if `lib::nope` names a source file"),
+            "an absent deeper namespace must be hedged, got: {msg}"
+        );
+        assert!(
+            !msg.contains("namespace `lib::nope` is not imported; add"),
+            "must not confidently claim an unproven namespace exists, got: {msg}"
+        );
+    }
+
+    /// FIX-21 — the instance-method shadow must not REOPEN a leak. With only the
+    /// parent `use lib;` (NOT `use lib::geom;`), `lib::geom::mk()` still consumes
+    /// `geom` as the sub-file namespace (the instance `mk(self)` is not a viable
+    /// associated-access), and the descent gate then rejects the un-imported
+    /// `lib::geom` — the sub-file's free `mk` is not silently reached. The
+    /// loosened viability fixes the over-rejection without opening a leak.
+    #[test]
+    fn fix21_instance_method_shadow_leak_rejected_when_subfile_unimported() {
+        let msg = assert_err(&[
+            (vec![], "use lib; pub fn entry() -> i32 { let r: lib::geom::Widget = lib::geom::mk(); return r.size(); }"),
+            (vec!["lib"], "pub struct geom { junk: i32; pub fn mk(self) -> i32 { return 1; } }"),
+            (vec!["lib", "geom"], "pub struct Widget { s: i32; pub fn size(self) -> i32 { return self.s; } } pub fn mk() -> Widget { return Widget { s: 77 }; }"),
+        ]);
+        assert!(
+            msg.contains("`lib::geom`"),
+            "the un-imported sub-file must be reported (no leak), naming lib::geom, got: {msg}"
         );
     }
 

@@ -2661,10 +2661,24 @@ impl TypeChecker {
             self.symbol_table
                 .resolve_method_in_namespace(&type_name, &method_name, ns_scope, from_scope)
         else {
-            self.push_error_dedup(TypeCheckError::UndefinedFunction {
-                name: path,
-                location,
-            });
+            // The method does not resolve on the same-named struct. When the path
+            // instead descends into a sub-file the accessing file never imported —
+            // `a::b::deep` where `a` defines `struct b` *and* a sibling `a/b.inf`
+            // exists, but only `use a;` was written — committing a bare
+            // `undefined function` here hides the real fix (the missing `use a::b;`).
+            // Consult the single missing-import diagnostic first; fall to the bare
+            // error only when it is not a missing-import shape.
+            if let Some(diagnosis) = self
+                .symbol_table
+                .unimported_namespace_prefix(&segments, from_scope)
+            {
+                self.report_unimported_namespace(diagnosis, &segments, location);
+            } else {
+                self.push_error_dedup(TypeCheckError::UndefinedFunction {
+                    name: path,
+                    location,
+                });
+            }
             for arg in call_args {
                 self.infer_expression(arg.1, ctx);
             }

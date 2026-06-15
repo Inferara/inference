@@ -2449,19 +2449,51 @@ impl SymbolTable {
         // child file scopes only), and the number of segments that walk consumed.
         let (deep_id, k) = self.deepest_namespace_scope_structural(path, from_scope_id)?;
         let deep_key = self.module_path_of_scope(deep_id);
-        // The file already reads `deep_key`'s surface through its own `use` — so the
-        // path is not a missing-import leak. This single equality check (the same
-        // predicate the terminal surface gate uses) resolves three otherwise-
-        // confounded cases at once: a leaf that is genuinely unknown in an imported
-        // namespace (`geo::Nope` with `use geo;`) defers to the unknown-leaf error; a
-        // function reached through an intermediate plain `use` (not `pub use`) defers
-        // to the call site's re-export hint (the children-only walk stops at the
-        // imported re-exporting file); and a path the file simply imported already is
-        // never flagged. Importing an *ancestor* (`use a;` for `a::b`) does not read
-        // the descendant's surface, so it does not suppress — that is the very leak
-        // the diagnostic reports.
+        // The diagnostic suppresses (defers to a different, more precise error) only
+        // when the file actually reaches `deep_key` (imports it) AND one of two
+        // shapes holds. When `deep_key` is *not* imported, the path is a genuine
+        // missing-import leak the hint must report — importing an *ancestor*
+        // (`use a;` for `a::b`) does not read the descendant's surface, so it does
+        // not suppress (that is the very leak the FIX-18/19 gates close).
         if self.file_imports_namespace_key(from_scope_id, &deep_key) {
-            return None;
+            // (a) The leaf is read *directly* in the imported `deep_key` (the walk
+            // consumed every segment but the leaf). A genuinely-unknown leaf there
+            // (`geo::Nope` with `use geo;`, `math::nope` with `use math;`) is not a
+            // missing import — defer to the unknown-leaf / undefined-fn diagnostic.
+            if k == path.len() - 1 {
+                return None;
+            }
+            // (b) The next segment names something already present on `deep_key`'s
+            // surface — a sub-file, a namespace or item import, or a local
+            // definition. The path reaches *into* imported territory, so the failure
+            // is downstream (a re-export blocked by a plain `use`, an item-imported
+            // enum reached as a namespace, a member that does not exist), not a
+            // missing file import. Defer to the more precise diagnostic for that
+            // shape (`math::arith::add` where `math` plain-imports `lib::arith`;
+            // `lib::mid::Color::Red` where `mid` item-imports `Color`).
+            //
+            // EXCEPT a same-named struct/enum at `path[k]` that the path descends
+            // *past* non-viably: when `path[k]` is a type defined in `deep` but the
+            // remaining suffix is not a viable type-access on it (the same
+            // [`Self::type_shadow_viable_for_suffix`] decision the resolver applies
+            // in FIX-19b), the resolver consumes `path[k]` as a sub-file namespace
+            // and descends into a deeper, *uncompiled* file — so the leak is a
+            // missing import of that deeper file, which the shadowing type must not
+            // mask. `lib::b::Point::make` where `lib` defines `struct b` and the
+            // un-imported `lib/b.inf` defines `Point::make`: `b::Point::make` is not
+            // a viable access on `struct b`, so the hint must name `lib::b`, not
+            // suppress. A viable type-access (`lib::Point::new`) or a non-type
+            // surface member still defers.
+            let descends_past_shadow_type = self.scope_defines_type(&path[k], deep_id)
+                && !self.type_shadow_viable_for_suffix(path, k, deep_id, from_scope_id);
+            if self.scope_surface_contains(deep_id, &path[k]) && !descends_past_shadow_type {
+                return None;
+            }
+            // Otherwise `deep_key` is imported but the path descends past it into a
+            // segment absent from its surface — the deeper target file is uncompiled
+            // (outside the closure). Its existence cannot be proven, so fall through
+            // to the Hedged best-guess below rather than suppressing into a
+            // misleading "undefined function" / "unknown type".
         }
         // The deepest real file is `deep_key`, and it is not imported. The fix is
         // exact (`use {deep_key}`, always a parseable file namespace) when the walk
@@ -2474,7 +2506,9 @@ impl SymbolTable {
         // unlocks (`lib::b::Point::make`), not just the leaf member.
         let namespace_portion = path[..path.len() - 1].join("::");
         if deep_key == namespace_portion
-            || (k < path.len() && self.scope_defines_type(&path[k], deep_id))
+            || (k < path.len()
+                && self.scope_defines_type(&path[k], deep_id)
+                && self.type_shadow_viable_for_suffix(path, k, deep_id, from_scope_id))
         {
             return Some(UnimportedNamespace::Confident {
                 namespace: deep_key,
@@ -2533,6 +2567,26 @@ impl SymbolTable {
             }
         }
         Some((current.borrow().id, consumed))
+    }
+
+    /// Whether `name` appears anywhere on the *surface* of scope `scope_id` — as a
+    /// child file scope, a resolved import (namespace or item, re-exported or plain),
+    /// or a local definition. Used by the missing-import diagnostic to decide
+    /// whether a path that descends past an imported namespace reaches *into* that
+    /// namespace's surface (so the failure is downstream — a blocked re-export, an
+    /// item reached as a namespace, an unknown member — and the missing-import hint
+    /// must defer) or names a genuinely-absent deeper file (so the uncompiled-target
+    /// Hedged best-guess applies). It is intentionally permissive: any presence at
+    /// all means "not a missing file import".
+    #[must_use = "this is a pure check with no side effects"]
+    fn scope_surface_contains(&self, scope_id: u32, name: &str) -> bool {
+        let Some(scope) = self.get_scope(scope_id) else {
+            return false;
+        };
+        let scope = scope.borrow();
+        scope.children.iter().any(|c| c.borrow().name == name)
+            || scope.resolved_imports.contains_key(name)
+            || scope.lookup_symbol_local(name).is_some()
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -3257,16 +3311,20 @@ impl SymbolTable {
     /// - the type is the **leaf** (`type_index == path.len() - 1`): `lib::Point`
     ///   in type position, trivially viable; or
     /// - the type is followed by **exactly one** trailing member that is a real
-    ///   associated function of that struct, or a real variant of that enum
-    ///   (`Type::assoc`, `Enum::Variant`).
+    ///   **associated function** (no `self`) of that struct, or a real variant of
+    ///   that enum (`Type::assoc`, `Enum::Variant`).
     ///
-    /// Any other suffix — a deeper path, or a single member the type does not have —
-    /// is *not* a type-access, so the segment must be consumed as a sub-file
-    /// namespace instead. Without this check, the type-shadow break fired on the
-    /// mere existence of a same-named struct, turning `lib::geom::mk()` (where
-    /// `lib` defines `struct geom` but `mk` is a free fn in the sub-file
-    /// `lib/geom.inf`) into `lib::(struct geom)::mk` — an undefined associated
-    /// function — instead of resolving the sub-file's free `mk` (#63).
+    /// Any other suffix — a deeper path, a single member the type does not have, or
+    /// an **instance** method (which needs a receiver and so is not a valid
+    /// `Type::member()` associated-access) — is *not* a type-access, so the segment
+    /// must be consumed as a sub-file namespace instead. Without this check, the
+    /// type-shadow break fired on the mere existence of a same-named struct, turning
+    /// `lib::geom::mk()` (where `lib` defines `struct geom` but `mk` is a free fn in
+    /// the sub-file `lib/geom.inf`) into `lib::(struct geom)::mk` — an undefined or
+    /// receiver-requiring member — instead of resolving the sub-file's free `mk`.
+    /// Requiring an *associated* function (not an instance method) is what keeps
+    /// `geom::mk(self)` from pre-empting the sub-file: an instance method could
+    /// never satisfy `Type::mk()` anyway, so the break must not fire on it (#63).
     ///
     /// The viability probe reuses the *same* lookups the consuming handlers run
     /// ([`Self::resolve_method_in_namespace`], [`Self::resolve_enum_in_namespace`]),
@@ -3289,7 +3347,7 @@ impl SymbolTable {
         let member = &path[type_index + 1];
         if self
             .resolve_method_in_namespace(type_name, member, ns_scope, from_scope_id)
-            .is_some()
+            .is_some_and(|m| !m.is_instance_method())
         {
             return true;
         }
