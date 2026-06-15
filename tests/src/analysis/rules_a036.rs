@@ -1012,4 +1012,180 @@ mod analysis_rules_tests {
             );
         }
     }
+
+    // --- Part E (#63): cross-file struct-associated-function chains -------------
+    //
+    // The structured `FnKey` that fixed the A035 sibling-file collision also keys
+    // A036's frame map. A cross-file chain through struct associated functions
+    // (rather than free functions) must have its cumulative depth summed: each
+    // assoc-fn node is keyed `Method`, distinct from any same-named sibling-file
+    // free fn, so the chain's edges resolve to the right nodes and the budget is
+    // checked across files.
+
+    /// A cross-file chain through struct associated functions
+    /// `main -> A::make -> lib::b::B::make`, each holding a ~40 KB frame, summing
+    /// past the budget. Must be rejected and name the chain across files.
+    #[test]
+    fn a036_cross_file_assoc_fn_over_budget_chain_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn main() -> i32 { return lib::a::A::make(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b;
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return lib::b::B::make();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub struct B {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib.a.A.make") && msg.contains("lib.b.B.make"),
+            "diagnostic should name the cross-file assoc-fn chain, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
+
+    /// The same cross-file assoc-fn call shape with small frames stays under
+    /// budget, so A036 must not fire — the chain is recorded but bounded.
+    #[test]
+    fn a036_cross_file_assoc_fn_under_budget_chain_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::a;
+                    pub fn main() -> i32 { return lib::a::A::make(); }
+                "#,
+            ),
+            (
+                vec!["lib", "a"],
+                r#"
+                    use lib::b;
+                    pub struct A {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i32; 16] = @;
+                                let x: i32 = arr[0];
+                            }
+                            return lib::b::B::make();
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib", "b"],
+                r#"
+                    pub struct B {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            forall {
+                                let arr: [i32; 16] = @;
+                                let x: i32 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_stack_depth_exceeded_multi(files),
+            "a small cross-file assoc-fn chain must not trip A036"
+        );
+    }
+
+    // --- Part F (#63): injective spec key keeps a heavy spec node visible -------
+    //
+    // A036 keys its frame map by `FnKey` through the shared call graph. Before the
+    // spec key became injective, a heavy spec function in `lib/checks::S` and a
+    // tiny same-folded sibling in `lib_checks::S` shared one key; the last-wins
+    // index could keep the tiny node, under-counting the heavy chain so it slipped
+    // under budget. The injective key keeps both nodes, so the heavy over-budget
+    // chain is still detected.
+
+    /// A heavy spec chain `S::heavy -> S::tail` (~80 KB summed) in `lib/checks`,
+    /// shadowed by a tiny same-folded sibling `lib_checks::S`. The over-budget
+    /// chain must still be rejected.
+    #[test]
+    fn a036_spec_over_budget_chain_with_folding_collision_sibling_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn heavy() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return tail();
+                        }
+                        fn tail() -> i32 {
+                            forall {
+                                let arr: [i64; 5000] = @;
+                                let x: i64 = arr[0];
+                            }
+                            return 0;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        fn heavy() -> i32 { return 0; }
+                        fn tail() -> i32 { return 0; }
+                    }
+                "#,
+            ),
+        ];
+        let diag = stack_depth_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.heavy") && msg.contains("lib_checks_S.tail"),
+            "the heavy spec chain must be detected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A036");
+    }
 }

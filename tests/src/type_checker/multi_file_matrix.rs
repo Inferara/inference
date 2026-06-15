@@ -3652,21 +3652,27 @@ mod tests {
         ]);
     }
 
-    /// The negative complement: when the qualified path's leaf names a member that
-    /// the struct lacks, resolution does *not* silently fall back to the same-named
-    /// sibling file's free function. `lib::Point::missing()` is rejected even though
-    /// `lib/Point.inf` defines a `missing` — the struct's identity is what the path
-    /// addresses (#63).
+    /// The remaining-path-aware complement (FIX-19b): a same-named parent struct
+    /// pre-empts the same-named sibling file *only when the trailing member is a
+    /// real associated function* of that struct. `lib::Point::missing()` where
+    /// `struct Point` has no `missing` is therefore NOT the struct's (nonexistent)
+    /// associated `missing`; the type interpretation is not viable, so the walk
+    /// consumes `Point` as the sub-file namespace and resolves the sibling file's
+    /// free `missing` (9). The struct still wins whenever the member it carries is
+    /// addressed (see [`qualified_path_prefers_struct_over_same_named_sibling_file`],
+    /// whose `new` is a real assoc) — the precedence is conditioned on viability,
+    /// not on the struct's mere existence (#63).
     #[test]
-    fn qualified_path_struct_member_miss_does_not_fall_back_to_sibling_file() {
-        let msg = assert_err(&[
+    fn qualified_path_struct_member_miss_falls_back_to_sibling_free_fn() {
+        let ctx = try_type_check_multi_file(&[
             (vec![], "use lib; use lib::Point; pub fn main() -> i32 { return lib::Point::missing(); }"),
             (vec!["lib"], "pub struct Point { v: i32; pub fn new() -> i32 { return 1; } }"),
             (vec!["lib", "Point"], "pub fn missing() -> i32 { return 9; }"),
         ]);
         assert!(
-            msg.contains("missing"),
-            "a struct member miss must not fall back to the sibling file, got: {msg}"
+            ctx.is_ok(),
+            "a struct member miss must resolve the sibling file's free fn, got: {:?}",
+            ctx.err().map(|e| e.to_string())
         );
     }
 
@@ -4263,4 +4269,710 @@ mod tests {
         );
     }
 
+    // =====================================================================
+    // FIX-18 Family 1 — cross-file namespace-descent import leak (#63).
+    //
+    // A file that imports only a PARENT namespace must not reach a deeper,
+    // UN-imported sibling file's surface. The leak anchored via the bound-name
+    // branch (`use a;` binds `a`), so the per-segment descent
+    // (`next_namespace_scope(a, "b")`) crossed from file `a` into the child file
+    // `a::b` with no import check. The descent gate now admits a cross-file hop
+    // only when the accessing file's own manifest reaches the destination
+    // (`file_imports_namespace_at_or_under`), so the leak resolves to nothing and
+    // falls to the missing-import diagnostic. Every test constructs BOTH sides and
+    // crosses the boundary; the byte-identical accessing file must give the same
+    // verdict regardless of which other files are present (closure-independence).
+    // =====================================================================
+
+    /// LEAK-CLOSED F1 — type annotation + struct literal. `main` imports only the
+    /// parent `a`, then names `a::b::Type` (a struct in the un-imported sibling
+    /// file `a/b.inf`). Before the fix this compiled and returned 161; now the
+    /// descent from file `a` into file `a::b` is gated off and the path is rejected
+    /// as an unimported namespace.
+    #[test]
+    fn leak_f1_parent_import_does_not_reach_sibling_type() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { let t: a::b::Type = a::b::Type{val:161}; return t.val; }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; } pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub struct Type { val: i32; }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `a::b` is not imported"),
+            "the parent-only import must be rejected with a missing-import hint naming `a::b`, got: {msg}"
+        );
+    }
+
+    /// LEAK-CLOSED F2 — `Type::assoc()` two levels deep. `main` imports `a::b` but
+    /// reaches `a::b::c::Type::make()`, descending into the un-imported sibling
+    /// `a/b/c.inf`. The descent from file `a::b` into file `a::b::c` is gated off.
+    #[test]
+    fn leak_f2_intermediate_import_does_not_reach_grandchild_assoc() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a::b; use dragger; pub fn main() -> i32 { let t: a::b::c::Type = a::b::c::Type::make(); return t.val; }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; }"),
+            (vec!["a", "b"], "pub struct c { dummy: i32; }"),
+            (
+                vec!["a", "b", "c"],
+                "pub struct Type { val: i32; pub fn make() -> Type { return Type{val:999}; } }",
+            ),
+            (vec!["dragger"], "use a::b::c; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `a::b::c` is not imported"),
+            "reaching a grandchild file's assoc fn must be rejected, hint naming `a::b::c`, got: {msg}"
+        );
+    }
+
+    /// LEAK-CLOSED F3 — three directory levels. `main` imports `lib::geom` but
+    /// reaches `lib::geom::sub::Deep` in the un-imported `lib/geom/sub.inf`.
+    #[test]
+    fn leak_f3_three_level_parent_does_not_reach_grandchild_type() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; use dragger; pub fn main() -> i32 { let t: lib::geom::sub::Deep = lib::geom::sub::Deep{z:424}; return t.z; }",
+            ),
+            (vec!["lib", "geom"], "pub struct sub { dummy: i32; } pub fn area() -> i32 { return 0; }"),
+            (vec!["lib", "geom", "sub"], "pub struct Deep { z: i32; }"),
+            (vec!["dragger"], "use lib::geom::sub; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom::sub` is not imported"),
+            "a three-level parent-only import must be rejected, hint naming `lib::geom::sub`, got: {msg}"
+        );
+    }
+
+    /// LEAK-CLOSED F5 — free function call where the parent file ALSO defines a
+    /// colliding `struct b`. `main` imports only `a` and calls `a::b::deep()`, a
+    /// free fn in the un-imported sibling `a/b.inf`. Because `a` defines `struct b`
+    /// AND `main` imported `a`, the tail type-precedence (FIX-17b) claims the path
+    /// as `a`'s `struct b` associated fn `deep`, which does not exist — so the
+    /// rejection is "undefined function", NOT a missing-import hint, and the
+    /// sibling `a/b.inf::deep` (4242) is correctly never reached. The missing-import
+    /// hint would be wrong here: the file *did* import `a` and `b` is a visible type
+    /// in it. The pure-namespace leak (no colliding struct) is pinned by
+    /// [`leak_f5b_parent_import_pure_namespace_free_fn_rejected`].
+    #[test]
+    fn leak_f5_parent_import_does_not_reach_sibling_free_fn() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; } pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("undefined function") && msg.contains("a::b::deep"),
+            "the parent's `struct b` claims `a::b::deep` as a struct-assoc with no such method; the sibling free fn must not be reached, got: {msg}"
+        );
+    }
+
+    /// LEAK-CLOSED F5b — the pure-namespace free-fn leak: same shape as F5 but the
+    /// parent file defines NO colliding `struct b`, so `a::b` is unambiguously the
+    /// sub-file. `main` imports only `a` (not `a::b`), so the descent gate rejects
+    /// the child-descent hop and the path falls to the missing-import diagnostic
+    /// naming the un-imported `a::b`. This is the path F5's own fixture preempts via
+    /// type-precedence.
+    #[test]
+    fn leak_f5b_parent_import_pure_namespace_free_fn_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `a::b` is not imported") && msg.contains("use a::b;"),
+            "a free-fn call into an un-imported sibling (no colliding struct) must name the missing `a::b`, got: {msg}"
+        );
+    }
+
+    /// LEAK-CLOSED F9 — qualified type + assoc fn three levels deep. `main`
+    /// imports `lib::geom` and reaches `lib::geom::sub::Secret::reveal()`.
+    #[test]
+    fn leak_f9_parent_import_does_not_reach_grandchild_qualified_assoc() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; use other; pub fn main() -> i32 { let t: lib::geom::sub::Secret = lib::geom::sub::Secret::reveal(); return t.v; }",
+            ),
+            (vec!["lib", "geom"], "pub struct sub { v: i32; }"),
+            (
+                vec!["lib", "geom", "sub"],
+                "pub struct Secret { v: i32; pub fn reveal() -> Secret { return Secret{v:42}; } }",
+            ),
+            (vec!["other"], "use lib::geom::sub; pub fn o() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::geom::sub` is not imported"),
+            "a qualified type + assoc into an un-imported grandchild must be rejected, got: {msg}"
+        );
+    }
+
+    // ---- Closure-independence: the same accessing file gives the same verdict
+    //      with AND without the dragger/other file present. ----
+
+    /// F1 closure-independence: WITHOUT the dragger file, the byte-identical `main`
+    /// (importing only `a`) is still rejected — the verdict must not depend on
+    /// whether a third file imported `a::b`. Pair with
+    /// [`leak_f1_parent_import_does_not_reach_sibling_type`] (the WITH-dragger half).
+    #[test]
+    fn leak_f1_rejected_without_dragger_present() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; pub fn main() -> i32 { let t: a::b::Type = a::b::Type{val:161}; return t.val; }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; } pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub struct Type { val: i32; }"),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "the parent-only import must be rejected with or without a third file present"
+        );
+    }
+
+    /// F3 closure-independence: WITHOUT the dragger file, the byte-identical `main`
+    /// (importing only `lib::geom`) is still rejected. Pair with
+    /// [`leak_f3_three_level_parent_does_not_reach_grandchild_type`].
+    #[test]
+    fn leak_f3_rejected_without_dragger_present() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib::geom; pub fn main() -> i32 { let t: lib::geom::sub::Deep = lib::geom::sub::Deep{z:424}; return t.z; }",
+            ),
+            (vec!["lib", "geom"], "pub struct sub { dummy: i32; } pub fn area() -> i32 { return 0; }"),
+            (vec!["lib", "geom", "sub"], "pub struct Deep { z: i32; }"),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "the three-level parent-only import must be rejected with or without a third file present"
+        );
+    }
+
+    // ---- No over-rejection: legitimate cross-file resolution still type-checks. ----
+
+    /// FIX-14 leaf-type-wins, with the sibling file present: `main` imports the
+    /// parent file `a::b::c` directly (binding `c`), so the bound name anchors
+    /// INSIDE `a::b::c` and the leaf `Node` is the struct defined there — the
+    /// descent gate is never consulted (no cross-file hop), and the sibling
+    /// `a/b/c/Node.inf` must not shadow the type. Must type-check.
+    #[test]
+    fn no_over_reject_leaf_type_via_direct_parent_import() {
+        assert_ok(&[
+            (
+                vec![],
+                "use a::b::c; pub fn main() -> i32 { let n: a::b::c::Node = a::b::c::Node::make(); return n.v; }",
+            ),
+            (
+                vec!["a", "b", "c"],
+                "pub struct Node { v: i32; pub fn make() -> Node { return Node{v:7}; } }",
+            ),
+            (vec!["a", "b", "c", "Node"], "pub fn make() -> i32 { return 999; }"),
+        ]);
+    }
+
+    /// A deep namespace that IS properly imported resolves: `use lib::geom::sub;`
+    /// then `lib::geom::sub::deep()`. The prefix descent gate licenses the
+    /// pass-through hops `lib` and `lib::geom` (each a prefix of the import) to
+    /// reach the imported `lib::geom::sub`.
+    #[test]
+    fn no_over_reject_deep_namespace_properly_imported() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom::sub; pub fn main() -> i32 { return lib::geom::sub::deep(); }",
+            ),
+            (vec!["lib", "geom", "sub"], "pub fn deep() -> i32 { return 40; }"),
+        ]);
+    }
+
+    /// D1 long-form: `use lib::geom::sub;` licenses spelling the full
+    /// `lib::geom::sub::deep()` long form — the PREFIX descent predicate admits the
+    /// pass-through hops. (Identical body to the test above, named to pin D1 as a
+    /// distinct decision: importing the deepest namespace admits its long form.)
+    #[test]
+    fn no_over_reject_long_form_of_deep_import_licensed() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom::sub; pub fn main() -> i32 { return lib::geom::sub::deep(); }",
+            ),
+            (vec!["lib", "geom", "sub"], "pub fn deep() -> i32 { return 40; }"),
+        ]);
+    }
+
+    /// Parent AND child both imported: `use lib::geom;` and `use lib::geom::sub;`
+    /// together let the file reach both surfaces. Each `use` licenses its own
+    /// namespace; the descent gate admits both because each destination is
+    /// at-or-under one of the imports.
+    #[test]
+    fn no_over_reject_parent_and_child_both_imported() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::geom; use lib::geom::sub; pub fn main() -> i32 { return lib::geom::area() + lib::geom::sub::deep(); }",
+            ),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 2; }"),
+            (vec!["lib", "geom", "sub"], "pub fn deep() -> i32 { return 40; }"),
+        ]);
+    }
+
+    // ---- Diagnostic (findings 10/11/12): the suggested `use` is always a
+    //      parseable FILE namespace, never `use prefix::Type;`. ----
+
+    /// A `prefix::Type::assoc()` value path into an un-imported namespace must
+    /// suggest the FILE namespace (`use a::b;`), never the unparseable
+    /// `use a::b::Type;`. The structural diagnostic walk stops at the real file
+    /// `a::b` (where `Type` is defined), so the hint names `a::b`.
+    #[test]
+    fn diagnostic_assoc_into_unimported_namespace_suggests_file_namespace() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { return a::b::Type::make(); }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; }"),
+            (
+                vec!["a", "b"],
+                "pub struct Type { val: i32; pub fn make() -> i32 { return 7; } }",
+            ),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("add `use a::b;`") && !msg.contains("use a::b::Type;"),
+            "the assoc-into-unimported hint must suggest the parseable `use a::b;`, never `use a::b::Type;`, got: {msg}"
+        );
+    }
+
+    /// Follow the emitted suggestion verbatim: adding `use a::b;` to the rejected
+    /// program above makes it compile. This proves the suggested import is both
+    /// parseable and correct.
+    #[test]
+    fn diagnostic_suggested_use_when_added_compiles() {
+        assert_ok(&[
+            (
+                vec![],
+                "use a::b; pub fn main() -> i32 { return a::b::Type::make(); }",
+            ),
+            (vec!["a"], "pub struct b { dummy: i32; }"),
+            (
+                vec!["a", "b"],
+                "pub struct Type { val: i32; pub fn make() -> i32 { return 7; } }",
+            ),
+        ]);
+    }
+
+    // ---- Item-kind axis: the descent gate covers EVERY qualified resolver
+    //      consumer, not only fn/struct/assoc. Enum-variant and const value paths
+    //      are distinct resolver entry points (each was fixed separately in prior
+    //      rounds), so each is leak-tested and over-rejection-tested in its own
+    //      right through the bound-name parent-import descent. ----
+
+    /// LEAK-CLOSED, enum-variant path. `main` imports only `a` and names
+    /// `a::b::Color::Red`, an enum variant in the un-imported sibling `a/b.inf`.
+    /// The descent from file `a` into file `a::b` is gated off.
+    #[test]
+    fn leak_enum_variant_parent_import_does_not_reach_sibling() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { let c: a::b::Color = a::b::Color::Red; return 0; }",
+            ),
+            (vec!["a"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub enum Color { Red, Green }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `a::b` is not imported"),
+            "an enum-variant path into an un-imported sibling must be rejected naming `a::b`, got: {msg}"
+        );
+    }
+
+    /// No over-rejection, enum-variant path: with `a::b` imported the variant
+    /// resolves. Companion to the leak test, proving the gate admits the legitimate
+    /// enum-variant descent.
+    #[test]
+    fn no_over_reject_enum_variant_with_namespace_imported() {
+        assert_ok(&[
+            (
+                vec![],
+                "use a::b; pub fn main() -> i32 { let c: a::b::Color = a::b::Color::Red; return 0; }",
+            ),
+            (vec!["a"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub enum Color { Red, Green }"),
+        ]);
+    }
+
+    /// LEAK-CLOSED, const value path. `main` imports only `lib` and reads
+    /// `lib::vals::MAX`, a `pub const` in the un-imported sibling `lib/vals.inf`.
+    /// The const value path is its own resolver consumer; the descent into the
+    /// un-imported sibling is gated off.
+    #[test]
+    fn leak_const_parent_import_does_not_reach_sibling() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib; use dragger; pub fn main() -> i32 { return lib::vals::MAX; }",
+            ),
+            (vec!["lib"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["lib", "vals"], "pub const MAX: i32 = 10;"),
+            (vec!["dragger"], "use lib::vals; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib::vals` is not imported"),
+            "a const path into an un-imported sibling must be rejected naming `lib::vals`, got: {msg}"
+        );
+    }
+
+    /// No over-rejection, const value path: with `lib::vals` imported the const
+    /// resolves, including the pass-through hop through the `lib` directory.
+    #[test]
+    fn no_over_reject_const_with_namespace_imported() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::vals; pub fn main() -> i32 { return lib::vals::MAX; }",
+            ),
+            (vec!["lib", "vals"], "pub const MAX: i32 = 10;"),
+        ]);
+    }
+
+    // ---- Accessor axis: the FIX-18 descent leak from a NON-ENTRY accessor. The
+    //      gate keys on the accessing scope, and a non-entry file's parent chain
+    //      runs into the entry, so a non-entry accessor is a distinct code path. ----
+
+    /// LEAK-CLOSED from a non-entry accessor. `helper` (a non-entry file) imports
+    /// only the parent `a` and calls `a::b::deep()` in the un-imported sibling
+    /// `a/b.inf`; the entry merely calls `helper::go()`. The non-entry file's
+    /// descent into `a::b` must be gated off exactly as the entry's is — the
+    /// `entry`/`non-entry` distinction must not open a hole.
+    #[test]
+    fn leak_non_entry_accessor_parent_import_does_not_reach_sibling() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use helper; pub fn main() -> i32 { return helper::go(); }",
+            ),
+            (vec!["a"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (
+                vec!["helper"],
+                "use a; pub fn go() -> i32 { return a::b::deep(); }",
+            ),
+        ]);
+        assert!(
+            msg.contains("namespace `a::b` is not imported"),
+            "a non-entry accessor's descent into an un-imported sibling must be rejected naming `a::b`, got: {msg}"
+        );
+    }
+
+    /// No over-rejection from a non-entry accessor: when `helper` imports `a::b`
+    /// the descent resolves, proving the gate admits a legitimate non-entry
+    /// cross-file call.
+    #[test]
+    fn no_over_reject_non_entry_accessor_with_namespace_imported() {
+        assert_ok(&[
+            (
+                vec![],
+                "use helper; pub fn main() -> i32 { return helper::go(); }",
+            ),
+            (vec!["a"], "pub fn area() -> i32 { return 0; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (
+                vec!["helper"],
+                "use a::b; pub fn go() -> i32 { return a::b::deep(); }",
+            ),
+        ]);
+    }
+
+    /// LEAK-CLOSED at the re-export/child-descent boundary — the one composition
+    /// where a re-export hop is immediately followed by a child-descent hop.
+    /// `main` reaches `lib` through `bridge`'s `pub use lib;` (a re-export of the
+    /// `lib` *directory*), then tries to child-descend into the sub-file
+    /// `lib/geom.inf` to call `bridge::lib::geom::area()`. Re-exporting a directory
+    /// reaches that directory's own surface, but it does NOT transitively license
+    /// child-descent into its sub-files — that descent needs `main`'s own manifest,
+    /// which never imported `lib::geom`. The gate must fire on the *second* (child)
+    /// hop even though the *first* (re-export) hop was admitted. Pins that the two
+    /// licensing mechanisms do not compose into ambient transitive visibility.
+    #[test]
+    fn reexport_of_directory_does_not_license_child_descent_into_subfile() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use bridge; pub fn main() -> i32 { return bridge::lib::geom::area(); }",
+            ),
+            (vec!["bridge"], "pub use lib; pub fn b() -> i32 { return 0; }"),
+            (vec!["lib", "geom"], "pub fn area() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "a re-export of the `lib` directory must not license child-descent into the un-imported sub-file `lib::geom`"
+        );
+    }
+
+    // =====================================================================
+    // FIX-19b — remaining-path-awareness for the qualified-CALL resolver.
+    //
+    // The type-shadow break in `resolve_longest_namespace_prefix` pre-empts a
+    // sub-file with a same-named parent struct only when the type interpretation is
+    // *viable* for the suffix: the trailing member must be a real associated
+    // function of that struct (or a real variant of that enum). An intermediate
+    // segment that merely shares a name with a parent struct — `geom` in
+    // `lib::geom::mk()`, where `mk` is a free fn in `lib/geom.inf`, not an assoc of
+    // `struct geom` — is consumed as the sub-file namespace, not mis-resolved as an
+    // undefined associated function. Composes with the FIX-18 descent gate: the
+    // sub-file is still reached only through the accessing file's own `use`.
+    // =====================================================================
+
+    /// `lib::geom::mk()` where `lib.inf` defines `struct geom` (collides with the
+    /// intermediate segment) and the sub-file `lib/geom.inf` defines the free `mk`.
+    /// `mk` is not an associated function of `struct geom`, so the type
+    /// interpretation is not viable and the walk consumes `geom` as the sub-file
+    /// namespace, resolving the free `mk`. Before FIX-19b this was rejected as
+    /// `call to undefined function lib::geom::mk` (the type-shadow break fired on
+    /// the mere existence of `struct geom`).
+    #[test]
+    fn qualified_call_intermediate_struct_shadow_resolves_free_fn() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::geom; pub fn main() -> i32 { let p: lib::geom::Point = lib::geom::mk(); let h: i32 = lib::helper(); return p.x + h; }",
+            ),
+            (vec!["lib"], "pub struct geom { g: i32; } pub fn helper() -> i32 { return 1; }"),
+            (
+                vec!["lib", "geom"],
+                "pub struct Point { x: i32; y: i32; } pub fn mk() -> Point { return Point { x: 9, y: 0 }; }",
+            ),
+        ]);
+    }
+
+    /// The three-level twin: `a::mid::deep()` where `a.inf` defines `struct mid`
+    /// and `a/mid.inf` defines the free `deep`. Both `a` and `a::mid` are imported;
+    /// `deep` is not an assoc of `struct mid`, so the walk consumes `mid` as the
+    /// sub-file and resolves the free `deep`.
+    #[test]
+    fn qualified_call_three_level_intermediate_shadow() {
+        assert_ok(&[
+            (
+                vec![],
+                "use a; use a::mid; pub fn main() -> i32 { return a::mid::deep(); }",
+            ),
+            (vec!["a"], "pub struct mid { m: i32; } pub fn helper() -> i32 { return 1; }"),
+            (vec!["a", "mid"], "pub fn deep() -> i32 { return 5; }"),
+        ]);
+    }
+
+    /// The viability gate must NOT open the FIX-18 descent leak: `a::b::deep()`
+    /// where the accessing file imports ONLY `a` (not `a::b`), and `a` defines no
+    /// `struct b`. `deep` is not an assoc of any struct `b`, so the walk would
+    /// consume `b` as the sub-file namespace — but the descent gate refuses the hop
+    /// into `a::b` (not at-or-under `a`), so the walk stops at `a`, `b` becomes the
+    /// type, `deep` an undefined method → rejected. The leak stays closed.
+    #[test]
+    fn qualified_call_leak_intermediate_shadow_stays_rejected() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub fn helper() -> i32 { return 1; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "the viability gate must not let a parent-only import reach the un-imported sub-file's free fn"
+        );
+    }
+
+    /// Closure-independence of the leak: the byte-identical accessing file gives the
+    /// same reject verdict whether or not a third file drags `a::b` into the closure.
+    /// Pairs with [`qualified_call_leak_intermediate_shadow_stays_rejected`] (which
+    /// has the dragger); this one omits it.
+    #[test]
+    fn qualified_call_leak_closure_independent() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use a; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub fn helper() -> i32 { return 1; }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+        ]);
+        assert!(
+            !msg.is_empty(),
+            "the leak verdict must be closure-independent — rejected with or without a third file"
+        );
+    }
+
+    /// The struct still wins when the member it carries is addressed:
+    /// `lib::Point::new()` where `new` IS an associated function of `struct Point`
+    /// (and a same-named sibling `lib/Point.inf` exists). The type interpretation is
+    /// viable, so the type-shadow break fires and the struct's `new` resolves — not
+    /// the sibling file's free `new`.
+    #[test]
+    fn qualified_call_struct_assoc_still_wins_when_viable() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::Point; pub fn main() -> i32 { return lib::Point::new(); }",
+            ),
+            (vec!["lib"], "pub struct Point { v: i32; pub fn new() -> i32 { return 1; } }"),
+            (vec!["lib", "Point"], "pub fn new(unused: i32) -> i32 { return 1000; }"),
+        ]);
+    }
+
+    /// ADVERSARIAL RESIDUAL: the parent struct `b` in `a.inf` HAS an associated
+    /// `deep`, AND the sub-file `a/b.inf` has a free `deep`, with the accessing file
+    /// importing ONLY `a`. The type interpretation is viable (`deep` is a real assoc
+    /// of `struct b`), so the break fires and the STRUCT's `deep` wins — never the
+    /// sub-file's, which the file never imported anyway. Pinned with and without a
+    /// third file dragging `a::b` into the closure: the result is the same (the
+    /// struct's `deep`), proving closure-independence of the viable case.
+    #[test]
+    fn qualified_call_struct_assoc_viable_wins_over_sibling_free_parent_only() {
+        let with_dragger = try_type_check_multi_file(&[
+            (
+                vec![],
+                "use a; use dragger; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub struct b { v: i32; pub fn deep() -> i32 { return 1; } }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+            (vec!["dragger"], "use a::b; pub fn d() -> i32 { return 0; }"),
+        ]);
+        let without_dragger = try_type_check_multi_file(&[
+            (
+                vec![],
+                "use a; pub fn main() -> i32 { return a::b::deep(); }",
+            ),
+            (vec!["a"], "pub struct b { v: i32; pub fn deep() -> i32 { return 1; } }"),
+            (vec!["a", "b"], "pub fn deep() -> i32 { return 4242; }"),
+        ]);
+        assert!(
+            with_dragger.is_ok() && without_dragger.is_ok(),
+            "the viable struct assoc must resolve identically with/without a third file, got: with={:?} without={:?}",
+            with_dragger.err().map(|e| e.to_string()),
+            without_dragger.err().map(|e| e.to_string()),
+        );
+    }
+
+    /// Enum analogue of the intermediate-shadow case: `lib::geom::Pick()` is not a
+    /// real variant of `enum geom` in `lib.inf`, so the walk consumes `geom` as the
+    /// sub-file namespace. Here the leaf `pick` is a free fn in `lib/geom.inf`, so
+    /// the call resolves to it. (The viability probe checks enum variants as well as
+    /// struct assoc fns.)
+    #[test]
+    fn qualified_call_intermediate_enum_shadow_resolves_free_fn() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib; use lib::geom; pub fn main() -> i32 { return lib::geom::pick(); }",
+            ),
+            (vec!["lib"], "pub enum geom { A, B } pub fn helper() -> i32 { return 1; }"),
+            (vec!["lib", "geom"], "pub fn pick() -> i32 { return 7; }"),
+        ]);
+    }
+
+    // ---- F6/F7 diagnostic wording for value paths into a struct-assoc. ----
+
+    /// F7 (Confident): a `prefix::file::Type::assoc` value path into a compiled-but-
+    /// un-imported namespace names the FULL type-access tail in the hint —
+    /// `lib::b::Point::make`, not the truncated `lib::b::make`. The suggested `use`
+    /// is the parseable file namespace `lib::b`.
+    #[test]
+    fn diagnostic_value_path_struct_assoc_names_full_tail() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use lib; pub fn main() -> i32 { return lib::b::Point::make(); }",
+            ),
+            (vec!["lib"], "pub fn helper() -> i32 { return 1; }"),
+            (
+                vec!["lib", "b"],
+                "pub struct Point { v: i32; pub fn make() -> i32 { return 3; } }",
+            ),
+        ]);
+        assert!(
+            msg.contains("add `use lib::b;` to reach `lib::b::Point::make`"),
+            "the Confident hint must name the full type-access tail `lib::b::Point::make`, got: {msg}"
+        );
+    }
+
+    /// Following the F7 suggestion verbatim — adding `use lib::b;` — makes the
+    /// program compile, proving the suggested import is parseable and correct.
+    #[test]
+    fn diagnostic_value_path_struct_assoc_suggestion_compiles() {
+        assert_ok(&[
+            (
+                vec![],
+                "use lib::b; pub fn main() -> i32 { return lib::b::Point::make(); }",
+            ),
+            (vec!["lib"], "pub fn helper() -> i32 { return 1; }"),
+            (
+                vec!["lib", "b"],
+                "pub struct Point { v: i32; pub fn make() -> i32 { return 3; } }",
+            ),
+        ]);
+    }
+
+    /// F6/Q3 (Hedged): a `prefix::file::Type::assoc` value path whose deeper file is
+    /// NOT in the closure suggests the parseable FILE namespace `lib::b`, never the
+    /// unparseable `lib::b::Point` (which includes the type segment). `lib` is in the
+    /// closure (dragged by `bridge`) but not imported by the accessing file, so the
+    /// path is a genuine missing-reach the hedged hint best-guesses.
+    #[test]
+    fn diagnostic_value_path_hedged_suggests_file_namespace_not_type() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use bridge; pub fn main() -> i32 { return lib::b::Point::make(); }",
+            ),
+            (vec!["bridge"], "use lib; pub fn br() -> i32 { return lib::helper(); }"),
+            (vec!["lib"], "pub fn helper() -> i32 { return 1; }"),
+        ]);
+        assert!(
+            msg.contains("use lib::b;") && !msg.contains("use lib::b::Point;"),
+            "the hedged hint must suggest the parseable file `use lib::b;`, never `use lib::b::Point;`, got: {msg}"
+        );
+    }
+
+    /// The viability gate composes with the import discipline: a *viable* struct
+    /// assoc (`lib::Point::new`, `new` is a real assoc of `struct Point`) is still
+    /// rejected when the accessing file did NOT import the parent. `lib` is dragged
+    /// into the closure by `bridge`, but `main` never wrote `use lib;`, so the
+    /// type-shadow break does not fire (it is conjoined with
+    /// `file_imports_namespace_key`) and the path is a missing-import leak — the
+    /// viability of the struct must not bypass the manifest. The full type-access
+    /// tail is named in the hint (`lib::Point::new`).
+    #[test]
+    fn qualified_call_viable_struct_assoc_still_gated_by_import() {
+        let msg = assert_err(&[
+            (
+                vec![],
+                "use bridge; pub fn main() -> i32 { return lib::Point::new(); }",
+            ),
+            (vec!["bridge"], "use lib; pub fn br() -> i32 { return lib::Point::new(); }"),
+            (vec!["lib"], "pub struct Point { v: i32; pub fn new() -> i32 { return 1; } }"),
+        ]);
+        assert!(
+            msg.contains("namespace `lib` is not imported")
+                && msg.contains("lib::Point::new"),
+            "a viable struct assoc must still be gated by the accessing file's import, got: {msg}"
+        );
+    }
 }

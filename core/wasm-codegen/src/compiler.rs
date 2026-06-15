@@ -89,9 +89,10 @@ use crate::memory::{
 /// Distinguishes top-level definitions from those nested inside a `spec`
 /// block. Used to gate WASM `export` emission so that `pub fn` inside a spec
 /// does not become an exported entry point (no spec-inner export site is
-/// reachable from outside the module). `SpecInner` carries the owning spec
-/// name so call lowering can prefer the mangled `"<spec>.<callee>"` key for
-/// intra-spec resolution.
+/// reachable from outside the module). `SpecInner` carries the owning **bare**
+/// spec name (not file-folded); call lowering combines it with the spec's
+/// defining file (`current_module_path`) to build the injective spec [`FnKey`]
+/// for intra-spec resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FunctionOrigin {
     TopLevel,
@@ -103,138 +104,13 @@ pub(crate) enum FunctionOrigin {
 /// frame sizes (canonical [`FnKey`] string → bytes).
 type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<String, u32>);
 
-/// Structured key for `func_name_to_idx`, `func_array_returns`, and
-/// `func_struct_returns` values.
+/// Structured key identifying every WASM function, shared with the analysis
+/// passes so codegen and the call-graph agree on identity by construction.
 ///
-/// The four variants partition the WASM function namespace so that
-/// `Method { struct_name: "Foo", name: "bar" }` cannot textually collide
-/// with `SpecFree { spec: "Foo", name: "bar" }` even though both would
-/// share the `"Foo.bar"` string under the old `FxHashMap<String, ..>`
-/// scheme. The collision class is eliminated by construction; the
-/// per-registration `assert!(!contains_key)` guards that previously
-/// caught it no longer have anything to detect.
-///
-/// Each variant also carries `module_path`: the source-root-relative segments
-/// of the item's **defining** file. A multi-file program flattens every file
-/// into one WASM module, so two files may each define a `fn add`; qualifying the
-/// key by the defining file keeps the two distinct. The entry file's
-/// `module_path` is empty, so its items keep unqualified names — a single-file
-/// program produces byte-identical output to before file qualification existed.
-/// For a method the qualifier is the **struct's** defining file, not the call
-/// site's.
-///
-/// `Display` reproduces the historical mangled-string form, prefixing the
-/// `.`-joined module path when non-empty (`lib.arith.add`, `lib.arith.Point.new`).
-/// It is used for diagnostic messages, `.wat` output, and panic descriptions.
-#[derive(Clone, Debug, Hash, Eq, PartialEq)]
-pub(crate) enum FnKey {
-    Free {
-        module_path: Vec<String>,
-        name: String,
-    },
-    Method {
-        module_path: Vec<String>,
-        struct_name: String,
-        name: String,
-    },
-    SpecFree {
-        module_path: Vec<String>,
-        spec: String,
-        name: String,
-    },
-    SpecMethod {
-        module_path: Vec<String>,
-        spec: String,
-        struct_name: String,
-        name: String,
-    },
-}
-
-impl FnKey {
-    fn free_in(module_path: Vec<String>, name: impl Into<String>) -> Self {
-        Self::Free {
-            module_path,
-            name: name.into(),
-        }
-    }
-    fn method_in(
-        module_path: Vec<String>,
-        struct_name: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::Method {
-            module_path,
-            struct_name: struct_name.into(),
-            name: name.into(),
-        }
-    }
-    fn spec_free(spec: impl Into<String>, name: impl Into<String>) -> Self {
-        Self::spec_free_in(Vec::new(), spec, name)
-    }
-    fn spec_free_in(
-        module_path: Vec<String>,
-        spec: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::SpecFree {
-            module_path,
-            spec: spec.into(),
-            name: name.into(),
-        }
-    }
-    fn spec_method(
-        spec: impl Into<String>,
-        struct_name: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::spec_method_in(Vec::new(), spec, struct_name, name)
-    }
-    fn spec_method_in(
-        module_path: Vec<String>,
-        spec: impl Into<String>,
-        struct_name: impl Into<String>,
-        name: impl Into<String>,
-    ) -> Self {
-        Self::SpecMethod {
-            module_path,
-            spec: spec.into(),
-            struct_name: struct_name.into(),
-            name: name.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for FnKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (module_path, rest) = match self {
-            Self::Free { module_path, name } => (module_path, name.clone()),
-            Self::Method {
-                module_path,
-                struct_name,
-                name,
-            } => (module_path, format!("{struct_name}{METHOD_SEPARATOR}{name}")),
-            Self::SpecFree {
-                module_path,
-                spec,
-                name,
-            } => (module_path, format!("{spec}.{name}")),
-            Self::SpecMethod {
-                module_path,
-                spec,
-                struct_name,
-                name,
-            } => (
-                module_path,
-                format!("{spec}.{struct_name}{METHOD_SEPARATOR}{name}"),
-            ),
-        };
-        if module_path.is_empty() {
-            write!(f, "{rest}")
-        } else {
-            write!(f, "{}{METHOD_SEPARATOR}{rest}", module_path.join(METHOD_SEPARATOR))
-        }
-    }
-}
+/// Re-exported from [`inference_fn_key`] for the in-crate references that use
+/// the bare `FnKey` name; see that crate for the variant and `Display`
+/// documentation.
+pub(crate) use inference_fn_key::FnKey;
 
 /// RAII guard that saves and restores `Compiler::current_spec`.
 ///
@@ -296,14 +172,6 @@ const END_OPCODE: u8 = 0x0b;
 /// elements = 327 680 instructions -- a reasonable upper bound before
 /// instruction explosion becomes a concern.
 const MAX_UZUMAKI_UNROLL_ELEMENTS: u32 = 65_536;
-
-/// Separator used in mangled method names: `"{StructName}.{method_name}"`.
-///
-/// Dot is used because it matches Zig's convention and is standard across
-/// the WASM ecosystem. Since `.` is a syntax token in Inference (member
-/// access), it cannot appear in user-defined identifiers, making collisions
-/// impossible without any additional validation.
-const METHOD_SEPARATOR: &str = ".";
 
 /// Recurses through `Array(elem, _)` until it finds the leaf (non-array) scalar type.
 fn leaf_scalar_type(kind: &TypeInfoKind) -> &TypeInfoKind {
@@ -877,8 +745,7 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         for (idx, entry) in spec_funcs.iter().enumerate() {
             let fn_name = arena.def_name(entry.def_id);
-            let spec_name = crate::qualified_spec_name(&entry.module_path, &entry.spec_name);
-            let key = FnKey::spec_free(&spec_name, fn_name);
+            let key = FnKey::spec_free_folded(&entry.module_path, &entry.spec_name, fn_name);
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
                 "Spec-inner function '{key}' collides with an \
@@ -971,8 +838,12 @@ impl Compiler {
         #[allow(clippy::cast_possible_truncation)]
         for (i, entry) in spec_methods.iter().enumerate() {
             let method_name = arena.def_name(entry.def_id).to_string();
-            let spec_name = crate::qualified_spec_name(&entry.module_path, &entry.spec_name);
-            let key = FnKey::spec_method(&spec_name, &entry.struct_name, &method_name);
+            let key = FnKey::spec_method_folded(
+                &entry.module_path,
+                &entry.spec_name,
+                &entry.struct_name,
+                &method_name,
+            );
 
             assert!(
                 !self.func_name_to_idx.contains_key(&key),
@@ -1118,14 +989,16 @@ impl Compiler {
         self.current_module_path = module_path.to_vec();
         // Compute the structured key for this function so sret lookups
         // and call-site resolution stay in lockstep with the registration
-        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`. Spec
-        // items carry their file qualifier in `current_spec` (already a
-        // file-qualified spec name), so their keys take an empty module path;
-        // free functions and methods are qualified by their defining file here.
+        // variant chosen by `build_*_name_to_idx{,_with_spec_names}`. Every key —
+        // including spec items — is qualified by its defining file: `current_spec`
+        // is the bare spec name, combined with the spec's defining file
+        // (`current_module_path`, set above) into the injective spec key.
         let current_spec = self.current_spec.clone();
         let current_fn_key = match (current_spec.as_deref(), method_struct_name) {
-            (Some(spec), Some(struct_name)) => FnKey::spec_method(spec, struct_name, &raw_name),
-            (Some(spec), None) => FnKey::spec_free(spec, &raw_name),
+            (Some(spec), Some(struct_name)) => {
+                FnKey::spec_method_folded(module_path, spec, struct_name, &raw_name)
+            }
+            (Some(spec), None) => FnKey::spec_free_folded(module_path, spec, &raw_name),
             (None, Some(struct_name)) => {
                 FnKey::method_in(module_path.to_vec(), struct_name, &raw_name)
             }
@@ -1133,9 +1006,10 @@ impl Compiler {
         };
         // For diagnostics and debug names we keep the mangled-string form
         // (`Struct.method` / bare name); spec-inner-ness is implicit via
-        // `current_spec` for any consumer that needs it.
+        // `current_spec` for any consumer that needs it. The `.` here is the
+        // method-name separator, the same one `FnKey::Display` uses.
         let fn_name = if let Some(struct_name) = method_struct_name {
-            format!("{struct_name}{METHOD_SEPARATOR}{raw_name}")
+            format!("{struct_name}.{raw_name}")
         } else {
             raw_name
         };
@@ -2705,7 +2579,7 @@ impl Compiler {
     /// through [`ResolvedCallee::QualifiedFunction`].
     fn resolve_free_callee_idx(&self, callee_name: &str) -> Option<u32> {
         if let Some(spec) = self.current_spec.as_deref() {
-            let key = FnKey::spec_free(spec, callee_name);
+            let key = FnKey::spec_free_folded(&self.current_module_path, spec, callee_name);
             if let Some(idx) = self.func_name_to_idx.get(&key).copied() {
                 return Some(idx);
             }
@@ -2725,7 +2599,7 @@ impl Compiler {
     /// scope.
     fn is_sret_free(&self, callee_name: &str) -> bool {
         if let Some(spec) = self.current_spec.as_deref() {
-            let key = FnKey::spec_free(spec, callee_name);
+            let key = FnKey::spec_free_folded(&self.current_module_path, spec, callee_name);
             if self.func_array_returns.contains_key(&key)
                 || self.func_struct_returns.contains_key(&key)
             {
@@ -2826,7 +2700,8 @@ impl Compiler {
         ctx: &TypedContext,
     ) -> Option<FnKey> {
         if let Some(spec) = self.current_spec.as_deref() {
-            let candidate = FnKey::spec_method(spec, struct_name, method_name);
+            let candidate =
+                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
             if self.func_name_to_idx.contains_key(&candidate) {
                 return Some(candidate);
             }
@@ -2884,7 +2759,8 @@ impl Compiler {
         // No top-level method for this struct identity: the receiver is the active
         // spec's own inner struct (its methods register only as `SpecMethod`).
         if let Some(spec) = self.current_spec.as_deref() {
-            let candidate = FnKey::spec_method(spec, struct_name, method_name);
+            let candidate =
+                FnKey::spec_method_folded(&self.current_module_path, spec, struct_name, method_name);
             if self.func_name_to_idx.contains_key(&candidate) {
                 return Some(candidate);
             }
@@ -5045,42 +4921,6 @@ fn try_const_index_byte_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn entry_file_fnkey_display_is_unqualified() {
-        // An empty module path is the entry file; its keys must render exactly
-        // as before file qualification existed so every single-file golden
-        // stays byte-identical.
-        assert_eq!(FnKey::free_in(vec![], "add").to_string(), "add");
-        assert_eq!(
-            FnKey::method_in(vec![], "Point", "new").to_string(),
-            "Point.new"
-        );
-        assert_eq!(FnKey::spec_free("MySpec", "f").to_string(), "MySpec.f");
-        assert_eq!(
-            FnKey::spec_method("MySpec", "Point", "new").to_string(),
-            "MySpec.Point.new"
-        );
-    }
-
-    #[test]
-    fn non_entry_file_fnkey_display_is_qualified() {
-        let path = vec!["lib".to_string(), "arith".to_string()];
-        assert_eq!(
-            FnKey::free_in(path.clone(), "add").to_string(),
-            "lib.arith.add"
-        );
-        assert_eq!(
-            FnKey::method_in(path, "Point", "new").to_string(),
-            "lib.arith.Point.new"
-        );
-        // A spec carries its file qualifier in the spec name string, so a spec
-        // key's module path stays empty and the spec name renders the file.
-        assert_eq!(
-            FnKey::spec_free("lib.geometry.MySpec", "f").to_string(),
-            "lib.geometry.MySpec.f"
-        );
-    }
 
     #[test]
     fn finish_without_memory_omits_memory_section() {

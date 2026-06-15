@@ -574,4 +574,362 @@ mod analysis_rules_tests {
             "a non-recursive cross-file method/assoc chain must not trip A035"
         );
     }
+
+    // --- FAMILY 2 (#63): structured FnKey defeats the sibling-file collision ----
+    //
+    // A struct associated/instance function and a same-named free function in a
+    // sibling file render to the same flat string (`a.mid.make`): the module-join
+    // `.` conflates with the struct-method-join `.`. Under the old string key the
+    // free-fn node hijacked the method's call-graph slot, masking the method's
+    // self/back-edge, so A035 never fired and the program compiled then
+    // stack-overflowed at runtime. Keying nodes on the structured `FnKey` makes
+    // `Method { module: ["a"], struct: "mid", name: "make" }` distinct from
+    // `Free { module: ["a", "mid"], name: "make" }`, restoring the edge. Every
+    // case below has a same-named sibling free fn present.
+
+    /// F6: a struct associated function that directly recurses (`mid::make` calls
+    /// `mid::make`), with a same-named free `make` in the sibling file `a/mid`.
+    #[test]
+    fn a035_assoc_self_recursion_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn entry() -> i32 { return a::mid::make(); }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            let r: i32 = mid::make();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a.mid.make -> a.mid.make"),
+            "the struct method's self-recursion must be named, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// F7: a struct instance method that recurses on `self` (`T.m` calls
+    /// `self.m()`), with a same-named free `m` in the sibling file `a/T`, reached
+    /// through an associated `make` and entry call chain.
+    #[test]
+    fn a035_instance_method_self_recursion_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::T;
+                    pub fn entry() -> i32 {
+                        let t: a::T = a::T::make();
+                        return t.m();
+                    }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct T {
+                        v: i32;
+                        pub fn m(self) -> i32 {
+                            let r: i32 = self.m();
+                            return r;
+                        }
+                        pub fn make() -> T { return T { v: 0 }; }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "T"],
+                r#"
+                    pub fn m() -> i32 { return 9; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a.T.m -> a.T.m"),
+            "the instance method's self-recursion must be named, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// F8: an indirect/mutual cycle `bounce -> a::mid::make -> root::bounce`,
+    /// where `mid::make` is a struct associated function with a same-named free
+    /// `make` in the sibling file `a/mid`.
+    #[test]
+    fn a035_indirect_cycle_through_assoc_with_sibling_free_fn_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn bounce() -> i32 {
+                        let r: i32 = a::mid::make();
+                        return r;
+                    }
+                    pub fn entry() -> i32 {
+                        let r: i32 = bounce();
+                        return r;
+                    }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    use root;
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 {
+                            let r: i32 = root::bounce();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("bounce") && msg.contains("a.mid.make"),
+            "the indirect cycle must name both `bounce` and `a.mid.make`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Control: a struct associated function and a same-named sibling-file free
+    /// function both exist, but neither recurses. The structured key must keep
+    /// them distinct without inventing a cycle, so the program compiles.
+    #[test]
+    fn a035_assoc_and_sibling_free_fn_without_recursion_accepted() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    use a::mid;
+                    pub fn entry() -> i32 { return a::mid::make(); }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    pub struct mid {
+                        v: i32;
+                        pub fn make() -> i32 { return 11; }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "mid"],
+                r#"
+                    pub fn make() -> i32 { return 7; }
+                "#,
+            ),
+        ];
+        assert!(
+            !has_recursion_multi(files),
+            "a non-recursive assoc fn with a same-named sibling free fn must compile"
+        );
+    }
+
+    /// Control: a cross-file spec-inner function that self-recurses must still be
+    /// rejected, and its key must carry the underscore-folded spec name codegen
+    /// uses (`a_S.tick`), proving the analysis spec-name fold matches codegen.
+    #[test]
+    fn a035_cross_file_spec_inner_self_recursion_rejected() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use a;
+                    pub fn entry() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["a"],
+                r#"
+                    spec S {
+                        fn tick() -> i32 {
+                            let r: i32 = tick();
+                            return r;
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["a", "sub"],
+                r#"
+                    pub fn tick() -> i32 { return 3; }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("a_S.tick -> a_S.tick"),
+            "the cross-file spec-inner self-recursion must name the folded spec key \
+             `a_S.tick`, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    // --- FIX-19a (#63): injective spec FnKey defeats the fold-collision escape --
+    //
+    // The spec-name fold is lossy: `lib/checks` + spec `S` and the sibling file
+    // `lib_checks` + spec `S` both render `lib_checks_S`. When the spec key folded
+    // the file INTO the spec string with an empty module_path, the two files
+    // produced byte-identical `FnKey`s; the call-graph index is last-wins, so a
+    // recursive function's self-edge in `lib/checks::S` resolved to the
+    // non-recursive same-folded sibling node and A035 never saw the cycle — the
+    // recursive spec compiled. Keying the spec variants by the real (distinct)
+    // module_path while still rendering the folded name fixes it. Analysis runs
+    // identically in plain and proof mode, so `analyze_multi` exercises the
+    // plain-mode path the escape lived on.
+
+    /// The exact escape: `lib/checks::S::rec` recurses, and a sibling
+    /// `lib_checks::S::rec` (non-recursive) folds to the same spec name. A035 must
+    /// still fire on the recursive one — the masking sibling must not hide it.
+    #[test]
+    fn a035_rejects_spec_recursion_with_folding_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return rec(x); }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return x; }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.rec -> lib_checks_S.rec"),
+            "the recursive spec must be rejected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// Control: the same recursive `lib/checks::S::rec` without the masking
+    /// sibling is still rejected — proving the sibling above was what masked it,
+    /// not some unrelated reason the recursive file compiled.
+    #[test]
+    fn a035_rejects_spec_recursion_without_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        fn rec(x: i32) -> i32 { return rec(x); }
+                        fn ob() -> i32 { return rec(1); }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        assert!(
+            diag.to_string().contains("lib_checks_S.rec -> lib_checks_S.rec"),
+            "the recursive spec must be rejected on its own"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
+
+    /// The spec-*method* analogue: a recursive spec-inner method
+    /// `lib/checks::S::T::m` masked by a same-folded sibling
+    /// `lib_checks::S::T::m`. The injective `SpecMethod` key keeps them distinct.
+    #[test]
+    fn a035_rejects_spec_method_recursion_with_folding_collision_sibling() {
+        let files: &[(Vec<&str>, &str)] = &[
+            (
+                vec![],
+                r#"
+                    use lib::checks;
+                    use lib_checks;
+                    pub fn main() -> i32 { return 0; }
+                "#,
+            ),
+            (
+                vec!["lib", "checks"],
+                r#"
+                    spec S {
+                        struct T {
+                            v: i32;
+                            fn m(self) -> i32 { return self.m(); }
+                        }
+                    }
+                "#,
+            ),
+            (
+                vec!["lib_checks"],
+                r#"
+                    spec S {
+                        struct T {
+                            v: i32;
+                            fn m(self) -> i32 { return self.v; }
+                        }
+                    }
+                "#,
+            ),
+        ];
+        let diag = recursion_diag_multi(files);
+        let msg = diag.to_string();
+        assert!(
+            msg.contains("lib_checks_S.T.m -> lib_checks_S.T.m"),
+            "the recursive spec method must be rejected despite the same-folded sibling, got: {msg}"
+        );
+        assert_eq!(diag.rule_id(), "A035");
+    }
 }

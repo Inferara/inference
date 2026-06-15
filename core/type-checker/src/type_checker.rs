@@ -4506,10 +4506,10 @@ impl TypeChecker {
         location: Location,
     ) {
         match diagnosis {
-            UnimportedNamespace::Confident { namespace } => {
+            UnimportedNamespace::Confident { namespace, item } => {
                 self.push_error_dedup(TypeCheckError::UnimportedAbsoluteNamespacePath {
                     namespace,
-                    item: path.last().cloned().unwrap_or_default(),
+                    item,
                     location,
                 });
             }

@@ -3005,3 +3005,285 @@ pub fn run() -> i32 {
     let (mut store, instance) = instantiate(&wasm);
     assert_eq!(call_i32(&mut store, &instance, "run"), 3);
 }
+
+// =====================================================================
+// FIX-18 Family 1 — the cross-file descent gate must not over-reject legitimate
+// resolution. These compile AND run through Wasmtime, so they pin not only that
+// the gate admits the hop but that the resolved target is the right one (#63).
+// The rejection / closure-independence / diagnostic-quality halves live in the
+// type-checker matrix; here we prove the no-over-rejection controls execute.
+// =====================================================================
+
+/// FIX-14 leaf-type-wins with the sibling file present: `main` imports the parent
+/// file `a::b::c` directly, so the bound name anchors INSIDE `a::b::c` and the leaf
+/// `Node` is the struct defined there — no cross-file hop, so the descent gate is
+/// never consulted, and the sibling `a/b/c/Node.inf` must not shadow the type. The
+/// constructed value's field read must run to 7, not the sibling's free `make`.
+#[test]
+fn descent_gate_allows_leaf_type_via_direct_parent_import() {
+    let main = "\
+use a::b::c;
+
+pub fn run() -> i32 {
+    let n: a::b::c::Node = a::b::c::Node::make();
+    return n.v;
+}
+";
+    let a_b_c = "\
+pub struct Node {
+    v: i32;
+
+    pub fn make() -> Node {
+        return Node { v: 7 };
+    }
+}
+";
+    let a_b_c_node = "\
+pub fn make() -> i32 {
+    return 999;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["a", "b", "c"], a_b_c),
+        (vec!["a", "b", "c", "Node"], a_b_c_node),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 7);
+}
+
+/// A deep namespace that IS properly imported resolves and runs: `use
+/// lib::geom::sub;` then `lib::geom::sub::deep()` returns 40. The prefix descent
+/// predicate licenses the pass-through hops `lib` and `lib::geom` to reach the
+/// imported `lib::geom::sub` in long form (D1).
+#[test]
+fn descent_gate_allows_long_form_of_deep_import() {
+    let main = "\
+use lib::geom::sub;
+
+pub fn run() -> i32 {
+    return lib::geom::sub::deep();
+}
+";
+    let lib_geom_sub = "\
+pub fn deep() -> i32 {
+    return 40;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geom", "sub"], lib_geom_sub),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 40);
+}
+
+/// Parent AND child both imported: `use lib::geom;` and `use lib::geom::sub;` let
+/// the file reach both surfaces; `lib::geom::area() + lib::geom::sub::deep()` runs
+/// to the sum (2 + 40 = 42). Each `use` licenses its own namespace.
+#[test]
+fn descent_gate_allows_parent_and_child_both_imported() {
+    let main = "\
+use lib::geom;
+use lib::geom::sub;
+
+pub fn run() -> i32 {
+    return lib::geom::area() + lib::geom::sub::deep();
+}
+";
+    let lib_geom = "\
+pub fn area() -> i32 {
+    return 2;
+}
+";
+    let lib_geom_sub = "\
+pub fn deep() -> i32 {
+    return 40;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib", "geom"], lib_geom),
+        (vec!["lib", "geom", "sub"], lib_geom_sub),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 42);
+}
+
+// =====================================================================
+// FIX-19b — the viability-gated type-shadow break must resolve the RIGHT target,
+// not merely accept. These compile AND run through Wasmtime so the resolved value
+// distinguishes the sub-file's free fn from a same-named struct's assoc fn (#63).
+// =====================================================================
+
+/// `lib::geom::mk()` where `lib.inf` defines `struct geom` (colliding with the
+/// intermediate segment) and `lib/geom.inf` defines the free `mk` returning a
+/// `Point`. `mk` is not an assoc of `struct geom`, so the walk consumes `geom` as
+/// the sub-file and resolves the free `mk`; `p.x` (9) + `lib::helper()` (1) = 10.
+/// Before FIX-19b this was rejected as `undefined function lib::geom::mk`.
+#[test]
+fn intermediate_struct_shadow_resolves_free_fn_runs() {
+    let main = "\
+use lib;
+use lib::geom;
+
+pub fn run() -> i32 {
+    let p: lib::geom::Point = lib::geom::mk();
+    let h: i32 = lib::helper();
+    return p.x + h;
+}
+";
+    let lib = "\
+pub struct geom {
+    g: i32;
+}
+
+pub fn helper() -> i32 {
+    return 1;
+}
+";
+    let lib_geom = "\
+pub struct Point {
+    x: i32;
+    y: i32;
+}
+
+pub fn mk() -> Point {
+    return Point { x: 9, y: 0 };
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "geom"], lib_geom),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 10);
+}
+
+/// The struct still wins when viable: `lib::Point::new()` where `new` IS an assoc
+/// of `struct Point` (and a sibling `lib/Point.inf` has a free `new` returning
+/// 1000). The viable type interpretation makes the type-shadow break fire, so the
+/// struct's `new` (1) runs — not the sibling's 1000.
+#[test]
+fn struct_assoc_wins_when_viable_runs() {
+    let main = "\
+use lib;
+use lib::Point;
+
+pub fn run() -> i32 {
+    return lib::Point::new();
+}
+";
+    let lib = "\
+pub struct Point {
+    v: i32;
+
+    pub fn new() -> i32 {
+        return 1;
+    }
+}
+";
+    let lib_point = "\
+pub fn new() -> i32 {
+    return 1000;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "Point"], lib_point),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+/// ADVERSARIAL RESIDUAL: `a::b::deep()` where `a.inf`'s `struct b` HAS an assoc
+/// `deep` (1) and `a/b.inf` has a free `deep` (4242), accessing file imports ONLY
+/// `a`. The type interpretation is viable (deep is a real assoc of struct b), so
+/// the struct's `deep` (1) wins — the sub-file's free `deep` (4242), which the file
+/// never imported, must not be reached.
+#[test]
+fn struct_assoc_viable_wins_over_sibling_free_parent_only_runs() {
+    let main = "\
+use a;
+
+pub fn run() -> i32 {
+    return a::b::deep();
+}
+";
+    let a = "\
+pub struct b {
+    v: i32;
+
+    pub fn deep() -> i32 {
+        return 1;
+    }
+}
+";
+    let a_b = "\
+pub fn deep() -> i32 {
+    return 4242;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["a"], a),
+        (vec!["a", "b"], a_b),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 1);
+}
+
+/// The flipped member-miss case (FIX-19b): `lib::Point::missing()` where
+/// `struct Point` has no `missing` but the sibling `lib/Point.inf` does. The type
+/// interpretation is not viable (missing is not an assoc of Point), so the walk
+/// consumes `Point` as the sub-file namespace and resolves the sibling's free
+/// `missing` (9). This is the value-pin for the matrix's
+/// `qualified_path_struct_member_miss_falls_back_to_sibling_free_fn`.
+#[test]
+fn struct_member_miss_falls_back_to_sibling_free_fn_runs() {
+    let main = "\
+use lib;
+use lib::Point;
+
+pub fn run() -> i32 {
+    return lib::Point::missing();
+}
+";
+    let lib = "\
+pub struct Point {
+    v: i32;
+
+    pub fn new() -> i32 {
+        return 1;
+    }
+}
+";
+    let lib_point = "\
+pub fn missing() -> i32 {
+    return 9;
+}
+";
+
+    let wasm = wasm_codegen_multi_file(&[
+        (vec![], main),
+        (vec!["lib"], lib),
+        (vec!["lib", "Point"], lib_point),
+    ]);
+
+    let (mut store, instance) = instantiate(&wasm);
+    assert_eq!(call_i32(&mut store, &instance, "run"), 9);
+}

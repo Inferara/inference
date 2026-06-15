@@ -304,6 +304,22 @@ pub(crate) struct ResolvedImport {
     pub(crate) reexported: bool,
 }
 
+/// How an intermediate namespace hop reached the next scope, which selects the
+/// licensing discipline that hop is subject to. A hop into a raw child scope is
+/// *file-nesting structural descent* (`a` → `a::b`, the scopes
+/// [`SymbolTable::enter_file_scope`] nests) and must be gated by the accessing
+/// file's own `use` manifest; a hop through a re-exported (`pub use`) namespace
+/// import is the orthogonal re-export mechanism, already disciplined by the
+/// `reexported` flag, and must not be re-gated by the manifest (#63).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReachedVia {
+    /// A direct child scope — file-nesting descent, subject to the manifest gate.
+    Child,
+    /// A `pub use` re-export import — disciplined by the re-export flag, not the
+    /// manifest.
+    Reexport,
+}
+
 /// The diagnosis of a `::`-qualified path whose namespace portion the accessing
 /// file did not import. Carried out of [`SymbolTable::unimported_namespace_prefix`]
 /// so the caller emits the precise diagnostic for each case.
@@ -311,9 +327,12 @@ pub(crate) struct ResolvedImport {
 pub(crate) enum UnimportedNamespace {
     /// The namespace portion is a registered project namespace (it is in the
     /// compilation closure) the accessing file simply did not `use`. The fix is
-    /// exact: `use {namespace};`. Maps to
+    /// exact: `use {namespace};`. `item` is the type-access tail the path reads
+    /// inside that namespace (`Point::make` for `lib::b::Point::make`, or just the
+    /// leaf `area` for `lib::geom::area`), so the diagnostic names the full path the
+    /// import unlocks rather than dropping the type segment. Maps to
     /// [`crate::errors::TypeCheckError::UnimportedAbsoluteNamespacePath`].
-    Confident { namespace: String },
+    Confident { namespace: String, item: String },
     /// No registered namespace covers the path's namespace portion — the target
     /// file is most likely uncompiled, so its existence cannot be proven here.
     /// The namespace portion is offered as a hedged best-guess `use`. Maps to
@@ -2329,76 +2348,16 @@ impl SymbolTable {
             .any(|k| k.rsplit("::").next() == Some(name))
     }
 
-    /// The longest leading run of `path` (one or more leading segments, up to and
-    /// including the whole path) whose `::`-joined form is a registered project
-    /// namespace (a [`Self::mod_scopes`] key). `["lib", "geom", "Point", "new"]`
-    /// returns `Some("lib::geom")` — `Point` is a type, never a `mod_scopes` key,
-    /// so the run stops there — while a pure namespace path `["lib", "geom"]`
-    /// returns `Some("lib::geom")`, the whole path. Returns `None` when no leading
-    /// run names a project namespace.
-    ///
-    /// This is the *Deepest Registered Namespace Prefix* (DRNP): the namespace a
-    /// file must have imported to spell `path` in long form. Callers pass either a
-    /// path that still carries a trailing item segment (a call/type/const path, so
-    /// the namespace is a strict prefix) or one that is already a pure namespace (a
-    /// pre-split struct-literal prefix, so the whole path is the namespace) — the
-    /// inclusive scan handles both. It is the sole rev-scan shared by the
-    /// absolute-anchor gate ([`Self::file_may_anchor_absolute_path`]) and the
-    /// missing-import diagnostic ([`Self::unimported_namespace_prefix`]).
-    ///
-    /// The scan is *leaf-aware* and *manifest-aware*: a candidate run whose final
-    /// segment names a type defined in the file at the one-shorter prefix is a
-    /// type-access (`Type`, `Type::assoc`), not a deeper namespace — even when a
-    /// same-named sibling file registered the longer key — UNLESS the accessing
-    /// file (`from_scope_id`) itself imported that exact key. Such a type-shadowed,
-    /// un-imported candidate is skipped so the namespace resolves to the shorter
-    /// prefix, mirroring the leaf precedence that
-    /// [`Self::resolve_longest_namespace_prefix`] applies to the actual resolution:
-    /// `a::b::c::Node`, where `a::b::c` defines `struct Node` *and* a sibling
-    /// `a/b/c/Node.inf` exists, has namespace `a::b::c` when reached via the parent
-    /// `use a::b::c;` (the type wins), not the sibling file. But when the accessing
-    /// file imported the deeper key itself (`use a::mid;` where `a` also defines
-    /// `struct mid`), it explicitly chose the sub-file interpretation, so that key
-    /// is its own namespace and is *not* skipped — the DRNP follows the accessing
-    /// file's manifest, exactly as the resolver does. Without the type-shadow skip,
-    /// a file importing the parent would be wrongly denied the long-form spelling
-    /// of a type in that namespace; without the import exception, a file importing
-    /// the deeper sub-file would be wrongly denied its own import. The skip only
-    /// ever *shortens* the DRNP to a namespace whose own surface the type belongs
-    /// to, so it never licenses a deeper, un-imported file's surface.
-    #[must_use = "this is a pure lookup with no side effects"]
-    fn deepest_registered_namespace_prefix(
-        &self,
-        path: &[String],
-        from_scope_id: u32,
-    ) -> Option<String> {
-        for end in (1..=path.len()).rev() {
-            let key = path[..end].join("::");
-            if !self.mod_scopes.contains_key(&key) {
-                continue;
-            }
-            if end >= 2 && !self.file_imports_namespace_key(from_scope_id, &key) {
-                let parent_key = path[..end - 1].join("::");
-                if let Some(parent_scope) = self.mod_scopes.get(&parent_key) {
-                    let parent_id = parent_scope.borrow().id;
-                    if self.scope_defines_type(&path[end - 1], parent_id) {
-                        continue;
-                    }
-                }
-            }
-            return Some(key);
-        }
-        None
-    }
-
     /// Whether `from_scope_id`'s file imported the namespace whose `::`-joined
-    /// module-path key is `key`. This reads the accessing file's own `use`
-    /// manifest ([`Self::imported_namespace_keys`], which stops at the file
+    /// module-path key is `key` **exactly**. This reads the accessing file's own
+    /// `use` manifest ([`Self::imported_namespace_keys`], which stops at the file
     /// boundary), so no namespace another file dragged into the compilation
-    /// closure counts. The single primitive shared by the absolute-anchor gate
-    /// (which asks about the path's DRNP) and the tail-precedence decision in
-    /// [`Self::resolve_longest_namespace_prefix`] (which asks about the walked
-    /// scope's parent file).
+    /// closure counts. The exact-equality primitive shared by the tail-precedence
+    /// decision in [`Self::resolve_longest_namespace_prefix`] (which asks about the
+    /// walked scope's parent file) and the terminal surface-read gate
+    /// ([`Self::may_read_namespace_surface`]). Contrast
+    /// [`Self::file_imports_namespace_at_or_under`], the prefix form used for
+    /// pass-through hops.
     #[must_use = "this is a pure check with no side effects"]
     fn file_imports_namespace_key(&self, from_scope_id: u32, key: &str) -> bool {
         self.imported_namespace_keys(from_scope_id)
@@ -2406,22 +2365,56 @@ impl SymbolTable {
             .any(|k| k == key)
     }
 
-    /// Diagnoses a `::`-qualified `dir::file::item` path the accessing file is not
-    /// licensed to spell, distinguishing a *confident* missing-import (the
-    /// namespace is in the closure; the exact `use` is known) from a *hedged* one
-    /// (the target file is not in the closure, so its existence is unproven).
-    /// Returns `None` when the path is not a leak the diagnostic should pre-empt:
-    /// the accessing file may anchor it, the head names a local type, or no
-    /// project namespace is involved (a genuine typo, left to report as undefined).
+    /// Whether `from_scope_id`'s file imported the namespace `dest`, or any
+    /// namespace nested under it. `use lib::geom::sub;` returns `true` for `dest`
+    /// of `lib`, `lib::geom`, and `lib::geom::sub` — the import licenses the file
+    /// to walk *through* the pass-through hops `lib` and `lib::geom` to reach the
+    /// sub-file it actually named, so the long form `lib::geom::sub::deep` resolves
+    /// (the prefix form, not equality). It does **not** license a sibling the file
+    /// never named: `lib::geom::other` is not `dest`-or-under any import, and
+    /// `use a;` does not license descending into `a::b` (`a` is not a prefix of the
+    /// hop key `a::b`).
     ///
-    /// The namespace is the path minus its final (item) segment. When a registered
-    /// namespace key equals that namespace portion, the namespace provably exists
-    /// and the suggestion is exact ([`UnimportedNamespace::Confident`]). When the
-    /// only registered keys are *shorter* than the namespace portion — the target
-    /// sub-file was never compiled, so the rev-scan would otherwise fall back to a
-    /// shallower directory key like `lib`, yielding the unparseable hint
-    /// `use lib;` — the namespace portion itself is offered as the longest
-    /// plausible *file* namespace ([`UnimportedNamespace::Hedged`]).
+    /// This is the cross-file descent gate: every hop that crosses from one file's
+    /// scope into another's is admitted only when the accessing file's own manifest
+    /// reaches the destination, so a file sees another file's surface strictly
+    /// through its own `use`. Reading only `from_scope_id`'s manifest makes the
+    /// decision closure-independent — no namespace another file dragged into the
+    /// compilation closure can flip it (#63).
+    #[must_use = "this is a pure check with no side effects"]
+    fn file_imports_namespace_at_or_under(&self, from_scope_id: u32, dest: &str) -> bool {
+        let prefix = format!("{dest}::");
+        self.imported_namespace_keys(from_scope_id)
+            .iter()
+            .any(|k| k == dest || k.starts_with(&prefix))
+    }
+
+    /// Diagnoses a `::`-qualified `dir::file::item` path the accessing file is not
+    /// licensed to spell, distinguishing a *confident* missing-import (the deepest
+    /// file the path descends into is in the closure; the exact `use` is known)
+    /// from a *hedged* one (the descent fell short of a real file, so the target's
+    /// existence is unproven). Returns `None` when the path is not a leak the
+    /// diagnostic should pre-empt: the head names a local type, the path is the
+    /// entry's own root-scope surface, the file already imports the namespace, or
+    /// no project namespace is involved (a genuine typo, left to report as
+    /// undefined).
+    ///
+    /// The namespace is found by a *structural*, gate-free, import-free walk
+    /// ([`Self::deepest_namespace_scope_structural`]): it shares the resolver's
+    /// anchor ([`Self::start_qualified_walk`]) and then hops **child** file scopes
+    /// only ([`ReachedVia::Child`], stopping at a re-export hop) for as long as each
+    /// segment names a real file, reaching the deepest file `deep` the path descends
+    /// into. The descent gate is deliberately *not* applied here — the diagnostic
+    /// must see the structure that resolution refused. When the walk reaches the
+    /// path's actual target namespace (it consumed the whole namespace portion, or
+    /// stopped because the next segment names a type defined in `deep`), the
+    /// suggestion is exact: `use {deep}` ([`UnimportedNamespace::Confident`], whose
+    /// namespace is always a parseable file, never `…::Type`, with the type-access
+    /// tail named as the `item`). When it falls short — the next segment is neither a
+    /// child file nor a type there, so the target sub-file was not compiled — the
+    /// deepest proven file plus the next plausible segment (`path[..k + 1]`) is
+    /// offered as a best-guess ([`UnimportedNamespace::Hedged`]), still a parseable
+    /// file namespace rather than a path carrying a type segment.
     #[must_use = "this is a pure check with no side effects"]
     pub(crate) fn unimported_namespace_prefix(
         &self,
@@ -2439,31 +2432,107 @@ impl SymbolTable {
         if path.len() <= 2 && self.head_type_preempts_sibling_file(&path[0], from_scope_id) {
             return None;
         }
-        if self.file_may_anchor_absolute_path(path, from_scope_id) {
+        // An absolute path whose head is *not* a directory namespace names the
+        // entry's own root-scope surface (`MySpec::fn`, `MyType::assoc`), which the
+        // entry owns and may always spell — not a cross-file leak. This is the
+        // entry-own-surface half of the structural anchor router; a directory-
+        // descent path is exactly the diagnostic's input and is not suppressed here.
+        if Some(self.enclosing_file_scope(from_scope_id)) == self.root_scope_id()
+            && !self.path_descends_into_directory_namespace(path)
+        {
             return None;
         }
         if path.len() < 2 {
             return None;
         }
-        // The namespace portion is the path minus its final (item) segment — the
-        // longest plausible *file* namespace, always parseable as a `use`.
-        let namespace_portion = path[..path.len() - 1].join("::");
-        match self.deepest_registered_namespace_prefix(path, from_scope_id) {
-            // A registered namespace covers the full namespace portion: the file
-            // is in the closure, so the namespace provably exists and the fix is
-            // exact.
-            Some(key) if key == namespace_portion => {
-                Some(UnimportedNamespace::Confident { namespace: key })
-            }
-            // The only registered keys are shorter than the namespace portion (a
-            // shallower directory like `lib`), or none is registered at all — the
-            // target sub-file is not in the closure. Returning the directory key
-            // would suggest the unparseable `use lib;`; offer the namespace
-            // portion as a hedged best-guess instead.
-            _ => Some(UnimportedNamespace::Hedged {
-                namespace: namespace_portion,
-            }),
+        // The deepest real file the path's leading segments descend into (following
+        // child file scopes only), and the number of segments that walk consumed.
+        let (deep_id, k) = self.deepest_namespace_scope_structural(path, from_scope_id)?;
+        let deep_key = self.module_path_of_scope(deep_id);
+        // The file already reads `deep_key`'s surface through its own `use` — so the
+        // path is not a missing-import leak. This single equality check (the same
+        // predicate the terminal surface gate uses) resolves three otherwise-
+        // confounded cases at once: a leaf that is genuinely unknown in an imported
+        // namespace (`geo::Nope` with `use geo;`) defers to the unknown-leaf error; a
+        // function reached through an intermediate plain `use` (not `pub use`) defers
+        // to the call site's re-export hint (the children-only walk stops at the
+        // imported re-exporting file); and a path the file simply imported already is
+        // never flagged. Importing an *ancestor* (`use a;` for `a::b`) does not read
+        // the descendant's surface, so it does not suppress — that is the very leak
+        // the diagnostic reports.
+        if self.file_imports_namespace_key(from_scope_id, &deep_key) {
+            return None;
         }
+        // The deepest real file is `deep_key`, and it is not imported. The fix is
+        // exact (`use {deep_key}`, always a parseable file namespace) when the walk
+        // reached the path's actual target namespace — either it consumed the whole
+        // namespace portion as real files (`lib::geom::area`, `a::b::Type`: the leaf
+        // is read directly in `deep`), or it stopped because `path[k]` names a type
+        // in `deep` (`a::b::Type::make`: the remaining segments are a type-access
+        // into the real file). The `item` is the type-access tail read inside
+        // `deep` — `path[k..]` — so the message names the full path the import
+        // unlocks (`lib::b::Point::make`), not just the leaf member.
+        let namespace_portion = path[..path.len() - 1].join("::");
+        if deep_key == namespace_portion
+            || (k < path.len() && self.scope_defines_type(&path[k], deep_id))
+        {
+            return Some(UnimportedNamespace::Confident {
+                namespace: deep_key,
+                item: path[k..].join("::"),
+            });
+        }
+        // The walk fell short of a real file (the target sub-file was not compiled).
+        // Offer the deepest proven file plus the next segment the path tried to
+        // descend into — `path[..k + 1]` — as the longest plausible *file* namespace.
+        // This is one hop past what the walk proved (never the shallower directory
+        // `deep_key` alone), and never includes a type segment: the walk stopped at
+        // `k` because `path[k]` is not a child file, and the Confident arm above
+        // already excluded `path[k]` being a type in `deep`, so the appended segment
+        // is plausibly a file. For a type-access value path (`lib::b::Point::make`)
+        // this names `lib::b`, never the unparseable `lib::b::Point`. The bound is
+        // clamped: a path whose every segment (leaf included) named a real child
+        // file reaches here with `k == len`, and the clamp keeps the slice in range.
+        let plausible_namespace_end = (k + 1).min(path.len());
+        Some(UnimportedNamespace::Hedged {
+            namespace: path[..plausible_namespace_end].join("::"),
+        })
+    }
+
+    /// The deepest file scope `path`'s leading segments structurally descend into
+    /// from `from_scope_id`, and the number of segments consumed reaching it. A
+    /// *structural*, gate-free walk used only by the missing-import diagnostic
+    /// ([`Self::unimported_namespace_prefix`]): it must see the file structure even
+    /// where the descent gate refused resolution.
+    ///
+    /// The anchor is shared with the resolver ([`Self::start_qualified_walk`]) so
+    /// the two never disagree on where a path begins; each subsequent hop follows a
+    /// **child** file scope only ([`ReachedVia::Child`]), stopping at a re-export
+    /// hop. A re-export target is a *reachable* namespace, not a missing one, so it
+    /// is never a candidate for a "you forgot to import this" hint — only raw
+    /// file-nesting descent names the deepest file the `use` suggestion should
+    /// point at. Returns `None` only when the path cannot anchor at all (no bound
+    /// namespace, no directory head, not the entry surface).
+    #[must_use = "the scope and count are the return value"]
+    fn deepest_namespace_scope_structural(
+        &self,
+        path: &[String],
+        from_scope_id: u32,
+    ) -> Option<(u32, usize)> {
+        let (anchor, remaining) = self.start_qualified_walk(path, from_scope_id)?;
+        let mut current = anchor;
+        let mut consumed = path.len() - remaining.len();
+        for segment in remaining {
+            match self.next_namespace_scope(&current, segment) {
+                Some((next, ReachedVia::Child))
+                    if self.scope_is_file_namespace(next.borrow().id) =>
+                {
+                    current = next;
+                    consumed += 1;
+                }
+                _ => break,
+            }
+        }
+        Some((current.borrow().id, consumed))
     }
 
     #[must_use = "this is a pure lookup with no side effects"]
@@ -2522,7 +2591,7 @@ impl SymbolTable {
         }
 
         let (start_scope, module_path) = self.start_qualified_walk(path, from_scope_id)?;
-        self.walk_qualified_from(start_scope, module_path, from_scope_id)
+        self.walk_qualified_from(start_scope, module_path, from_scope_id, true)
     }
 
     /// Walks the namespace chain `module_path` from `start_scope`, returning the
@@ -2533,17 +2602,46 @@ impl SymbolTable {
     /// boundary out of `from_scope_id`'s file. Shared by
     /// [`Self::resolve_qualified_name`] and [`Self::resolve_import_path`] so the
     /// two differ only in how the start scope is anchored.
+    ///
+    /// `gate_descent` applies the cross-file import discipline to the walk: each
+    /// intermediate *child* hop must pass [`Self::may_descend_through_namespace`]
+    /// and the terminal namespace (when reached by a child hop) must pass
+    /// [`Self::may_read_namespace_surface`], so a body reference reaches another
+    /// file's surface only through this file's own `use` or a `pub use` re-export
+    /// chain. Re-export hops carry their own discipline (the `reexported` flag in
+    /// [`Self::next_namespace_scope`]) and are never re-gated by the manifest — a
+    /// terminal reached by a re-export hop is exempt from the surface gate, or
+    /// `pub use` would be defeated. [`Self::resolve_qualified_name`] (body
+    /// references) passes `true`; [`Self::resolve_import_path`] passes `false`
+    /// because an import declaration's own path *is* the dependency it declares —
+    /// gating it would make `use lib::geom::{val};` fail to resolve its own prefix
+    /// (#63).
     #[must_use = "this is a pure lookup with no side effects"]
     fn walk_qualified_from(
         &self,
         start_scope: ScopeRef,
         module_path: &[String],
         from_scope_id: u32,
+        gate_descent: bool,
     ) -> Option<(Symbol, u32)> {
         let mut current_scope = start_scope;
+        // How the most recent hop reached `current_scope`; `None` for the anchor.
+        // A terminal namespace reached by a re-export hop is exempt from the
+        // surface gate (the re-export licensed it).
+        let mut last_via: Option<ReachedVia> = None;
         for (i, segment) in module_path.iter().enumerate() {
             let is_last = i == module_path.len() - 1;
             if is_last {
+                // The leaf is read in the terminal namespace `current_scope`. When
+                // the terminal was reached by child-descent (or is the anchor), a
+                // cross-file surface read requires an exact import of that namespace.
+                // A terminal reached by a re-export hop is already licensed.
+                if gate_descent
+                    && last_via != Some(ReachedVia::Reexport)
+                    && !self.may_read_namespace_surface(from_scope_id, &current_scope)
+                {
+                    return None;
+                }
                 let scope = current_scope.borrow();
                 if let Some(symbol) = scope.lookup_symbol_local(segment) {
                     return Some((symbol.clone(), scope.id));
@@ -2572,8 +2670,17 @@ impl SymbolTable {
                 return None;
             }
 
-            let next = self.next_namespace_scope(&current_scope, segment)?;
+            let (next, via) = self.next_namespace_scope(&current_scope, segment)?;
+            // Only file-nesting child descent is gated by the manifest; a re-export
+            // hop carries its own discipline and is followed freely.
+            if gate_descent
+                && via == ReachedVia::Child
+                && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+            {
+                return None;
+            }
             current_scope = next;
+            last_via = Some(via);
         }
 
         None
@@ -2585,13 +2692,15 @@ impl SymbolTable {
     /// segment that names a namespace bound in the accessing scope (a `use a::b;`
     /// import) anchors there too, so a file can reach an imported namespace by
     /// the bound name. Otherwise the path is treated as an absolute `dir::file`
-    /// chain rooted at the entry file — but only when the accessing file is
-    /// licensed to spell that absolute prefix (see
-    /// [`Self::file_may_anchor_absolute_path`]). A file that never imported the
-    /// head namespace must not reach it by an absolute path: that would let any
-    /// file read another file's surface without a `use`, which the leaf-alias
-    /// spelling (`geom::val()`) already forbids. The returned slice is the path
-    /// with any consumed `self` stripped.
+    /// chain rooted at the entry file when it *structurally* can be — when the head
+    /// names a directory namespace, or the accessing file is the entry naming its
+    /// own root surface ([`Self::file_may_anchor_absolute_path`], a pure structural
+    /// router). Anchoring no longer enforces the cross-file import discipline: that
+    /// is applied per-hop by [`Self::may_descend_through_namespace`] and at the leaf
+    /// by [`Self::may_read_namespace_surface`] during the subsequent walk, so a file
+    /// that never imported the head namespace fails not at the anchor but at the
+    /// first cross-file hop. The returned slice is the path with any consumed `self`
+    /// stripped.
     fn start_qualified_walk<'p>(
         &self,
         path: &'p [String],
@@ -2638,55 +2747,33 @@ impl SymbolTable {
         } else {
             (self.root_scope.clone()?, path)
         };
-        self.walk_qualified_from(start_scope, remaining, from_scope_id)
+        self.walk_qualified_from(start_scope, remaining, from_scope_id, false)
     }
 
-    /// Whether the file enclosing `from_scope_id` may anchor `path` at the root
-    /// scope as an absolute chain.
+    /// Whether `path` may *structurally* anchor at the root scope as an absolute
+    /// chain — that is, whether root has somewhere to start the walk. This is a
+    /// pure structural router, not an import gate: the file-scoped import
+    /// discipline lives entirely in the descent gate
+    /// ([`Self::may_descend_through_namespace`]), which every cross-file hop of the
+    /// subsequent walk must pass. Anchoring merely picks the starting scope; the
+    /// first hop that crosses a file boundary is where disclosure is decided.
     ///
-    /// Anchoring at root reaches two kinds of head: a *directory namespace*
-    /// (`lib::geom::…`, another file's surface) or a non-directory root child that
-    /// the entry file defines directly (an entry `spec`, type, function, or const,
-    /// reached as `MySpec::fn` or `MyType::assoc`). The two are held to different
-    /// rules:
+    /// Root is a valid anchor in exactly two cases:
     ///
-    /// - A path that descends into a **directory namespace** is subject to the
-    ///   file-scoped import discipline: the file may spell the long form only of a
-    ///   namespace it imported, and only the *exact* namespace the path descends
-    ///   into. That namespace is the path's Deepest Registered Namespace Prefix
-    ///   (DRNP, [`Self::deepest_registered_namespace_prefix`]) — the longest
-    ///   leading prefix that names a project namespace. The file is licensed iff
-    ///   one of its imported namespace keys *equals* the DRNP (`use lib::geom;`
-    ///   licenses `lib::geom::Point`, whose DRNP is `lib::geom`, because `Point`
-    ///   is a type, not a namespace). Equality — not prefix — because each `use`
-    ///   imports exactly one namespace, never its sub-namespaces transitively:
-    ///   `use lib::geom;` must NOT license `lib::geom::sub::deep`, whose DRNP is
-    ///   `lib::geom::sub`, a deeper namespace only another file dragged into the
-    ///   closure. A file that imported nothing equal to the DRNP is rejected, so it
-    ///   cannot read another file's surface without a `use`. A file's `use` list is
-    ///   its complete dependency manifest; there is no ambient cross-file
-    ///   visibility, so the entry is held to the same discipline as every other
-    ///   file (#63).
-    /// - A path whose head is **not** a directory namespace names the entry's own
-    ///   root-scope surface, not another file. The entry owns those definitions, so
-    ///   it anchors them freely (a non-entry file's own top-level items live in its
-    ///   *own* file scope, not at root, so root-anchoring never reaches them — the
-    ///   entry is the only file for which this branch resolves anything).
-    ///
-    /// Only namespace imports written within this file (before the file boundary)
-    /// count toward the prefix gate. This is the same file-scoped import discipline
-    /// that [`Self::namespace_binding_scope`] and
-    /// [`Self::lookup_symbol_file_scoped_from`] enforce for the bound-name and
-    /// bare-name spellings.
+    /// - The head names a **directory namespace** (`lib::geom::…`, the root child
+    ///   that begins another file's path). The walk may *begin* there; whether it
+    ///   may *descend* into the target file is the descent gate's call, applied at
+    ///   the hop. This is why anchoring no longer needs the accessing file's
+    ///   manifest — admitting the anchor discloses nothing on its own.
+    /// - The accessing file **is the entry** (its enclosing file scope is root), so
+    ///   an absolute head names the entry's own root-scope surface (an entry
+    ///   `spec`, type, fn, or const reached as `MySpec::fn` / `MyType::assoc`). A
+    ///   non-entry file's own top-level items live in its *own* file scope, not at
+    ///   root, so this never reaches another file's surface.
     #[must_use = "this is a pure check with no side effects"]
     fn file_may_anchor_absolute_path(&self, path: &[String], from_scope_id: u32) -> bool {
-        if !self.path_descends_into_directory_namespace(path) {
-            return Some(self.enclosing_file_scope(from_scope_id)) == self.root_scope_id();
-        }
-        let Some(drnp) = self.deepest_registered_namespace_prefix(path, from_scope_id) else {
-            return false;
-        };
-        self.file_imports_namespace_key(from_scope_id, &drnp)
+        self.path_descends_into_directory_namespace(path)
+            || Some(self.enclosing_file_scope(from_scope_id)) == self.root_scope_id()
     }
 
     /// Whether `path`'s head names a directory namespace — a file or directory
@@ -2776,7 +2863,9 @@ impl SymbolTable {
 
     /// Advances one intermediate hop of a qualified-name walk: the next scope is
     /// a direct child named `segment`, or a **re-exported** namespace import
-    /// named `segment` in `current`.
+    /// named `segment` in `current`. The returned [`ReachedVia`] records which,
+    /// so the caller applies the manifest descent gate to child hops only and
+    /// leaves re-export hops to their own discipline.
     ///
     /// The accessing file's own import (which may be private) is consumed by
     /// [`Self::start_qualified_walk`] as the entry point, so by the time this
@@ -2784,18 +2873,90 @@ impl SymbolTable {
     /// import there is private to its own file and is never followed. That is
     /// what makes `math::arith::add` resolve only when `math` writes
     /// `pub use lib::arith;`, not a plain `use`.
-    fn next_namespace_scope(&self, current: &ScopeRef, segment: &str) -> Option<ScopeRef> {
+    fn next_namespace_scope(
+        &self,
+        current: &ScopeRef,
+        segment: &str,
+    ) -> Option<(ScopeRef, ReachedVia)> {
         let scope = current.borrow();
         if let Some(child) = scope.children.iter().find(|c| c.borrow().name == segment) {
-            return Some(child.clone());
+            return Some((child.clone(), ReachedVia::Child));
         }
         if let Some(resolved) = scope.resolved_imports.get(segment)
             && let ResolvedImportTarget::Namespace { scope_id } = &resolved.target
             && resolved.reexported
         {
-            return self.get_scope(*scope_id);
+            return self.get_scope(*scope_id).map(|s| (s, ReachedVia::Reexport));
         }
         None
+    }
+
+    /// Whether a namespace walk in `from_scope_id`'s file may take the *intermediate
+    /// hop* from `current` into `next` — passing through `next` toward a deeper
+    /// target. A hop that crosses a file boundary is admitted when the accessing
+    /// file's own `use` manifest reaches `next` **or any namespace under it**
+    /// ([`Self::file_imports_namespace_at_or_under`], the prefix form): importing
+    /// `lib::geom::sub` licenses passing through the hops `lib` and `lib::geom` to
+    /// reach it in long form. A hop that stays within the current file (a directory
+    /// scope, or the entry's own surface), or descends into a non-file scope,
+    /// carries no cross-file disclosure and is always admitted.
+    ///
+    /// This is the pass-through half of the cross-file discipline; the *terminal*
+    /// half ([`Self::may_read_namespace_surface`]) is stricter — passing through a
+    /// namespace is not licence to read its surface. All three namespace-walk loops
+    /// consult this on every intermediate hop — [`Self::resolve_longest_namespace_prefix`]
+    /// (the type-path resolver), [`Self::prefix_is_namespace`] (the call-shape
+    /// probe), and [`Self::walk_qualified_from`] (the value/function resolver) — so
+    /// they agree by construction rather than by parallel re-derivation. Without it,
+    /// `next_namespace_scope` would descend from one file's scope into a child file
+    /// scope with no import check, letting a file importing only a parent reach an
+    /// un-imported sibling file's surface (#63).
+    #[must_use = "this is a pure check with no side effects"]
+    fn may_descend_through_namespace(
+        &self,
+        from_scope_id: u32,
+        current: &ScopeRef,
+        next: &ScopeRef,
+    ) -> bool {
+        let next_id = next.borrow().id;
+        if !self.is_non_entry_file_scope(next_id) {
+            return true;
+        }
+        let current_id = current.borrow().id;
+        if self.enclosing_file_scope(next_id) == self.enclosing_file_scope(current_id) {
+            return true;
+        }
+        self.file_imports_namespace_at_or_under(from_scope_id, &self.module_path_of_scope(next_id))
+    }
+
+    /// Whether `from_scope_id`'s file may read the *surface* of `terminal` — the
+    /// namespace scope a qualified path's leaf segment resolves in. This is the
+    /// terminal half of the cross-file discipline, and it is stricter than the
+    /// pass-through hop gate ([`Self::may_descend_through_namespace`]): a file may
+    /// read another file's surface only through an **exact** import of that
+    /// namespace ([`Self::file_imports_namespace_key`], equality), never through a
+    /// deeper or shallower import it merely walked across.
+    ///
+    /// `use lib::geom::sub;` licenses reading `lib::geom::sub`'s own leaves
+    /// (`lib::geom::sub::deep`) but not its parent `lib::geom`'s surface
+    /// (`lib::geom::area`) — passing *through* `lib::geom` to reach the sub-file is
+    /// not licence to read `lib::geom` itself. Symmetrically `use lib::geom;` does
+    /// not reach the deeper `lib::geom::sub::deep`. Each `use` grants exactly its
+    /// own namespace's surface; ancestors serve only pass-through spelling.
+    ///
+    /// A leaf read in the accessing file's *own* file scope needs no import, so the
+    /// gate fires only on cross-file reads (the `enclosing_file_scope` inequality),
+    /// mirroring the pass-through gate's same-file exemption.
+    #[must_use = "this is a pure check with no side effects"]
+    fn may_read_namespace_surface(&self, from_scope_id: u32, terminal: &ScopeRef) -> bool {
+        let terminal_id = terminal.borrow().id;
+        if !self.is_non_entry_file_scope(terminal_id) {
+            return true;
+        }
+        if self.enclosing_file_scope(terminal_id) == self.enclosing_file_scope(from_scope_id) {
+            return true;
+        }
+        self.file_imports_namespace_key(from_scope_id, &self.module_path_of_scope(terminal_id))
     }
 
     /// Whether `path` names a **function** reachable from `from_scope_id` when the
@@ -2899,7 +3060,14 @@ impl SymbolTable {
         };
         for segment in remaining {
             match self.next_namespace_scope(&current_scope, segment) {
-                Some(next) => current_scope = next,
+                Some((next, via)) => {
+                    if via == ReachedVia::Child
+                        && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+                    {
+                        return false;
+                    }
+                    current_scope = next;
+                }
                 None => return false,
             }
         }
@@ -2980,6 +3148,10 @@ impl SymbolTable {
 
         let mut current_scope = start_scope;
         let mut consumed = consumed_by_start;
+        // How the most recent hop reached `current_scope`; `None` for the anchor.
+        // A terminal namespace reached by a re-export hop is exempt from the
+        // surface gate applied after the loop.
+        let mut last_via: Option<ReachedVia> = None;
         // Continue while subsequent segments still name sub-namespaces, stopping at
         // the first that does not (a type, variant, or the leaf member).
         //
@@ -3015,24 +3187,51 @@ impl SymbolTable {
         // precedence requires for the head segment (#63).
         for (i, segment) in path.iter().enumerate().skip(consumed) {
             let scope_id = current_scope.borrow().id;
+            // A same-named type pre-empts the sub-file at the type-access start only
+            // when the type interpretation is *viable* for the suffix (the type is
+            // the leaf, or `Type::member` names a real assoc fn / enum variant).
+            // Without the viability conjunct, an intermediate segment that merely
+            // shares a name with a parent struct — `geom` in `lib::geom::mk()`,
+            // where `mk` is a free fn in `lib/geom.inf`, not an assoc of
+            // `struct geom` — would break here and be mis-resolved as an undefined
+            // associated function instead of consuming `geom` as the sub-file (#63).
             if i == type_access_start
                 && self.scope_defines_type(segment, scope_id)
                 && self.file_imports_namespace_key(
                     from_scope_id,
                     &self.module_path_of_scope(scope_id),
                 )
+                && self.type_shadow_viable_for_suffix(path, i, scope_id, from_scope_id)
             {
                 break;
             }
             match self.next_namespace_scope(&current_scope, segment) {
-                Some(next) => {
+                Some((next, via)) => {
+                    if via == ReachedVia::Child
+                        && !self.may_descend_through_namespace(from_scope_id, &current_scope, &next)
+                    {
+                        break;
+                    }
                     current_scope = next;
                     consumed += 1;
+                    last_via = Some(via);
                 }
                 None => break,
             }
         }
         if consumed == 0 {
+            return None;
+        }
+        // The leaf type is read inside the namespace the walk landed in, so reading
+        // it is a cross-file surface read subject to the terminal equality gate: a
+        // file may name `lib::geom::Point` only by importing `lib::geom` exactly,
+        // never a deeper (`lib::geom::sub`) or shallower import it walked across.
+        // A terminal reached by a re-export hop is already licensed by that hop and
+        // is exempt. This mirrors the value/function resolver's terminal gate so the
+        // type path and the value path enforce the identical rule.
+        if last_via != Some(ReachedVia::Reexport)
+            && !self.may_read_namespace_surface(from_scope_id, &current_scope)
+        {
             return None;
         }
         Some((current_scope.borrow().id, consumed))
@@ -3047,6 +3246,55 @@ impl SymbolTable {
     fn scope_defines_type(&self, name: &str, scope_id: u32) -> bool {
         self.lookup_symbol_file_scoped_from(name, scope_id)
             .is_some_and(|symbol| symbol.as_struct().is_some() || symbol.as_enum().is_some())
+    }
+
+    /// Whether interpreting `path[type_index]` as a type defined in `ns_scope` is
+    /// *viable* for the rest of the path — the precondition for letting a same-named
+    /// type pre-empt a sub-file at an intermediate segment of a qualified call.
+    ///
+    /// A type interpretation is viable only when the suffix is a shape that type
+    /// resolution can actually consume:
+    /// - the type is the **leaf** (`type_index == path.len() - 1`): `lib::Point`
+    ///   in type position, trivially viable; or
+    /// - the type is followed by **exactly one** trailing member that is a real
+    ///   associated function of that struct, or a real variant of that enum
+    ///   (`Type::assoc`, `Enum::Variant`).
+    ///
+    /// Any other suffix — a deeper path, or a single member the type does not have —
+    /// is *not* a type-access, so the segment must be consumed as a sub-file
+    /// namespace instead. Without this check, the type-shadow break fired on the
+    /// mere existence of a same-named struct, turning `lib::geom::mk()` (where
+    /// `lib` defines `struct geom` but `mk` is a free fn in the sub-file
+    /// `lib/geom.inf`) into `lib::(struct geom)::mk` — an undefined associated
+    /// function — instead of resolving the sub-file's free `mk` (#63).
+    ///
+    /// The viability probe reuses the *same* lookups the consuming handlers run
+    /// ([`Self::resolve_method_in_namespace`], [`Self::resolve_enum_in_namespace`]),
+    /// so the break and the handler can never disagree on whether a member exists.
+    #[must_use = "this is a pure check with no side effects"]
+    fn type_shadow_viable_for_suffix(
+        &self,
+        path: &[String],
+        type_index: usize,
+        ns_scope: u32,
+        from_scope_id: u32,
+    ) -> bool {
+        let type_name = &path[type_index];
+        if type_index == path.len() - 1 {
+            return true;
+        }
+        if type_index + 1 != path.len() - 1 {
+            return false;
+        }
+        let member = &path[type_index + 1];
+        if self
+            .resolve_method_in_namespace(type_name, member, ns_scope, from_scope_id)
+            .is_some()
+        {
+            return true;
+        }
+        self.resolve_enum_in_namespace(type_name, ns_scope, from_scope_id)
+            .is_some_and(|(info, _)| info.variants.contains(member))
     }
 
     /// The single precedence decision shared by both qualified-path resolvers: a

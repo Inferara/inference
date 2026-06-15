@@ -111,14 +111,14 @@ fn cycle_from_back_edge(stack: &[usize], v: usize) -> Option<Vec<usize>> {
     Some(canon)
 }
 
-/// Renders a cycle as `a -> b -> ... -> a` using node display labels.
+/// Renders a cycle as `a -> b -> ... -> a` using each node's canonical key.
 fn render_cycle(nodes: &[FnNode], cycle: &[usize]) -> String {
     let mut chain = String::new();
     for &i in cycle {
-        chain.push_str(&nodes[i].display);
+        chain.push_str(&nodes[i].key.to_string());
         chain.push_str(" -> ");
     }
-    chain.push_str(&nodes[cycle[0]].display);
+    chain.push_str(&nodes[cycle[0]].key.to_string());
     chain
 }
 
@@ -128,9 +128,24 @@ mod tests {
     use crate::call_graph::{test_node, CallEdge, FnNode};
     use inference_ast::ids::idx_from_u32;
     use inference_ast::nodes::Location;
+    use inference_fn_key::FnKey;
 
     fn loc() -> Location {
         Location::default()
+    }
+
+    /// Builds a node with an explicit structured key and edges; placeholder
+    /// def/body metadata since these tests exercise graph shape only.
+    fn node(key: FnKey, edges: Vec<CallEdge>) -> FnNode {
+        FnNode {
+            key,
+            edges,
+            def_id: idx_from_u32(0),
+            body: idx_from_u32(0),
+            location: loc(),
+            module_path: Vec::new(),
+            struct_name: None,
+        }
     }
 
     fn cycles(diags: &[LabeledDiagnostic]) -> Vec<String> {
@@ -215,21 +230,16 @@ mod tests {
     fn spec_first_resolution_prefers_spec_inner_callee() {
         // Inside spec `S`, bare `f` resolves to `S.f` when both exist.
         let nodes = vec![
-            FnNode {
-                key: "S.f".to_string(),
-                display: "S.f".to_string(),
-                edges: vec![CallEdge {
-                    callee_raw: "f".to_string(),
+            node(
+                FnKey::spec_free_folded(&[], "S", "f"),
+                vec![CallEdge {
+                    name: "f".to_string(),
+                    receiver_struct: None,
                     module_path: Vec::new(),
                     spec: Some("S".to_string()),
                     location: loc(),
                 }],
-                def_id: idx_from_u32(0),
-                body: idx_from_u32(0),
-                location: loc(),
-                module_path: Vec::new(),
-                struct_name: None,
-            },
+            ),
             test_node("f", &[]),
         ];
         let diags = detect_cycles(&nodes);
@@ -239,22 +249,18 @@ mod tests {
 
     #[test]
     fn method_self_cycle_reported() {
-        // A method `T.m` resolved by call-site resolution to raw `T.m`.
-        let nodes = vec![FnNode {
-            key: "T.m".to_string(),
-            display: "T.m".to_string(),
-            edges: vec![CallEdge {
-                callee_raw: "T.m".to_string(),
+        // A method `T.m` whose body calls itself (`recv.m()` -> receiver struct
+        // `T`, name `m`).
+        let nodes = vec![node(
+            FnKey::method_in(Vec::new(), "T", "m"),
+            vec![CallEdge {
+                name: "m".to_string(),
+                receiver_struct: Some("T".to_string()),
                 module_path: Vec::new(),
                 spec: None,
                 location: loc(),
             }],
-            def_id: idx_from_u32(0),
-            body: idx_from_u32(0),
-            location: loc(),
-            module_path: Vec::new(),
-            struct_name: None,
-        }];
+        )];
         let diags = detect_cycles(&nodes);
         assert_eq!(diags.len(), 1);
         assert_eq!(cycles(&diags), vec!["T.m -> T.m"]);

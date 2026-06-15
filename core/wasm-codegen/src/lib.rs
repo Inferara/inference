@@ -272,10 +272,7 @@ fn traverse_t_ast_with_compiler(
             typed_context,
             None,
             &entry.module_path,
-            &FunctionOrigin::SpecInner(qualified_spec_name(
-                &entry.module_path,
-                &entry.spec_name,
-            )),
+            &FunctionOrigin::SpecInner(entry.spec_name.clone()),
         )?;
     }
     for entry in &buckets.spec_methods {
@@ -285,10 +282,7 @@ fn traverse_t_ast_with_compiler(
             typed_context,
             Some(&entry.struct_name),
             &entry.module_path,
-            &FunctionOrigin::SpecInner(qualified_spec_name(
-                &entry.module_path,
-                &entry.spec_name,
-            )),
+            &FunctionOrigin::SpecInner(entry.spec_name.clone()),
         )?;
     }
     Ok(())
@@ -304,12 +298,12 @@ fn traverse_t_ast_with_compiler(
 /// intact into the `<module>__<spec>_specs` theorem grammar. The join is not
 /// injective when a segment itself ends or begins with `_`; [`check_spec_name_collisions`]
 /// rejects the rare resulting clash rather than letting two specs merge.
+///
+/// Delegates to [`inference_fn_key::fold_spec_name`], the single implementation
+/// of the fold, so the proof grammar here and the spec [`FnKey`] identity the
+/// analysis passes build stay byte-identical.
 pub(crate) fn qualified_spec_name(module_path: &[String], spec_name: &str) -> String {
-    if module_path.is_empty() {
-        spec_name.to_string()
-    } else {
-        format!("{}_{spec_name}", module_path.join("_"))
-    }
+    inference_fn_key::fold_spec_name(module_path, spec_name)
 }
 
 /// Rejects two distinct `(module_path, spec_name)` pairs that collapse to the

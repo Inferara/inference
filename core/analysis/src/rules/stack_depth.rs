@@ -188,10 +188,10 @@ fn longest_from(
     color[u] = BLACK;
 }
 
-/// Renders a path as `a -> b -> c` using node display labels.
+/// Renders a path as `a -> b -> c` using each node's canonical key.
 fn render_chain(nodes: &[FnNode], path: &[usize]) -> String {
     path.iter()
-        .map(|&i| nodes[i].display.as_str())
+        .map(|&i| nodes[i].key.to_string())
         .collect::<Vec<_>>()
         .join(" -> ")
 }
@@ -201,15 +201,15 @@ fn render_chain(nodes: &[FnNode], path: &[usize]) -> String {
 ///
 /// Exposed so the codegen↔analysis frame-size soundness invariant
 /// (estimate ≥ real) can be checked cross-crate; see the parity test in
-/// `inference-tests`. Keys match codegen's [`FnKey`] display scheme
-/// (free `f`, spec-free `S.f`, method `T.m`, spec-method `S.T.m`).
-///
-/// [`FnKey`]: (codegen-internal; mirrored by `crate::call_graph::fn_key`)
-#[must_use]
+/// `inference-tests`. Keys are `FnKey::to_string()` from the shared
+/// [`inference_fn_key`] crate (free `f`, spec-free `S.f`, method `T.m`,
+/// spec-method `S.T.m`) — the same string codegen emits its frame-size map
+/// under, which is the interchange format the parity test compares.
+#[must_use = "returns the estimated frame sizes"]
 pub fn estimate_frame_sizes(ctx: &TypedContext) -> std::collections::BTreeMap<String, u32> {
     build_call_graph(ctx)
         .iter()
-        .map(|node| (node.key.clone(), estimate_frame_size(ctx, node)))
+        .map(|node| (node.key.to_string(), estimate_frame_size(ctx, node)))
         .collect()
 }
 
