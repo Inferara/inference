@@ -186,7 +186,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no {kind:?} node in:\n{}", root.debug_tree(src)))
     }
 
-    // ---- items ----
+    // items
 
     #[test]
     fn function_definition_shape() {
@@ -364,7 +364,7 @@ mod tests {
         assert_eq!(count_kind(&s, SyntaxKind::StructField), 0);
     }
 
-    // ---- use directives ----
+    // use directives
 
     #[test]
     fn use_path() {
@@ -457,7 +457,7 @@ mod tests {
         assert!(find(&root, SyntaxKind::FunctionDefinition).is_some());
     }
 
-    // ---- use directives: #63 matrix (CST) ----
+    // use directives: #63 matrix (CST)
     //
     // The smoke tests above cover one happy case per `pub`/glob form. The
     // matrix below broadens coverage across every path depth, every glob
@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(root.kind, SyntaxKind::SourceFile);
     }
 
-    // -- pub spec rejection: exact message, body integrity, following items ----
+    // -- pub spec rejection: exact message, body integrity, following items
 
     #[test]
     fn pub_spec_exact_message_single_error() {
@@ -704,7 +704,7 @@ mod tests {
         );
     }
 
-    // -- pub field rejection: exact message, AST integrity, mixed members ------
+    // -- pub field rejection: exact message, AST integrity, mixed members
 
     #[test]
     fn pub_field_exact_message_single_error() {
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(fns, 1, "the trailing fn must parse:\n{}", tree(src));
     }
 
-    // ---- types ----
+    // types
 
     #[test]
     fn primitive_types() {
@@ -844,7 +844,7 @@ mod tests {
         assert!(find(&args, SyntaxKind::Identifier).is_some());
     }
 
-    // ---- statements ----
+    // statements
 
     #[test]
     fn variable_definition_with_value() {
@@ -961,7 +961,7 @@ mod tests {
         }
     }
 
-    // ---- expressions: literals & atoms ----
+    // expressions: literals & atoms
 
     #[test]
     fn number_literal_atom() {
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(find(&parse_to_cst(src).0, SyntaxKind::StructExpression).is_none());
     }
 
-    // ---- expressions: precedence & associativity ----
+    // expressions: precedence & associativity
 
     #[test]
     fn add_binds_looser_than_mul() {
@@ -1202,7 +1202,7 @@ mod tests {
         assert_eq!(left.kind, SyntaxKind::ParenthesizedExpression);
     }
 
-    // ---- disambiguations ----
+    // disambiguations
 
     #[test]
     fn negative_number_is_single_literal() {
@@ -1308,7 +1308,7 @@ mod tests {
         assert!(find(&a, SyntaxKind::MemberAccessExpression).is_some());
     }
 
-    // ---- resilience: never panic, always reach EOF, produce errors ----
+    // resilience: never panic, always reach EOF, produce errors
 
     #[test]
     fn missing_semicolon_recovers() {
@@ -1422,7 +1422,7 @@ mod tests {
         }
     }
 
-    // ---- corpus smoke ----
+    // corpus smoke
 
     // Real Inference programs, vendored under `core/parser/test_data/` and
     // embedded at compile time via `include_str!` so these tests run everywhere

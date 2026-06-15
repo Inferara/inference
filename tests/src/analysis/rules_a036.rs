@@ -263,7 +263,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part A: compound-type frame coverage ---------------------------------
+    // Part A: compound-type frame coverage
     //
     // The tests above exercise only flat `[i32; N]` arrays. A036's per-function
     // frame estimate must also be sound for structs, mixed-alignment fields,
@@ -508,7 +508,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part B: cross-crate frame-size parity --------------------------------
+    // Part B: cross-crate frame-size parity
 
     /// Enforced cross-crate soundness guard for A036.
     ///
@@ -640,7 +640,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part C: cross-file frames --------------------------------------------
+    // Part C: cross-file frames
     //
     // A036's soundness assumes the call graph is whole-program: a cross-file
     // chain's cumulative depth must be summed, and an imported struct's frame
@@ -790,7 +790,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part D: qualified-typed by-value parameter frames ---------------------
+    // Part D: qualified-typed by-value parameter frames
     //
     // A by-value parameter whose type is written as a `::`-qualified path
     // (`fn consume(big: lib::big::Big)`) reaches the frame estimator as an
@@ -1013,7 +1013,7 @@ mod analysis_rules_tests {
         }
     }
 
-    // --- Part E (#63): cross-file struct-associated-function chains -------------
+    // Part E (#63): cross-file struct-associated-function chains
     //
     // The structured `FnKey` that fixed the A035 sibling-file collision also keys
     // A036's frame map. A cross-file chain through struct associated functions
@@ -1126,7 +1126,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Part F (#63): injective spec key keeps a heavy spec node visible -------
+    // Part F (#63): injective spec key keeps a heavy spec node visible
     //
     // A036 keys its frame map by `FnKey` through the shared call graph. Before the
     // spec key became injective, a heavy spec function in `lib/checks::S` and a

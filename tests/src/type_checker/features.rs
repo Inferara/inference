@@ -1070,9 +1070,7 @@ mod generics_tests {
         Ok(TypeCheckerBuilder::build_typed_context(arena)?.typed_context())
     }
 
-    // ============================================
     // Type Substitution Tests
-    // ============================================
 
     // Note: Inference language uses T' syntax for type parameters, not <T>
     // fn identity T'(x: T) -> T { ... }
@@ -1209,9 +1207,7 @@ mod generics_tests {
         );
     }
 
-    // ============================================
     // Phase 7.4.2: Error Case Tests
-    // ============================================
 
     // Note: Explicit type arguments on function calls (e.g., identity i32'(42))
     // are not yet supported in the grammar. Skipping tests that require this syntax.
@@ -1240,9 +1236,7 @@ mod generics_tests {
         }
     }
 
-    // ============================================
     // Generic Inference Tests
-    // ============================================
 
     #[test]
     fn test_infer_type_param_from_argument() {
@@ -1283,9 +1277,7 @@ mod generics_tests {
         );
     }
 
-    // ============================================
     // Additional Edge Cases
-    // ============================================
 
     #[test]
     fn test_generic_function_non_generic_call() {

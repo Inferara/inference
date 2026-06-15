@@ -861,19 +861,17 @@ mod tests {
         assert_eq!(edit_distance("", "abc"), 3);
     }
 
-    // -----------------------------------------------------------------------
     // Comprehensive matrix. Broadens the smoke tests above
     // along axes they do not cover: deep nesting, diamond/cycle combos,
     // self-import, multi-file canonical ordering, `pub use` discovery, mixed
     // directives, missing-file edge cases, and unreachable-warning edge cases.
-    // -----------------------------------------------------------------------
 
     /// Convenience constructor for an owned `["a", "b", ...]` module path.
     fn mp(segments: &[&str]) -> Vec<String> {
         segments.iter().map(ToString::to_string).collect()
     }
 
-    // --- Axis: deep nesting -------------------------------------------------
+    // Axis: deep nesting
 
     #[test]
     fn three_directory_levels_resolve() {
@@ -945,7 +943,7 @@ mod tests {
         );
     }
 
-    // --- Axis: diamond + cycle combos --------------------------------------
+    // Axis: diamond + cycle combos
 
     #[test]
     fn diamond_dependency_parses_shared_apex_once() {
@@ -1026,7 +1024,7 @@ mod tests {
         );
     }
 
-    // --- Axis: canonical order ---------------------------------------------
+    // Axis: canonical order
 
     #[test]
     fn five_files_sorted_lexicographically_regardless_of_discovery() {
@@ -1140,7 +1138,7 @@ mod tests {
         );
     }
 
-    // --- Axis: `pub use` in the closure walk --------------------------------
+    // Axis: `pub use` in the closure walk
 
     #[test]
     fn pub_use_pulls_file_into_closure() {
@@ -1195,7 +1193,7 @@ mod tests {
         );
     }
 
-    // --- Axis: mixed directives in one file --------------------------------
+    // Axis: mixed directives in one file
 
     #[test]
     fn mixed_directive_forms_only_path_form_drives_discovery() {
@@ -1251,7 +1249,7 @@ mod tests {
         );
     }
 
-    // --- Axis: missing-file edge cases -------------------------------------
+    // Axis: missing-file edge cases
 
     #[test]
     fn suggestion_offered_at_distance_exactly_two() {
@@ -1373,7 +1371,7 @@ mod tests {
         }
     }
 
-    // --- Axis: unreachable warnings ----------------------------------------
+    // Axis: unreachable warnings
 
     #[test]
     fn multiple_unreachable_files_warn_in_sorted_order() {
@@ -1476,7 +1474,7 @@ mod tests {
         );
     }
 
-    // --- Axis: error precedence --------------------------------------------
+    // Axis: error precedence
 
     #[test]
     fn missing_file_aborts_before_unreachable_scan() {
@@ -1494,7 +1492,7 @@ mod tests {
         ));
     }
 
-    // --- Axis: entry-level error variants ----------------------------------
+    // Axis: entry-level error variants
     // The `Io` and `NoSourceRoot` arms guard the entry itself, ahead of the
     // import walk; the rest of the matrix only ever exercises healthy entries.
 
@@ -1533,7 +1531,7 @@ mod tests {
         }
     }
 
-    // --- Axis: self-import of the entry file -------------------------------
+    // Axis: self-import of the entry file
     // A `use main;` from a non-entry file resolves to the entry's own path. The
     // entry is already in the closure under the empty module path, so it must not
     // be discovered a second time — re-adding it would lower (and emit) every

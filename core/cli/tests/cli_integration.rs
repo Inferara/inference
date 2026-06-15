@@ -897,7 +897,6 @@ fn codegen_dry_run_preserves_existing_artifact() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Multi-file front end (issue #63).
 //
 // infc drives `parse_project` for the `--parse` phase, folding the
@@ -909,7 +908,6 @@ fn codegen_dry_run_preserves_existing_artifact() {
 // (success, warnings, and import errors). Multi-file codegen is fully wired —
 // the import-reachable closure compiles to one artifact — so driving later phases
 // would test codegen, not discovery; the dedicated codegen tests cover that.
-// ---------------------------------------------------------------------------
 
 /// Writes `source` to `<root>/<relative>` (a `/`-joined logical path), creating
 /// parent directories, and returns the absolute path. The logical path is split
@@ -1450,13 +1448,11 @@ fn entry_spec_trailing_underscore_compiles_in_default_mode() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Stale-artifact safety: a rejected compile must never leave a runnable
 // `out/<name>.wasm` (or `.v`) on disk for `wasmtime` to execute. After a good
 // build, a later edit that fails any rejection channel (type check, analysis,
 // codegen) must clear the previous artifact rather than leave it behind, in both
 // single-file and multi-file modes.
-// ---------------------------------------------------------------------------
 
 /// Builds `entry` in the given temp dir and asserts the build succeeded and wrote
 /// `out/<stem>.wasm`. Shared first half of every stale-artifact test.
@@ -1750,12 +1746,10 @@ fn codegen_v_success_then_default_success_both_write_artifacts() {
     build_ok_and_assert_wasm(&temp, &entry, "main");
 }
 
-// ---------------------------------------------------------------------------
 // wasm_to_v rejection ordering: the Rocq translation runs before any artifact
 // is written, so a `-v` build rejected by `wasm_to_v` (e.g. a spec named after a
 // Rocq stdlib type, a keyword, or a `__`-containing name) leaves NO runnable
 // `.wasm` behind. A `wasm_to_v` rejection at a non-zero exit must not be runnable.
-// ---------------------------------------------------------------------------
 
 /// A spec named `list` shadows the Rocq stdlib type and is rejected by
 /// `wasm_to_v`. Because the translation runs before the WASM is written, no

@@ -1390,7 +1390,7 @@ impl<'s> Lowering<'s> {
         Location::new(0, len, 1, 1, line, column)
     }
 
-    // -- CST navigation helpers (replace tree-sitter field-name lookups) -------
+    // -- CST navigation helpers (replace tree-sitter field-name lookups)
 
     /// The first direct `Identifier` child of `node`, if any.
     ///
@@ -1775,7 +1775,7 @@ mod tests {
         &arena[ty].kind
     }
 
-    // -- Items ---------------------------------------------------------------
+    // -- Items
 
     #[test]
     fn lowers_function_without_return() {
@@ -2137,7 +2137,7 @@ mod tests {
         assert_eq!(imported, ["x"]);
     }
 
-    // -- Use directives: #63 lowering matrix ---------------------------------
+    // -- Use directives: #63 lowering matrix
     //
     // The smoke tests above lower one happy case per form (path-form braced,
     // from simple/path, and the three `pub` variants). This matrix adds the
@@ -2273,7 +2273,7 @@ mod tests {
         }
     }
 
-    // -- Statements ----------------------------------------------------------
+    // -- Statements
 
     #[test]
     fn lowers_let_with_and_without_value() {
@@ -2477,7 +2477,7 @@ mod tests {
         }
     }
 
-    // -- Expressions ---------------------------------------------------------
+    // -- Expressions
 
     #[test]
     fn lowers_binary_operators() {
@@ -2741,7 +2741,7 @@ mod tests {
         }
     }
 
-    // -- Types ---------------------------------------------------------------
+    // -- Types
 
     /// The annotated type `kind` of `fn f() { let v: <ty> = x; }`.
     fn let_type(arena: &AstArena) -> &TypeNode {
@@ -2904,7 +2904,7 @@ mod tests {
         }
     }
 
-    // -- Location parity -----------------------------------------------------
+    // -- Location parity
 
     #[test]
     fn number_literal_location_is_sensible() {
@@ -2938,7 +2938,7 @@ mod tests {
         assert_eq!(loc.start_column, 1);
     }
 
-    // -- Resilience: error-recovery / fallback arms --------------------------
+    // -- Resilience: error-recovery / fallback arms
 
     #[test]
     fn parse_recovers_from_member_access_without_name() {

@@ -22,9 +22,7 @@ use std::fmt::{Display, Formatter};
 
 use crate::ids::{BlockId, DefId, ExprId, IdentId, StmtId, TypeId};
 
-// ---------------------------------------------------------------------------
 // Location
-// ---------------------------------------------------------------------------
 
 /// Source location information for AST nodes.
 ///
@@ -89,9 +87,7 @@ pub fn file_label(module_path: &[String]) -> Option<String> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared enums (unchanged)
-// ---------------------------------------------------------------------------
 
 /// Visibility modifier for definitions.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -170,9 +166,7 @@ pub enum OperatorKind {
     Shr,
 }
 
-// ---------------------------------------------------------------------------
 // Wrapper structs (stored in arena Vecs)
-// ---------------------------------------------------------------------------
 
 /// Expression wrapper: `location` + `kind`.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -250,9 +244,7 @@ impl SourceFileData {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Block kind
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
@@ -263,9 +255,7 @@ pub enum BlockKind {
     Unique,
 }
 
-// ---------------------------------------------------------------------------
 // Directives
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Directive {
@@ -303,9 +293,7 @@ pub struct UseDirective {
     pub from: Option<ModuleRef>,
 }
 
-// ---------------------------------------------------------------------------
 // Definitions
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Def {
@@ -352,9 +340,7 @@ pub enum Def {
     },
 }
 
-// ---------------------------------------------------------------------------
 // Statements
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Stmt {
@@ -393,9 +379,7 @@ pub enum Stmt {
     ConstDef(DefId),
 }
 
-// ---------------------------------------------------------------------------
 // Expressions
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Expr {
@@ -451,9 +435,7 @@ pub enum Expr {
     Type(TypeId),
 }
 
-// ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeNode {
@@ -487,9 +469,7 @@ pub enum TypeNode {
     Custom(IdentId),
 }
 
-// ---------------------------------------------------------------------------
 // Inline helper structs (not arena-allocated)
-// ---------------------------------------------------------------------------
 
 /// A function/method argument definition.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -522,9 +502,7 @@ pub struct Field {
     pub ty: TypeId,
 }
 
-// ---------------------------------------------------------------------------
 // Convenience impls
-// ---------------------------------------------------------------------------
 
 impl TypeNode {
     /// Returns `true` if this type is the unit type `()`.

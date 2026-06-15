@@ -136,9 +136,7 @@ fn path_without_tools() -> String {
     }
 }
 
-// =============================================================================
 // Error Path Tests
-// =============================================================================
 
 /// Verifies that the build command fails gracefully when the input file doesn't exist.
 ///
@@ -227,9 +225,7 @@ fn build_v_flag_alone_produces_both_outputs() {
     );
 }
 
-// =============================================================================
 // Success Path Tests
-// =============================================================================
 
 /// Verifies that the full pipeline with Rocq output works correctly.
 ///
@@ -271,9 +267,7 @@ fn build_full_pipeline_with_v_output() {
     );
 }
 
-// =============================================================================
 // Version and Help Tests
-// =============================================================================
 
 /// Verifies that the `--version` flag displays the correct version information.
 ///
@@ -303,9 +297,7 @@ fn help_shows_available_commands() {
         .stdout(predicate::str::contains("--headless"));
 }
 
-// =============================================================================
 // Headless Mode Tests
-// =============================================================================
 
 /// Verifies that headless mode without a command shows informational output.
 ///
@@ -339,9 +331,7 @@ fn tui_detects_infs_no_tui_environment() {
         .stdout(predicate::str::contains("--help").or(predicate::str::contains("build")));
 }
 
-// =============================================================================
 // Byte-Identical Output Tests
-// =============================================================================
 
 /// Resolves the path to the `infc` binary in the workspace target directory.
 ///
@@ -437,9 +427,7 @@ fn build_produces_identical_wasm_as_infc() {
     );
 }
 
-// =============================================================================
 // Project-mode Build Tests
-// =============================================================================
 
 /// Source used as `src/main.inf` for project-mode tests. Must define a `main`
 /// entry point so it compiles cleanly and (for the run tests later) is
@@ -552,9 +540,7 @@ fn project_build_missing_entry_point_errors() {
     );
 }
 
-// =============================================================================
 // Project-mode Multi-file Build Tests (#63)
-// =============================================================================
 
 /// The stale `infs`-side warning that predated multi-file support: it claimed
 /// project mode compiled only `src/main.inf`. `infc` now compiles the whole
@@ -810,9 +796,7 @@ fn project_build_wasm_byte_identical_to_infc() {
     );
 }
 
-// =============================================================================
 // Project-mode Run Tests
-// =============================================================================
 
 /// A `main` returning a nonzero constant, used to assert wasmtime surfaces the
 /// return value (printed to stdout by `--invoke`).
@@ -1044,9 +1028,7 @@ fn project_run_propagates_compile_error() {
         .stdout(predicate::str::contains("Invoking 'main'").not());
 }
 
-// =============================================================================
 // Project-mode Manifest Semantics Tests
-// =============================================================================
 
 /// Scaffolds a project whose `Inference.toml` embeds the given `[build]` /
 /// `[verification]` body (appended after `[package]`). `manifest_extra` is raw
@@ -1372,13 +1354,9 @@ fn project_build_old_infc_with_output_dir_hard_errors() {
     );
 }
 
-// =============================================================================
 // Phase 2: Toolchain Management Command Tests
-// =============================================================================
 
-// -----------------------------------------------------------------------------
 // Install Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs install --help` displays the available options.
 ///
@@ -1414,9 +1392,7 @@ fn install_without_network_shows_error() {
         .stderr(predicate::str::contains("Error").or(predicate::str::contains("error")));
 }
 
-// -----------------------------------------------------------------------------
 // Uninstall Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs uninstall --help` displays the available options.
 ///
@@ -1451,9 +1427,7 @@ fn uninstall_nonexistent_shows_message() {
         .stderr(predicate::str::contains("not installed"));
 }
 
-// -----------------------------------------------------------------------------
 // List Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs list` runs successfully even with no toolchains installed.
 ///
@@ -1487,9 +1461,7 @@ fn list_shows_no_toolchains_message() {
         .stdout(predicate::str::contains("No toolchains installed"));
 }
 
-// -----------------------------------------------------------------------------
 // Versions Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs versions --help` displays the available options.
 ///
@@ -1569,9 +1541,7 @@ fn versions_json_flag_is_accepted() {
     cmd.assert().failure();
 }
 
-// -----------------------------------------------------------------------------
 // Default Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs default --help` displays the available options.
 ///
@@ -1620,9 +1590,7 @@ fn default_nonexistent_version_shows_error() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Doctor Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs doctor` runs successfully even with no toolchains installed.
 ///
@@ -1805,9 +1773,7 @@ fn doctor_shows_checking_message() {
         .stdout(predicate::str::contains("Checking Inference toolchain"));
 }
 
-// -----------------------------------------------------------------------------
 // Self Update Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs self --help` displays the available subcommands.
 ///
@@ -1891,13 +1857,9 @@ fn self_requires_subcommand() {
         .stderr(predicate::str::contains("subcommand").or(predicate::str::contains("required")));
 }
 
-// =============================================================================
 // Phase 3: Project Scaffolding Command Tests
-// =============================================================================
 
-// -----------------------------------------------------------------------------
 // New Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs new --help` displays the available options.
 ///
@@ -2083,9 +2045,7 @@ fn new_with_no_git_flag() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // Init Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs init --help` displays the available options.
 ///
@@ -2213,9 +2173,7 @@ fn init_uses_directory_name_as_default() {
     );
 }
 
-// -----------------------------------------------------------------------------
 // File Permission and Error Handling Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that file permissions are handled correctly for created project files.
 ///
@@ -2348,9 +2306,7 @@ fn init_handles_permission_denied() {
     std::fs::set_permissions(readonly_dir.path(), perms).expect("Failed to restore permissions");
 }
 
-// -----------------------------------------------------------------------------
 // Run Command Tests
-// -----------------------------------------------------------------------------
 
 /// Verifies that `infs run --help` displays the available options.
 ///
@@ -2444,9 +2400,7 @@ fn run_accepts_trailing_args() {
         .stdout(predicate::str::contains("ARGS").or(predicate::str::contains("args")));
 }
 
-// =============================================================================
 // Conditional Tests: Full Workflow (Require External Tools)
-// =============================================================================
 
 /// Helper function to check if wasmtime is available in PATH.
 fn is_wasmtime_available() -> bool {
@@ -2537,9 +2491,7 @@ fn build_fails_gracefully_on_syntax_error() {
     );
 }
 
-// =============================================================================
 // Helper Functions for QA Test Files
-// =============================================================================
 
 /// Returns the path to `empty.inf` test file.
 fn empty_file() -> std::path::PathBuf {
@@ -2576,9 +2528,7 @@ fn unique_test_file() -> std::path::PathBuf {
     example_file("unique_test.inf")
 }
 
-// =============================================================================
 // QA Test Coverage: Migrated from docs/qa-test-suite.md
-// =============================================================================
 
 /// QA: TC-2.10 - Verify empty file is handled gracefully.
 ///

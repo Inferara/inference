@@ -3330,7 +3330,7 @@ mod extern_provenance_tests {
         }
     }
 
-    // --- Binding succeeds ---
+    // Binding succeeds ---
 
     #[test]
     fn binds_extern_to_single_module() {
@@ -3405,7 +3405,7 @@ mod extern_provenance_tests {
         );
     }
 
-    // --- Unbound extern stays valid ---
+    // Unbound extern stays valid ---
 
     #[test]
     fn bare_extern_without_use_is_unbound_but_valid() {
@@ -3432,7 +3432,7 @@ mod extern_provenance_tests {
         assert!(ctx.extern_origin("helper").is_none());
     }
 
-    // --- Ambiguity errors ---
+    // Ambiguity errors ---
 
     #[test]
     fn ambiguous_extern_from_two_modules_errors() {
@@ -3467,7 +3467,7 @@ mod extern_provenance_tests {
         assert!(result.is_err(), "ambiguous extern must be rejected");
     }
 
-    // --- Missing / dangling import errors ---
+    // Missing / dangling import errors ---
 
     #[test]
     fn use_from_naming_undeclared_extern_errors() {
@@ -3501,7 +3501,7 @@ mod extern_provenance_tests {
         );
     }
 
-    // --- Provenance inside spec and module bodies ---
+    // Provenance inside spec and module bodies ---
 
     #[test]
     fn top_level_use_does_not_bind_a_spec_inner_extern() {

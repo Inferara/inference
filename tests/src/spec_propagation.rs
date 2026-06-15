@@ -55,9 +55,7 @@ mod helpers {
     }
 }
 
-// ============================================================================
 // Scenario 1: Type-checker scoping
-// ============================================================================
 #[cfg(test)]
 mod scenario_1_type_checker_scoping {
     use crate::utils::build_ast;
@@ -197,9 +195,7 @@ mod scenario_1_type_checker_scoping {
     }
 }
 
-// ============================================================================
 // Scenario 2: Export gating
-// ============================================================================
 #[cfg(test)]
 mod scenario_2_export_gating {
     use super::helpers::compile;
@@ -235,9 +231,7 @@ mod scenario_2_export_gating {
     }
 }
 
-// ============================================================================
 // Field-position uzumaki inside a spec compiles in proof mode
-// ============================================================================
 #[cfg(test)]
 mod spec_field_position_uzumaki {
     use super::helpers::compile;
@@ -285,9 +279,7 @@ mod spec_field_position_uzumaki {
     }
 }
 
-// ============================================================================
 // Scenario 3: Custom WASM section round-trip
-// ============================================================================
 #[cfg(test)]
 mod scenario_3_custom_section_round_trip {
     use super::helpers::{compile, wasm_contains};
@@ -342,9 +334,7 @@ mod scenario_3_custom_section_round_trip {
     }
 }
 
-// ============================================================================
 // Scenario 4: Per-spec emission ordering and theorems
-// ============================================================================
 #[cfg(test)]
 mod scenario_4_per_spec_emission {
     use super::helpers::compile;
@@ -569,9 +559,7 @@ mod scenario_4_per_spec_emission {
     }
 }
 
-// ============================================================================
 // Scenario 5: Empty list `(@nil N)`
-// ============================================================================
 #[cfg(test)]
 mod scenario_5_empty_list {
     use super::helpers::compile;
@@ -627,9 +615,7 @@ mod scenario_5_empty_list {
     }
 }
 
-// ============================================================================
 // Scenario 6: Invalid module name
-// ============================================================================
 #[cfg(test)]
 mod scenario_6_invalid_module_name {
     use super::helpers::compile;
@@ -794,9 +780,7 @@ mod scenario_6_invalid_module_name {
     }
 }
 
-// ============================================================================
 // Scenario 6b: Embedded WASM data validation (B2, B3)
-// ============================================================================
 #[cfg(test)]
 mod scenario_6b_embedded_data_validation {
     use super::helpers::compile;
@@ -1247,9 +1231,7 @@ mod scenario_6b_embedded_data_validation {
     }
 }
 
-// ============================================================================
 // Scenario 7: Empty spec block surfaces a per-spec entry (B1 regression)
-// ============================================================================
 #[cfg(test)]
 mod scenario_7_empty_spec {
     use super::helpers::{compile, wasm_contains};
@@ -1355,9 +1337,7 @@ mod scenario_7_empty_spec {
     }
 }
 
-// ============================================================================
 // Scenario 7b: spec-inner struct methods register as spec-owned functions
-// ============================================================================
 #[cfg(test)]
 mod scenario_7b_spec_methods {
     use super::helpers::compile;
@@ -1392,9 +1372,7 @@ mod scenario_7b_spec_methods {
     }
 }
 
-// ============================================================================
 // Scenario 8: Compile-mode emits no spec section
-// ============================================================================
 #[cfg(test)]
 mod scenario_8_compile_mode_no_section {
     use super::helpers::{compile, wasm_contains};
@@ -1451,9 +1429,7 @@ mod scenario_8_compile_mode_no_section {
     }
 }
 
-// ============================================================================
 // Scenario 9: Explicit-overrides-binary precedence and mismatch
-// ============================================================================
 #[cfg(test)]
 mod scenario_9_explicit_vs_embedded {
     use super::helpers::compile;
@@ -1508,9 +1484,7 @@ mod scenario_9_explicit_vs_embedded {
     }
 }
 
-// ============================================================================
 // Scenario 10: `wasm_to_v` on compile-mode binary
-// ============================================================================
 #[cfg(test)]
 mod scenario_10_wasm_to_v_compile_mode {
     use super::helpers::compile;
@@ -1544,9 +1518,7 @@ mod scenario_10_wasm_to_v_compile_mode {
     }
 }
 
-// ============================================================================
 // Scenario 11: Over-long spec name rejected at codegen (D2)
-// ============================================================================
 #[cfg(test)]
 mod scenario_11_overlong_spec_name {
     use crate::utils::build_ast;

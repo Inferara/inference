@@ -148,7 +148,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Cross-file recursion ----------------------------------------------------
+    // Cross-file recursion
     //
     // A `::`-qualified module call (`lib::b::pong()`) and a `root::`-qualified
     // call back into the entry file resolve to a function in another file. The
@@ -337,7 +337,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- Cross-file recursion through methods and associated functions -----------
+    // Cross-file recursion through methods and associated functions
     //
     // An instance-method dispatch (`recv.m()`) and a bare/namespaced associated
     // call (`Type::assoc()`) resolve to a function whose defining file differs
@@ -575,7 +575,7 @@ mod analysis_rules_tests {
         );
     }
 
-    // --- FAMILY 2 (#63): structured FnKey defeats the sibling-file collision ----
+    // FAMILY 2 (#63): structured FnKey defeats the sibling-file collision
     //
     // A struct associated/instance function and a same-named free function in a
     // sibling file render to the same flat string (`a.mid.make`): the module-join
@@ -801,7 +801,7 @@ mod analysis_rules_tests {
         assert_eq!(diag.rule_id(), "A035");
     }
 
-    // --- Injective spec FnKey defeats the fold-collision recursion escape (#63) --
+    // Injective spec FnKey defeats the fold-collision recursion escape (#63) --
     //
     // The spec-name fold is lossy: `lib/checks` + spec `S` and the sibling file
     // `lib_checks` + spec `S` both render `lib_checks_S`. When the spec key folded

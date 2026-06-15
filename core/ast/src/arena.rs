@@ -38,9 +38,7 @@ const _: () = {
     assert_sync::<AstArena>();
 };
 
-// ---------------------------------------------------------------------------
 // Index impls — forward to inner Arena<T>
-// ---------------------------------------------------------------------------
 
 impl std::ops::Index<SourceFileId> for AstArena {
     type Output = SourceFileData;
@@ -91,9 +89,7 @@ impl std::ops::Index<IdentId> for AstArena {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Source text retrieval
-// ---------------------------------------------------------------------------
 
 impl AstArena {
     /// Returns the source location of any node.
@@ -222,9 +218,7 @@ impl AstArena {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Query methods
-// ---------------------------------------------------------------------------
 
 impl AstArena {
     /// Returns all source file data entries in **canonical order**.

@@ -1593,7 +1593,6 @@ pub fn new() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run"), 1);
 }
 
-// =====================================================================
 // Closure-dependent tail-precedence flip (#63).
 //
 // `a::mid::make()` written with `use a::mid;` (the SUB-FILE) must reach
@@ -1606,7 +1605,6 @@ pub fn new() -> i32 {
 // The fix gates the tail type-precedence break on the accessing file having
 // imported the parent file the walk stands in (`file_imports_namespace_key`),
 // so the flip can no longer be triggered by another file's `use a;`.
-// =====================================================================
 
 /// The third-file-cannot-flip pin: `main` imports only `a::mid` (the sub-file),
 /// while `other` imports the parent `a`, dragging `a.inf` into the closure.
@@ -2407,12 +2405,10 @@ fn nth_function_body(v: &str, n: usize) -> String {
     def_body[..def_end].to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Head precedence: a struct/enum defined in the accessing file pre-empts a
 // same-named sibling FILE at the head of a `::` call. The meaning of a file's
 // own `foo::pick()` must not depend on whether an unrelated sibling dragged a
 // root-child `foo.inf` into the import closure.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn local_struct_assoc_call_wins_over_sibling_file_pulled_into_closure() {
@@ -2556,10 +2552,8 @@ pub fn probe() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run_keeper"), 888);
 }
 
-// ---------------------------------------------------------------------------
 // Distinct same-named cross-file structs are not a cycle: a one-level nested
 // field typed as a same-named struct in another file lays out and reads back.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn distinct_same_named_cross_file_nested_struct_lays_out_and_reads() {
@@ -3110,13 +3104,11 @@ pub fn run() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run"), 3);
 }
 
-// =====================================================================
 // The cross-file descent gate must not over-reject legitimate resolution. These
 // compile AND run through Wasmtime, so they pin not only that the gate admits the
 // hop but that the resolved target is the right one (#63).
 // The rejection / closure-independence / diagnostic-quality halves live in the
 // type-checker matrix; here we prove the no-over-rejection controls execute.
-// =====================================================================
 
 /// Leaf-type-wins with the sibling file present: `main` imports the parent
 /// file `a::b::c` directly, so the bound name anchors INSIDE `a::b::c` and the leaf
@@ -3220,11 +3212,9 @@ pub fn deep() -> i32 {
     assert_eq!(call_i32(&mut store, &instance, "run"), 42);
 }
 
-// =====================================================================
 // The viability-gated type-shadow break must resolve the RIGHT target, not merely
 // accept. These compile AND run through Wasmtime so the resolved value
 // distinguishes the sub-file's free fn from a same-named struct's assoc fn (#63).
-// =====================================================================
 
 /// `lib::geom::mk()` where `lib.inf` defines `struct geom` (colliding with the
 /// intermediate segment) and `lib/geom.inf` defines the free `mk` returning a

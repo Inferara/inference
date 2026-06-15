@@ -52,7 +52,7 @@ mod tests {
             .is_some_and(|head| !head.is_empty() && head.bytes().all(|b| b.is_ascii_digit()))
     }
 
-    // --- type-check channel -------------------------------------------------
+    // type-check channel
 
     /// A return-type mismatch in an imported file names that file, not the entry
     /// file the user invoked.
@@ -167,7 +167,7 @@ mod tests {
         );
     }
 
-    // --- analysis channel ---------------------------------------------------
+    // analysis channel
 
     /// A037 (constant array index out of bounds) in an imported file names that
     /// file.

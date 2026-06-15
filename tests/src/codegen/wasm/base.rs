@@ -4035,7 +4035,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Struct uzumaki (non-deterministic initialization) tests ---
+    // Struct uzumaki (non-deterministic initialization) tests ---
 
     #[test]
     fn struct_nondet_test() {
@@ -4238,7 +4238,7 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("Struct with bool array field uzumaki WASM is invalid: {e}"));
     }
 
-    // --- Method codegen: self parameter handling and instance method call tests ---
+    // Method codegen: self parameter handling and instance method call tests ---
 
     #[test]
     fn method_instance_test() {
@@ -4353,7 +4353,7 @@ mod base_codegen_tests {
             "test_on_param: method call on struct parameter should return p.x = 10"
         );
     }
-    // --- Method codegen: associated function call tests ---
+    // Method codegen: associated function call tests ---
 
     #[test]
     fn method_assoc_test() {
@@ -4486,7 +4486,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: methods returning structs (sret) ---
+    // Method codegen: methods returning structs (sret) ---
 
     #[test]
     fn method_return_struct_test() {
@@ -4611,7 +4611,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: mutable self tests ---
+    // Method codegen: mutable self tests ---
 
     #[test]
     fn method_self_mutate_test() {
@@ -4700,7 +4700,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: multiple structs with same method names ---
+    // Method codegen: multiple structs with same method names ---
 
     #[test]
     fn method_multi_struct_test() {
@@ -4765,7 +4765,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: cross-call tests (method-to-method, method-to-function) ---
+    // Method codegen: cross-call tests (method-to-method, method-to-function) ---
 
     #[test]
     fn method_cross_call_test() {
@@ -4835,7 +4835,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- Method codegen: method returning array (sret + instance method) ---
+    // Method codegen: method returning array (sret + instance method) ---
 
     #[test]
     fn method_array_return_test() {
@@ -4887,7 +4887,7 @@ mod base_codegen_tests {
         assert_eq!(result, 20, "p.to_array()[1] should return 20 (p.y)");
     }
 
-    // --- Method codegen: i64 struct fields ---
+    // Method codegen: i64 struct fields ---
 
     #[test]
     fn method_i64_fields_test() {
@@ -4941,7 +4941,7 @@ mod base_codegen_tests {
         assert_eq!(result, 300i64, "p.sum() should return 300 (100 + 200)");
     }
 
-    // --- Method codegen: three-field struct ---
+    // Method codegen: three-field struct ---
 
     #[test]
     fn method_three_fields_test() {
@@ -5307,7 +5307,7 @@ mod base_codegen_tests {
         assert_eq!(val, 4, "struct_with_array_return: val should be 4");
     }
 
-    // --- array_of_structs tests ---
+    // array_of_structs tests ---
 
     #[test]
     fn array_of_structs_golden_test() {
@@ -5449,7 +5449,7 @@ mod base_codegen_tests {
         );
     }
 
-    // --- nested_array_of_structs tests (array-of-structs at nesting depth >= 2) ---
+    // nested_array_of_structs tests (array-of-structs at nesting depth >= 2) ---
 
     #[test]
     fn nested_array_of_structs_test() {
@@ -5611,7 +5611,7 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
     }
 
-    // --- nested_struct_with_array tests ---
+    // nested_struct_with_array tests ---
 
     #[test]
     fn nested_struct_with_array_golden_test() {

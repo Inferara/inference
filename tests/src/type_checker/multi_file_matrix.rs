@@ -67,14 +67,12 @@ mod tests {
             .to_string()
     }
 
-    // ---------------------------------------------------------------------
     // Axis 1 — absolute cross-file paths × item visibility. The absolute
     // `a::b::fn` spelling is the long form of a namespace the accessing file
     // imported: a file (the entry included) reaches another file's surface only
     // through its own `use`, so each absolute path is paired with the `use` that
     // licenses it. A `pub` fn is then reachable by the path; a private one is
     // rejected with the dual-location diagnostic.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn absolute_path_pub_fn_resolves() {
@@ -286,11 +284,9 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 2 — file import (`use a::b;`) binds the namespace `b`, reached with
     // `::`. Item kinds: fn (callable), const (use-site), struct/enum (as `let`
     // type via a cross-file constructor).
-    // ---------------------------------------------------------------------
 
     #[test]
     fn file_import_namespace_call_pub_fn() {
@@ -400,10 +396,8 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 3 — item import (`use a::b::{x}`) × item kind × visibility.
     // The import itself must resolve (exist + pub) for fn/struct/enum.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn item_import_pub_fn_bare_call() {
@@ -511,11 +505,9 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 4 — `const` is an importable item × visibility. A `pub const` crosses
     // the file boundary both as a braced item import and as a qualified `::` path;
     // a private const is rejected at the boundary with a dual-location note.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn const_is_an_importable_item() {
@@ -575,9 +567,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 5 — type alias imports. The import resolves; the alias is nominal.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn type_alias_pub_item_import_resolves() {
@@ -605,9 +595,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 6 — structs: nested types, and methods cross-file.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn nested_struct_imported_field_type() {
@@ -932,9 +920,7 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 7 — imported types in signature positions (limitation).
-    // ---------------------------------------------------------------------
 
     #[test]
     fn imported_struct_usable_as_let_type() {
@@ -1004,9 +990,7 @@ mod tests {
         )]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 8 — `pub use` re-export: namespaces traverse, items do not.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn pub_use_namespace_one_hop_resolves() {
@@ -1172,9 +1156,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 9 — same-named items across files.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn same_named_private_fns_each_used_in_own_file() {
@@ -1257,9 +1239,7 @@ mod tests {
         assert_eq!(ctx.lookup_enum(&lib_key).unwrap().variants.len(), 3);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 10 — specs and visibility.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn spec_sees_own_file_private_fn() {
@@ -1554,12 +1534,10 @@ mod tests {
         )]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis — spec-inner / top-level function shadowing is a SAME-FILE relation.
     // A spec-inner fn shadows a top-level fn only when both are in the same file;
     // the colliding top-level name is resolved in the spec's own file scope, never
     // the entry file's. The diagnostic carries the file the collision lives in.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn spec_inner_fn_matching_entry_top_level_fn_in_another_file_ok() {
@@ -1830,10 +1808,8 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 11 — CircularDefinition over const / type-alias value graphs.
     // File-import cycles are legal; only value cycles are rejected.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn self_referential_const_rejected() {
@@ -1939,9 +1915,7 @@ mod tests {
         assert!(pos("B") < pos("A"), "B before A");
     }
 
-    // ---------------------------------------------------------------------
     // Axis 12 — import-name collisions.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn file_import_collides_with_local_fn() {
@@ -1993,9 +1967,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 13 — empty import list and other malformed imports.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn empty_import_list_rejected() {
@@ -2009,9 +1981,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 14 — entry reachability edge: `use main;` cannot name the entry.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn use_main_does_not_name_the_entry_file() {
@@ -2033,9 +2003,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 15 — type-alias visibility.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn private_type_alias_item_import_rejected() {
@@ -2056,14 +2024,12 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 16 — entry-file boundary: a non-entry file reaches NO entry item by
     // bare name — neither private (soundness) nor public (no ambient cross-file
     // visibility). The entry's `pub` items are reachable only through the reserved
     // `use root;` handle, as `root::item` (pinned by
     // `entry_item_not_bare_visible_but_reachable_via_use_root` in Axis 1 and the
     // `pub_entry_*_via_use_root_item` tests below).
-    // ---------------------------------------------------------------------
 
     #[test]
     fn private_entry_struct_not_reachable_by_bare_name() {
@@ -2412,12 +2378,10 @@ mod tests {
         )]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 17 — cross-file struct literal in a function signature position.
     // A signature whose param or return type is an item-imported struct accepts a
     // struct literal of that type: signatures are re-resolved to `Struct` after
     // imports, matching what call sites infer.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn cross_file_struct_literal_passed_as_param() {
@@ -2472,12 +2436,10 @@ mod tests {
         )]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 18 — const initializers referencing cross-file consts. An acyclic
     // chain type-checks (the initializer check runs after imports resolve); a
     // cycle still reports only `CircularDefinition`; `definition_order()` orders
     // the chain dependency-first.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn const_initializer_references_item_imported_const() {
@@ -2606,12 +2568,10 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 19 — qualified-path diagnostics. A `::` path through a known namespace
     // whose final segment is not a value reports `cannot resolve <path>` (naming a
     // function when that is what the segment is), never the misleading
     // "enum `lib` is not defined".
-    // ---------------------------------------------------------------------
 
     #[test]
     fn qualified_path_unknown_final_segment_diagnostic() {
@@ -2674,11 +2634,9 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis 20 — namespace-qualified type-member access: `geo::Point::new(...)`,
     // `geo::Color::Green`, `geo::Point { .. }` reach a struct/enum *inside* an
     // imported file, with the type's cross-file `pub`-ness enforced.
-    // ---------------------------------------------------------------------
 
     #[test]
     fn namespace_qualified_assoc_fn_resolves() {
@@ -2865,13 +2823,11 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 20b — namespace type-member access through an INTERMEDIATE file
     // honors the re-export gate exactly as the free-function path does: a plain
     // (non-`pub use`) intermediate import blocks traversal to its type members;
     // a `pub use` re-export permits it. Confirmed at depth-1 (`mid::Point::raw`)
     // and depth-3 (`lib::sub::mid::Point::raw`) (#63, Rule 5).
-    // ---------------------------------------------------------------------
 
     #[test]
     fn namespace_type_member_through_plain_import_blocked_depth1() {
@@ -2976,7 +2932,6 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis 9b — cross-file struct/enum TYPE CONFUSION (the B1 soundness
     // guard). Same-named struct/enum types from different files are DISTINCT
     // (identity keyed on the canonical file path, not the bare name), so a
@@ -2985,7 +2940,6 @@ mod tests {
     // starts passing, the type checker has regressed to bare-name unification
     // and a 12-byte struct can flow into a 4-byte slot (OOB) or a value's
     // private behavior can run on a forged same-named public twin.
-    // ---------------------------------------------------------------------
 
     /// `T{x;y;z}` from one file passed where the other file's `T{x}` param is
     /// expected — the canonical confirmed repro (argument boundary).
@@ -3185,7 +3139,6 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Axis — `::`-qualified type annotations resolve to canonical identity.
     //
     // A qualified type (`geo::Level`, `root::T`, `lib::geom::Point`) names a
@@ -3195,7 +3148,6 @@ mod tests {
     // opaque qualified-name. These cover let / parameter / return / receiver
     // positions, for both struct and enum, at 2- and 3-segment depths and via
     // `root::`, plus the cross-form identity, visibility, and negatives.
-    // ---------------------------------------------------------------------
 
     /// A namespace-qualified enum annotation in a `let` binding equals the
     /// qualified value, so the binding type-checks and the `==` unifies.
@@ -3529,13 +3481,11 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Axis — file-namespace bindings are private to the file that wrote them.
     // A brace-free `use a::b;` binds `b` only within its own file; a different
     // file (including a non-entry one) never resolves a bare qualified call
     // through another file's binding, even though their scope chains share an
     // ancestor (#63).
-    // ---------------------------------------------------------------------
 
     /// The leak's root: an entry-file `use lib::Point;` must not make a bare
     /// `Point::new()` inside `lib.inf` mean the sibling file `lib/Point.inf`. The
@@ -3676,7 +3626,6 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
     // Head precedence (the 2-segment call gate): a struct/enum defined in the
     // accessing file pre-empts a same-named sibling FILE at the *head* of a
     // qualified call, so `foo::pick()` / `Vec::new()` / `Color::Red` mean the
@@ -3684,7 +3633,6 @@ mod tests {
     // import closure. This is the value-position counterpart to the leaf/non-leaf
     // type-path precedence above, decided through the shared head-precedence
     // helper so the two resolvers never disagree (#63).
-    // ---------------------------------------------------------------------
 
     /// A local `struct Vec` with associated `new() -> Vec`, used in a `let v: Vec =
     /// Vec::new()`, must type-check even when a sibling pulls a root-child `Vec.inf`
@@ -3762,14 +3710,12 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Intermediate-segment precedence: a type defined in the accessing file
     // pre-empts a same-named sibling file only when the type interpretation is
     // *viable* for the remaining path (the type is the leaf, or is followed by a
     // single member). A type name colliding with an *intermediate* `::`-segment —
     // one followed by a further `::`-segment — cannot be a type-member access, so
     // the namespace walk must continue and the type must not stop it (#63).
-    // ---------------------------------------------------------------------
 
     /// `lib::geom::Point` where the parent file `lib.inf` defines a `struct geom`
     /// that collides with the intermediate `geom` segment. The type interpretation
@@ -3866,11 +3812,9 @@ mod tests {
         ]);
     }
 
-    // ---------------------------------------------------------------------
     // Recursive-struct detection is by canonical key, not bare name: distinct
     // same-named cross-file structs are not a cycle, and a genuine cross-file
     // cycle is caught at type-check (before codegen) (#63).
-    // ---------------------------------------------------------------------
 
     /// A genuine cross-file struct cycle — `root::Outer` contains `lib::m::Inner`,
     /// which contains `root::Outer` back — must be rejected at type-check with the
@@ -3942,7 +3886,6 @@ mod tests {
         );
     }
 
-    // =====================================================================
     // Ambient cross-file visibility defects (#63).
     //
     // (a) The absolute-anchor gate licensed a path if ANY imported namespace key
@@ -3961,9 +3904,8 @@ mod tests {
     // shorter directory key (`lib`), suggesting the unparseable `use lib;`. The
     // hedged diagnostic now offers the path's namespace portion (always a
     // parseable file namespace) instead.
-    // =====================================================================
 
-    // ---- (a) anchor-gate leak is closed (DRNP-equality) ----
+    // (a) anchor-gate leak is closed (DRNP-equality)
 
     /// The leak repro: the entry imports only `lib::geom`, while `helper`
     /// imports `lib::geom::sub`, dragging the deeper namespace into the closure.
@@ -4104,8 +4046,8 @@ mod tests {
         );
     }
 
-    // ---- (b) type-annotation & struct-literal positions report the
-    // missing import, not a generic unknown-type / struct-not-defined ----
+    // (b) type-annotation & struct-literal positions report the
+    // missing import, not a generic unknown-type / struct-not-defined
 
     /// A leaked qualified TYPE annotation (`let p: lib::geom::Point`) reports the
     /// missing import — not "struct Point is not defined". `helper` drags
@@ -4184,7 +4126,7 @@ mod tests {
         ]);
     }
 
-    // ---- single-segment unimported namespace CALL: parseable hint ----
+    // single-segment unimported namespace CALL: parseable hint
 
     /// A bare `other::thing()` call from a file that did not import `other`, where
     /// another file (`bridge`) dragged `other` into the closure, reports the
@@ -4221,7 +4163,7 @@ mod tests {
         ]);
     }
 
-    // ---- Defects 6/7: uncompiled-file fallback gives a parseable hedged hint ----
+    // Uncompiled-file fallback gives a parseable hedged hint
 
     /// When the target sibling file is not in the closure (uncompiled), the rev-
     /// scan would otherwise fall back to the shallow directory key `lib`,
@@ -4269,7 +4211,6 @@ mod tests {
         );
     }
 
-    // =====================================================================
     // Cross-file namespace-descent import leak (#63).
     //
     // A file that imports only a PARENT namespace must not reach a deeper,
@@ -4282,7 +4223,6 @@ mod tests {
     // falls to the missing-import diagnostic. Every test constructs BOTH sides and
     // crosses the boundary; the byte-identical accessing file must give the same
     // verdict regardless of which other files are present (closure-independence).
-    // =====================================================================
 
     /// LEAK-CLOSED F1 — type annotation + struct literal. `main` imports only the
     /// parent `a`, then names `a::b::Type` (a struct in the un-imported sibling
@@ -4424,7 +4364,7 @@ mod tests {
         );
     }
 
-    // ---- Missing-import hint honesty: the hint stays parseable even when the
+    // Missing-import hint honesty: the hint stays parseable even when the
     //      target sub-file is OUTSIDE the compile closure (uncompiled). The closure
     //      boundary is the line between a Confident hint ("add use X;", the file is
     //      proven to exist) and a Hedged best-guess ("if X names a source file,
@@ -4432,7 +4372,7 @@ mod tests {
     //      into an uncompiled file must get the Hedged hint naming the longest
     //      plausible FILE namespace, never a false "unknown type", a bare
     //      "undefined function", or an unparseable type-carrying `use`. Every
-    //      verdict here is a rejection; only the message quality is under test. ----
+    //      verdict here is a rejection; only the message quality is under test.
 
     /// Value path into an UNCOMPILED sibling (only the parent `lib` is imported;
     /// `lib/b.inf` is in no closure). The hint must name the real file namespace
@@ -4555,8 +4495,8 @@ mod tests {
         );
     }
 
-    // ---- Closure-independence: the same accessing file gives the same verdict
-    //      with AND without the dragger/other file present. ----
+    // Closure-independence: the same accessing file gives the same verdict
+    //      with AND without the dragger/other file present.
 
     /// F1 closure-independence: WITHOUT the dragger file, the byte-identical `main`
     /// (importing only `a`) is still rejected — the verdict must not depend on
@@ -4597,7 +4537,7 @@ mod tests {
         );
     }
 
-    // ---- No over-rejection: legitimate cross-file resolution still type-checks. ----
+    // No over-rejection: legitimate cross-file resolution still type-checks.
 
     /// Leaf-type-wins, with the sibling file present: `main` imports the
     /// parent file `a::b::c` directly (binding `c`), so the bound name anchors
@@ -4665,8 +4605,8 @@ mod tests {
         ]);
     }
 
-    // ---- Diagnostic (findings 10/11/12): the suggested `use` is always a
-    //      parseable FILE namespace, never `use prefix::Type;`. ----
+    // Diagnostic: the suggested `use` is always a parseable FILE namespace,
+    // never `use prefix::Type;`.
 
     /// A `prefix::Type::assoc()` value path into an un-imported namespace must
     /// suggest the FILE namespace (`use a::b;`), never the unparseable
@@ -4710,11 +4650,11 @@ mod tests {
         ]);
     }
 
-    // ---- Item-kind axis: the descent gate covers EVERY qualified resolver
+    // Item-kind axis: the descent gate covers EVERY qualified resolver
     //      consumer, not only fn/struct/assoc. Enum-variant and const value paths
     //      are distinct resolver entry points (each was fixed separately in prior
     //      rounds), so each is leak-tested and over-rejection-tested in its own
-    //      right through the bound-name parent-import descent. ----
+    //      right through the bound-name parent-import descent.
 
     /// LEAK-CLOSED, enum-variant path. `main` imports only `a` and names
     /// `a::b::Color::Red`, an enum variant in the un-imported sibling `a/b.inf`.
@@ -4785,9 +4725,9 @@ mod tests {
         ]);
     }
 
-    // ---- Accessor axis: the cross-file descent leak from a NON-ENTRY accessor. The
+    // Accessor axis: the cross-file descent leak from a NON-ENTRY accessor. The
     //      gate keys on the accessing scope, and a non-entry file's parent chain
-    //      runs into the entry, so a non-entry accessor is a distinct code path. ----
+    //      runs into the entry, so a non-entry accessor is a distinct code path.
 
     /// LEAK-CLOSED from a non-entry accessor. `helper` (a non-entry file) imports
     /// only the parent `a` and calls `a::b::deep()` in the un-imported sibling
@@ -4859,7 +4799,6 @@ mod tests {
         );
     }
 
-    // =====================================================================
     // Remaining-path-awareness for the qualified-CALL resolver.
     //
     // The type-shadow break in `resolve_longest_namespace_prefix` pre-empts a
@@ -4871,7 +4810,6 @@ mod tests {
     // `struct geom` — is consumed as the sub-file namespace, not mis-resolved as an
     // undefined associated function. Composes with the cross-file descent gate: the
     // sub-file is still reached only through the accessing file's own `use`.
-    // =====================================================================
 
     /// `lib::geom::mk()` where `lib.inf` defines `struct geom` (collides with the
     /// intermediate segment) and the sub-file `lib/geom.inf` defines the free `mk`.
@@ -5022,7 +4960,7 @@ mod tests {
         ]);
     }
 
-    // ---- F6/F7 diagnostic wording for value paths into a struct-assoc. ----
+    // F6/F7 diagnostic wording for value paths into a struct-assoc.
 
     /// F7 (Confident): a `prefix::file::Type::assoc` value path into a compiled-but-
     /// un-imported namespace names the FULL type-access tail in the hint —
