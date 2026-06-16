@@ -2863,7 +2863,7 @@ impl TypeChecker {
             let info = self
                 .symbol_table
                 .lookup_struct(qualified_name)
-                .and_then(|info| self.symbol_table.lookup_type(qualified_name).map(|ty| (info, ty)));
+                .zip(self.symbol_table.lookup_type(qualified_name));
             return (qualified_name.to_string(), info);
         };
 
