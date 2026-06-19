@@ -318,6 +318,7 @@ impl TypeChecker {
     /// File-to-file import cycles are unaffected — they are allowed (#63). Only a
     /// cycle in the *values* of definitions, which has no evaluation order, is an
     /// error.
+    ///
     /// Returns `true` when a value cycle was found, so the caller can skip the
     /// const-initializer check (whose member resolution would otherwise emit a
     /// confusing secondary error for a definition that is part of the cycle).

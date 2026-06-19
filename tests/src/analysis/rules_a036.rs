@@ -623,10 +623,17 @@ mod analysis_rules_tests {
             let estimate = inference_analysis::estimate_frame_sizes(&ctx);
             let output = codegen_output_no_analysis(src);
             let real = output.frame_sizes();
+            // Both maps are keyed by the structured `FnKey`, so two functions whose
+            // keys render to the same `Display` string stay distinct here; the test
+            // therefore compares each function's estimate against its own real frame.
             for (key, &real_bytes) in real {
                 if real_bytes > 0 {
                     saw_nonzero_real_frame = true;
                 }
+                assert!(
+                    estimate.contains_key(key),
+                    "analysis estimate is missing a frame entry for fn `{key}` that codegen emitted in source:\n{src}"
+                );
                 let est = estimate.get(key).copied().unwrap_or(0);
                 assert!(
                     est >= real_bytes,
@@ -996,9 +1003,13 @@ mod analysis_rules_tests {
         let output = codegen_output_multi_file_no_analysis(files);
         let real = output.frame_sizes();
 
+        // `real` is keyed by the structured `FnKey`; the entry-file free function
+        // `consume` has an empty module path, so it renders to the bare `consume`.
+        // Find it by its rendered name to avoid naming `FnKey` in the test crate.
         let consume_real = real
-            .get("consume")
-            .copied()
+            .iter()
+            .find(|(key, _)| key.to_string() == "consume")
+            .map(|(_, &bytes)| bytes)
             .expect("codegen must emit a frame size for `consume`");
         assert!(
             consume_real > 0,

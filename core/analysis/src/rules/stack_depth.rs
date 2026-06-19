@@ -45,8 +45,10 @@ use std::collections::HashSet;
 
 use inference_ast::ids::{BlockId, NodeId};
 use inference_ast::nodes::{ArgData, ArgKind, Def, Location, Stmt};
+use inference_fn_key::FnKey;
 use inference_type_checker::type_info::{NumberType, TypeInfo, TypeInfoKind};
 use inference_type_checker::StructInfo;
+use rustc_hash::FxHashMap;
 
 use crate::call_graph::{build_call_graph, resolve_adjacency, FnNode, BLACK, GRAY, WHITE};
 use crate::errors::{AnalysisDiagnostic, LabeledDiagnostic};
@@ -196,20 +198,22 @@ fn render_chain(nodes: &[FnNode], path: &[usize]) -> String {
         .join(" -> ")
 }
 
-/// Returns each function's estimated stack-frame size in bytes, keyed by
-/// canonical function name.
+/// Returns each function's estimated stack-frame size in bytes, keyed by the
+/// structured [`FnKey`].
 ///
 /// Exposed so the codegen↔analysis frame-size soundness invariant
 /// (estimate ≥ real) can be checked cross-crate; see the parity test in
-/// `inference-tests`. Keys are `FnKey::to_string()` from the shared
-/// [`inference_fn_key`] crate (free `f`, spec-free `S.f`, method `T.m`,
-/// spec-method `S.T.m`) — the same string codegen emits its frame-size map
-/// under, which is the interchange format the parity test compares.
+/// `inference-tests`. Keys are the structured [`FnKey`] from the shared
+/// [`inference_fn_key`] crate — the same key codegen records its frame-size map
+/// under, which is the interchange format the parity test compares. Keying on
+/// the structured `FnKey` rather than its lossy `Display` string keeps two
+/// functions whose keys render identically distinct, so the parity test cannot
+/// compare one function's estimate against another's real frame.
 #[must_use = "returns the estimated frame sizes"]
-pub fn estimate_frame_sizes(ctx: &TypedContext) -> std::collections::BTreeMap<String, u32> {
+pub fn estimate_frame_sizes(ctx: &TypedContext) -> FxHashMap<FnKey, u32> {
     build_call_graph(ctx)
         .iter()
-        .map(|node| (node.key.to_string(), estimate_frame_size(ctx, node)))
+        .map(|node| (node.key.clone(), estimate_frame_size(ctx, node)))
         .collect()
 }
 

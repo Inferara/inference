@@ -101,8 +101,8 @@ pub(crate) enum FunctionOrigin {
 
 /// The triple yielded by [`Compiler::finish_and_take`]: the assembled WASM
 /// binary, the per-spec function indices, and the per-function shadow-stack
-/// frame sizes (canonical [`FnKey`] string → bytes).
-type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<String, u32>);
+/// frame sizes (canonical [`FnKey`] → bytes).
+type FinishedModule = (Vec<u8>, FxHashMap<String, Vec<u32>>, FxHashMap<FnKey, u32>);
 
 /// Structured key identifying every WASM function, shared with the analysis
 /// passes so codegen and the call-graph agree on identity by construction.
@@ -381,7 +381,11 @@ pub(crate) struct Compiler {
     /// computed; frameless functions record 0. Moved out by
     /// [`Self::finish_and_take`] so the analysis↔codegen frame-size soundness
     /// invariant (A036's estimate ≥ this) can be checked cross-crate.
-    frame_sizes: FxHashMap<String, u32>,
+    ///
+    /// Keyed by the structured [`FnKey`] (not its lossy `Display` string) so the
+    /// cross-crate parity test cannot collapse two distinct functions whose keys
+    /// render to the same string into one slot.
+    frame_sizes: FxHashMap<FnKey, u32>,
     /// When true, dynamic (runtime-index) array accesses are preceded by a
     /// bounds-check guard (`index >= length → unreachable`). Derived in
     /// Set by [`crate::codegen`] for every Compile-mode build (the deployed
@@ -1132,14 +1136,17 @@ impl Compiler {
         )?;
 
         // Record the real frame size (0 for frameless functions) keyed by the
-        // canonical FnKey so A036's estimate can be checked against it. The key
-        // was set above and is always present here.
+        // structured `FnKey` itself, not its lossy `Display` rendering: two
+        // distinct keys can render to the same string, so keying on the string
+        // would let one function's frame overwrite another's. This map is the
+        // interchange format the cross-crate A036 frame-size parity test reads.
+        // The key was set above and is always present here.
         let frame_size = self.frame_layout.as_ref().map_or(0, |l| l.total_size);
         self.frame_sizes.insert(
             self.current_fn_key
                 .as_ref()
                 .expect("current_fn_key is set at the top of visit_function_definition")
-                .to_string(),
+                .clone(),
             frame_size,
         );
 
@@ -4750,7 +4757,7 @@ impl Compiler {
     /// Consumes `self` so the recorded maps are moved out exactly once; there is
     /// no separate drain step and no flag to track. The custom
     /// `inference.spec_funcs` section is emitted from `self.spec_func_indices_by_spec`
-    /// before the move. The `frame_sizes` map (canonical [`FnKey`] string →
+    /// before the move. The `frame_sizes` map (canonical [`FnKey`] →
     /// real shadow-stack frame bytes) is surfaced for the cross-crate A036
     /// frame-size soundness check.
     pub(crate) fn finish_and_take(self) -> FinishedModule {

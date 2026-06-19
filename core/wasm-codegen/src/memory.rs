@@ -163,16 +163,6 @@ pub(crate) struct StructSlot {
     pub fields: Vec<StructFieldSlot>,
 }
 
-/// Resolves the struct named `name`, as referenced from `module_path`, into its
-/// [`StructInfo`] paired with the defining file's module path.
-///
-/// The defining-file path is what layout recursion must thread into the struct's
-/// nested fields: a same-named struct in another file has a different layout, so
-/// resolving its fields relative to the access site would compute the wrong
-/// offsets (#63). The path is derived from the struct's own defining scope, so a
-/// bare type name accessed from a file that *imports* it still lays out by the
-/// definer. For a single-file program every struct is defined in the entry file,
-/// so the defining path is empty and resolution is unchanged.
 /// Resolves a struct *field/element* type to its definition and defining-file
 /// path, preferring the canonical key.
 ///
@@ -182,6 +172,11 @@ pub(crate) struct StructSlot {
 /// `module_path` would miss it. The key identifies the struct by its defining
 /// file, so it is tried first, with the bare-name lookup as the fallback for a
 /// `Custom` kind (which carries no key).
+///
+/// The returned defining-file path is what layout recursion must thread into the
+/// struct's nested fields: a same-named struct in another file has a different
+/// layout, so resolving its fields relative to the access site would compute the
+/// wrong offsets (#63).
 pub(crate) fn resolve_struct_with_defining_path(
     kind: &TypeInfoKind,
     ctx: &TypedContext,

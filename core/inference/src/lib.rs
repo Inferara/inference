@@ -232,10 +232,6 @@
 //!
 //! ## Limitations
 //!
-//! - **Multi-file codegen**: the front end ([`parse_project`]) folds a whole
-//!   import-reachable file closure into one arena, but code generation still
-//!   accepts a single source file only; cross-file type checking and codegen
-//!   are tracked by #63.
 //! - **Analyze phase**: The semantic analysis phase currently covers loop
 //!   control flow validation. Additional analyses are planned for future releases.
 //!
@@ -579,7 +575,6 @@ pub fn analyze(typed_context: &TypedContext) -> Result<AnalysisResult, AnalysisE
 /// Returns an error if:
 /// - WebAssembly generation fails for any AST node
 /// - Type information is missing or inconsistent in the [`TypedContext`]
-/// - More than one source file is present (multi-file not yet supported)
 ///
 /// [`TypedContext`]: inference_type_checker::typed_context::TypedContext
 /// [`CodegenOutput`]: inference_wasm_codegen::CodegenOutput

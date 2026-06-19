@@ -136,7 +136,7 @@ pub fn codegen(
     // traps; the `emit_index_offset` choke point is the seam where it hooks in.
     compiler.set_emit_bounds_checks(mode == CompilationMode::Compile);
 
-    if typed_context.source_files().len() > 0 {
+    if typed_context.source_files().next().is_some() {
         traverse_t_ast_with_compiler(typed_context, &mut compiler, mode)?;
     }
 
