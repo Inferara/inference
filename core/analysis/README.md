@@ -103,7 +103,7 @@ These rules cover constructs that are valid in the type system but cannot yet be
 |----|--------|----------|----------------|
 | A035 | `RecursionDetected` | error | direct or indirect (mutual) recursion is forbidden so stack usage stays statically bounded (Power of 10, Rule 1) |
 
-A035 builds a whole-program call graph keyed by the canonical function name (matching the codegen `FnKey` scheme) and reports each call cycle once, pointing at the call site that closes the cycle.
+A035 builds a whole-program call graph keyed by `FnKey` (from `inference-fn-key`, the shared canonical function identity used by both this crate and `wasm-codegen`) and reports each call cycle once, pointing at the call site that closes the cycle.
 
 ### Stack Depth (errors)
 
@@ -226,6 +226,7 @@ Test files are organized by rule group:
 |-------|------|
 | `inference-ast` | AST arena types, node kinds, `Location` |
 | `inference-type-checker` | `TypedContext` input to every rule |
+| `inference-fn-key` | `FnKey` — shared canonical function identity used to key the call graph |
 | `thiserror` | Derive `Error` for `AnalysisDiagnostic` |
 
 ## Current Limitations
