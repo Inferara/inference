@@ -159,6 +159,9 @@ pub enum AnalysisDiagnostic {
     #[error("uzumaki (@) cannot be assigned to array of structs; arrays of structs do not support uzumaki")]
     UzumakiOnStructInArray { location: Location },
 
+    #[error("uzumaki (@) cannot initialize field `{field}` of type `{ty}` because it is a struct or array; in a struct literal, uzumaki is only supported for scalar fields — initialize a compound field with a literal whose scalar leaves use @ (e.g. `Inner {{ v: @ }}`)")]
+    UzumakiOnCompoundField { field: String, ty: String, location: Location },
+
     #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
     CompoundLiteralInCompoundAssign { location: Location },
 
@@ -233,6 +236,7 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::NestedCompoundDepthExceeded { location, .. }
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
+            | AnalysisDiagnostic::UzumakiOnCompoundField { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
@@ -285,6 +289,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::RecursionDetected { .. } => "A035",
             AnalysisDiagnostic::StackDepthExceeded { .. } => "A036",
             AnalysisDiagnostic::ArrayIndexConstOutOfBounds { .. } => "A037",
+            AnalysisDiagnostic::UzumakiOnCompoundField { .. } => "A038",
         }
     }
 }
@@ -1122,6 +1127,29 @@ mod tests {
             text.contains("length 5"),
             "A037 diagnostic must include the array length, got: {text}"
         );
+    }
+
+    #[test]
+    fn display_uzumaki_on_compound_field() {
+        let err = AnalysisDiagnostic::UzumakiOnCompoundField {
+            field: "i".to_string(),
+            ty: "Inner".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("`i`"),
+            "A038 diagnostic must name the offending field, got: {text}"
+        );
+        assert!(
+            text.contains("Inner"),
+            "A038 diagnostic must include the field type, got: {text}"
+        );
+        assert!(
+            text.contains("scalar"),
+            "A038 diagnostic must explain uzumaki is only for scalar fields, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A038");
     }
 
     #[test]
