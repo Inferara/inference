@@ -499,4 +499,43 @@ mod analysis_rules_tests {
             "an array literal with no element `@` must not trip A040"
         );
     }
+
+    /// Boundary guard: an array literal with a `@` element passed *as a function
+    /// argument* (`take([0, @])`) is rejected by A012 (a compound literal cannot be
+    /// a function argument, regardless of its elements), so it never reaches codegen
+    /// and the `@` is never threaded a type. A040 therefore does not — and need not —
+    /// fire here. This pins the boundary so the (unreachable) argument path is not
+    /// later "fixed" by threading element types into it, which would be dead code
+    /// and risk masking removal of the A012 guard.
+    #[test]
+    fn a040_array_literal_uzumaki_element_as_argument_is_a012_not_a040() {
+        let source = r#"
+            fn take(a: [i32; 2]) -> i32 { return a[0]; }
+            spec C {
+                fn o() {
+                    forall {
+                        let r: i32 = take([0, @]);
+                    }
+                }
+            }
+            pub fn main() {}
+        "#;
+        let errors = analyze(source).expect_err("expected analysis errors but got Ok");
+        assert!(
+            errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::CompoundLiteralAsArgument { .. })),
+            "an array-literal argument must be rejected by A012, got: {:?}",
+            errors.errors()
+        );
+        assert!(
+            !errors
+                .errors()
+                .iter()
+                .any(|e| matches!(e, AnalysisDiagnostic::UzumakiOnCompoundArrayElement { .. })),
+            "A040 must not fire for an array-literal argument (A012 owns that position), got: {:?}",
+            errors.errors()
+        );
+    }
 }

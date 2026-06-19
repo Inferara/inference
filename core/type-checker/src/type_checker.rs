@@ -1593,10 +1593,10 @@ impl TypeChecker {
     /// compiled before; it panicked codegen).
     ///
     /// `expected` must already be scope-resolved (a `Struct`/`Enum` carries a
-    /// canonical key, not a bare `Custom`/`Qualified`): all three call sites pass
+    /// canonical key, not a bare `Custom`/`Qualified`): all four call sites pass
     /// a type whose array element was resolved against the file that owns it (the
-    /// annotation's file for `let`/assignment, the defining file for a struct
-    /// field). The inner `resolve_custom_type` is therefore an idempotent no-op
+    /// annotation's file for `let`/`const`/assignment, the defining file for a
+    /// struct field). The inner `resolve_custom_type` is therefore an idempotent no-op
     /// kept as a guard; it must not be relied on to resolve a still-`Custom`
     /// element, which it would resolve against the current cursor scope.
     fn thread_array_uzumaki_types(
