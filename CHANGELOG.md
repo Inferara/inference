@@ -359,6 +359,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The array length is read from the array sub-expression's `Array(_, length)` type info, so the check is zero-runtime-cost and fires in every build profile and compilation mode; the literal index is parsed as `i128` so out-of-`i32` values are caught too
   - A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is rejected here as well; the diagnostic names the offending index and the array length
   - Dynamic (non-literal) indices are out of scope for the static rule and are guarded at run time in all Compile-mode builds (see Codegen)
+- A038 `UzumakiOnCompoundField`: reject uzumaki (@) on a struct- or array-typed
+  struct-literal field (e.g. `Outer { i: @ }`); it previously slipped past A027 and
+  panicked proof-mode codegen with "Struct/Array uzumaki ... has no enclosing
+  variable name" ([#225])
+- A039 `StructUzumakiAsArgument`: reject a struct-typed uzumaki (@) passed directly as a
+  function argument (e.g. `f(@)` where the parameter is a struct); the array case was
+  already A014, but the struct case slipped through and panicked codegen with
+  "Struct uzumaki ... has no enclosing variable name". Sibling of #225 ([#225])
+- A040 `UzumakiOnCompoundArrayElement`: reject a struct- or array-typed uzumaki (@)
+  element of an array literal (e.g. `[Point { .. }, @]`); a scalar element `@` is now
+  supported (the type checker threads the declared element type onto it), but a compound
+  element has no enclosing variable name and panicked codegen. Distinct from A028
+  (whole-array `@`), and also covers a nested-array element such as the outer `@` in
+  `[@, [1, 2]]`. The array-element sibling of #225's struct-literal-field fix ([#225])
 
 ### AST
 
@@ -844,3 +858,4 @@ Initial tagged release.
 [#63]: https://github.com/Inferara/inference/issues/63
 [#223]: https://github.com/Inferara/inference/pull/223
 [#224]: https://github.com/Inferara/inference/issues/224
+[#225]: https://github.com/Inferara/inference/issues/225

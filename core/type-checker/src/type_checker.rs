@@ -1253,6 +1253,17 @@ impl TypeChecker {
                 });
             }
         } else {
+            // A `const` array initializer may carry a `@` element (`const A:
+            // [i32; 2] = [0, @]`), which inherits the constant's element type.
+            // Thread it before inference (a no-op for non-array/non-uzumaki
+            // values) so the `@` is typed; this initializer is otherwise lowered
+            // element-by-element with no enclosing variable, so a `@` element
+            // panics codegen. A compound element is rejected by analysis (A040).
+            if matches!(ctx.arena()[value_id].kind, Expr::ArrayLiteral { .. })
+                && matches!(const_type.kind, TypeInfoKind::Array(_, _))
+            {
+                self.thread_array_uzumaki_types(ctx, value_id, const_type);
+            }
             let init_type = self.infer_expression(value_id, ctx);
             match init_type {
                 Some(init)
@@ -1572,6 +1583,42 @@ impl TypeChecker {
         self.symbol_table.pop_scope();
     }
 
+    /// Threads `expected` onto the uzumaki (`@`) leaves of an array-literal
+    /// initializer so codegen can choose an opcode/width for each `@`. Recurses
+    /// through nested array literals; a `@` element of a multidimensional array is
+    /// typed as its (array) element type, which lets analysis (A040) reject it as
+    /// a compound element. Only `@` leaves receive type info — number literals and
+    /// every other element kind keep their existing bottom-up inference, so no
+    /// previously-compiling program changes its emitted bytes (a `@` element never
+    /// compiled before; it panicked codegen).
+    ///
+    /// `expected` must already be scope-resolved (a `Struct`/`Enum` carries a
+    /// canonical key, not a bare `Custom`/`Qualified`): all four call sites pass
+    /// a type whose array element was resolved against the file that owns it (the
+    /// annotation's file for `let`/`const`/assignment, the defining file for a
+    /// struct field). The inner `resolve_custom_type` is therefore an idempotent no-op
+    /// kept as a guard; it must not be relied on to resolve a still-`Custom`
+    /// element, which it would resolve against the current cursor scope.
+    fn thread_array_uzumaki_types(
+        &mut self,
+        ctx: &mut TypedContext,
+        expr_id: ExprId,
+        expected: &TypeInfo,
+    ) {
+        match ctx.arena()[expr_id].kind.clone() {
+            Expr::Uzumaki => ctx.set_node_typeinfo(NodeId::Expr(expr_id), expected.clone()),
+            Expr::ArrayLiteral { elements } => {
+                if let TypeInfoKind::Array(elem_type, _) = &expected.kind {
+                    let elem_type = self.symbol_table.resolve_custom_type((**elem_type).clone());
+                    for e in elements {
+                        self.thread_array_uzumaki_types(ctx, e, &elem_type);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn infer_statement(&mut self, stmt_id: StmtId, return_type: &TypeInfo, ctx: &mut TypedContext) {
         let arena = ctx.arena();
@@ -1621,6 +1668,17 @@ impl TypeChecker {
                         });
                     }
                 } else {
+                    // An array-literal RHS may carry a `@` element (`a = [0, @]`),
+                    // which inherits the assignment target's element type. Thread
+                    // it before inference (a no-op for non-array/non-uzumaki RHS) so
+                    // the `@` is typed; this assignment position is otherwise
+                    // unguarded and a `@` element panics codegen. A compound element
+                    // is rejected by analysis (A040).
+                    if let Some(target) = &target_type
+                        && matches!(ctx.arena()[right].kind, Expr::ArrayLiteral { .. })
+                    {
+                        self.thread_array_uzumaki_types(ctx, right, target);
+                    }
                     let value_type = self.infer_expression(right, ctx);
                     // Compound-return-in-assignment check moved to analysis rule A017.
                     if let (Some(target), Some(val)) = (target_type, value_type)
@@ -1753,6 +1811,17 @@ impl TypeChecker {
                                 ctx.set_node_typeinfo(NodeId::Expr(elem_id), (**elem_type).clone());
                             }
                         }
+                    }
+                    // An array-literal initializer may carry a `@` element (`let a:
+                    // [i32; 2] = [0, @]`), which inherits the variable's element
+                    // type. Thread it after the number-literal pass and before
+                    // inference so the `@` is typed; an array-element `@` is
+                    // otherwise lowered with no enclosing variable and panics
+                    // codegen. A compound element is rejected by analysis (A040).
+                    if matches!(ctx.arena()[expr_id].kind, Expr::ArrayLiteral { .. })
+                        && matches!(target_type.kind, TypeInfoKind::Array(_, _))
+                    {
+                        self.thread_array_uzumaki_types(ctx, expr_id, &target_type);
                     }
                     let arena = ctx.arena();
                     if let Expr::Uzumaki = &arena[expr_id].kind {
@@ -2193,7 +2262,17 @@ impl TypeChecker {
                                         field_type.clone(),
                                     );
                                 } else {
-            
+                                    // An array-typed field whose value is an array
+                                    // literal may carry a `@` element (`Holder { arr:
+                                    // [0, @] }`), which inherits the field's element
+                                    // type. Thread it before inference (a no-op for a
+                                    // non-array/non-uzumaki value) so the `@` is typed;
+                                    // a compound element is rejected by analysis (A040).
+                                    self.thread_array_uzumaki_types(
+                                        ctx,
+                                        *field_value_expr,
+                                        &field_type,
+                                    );
                                     let init_type =
                                         self.infer_expression(*field_value_expr, ctx);
                                     if let Some(init) = init_type

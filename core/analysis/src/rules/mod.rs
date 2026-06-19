@@ -24,9 +24,12 @@ pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
+pub mod struct_uzumaki_as_argument;
 pub mod top_level_const;
 pub mod uninitialized_variable;
 pub mod uzumaki_in_reassignment;
+pub mod uzumaki_on_compound_array_element;
+pub mod uzumaki_on_compound_field;
 pub mod uzumaki_on_nested_struct;
 pub mod uzumaki_on_struct_in_array;
 pub mod unsupported_compound_return_expr;
@@ -59,9 +62,12 @@ use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
+use struct_uzumaki_as_argument::StructUzumakiAsArgument;
 use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
 use uzumaki_in_reassignment::UzumakiInReassignment;
+use uzumaki_on_compound_array_element::UzumakiOnCompoundArrayElement;
+use uzumaki_on_compound_field::UzumakiOnCompoundField;
 use uzumaki_on_nested_struct::UzumakiOnNestedStruct;
 use uzumaki_on_struct_in_array::UzumakiOnStructInArray;
 use unsupported_compound_return_expr::UnsupportedCompoundReturnExpr;
@@ -111,5 +117,8 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &RecursionDetected,
         &StackDepthExceeded,
         &ArrayIndexConstOob,
+        &UzumakiOnCompoundField,
+        &StructUzumakiAsArgument,
+        &UzumakiOnCompoundArrayElement,
     ]
 }
