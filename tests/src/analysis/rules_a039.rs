@@ -295,10 +295,11 @@ mod analysis_rules_tests {
             !has_a039(source),
             "a scalar `@` argument must not trip A039"
         );
+        let result = analyze(source);
         assert!(
-            analyze(source).is_ok(),
+            result.is_ok(),
             "a scalar `@` argument must analyze cleanly: {:?}",
-            analyze(source).err()
+            result.err()
         );
     }
 
@@ -405,10 +406,11 @@ mod analysis_rules_tests {
             !has_a039(source),
             "a call passing a struct *variable* (not `@`) must not trip A039"
         );
+        let result = analyze(source);
         assert!(
-            analyze(source).is_ok(),
+            result.is_ok(),
             "passing a struct variable argument must analyze cleanly: {:?}",
-            analyze(source).err()
+            result.err()
         );
     }
 
