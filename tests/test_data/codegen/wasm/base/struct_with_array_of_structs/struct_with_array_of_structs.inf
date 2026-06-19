@@ -1,0 +1,72 @@
+struct Point { x: i32; y: i32; }
+struct Grid { cells: [Point; 2]; }
+struct Mixed { tag: i32; pts: [Point; 2]; total: i32; }
+struct PointL { x: i64; y: i64; }
+struct GridL { cells: [PointL; 2]; }
+
+pub fn read_c0x() -> i32 {
+    let g: Grid = Grid { cells: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] };
+    return g.cells[0].x;
+}
+
+pub fn read_c1y() -> i32 {
+    let g: Grid = Grid { cells: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] };
+    return g.cells[1].y;
+}
+
+pub fn read_var_index(i: i32) -> i32 {
+    let g: Grid = Grid { cells: [Point { x: 10, y: 20 }, Point { x: 30, y: 40 }] };
+    return g.cells[i].x;
+}
+
+pub fn write_c1y() -> i32 {
+    let mut g: Grid = Grid { cells: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] };
+    g.cells[1].y = 99;
+    return g.cells[1].y;
+}
+
+pub fn write_whole_elem() -> i32 {
+    let mut g: Grid = Grid { cells: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] };
+    let p: Point = Point { x: 77, y: 88 };
+    g.cells[0] = p;
+    return g.cells[0].x + g.cells[0].y;
+}
+
+pub fn grid_param(g: Grid) -> i32 {
+    return g.cells[0].x + g.cells[1].y;
+}
+
+pub fn call_grid_param() -> i32 {
+    let g: Grid = Grid { cells: [Point { x: 6, y: 7 }, Point { x: 8, y: 9 }] };
+    return grid_param(g);
+}
+
+pub fn make_grid() -> Grid {
+    return Grid { cells: [Point { x: 5, y: 6 }, Point { x: 7, y: 8 }] };
+}
+
+pub fn make_and_read() -> i32 {
+    let g: Grid = make_grid();
+    return g.cells[1].x;
+}
+
+pub fn mixed_offsets() -> i32 {
+    let m: Mixed = Mixed { tag: 11, pts: [Point { x: 100, y: 200 }, Point { x: 300, y: 400 }], total: 99 };
+    return m.tag + m.pts[0].x + m.pts[1].y + m.total;
+}
+
+pub fn two_grids() -> i32 {
+    let a: Grid = Grid { cells: [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] };
+    let b: Grid = Grid { cells: [Point { x: 5, y: 6 }, Point { x: 7, y: 8 }] };
+    return a.cells[0].x + b.cells[1].y;
+}
+
+pub fn zero_field_elem() -> i32 {
+    let g: Grid = Grid { cells: [Point { x: 0, y: 5 }, Point { x: 0, y: 0 }] };
+    return g.cells[0].y + g.cells[1].x;
+}
+
+pub fn read_i64() -> i64 {
+    let g: GridL = GridL { cells: [PointL { x: 1, y: 2 }, PointL { x: 3, y: 4 }] };
+    return g.cells[1].x;
+}
