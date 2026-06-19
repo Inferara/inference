@@ -5891,6 +5891,127 @@ mod base_codegen_tests {
             .unwrap_or_else(|e| panic!("4D array uzumaki WASM is invalid: {e}"));
     }
 
+    // Array-element uzumaki: a scalar `@` element of an array literal (`[0, @]`)
+    // must compile end-to-end (type-check threads the element type onto the `@`,
+    // analysis A040 permits scalar elements, codegen lowers it to a single scalar
+    // uzumaki opcode). These run through `wasm_codegen` (analysis ON), so they
+    // also guard that A040 does not reject the scalar element position.
+
+    #[test]
+    fn array_element_uzumaki_i32_compiles() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let a: [i32; 2] = [0, @];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("scalar i32 array-element uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_element_uzumaki_i64_compiles() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i64, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let a: [i64; 2] = [0, @];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("scalar i64 array-element uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn array_element_uzumaki_bool_compiles() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let a: [bool; 2] = [true, @];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("scalar bool array-element uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn nested_array_inner_element_uzumaki_compiles() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    let a: [[i32; 2]; 2] = [[0, @], [1, 2]];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| {
+            panic!("nested-array inner scalar element uzumaki WASM is invalid: {e}")
+        });
+    }
+
+    #[test]
+    fn array_element_uzumaki_in_struct_field_literal_compiles() {
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            struct Holder { arr: [i32; 3]; }
+            pub fn test() {
+                forall {
+                    let h: Holder = Holder { arr: [0, @, 2] };
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes).unwrap_or_else(|e| {
+            panic!("scalar array-element uzumaki in struct field literal WASM is invalid: {e}")
+        });
+    }
+
+    #[test]
+    fn array_element_uzumaki_enum_compiles() {
+        // An enum element is scalar-like: it lowers through the same i32 uzumaki
+        // opcode as a numeric scalar (compiler dispatches `Enum` to the i32 arm),
+        // so an enum array-element `@` must compile, not panic.
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            enum Color { Red, Green, Blue }
+            pub fn test() {
+                forall {
+                    let a: [Color; 2] = [Color::Red, @];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("enum array-element uzumaki WASM is invalid: {e}"));
+    }
+
+    #[test]
+    fn const_array_element_uzumaki_compiles() {
+        // A `const` array initializer reaches a distinct lowering path from a
+        // `let`; its scalar `@` element must compile (it was a latent panic before
+        // the element type was threaded onto the `@` in the const-init path).
+        cov_mark::check_count!(wasm_codegen_emit_uzumaki_i32, 1);
+        let source = r#"
+            pub fn test() {
+                forall {
+                    const A: [i32; 2] = [0, @];
+                }
+            }
+        "#;
+        let wasm_bytes = wasm_codegen(source);
+        inf_wasmparser::validate(&wasm_bytes)
+            .unwrap_or_else(|e| panic!("const scalar array-element uzumaki WASM is invalid: {e}"));
+    }
+
     // nested_struct_with_array tests ---
 
     #[test]

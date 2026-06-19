@@ -165,6 +165,9 @@ pub enum AnalysisDiagnostic {
     #[error("struct uzumaki (@) cannot be used as a function argument; assign to a variable first")]
     StructUzumakiAsArgument { location: Location },
 
+    #[error("uzumaki (@) cannot initialize an array element of type `{ty}` because it is a struct or array; only scalar array elements may use @ — bind the value to a variable first, then use the variable as the element")]
+    UzumakiOnCompoundArrayElement { ty: String, location: Location },
+
     #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
     CompoundLiteralInCompoundAssign { location: Location },
 
@@ -241,6 +244,7 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::UzumakiOnCompoundField { location, .. }
             | AnalysisDiagnostic::StructUzumakiAsArgument { location }
+            | AnalysisDiagnostic::UzumakiOnCompoundArrayElement { location, .. }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
@@ -295,6 +299,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::ArrayIndexConstOutOfBounds { .. } => "A037",
             AnalysisDiagnostic::UzumakiOnCompoundField { .. } => "A038",
             AnalysisDiagnostic::StructUzumakiAsArgument { .. } => "A039",
+            AnalysisDiagnostic::UzumakiOnCompoundArrayElement { .. } => "A040",
         }
     }
 }
@@ -1172,6 +1177,24 @@ mod tests {
             "A039 diagnostic must suggest assigning to a variable first, got: {text}"
         );
         assert_eq!(err.rule_id(), "A039");
+    }
+
+    #[test]
+    fn display_uzumaki_on_compound_array_element() {
+        let err = AnalysisDiagnostic::UzumakiOnCompoundArrayElement {
+            ty: "Point".to_string(),
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("Point"),
+            "A040 diagnostic must include the element type, got: {text}"
+        );
+        assert!(
+            text.contains("scalar"),
+            "A040 diagnostic must explain only scalar array elements may use @, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A040");
     }
 
     #[test]

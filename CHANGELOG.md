@@ -367,6 +367,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function argument (e.g. `f(@)` where the parameter is a struct); the array case was
   already A014, but the struct case slipped through and panicked codegen with
   "Struct uzumaki ... has no enclosing variable name". Sibling of #225 ([#225])
+- A040 `UzumakiOnCompoundArrayElement`: reject a struct- or array-typed uzumaki (@)
+  element of an array literal (e.g. `[Point { .. }, @]`); a scalar element `@` is now
+  supported (the type checker threads the declared element type onto it), but a compound
+  element has no enclosing variable name and panicked codegen. Distinct from A028
+  (whole-array `@`), and also covers a nested-array element such as the outer `@` in
+  `[@, [1, 2]]`. The array-element sibling of #225's struct-literal-field fix ([#225])
 
 ### AST
 
