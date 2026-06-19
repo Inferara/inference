@@ -268,18 +268,41 @@ pub(crate) fn probe_compiler_compatibility(infc_path: &Path) -> Result<CompilerC
     })
 }
 
+/// Spawn attempts for [`probe_flag`] when exec reports `ETXTBSY`. Five tries
+/// with linear backoff (10–50 ms) comfortably outlast the sub-millisecond
+/// fork/exec window that triggers the race.
+const PROBE_BUSY_RETRIES: u32 = 5;
+
 /// Runs `<infc_path> <flag>` with stdin/stderr suppressed and returns the
 /// trimmed stdout on success. Returns `None` for any failure mode that an old
-/// `infc` lacking the flag would produce: spawn error, non-zero exit, empty
-/// stdout, or the literal `unknown`.
+/// `infc` lacking the flag would produce: an unspawnable binary, non-zero exit,
+/// empty stdout, or the literal `unknown`.
+///
+/// A freshly built `infc` can transiently fail to exec with `ETXTBSY` ("text
+/// file busy") while another process still holds a writable handle to it across
+/// that process's fork/exec window. The condition clears within milliseconds, so
+/// the spawn is retried a few times rather than misread as a missing flag.
 fn probe_flag(infc_path: &Path, flag: &str) -> Option<String> {
-    let output = Command::new(infc_path)
-        .arg(flag)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
+    let mut attempt = 0;
+    let output = loop {
+        match Command::new(infc_path)
+            .arg(flag)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) => break output,
+            Err(err)
+                if err.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < PROBE_BUSY_RETRIES =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * u64::from(attempt)));
+            }
+            Err(_) => return None,
+        }
+    };
     if !output.status.success() {
         return None;
     }
