@@ -36,7 +36,7 @@
 //!
 //! - A025: Variable declarations must have an initializer
 //!
-//! ### Codegen Restrictions (A012–A019, A022–A031, A038)
+//! ### Codegen Restrictions (A012–A019, A022–A031, A038–A039)
 //!
 //! These rules describe constructs that are valid in the type system but cannot
 //! be lowered by the current code generator.
@@ -59,6 +59,7 @@
 //! - A031: Unsupported expression form in compound-returning function return
 //! - A032: Top-level (module-scope) `const` declaration (not yet implemented)
 //! - A038: Uzumaki (`@`) on a struct- or array-typed struct-literal field
+//! - A039: Struct uzumaki (`@`) passed directly as a function argument
 //!
 //! ### Syntactic Restrictions (A033)
 //!
@@ -194,6 +195,7 @@ mod tests {
             AnalysisDiagnostic::StackDepthExceeded { chain: "a -> b".to_string(), depth_bytes: 80_000, budget_bytes: 65_536, location: dummy_location() },
             AnalysisDiagnostic::ArrayIndexConstOutOfBounds { index: "3".to_string(), length: 3, location: dummy_location() },
             AnalysisDiagnostic::UzumakiOnCompoundField { field: "i".to_string(), ty: "Inner".to_string(), location: dummy_location() },
+            AnalysisDiagnostic::StructUzumakiAsArgument { location: dummy_location() },
         ];
 
         let rules = rules::all_rules();

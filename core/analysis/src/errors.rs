@@ -162,6 +162,9 @@ pub enum AnalysisDiagnostic {
     #[error("uzumaki (@) cannot initialize field `{field}` of type `{ty}` because it is a struct or array; in a struct literal, uzumaki is only supported for scalar fields — initialize a compound field with a literal whose scalar leaves use @ (e.g. `Inner {{ v: @ }}`)")]
     UzumakiOnCompoundField { field: String, ty: String, location: Location },
 
+    #[error("struct uzumaki (@) cannot be used as a function argument; assign to a variable first")]
+    StructUzumakiAsArgument { location: Location },
+
     #[error("compound literal cannot be assigned directly to a compound element; assign to a temporary variable first")]
     CompoundLiteralInCompoundAssign { location: Location },
 
@@ -237,6 +240,7 @@ impl AnalysisDiagnostic {
             | AnalysisDiagnostic::UzumakiOnNestedStruct { location, .. }
             | AnalysisDiagnostic::UzumakiOnStructInArray { location, .. }
             | AnalysisDiagnostic::UzumakiOnCompoundField { location, .. }
+            | AnalysisDiagnostic::StructUzumakiAsArgument { location }
             | AnalysisDiagnostic::CompoundLiteralInCompoundAssign { location }
             | AnalysisDiagnostic::UnsupportedCompoundReturnExpression { location }
             | AnalysisDiagnostic::TopLevelConstNotSupported { location, .. }
@@ -290,6 +294,7 @@ impl AnalysisDiagnostic {
             AnalysisDiagnostic::StackDepthExceeded { .. } => "A036",
             AnalysisDiagnostic::ArrayIndexConstOutOfBounds { .. } => "A037",
             AnalysisDiagnostic::UzumakiOnCompoundField { .. } => "A038",
+            AnalysisDiagnostic::StructUzumakiAsArgument { .. } => "A039",
         }
     }
 }
@@ -1150,6 +1155,23 @@ mod tests {
             "A038 diagnostic must explain uzumaki is only for scalar fields, got: {text}"
         );
         assert_eq!(err.rule_id(), "A038");
+    }
+
+    #[test]
+    fn display_struct_uzumaki_as_argument() {
+        let err = AnalysisDiagnostic::StructUzumakiAsArgument {
+            location: test_location(),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("function argument"),
+            "A039 diagnostic must say it cannot be used as a function argument, got: {text}"
+        );
+        assert!(
+            text.contains("assign to a variable"),
+            "A039 diagnostic must suggest assigning to a variable first, got: {text}"
+        );
+        assert_eq!(err.rule_id(), "A039");
     }
 
     #[test]

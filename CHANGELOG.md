@@ -363,6 +363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   struct-literal field (e.g. `Outer { i: @ }`); it previously slipped past A027 and
   panicked proof-mode codegen with "Struct/Array uzumaki ... has no enclosing
   variable name" ([#225])
+- A039 `StructUzumakiAsArgument`: reject a struct-typed uzumaki (@) passed directly as a
+  function argument (e.g. `f(@)` where the parameter is a struct); the array case was
+  already A014, but the struct case slipped through and panicked codegen with
+  "Struct uzumaki ... has no enclosing variable name". Sibling of #225 ([#225])
 
 ### AST
 

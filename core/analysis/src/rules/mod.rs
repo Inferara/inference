@@ -24,6 +24,7 @@ pub mod return_inside_loop;
 pub mod return_inside_nondet_block;
 pub mod stack_depth;
 pub mod standalone_uzumaki;
+pub mod struct_uzumaki_as_argument;
 pub mod top_level_const;
 pub mod uninitialized_variable;
 pub mod uzumaki_in_reassignment;
@@ -60,6 +61,7 @@ use return_inside_loop::ReturnInsideLoop;
 use return_inside_nondet_block::ReturnInsideNonDetBlock;
 use stack_depth::StackDepthExceeded;
 use standalone_uzumaki::StandaloneUzumaki;
+use struct_uzumaki_as_argument::StructUzumakiAsArgument;
 use top_level_const::TopLevelConstNotSupported;
 use uninitialized_variable::UninitializedVariable;
 use uzumaki_in_reassignment::UzumakiInReassignment;
@@ -114,5 +116,6 @@ pub fn all_rules() -> &'static [&'static dyn crate::rule::Rule] {
         &StackDepthExceeded,
         &ArrayIndexConstOob,
         &UzumakiOnCompoundField,
+        &StructUzumakiAsArgument,
     ]
 }
