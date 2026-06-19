@@ -386,6 +386,15 @@ pub(crate) enum Symbol {
 }
 
 impl Symbol {
+    /// A display string for this symbol — **not** a reliable declared identifier.
+    ///
+    /// `Struct`, `Enum`, `Spec`, and `Function` carry their declared name and
+    /// return it verbatim. `TypeAlias` and `Constant` do not store a name — it
+    /// lives only as the scope-map key under which they are registered (#63) — so
+    /// for those arms this falls back to the wrapped type's string form (e.g.
+    /// `"i32"`), which is a type, not the declared identifier. A caller that needs
+    /// the user-facing identifier already holds it as that lookup key and must use
+    /// it directly rather than surfacing this value in a diagnostic.
     #[allow(dead_code)]
     #[must_use = "discarding the name has no effect"]
     pub(crate) fn name(&self) -> String {
@@ -2253,9 +2262,7 @@ impl SymbolTable {
         }
         for segment in module_path {
             if let Some(existing) = self.child_scope_named(segment) {
-                let id = existing.borrow().id;
                 self.current_scope = Some(existing);
-                let _ = id;
             } else {
                 let id = self.push_scope_with_name(segment, Visibility::Public);
                 if let Some(scope) = self.scopes.get(&id) {

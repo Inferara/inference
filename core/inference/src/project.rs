@@ -424,7 +424,11 @@ fn collect_unreachable_warnings(
                 module_file_path(src_root, &sf.module_path)
             }
         })
-        .filter_map(|path| std::fs::canonicalize(path).ok())
+        // Fall back to the un-canonicalized path rather than dropping the entry:
+        // a reachable (compiled) file whose canonicalization fails must still land
+        // in this set, or the on-disk scan below — which uses the same fallback —
+        // would flag it as unreachable when it was actually built.
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
         .collect();
 
     let mut warnings = Vec::new();
