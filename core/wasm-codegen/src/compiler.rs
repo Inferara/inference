@@ -3732,6 +3732,7 @@ impl Compiler {
                 ref elem_kind,
                 elem_size,
                 length,
+                ..
             } => {
                 let uzumaki_opcode = if Self::is_i64_type(elem_kind) {
                     UZUMAKI_I64_OPCODE
@@ -4492,33 +4493,19 @@ impl Compiler {
                     elem_kind,
                     elem_size,
                     length,
+                    ..
                 } => {
-                    if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
-                        assert!(
-                            !matches!(elem_kind, TypeInfoKind::Struct(_, _) | TypeInfoKind::Custom(_)),
-                            "Array literal element-wise store requires scalar element type, \
-                             got {elem_kind:?}"
-                        );
-                        let store_instr = memory::store_instruction(elem_kind);
-                        let elements: Vec<_> = elements.clone();
-                        for (i, &element_id) in elements.iter().enumerate() {
-                            if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
-                                continue;
-                            }
-                            #[allow(clippy::cast_possible_truncation)]
-                            let elem_byte_offset = offset + (i as u32) * elem_size;
-                            emit_ptr_offset_addr(self.func(), base_ptr_local, elem_byte_offset);
-                            self.lower_expression(arena, element_id, ctx, None);
-                            self.func().instruction(&store_instr);
-                        }
-                    } else {
-                        let array_byte_size = elem_size.checked_mul(*length).expect(
-                            "Array byte size overflow: elem_size * length exceeds u32::MAX",
-                        );
-                        emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
-                        self.lower_expression(arena, field_value_expr_id, ctx, None);
-                        self.emit_memory_copy(array_byte_size);
-                    }
+                    self.lower_array_field(
+                        arena,
+                        field_value_expr_id,
+                        elem_kind,
+                        *elem_size,
+                        *length,
+                        base_ptr_local,
+                        offset,
+                        ctx,
+                        skip_zero_stores,
+                    );
                 }
                 memory::CompoundFieldLayout::Scalar => {
                     if !(skip_zero_stores && Self::is_syntactic_zero(arena, field_value_expr_id)) {
@@ -4529,6 +4516,87 @@ impl Compiler {
                     }
                 }
             }
+        }
+    }
+
+    /// Lowers an array-typed struct field initializer into the field's slot.
+    ///
+    /// An array literal is stored element by element, dispatching on the element
+    /// kind: 1D arrays of (flat) structs go through
+    /// [`Self::lower_array_literal_struct_elements`] (the machinery shared with
+    /// top-level array-of-struct locals); multi-dimensional arrays go through
+    /// [`Self::store_array_literal_elements`], which recurses over nested scalar
+    /// arrays and nested arrays-of-structs; and 1D arrays of scalars/enums use
+    /// direct element-wise stores. Any non-literal initializer (identifier,
+    /// function call) is copied whole with `memory.copy`.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_array_field(
+        &mut self,
+        arena: &AstArena,
+        field_value_expr_id: ExprId,
+        elem_kind: &TypeInfoKind,
+        elem_size: u32,
+        length: u32,
+        base_ptr_local: u32,
+        offset: u32,
+        ctx: &TypedContext,
+        skip_zero_stores: bool,
+    ) {
+        if let Expr::ArrayLiteral { elements } = &arena[field_value_expr_id].kind {
+            let elements: Vec<_> = elements.clone();
+            if let Some(elem_field_slots) =
+                compute_element_layout_if_struct(elem_kind, ctx, &self.current_module_path)
+                    .expect("array element struct layout already validated during frame layout")
+            {
+                // 1D array of (flat) structs.
+                self.lower_array_literal_struct_elements(
+                    arena,
+                    &elements,
+                    &elem_field_slots,
+                    base_ptr_local,
+                    offset,
+                    elem_size,
+                    ctx,
+                    skip_zero_stores,
+                );
+            } else if matches!(elem_kind, TypeInfoKind::Array(_, _)) {
+                // Multi-dimensional array field: delegate to the recursive
+                // leaf-store machinery shared with top-level array locals, which
+                // handles nested scalar arrays and nested arrays-of-structs.
+                self.store_array_literal_elements(
+                    arena,
+                    &elements,
+                    elem_kind,
+                    offset,
+                    base_ptr_local,
+                    ctx,
+                    skip_zero_stores,
+                );
+            } else {
+                // 1D array of scalars/enums: each element stored directly. The
+                // address sequence elides `i32.const 0; i32.add` at offset 0,
+                // which differs from the unconditional sequence emitted by
+                // `store_array_literal_elements`, so scalar fields are not routed
+                // through it.
+                let store_instr = memory::store_instruction(elem_kind);
+                for (i, &element_id) in elements.iter().enumerate() {
+                    if skip_zero_stores && Self::is_syntactic_zero(arena, element_id) {
+                        continue;
+                    }
+                    #[allow(clippy::cast_possible_truncation)]
+                    let elem_byte_offset = offset + (i as u32) * elem_size;
+                    emit_ptr_offset_addr(self.func(), base_ptr_local, elem_byte_offset);
+                    self.lower_expression(arena, element_id, ctx, None);
+                    self.func().instruction(&store_instr);
+                }
+            }
+        } else {
+            let array_byte_size = elem_size
+                .checked_mul(length)
+                .expect("Array byte size overflow: elem_size * length exceeds u32::MAX");
+            emit_ptr_offset_addr(self.func(), base_ptr_local, offset);
+            self.lower_expression(arena, field_value_expr_id, ctx, None);
+            self.emit_memory_copy(array_byte_size);
         }
     }
 

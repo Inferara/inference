@@ -687,6 +687,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Constructing an array-of-struct value inside a struct field now lowers correctly. A struct literal whose field is an array of structs (e.g. `Grid { cells: [Point { … }, Point { … }] }`) previously panicked in codegen during element-wise store; it now stores each struct element through the same per-element machinery used for top-level array-of-struct locals. The read, write, parameter, and sret-return paths were already correct ([#224])
+- Constructing a multi-dimensional array value inside a struct field now lowers correctly. A struct literal whose field is a nested array (e.g. `Grid { grid: [[1, 2, 3], [4, 5, 6]] }` for a `[[i32; 3]; 2]` field, including arrays-of-structs such as `[[Point; 2]; 2]`) previously panicked in codegen because the element-wise store loop could not handle array elements; it now delegates to the recursive leaf-store machinery shared with top-level multi-dimensional array locals. The read and write paths (e.g. `g.grid[i][j]`) were already correct ([#224])
 - Fix FxHashMap non-deterministic iteration in `Arena` — `filter_nodes()` and `list_nodes_cmp()` now sort by node ID, ensuring reproducible WASM function emission order
 - Fix Drop instruction emission for nested non-det blocks — `parent_blocks_stack.last()` (innermost block) is now used instead of `.first()` (outermost block)
 - Fix `lower_literal` to emit type-correct WASM const instructions — number literals now consult `TypedContext` and emit `i32.const` or `i64.const` based on inferred type instead of always emitting `i32.const`
@@ -841,3 +843,4 @@ Initial tagged release.
 [#212]: https://github.com/Inferara/inference/issues/212
 [#63]: https://github.com/Inferara/inference/issues/63
 [#223]: https://github.com/Inferara/inference/pull/223
+[#224]: https://github.com/Inferara/inference/issues/224

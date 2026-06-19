@@ -1,0 +1,36 @@
+struct Point { x: i32; y: i32; }
+struct HasGrid { grid: [[i32; 3]; 2]; }
+struct HasCube { cube: [[[i32; 2]; 2]; 2]; }
+struct HasAoSGrid { cells: [[Point; 2]; 2]; }
+struct MixedGrid { tag: i32; grid: [[i32; 2]; 2]; total: i32; }
+
+pub fn grid_read(i: i32, j: i32) -> i32 {
+    let g: HasGrid = HasGrid { grid: [[1, 2, 3], [4, 5, 6]] };
+    return g.grid[i][j];
+}
+
+pub fn grid_sum() -> i32 {
+    let g: HasGrid = HasGrid { grid: [[1, 2, 3], [4, 5, 6]] };
+    return g.grid[0][0] + g.grid[0][1] + g.grid[0][2] + g.grid[1][0] + g.grid[1][1] + g.grid[1][2];
+}
+
+pub fn grid_write() -> i32 {
+    let mut g: HasGrid = HasGrid { grid: [[1, 2, 3], [4, 5, 6]] };
+    g.grid[1][2] = 99;
+    return g.grid[1][2];
+}
+
+pub fn cube_read() -> i32 {
+    let c: HasCube = HasCube { cube: [[[1, 2], [3, 4]], [[5, 6], [7, 8]]] };
+    return c.cube[1][0][1];
+}
+
+pub fn aos_grid_read() -> i32 {
+    let g: HasAoSGrid = HasAoSGrid { cells: [[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }], [Point { x: 5, y: 6 }, Point { x: 7, y: 8 }]] };
+    return g.cells[1][0].x + g.cells[0][1].y;
+}
+
+pub fn mixed_grid() -> i32 {
+    let m: MixedGrid = MixedGrid { tag: 10, grid: [[1, 2], [3, 4]], total: 100 };
+    return m.tag + m.grid[0][0] + m.grid[1][1] + m.total;
+}

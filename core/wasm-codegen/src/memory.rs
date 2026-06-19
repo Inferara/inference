@@ -111,6 +111,12 @@ pub(crate) enum CompoundFieldLayout {
     NestedArray {
         elem_kind: TypeInfoKind,
         elem_size: u32,
+        /// Natural alignment of one element, computed in the array's defining
+        /// file context. Cached so a field's alignment can be recovered from the
+        /// slot without re-resolving the element type by name at the access site
+        /// (which would be wrong for a compound element — struct or nested array —
+        /// whose type is not visible where the enclosing struct is used) (#63).
+        elem_align: u32,
         length: u32,
     },
 }
@@ -348,6 +354,7 @@ fn compute_field_layout_with_visited(
         TypeInfoKind::Array(elem_type, length) => Ok(CompoundFieldLayout::NestedArray {
             elem_kind: elem_type.kind.clone(),
             elem_size: type_byte_size_with_visited(&elem_type.kind, ctx, module_path, visited)?,
+            elem_align: natural_alignment_for_type(&elem_type.kind, ctx, module_path)?,
             length: *length,
         }),
         // An `Enum` (incl. a resolved qualified enum) is a scalar i32 tag.
@@ -504,7 +511,7 @@ fn field_slot_alignment(slot: &StructFieldSlot) -> u32 {
     match &slot.layout {
         CompoundFieldLayout::Scalar => element_size(&slot.type_kind),
         CompoundFieldLayout::NestedStruct { fields, .. } => max_struct_alignment(fields),
-        CompoundFieldLayout::NestedArray { elem_kind, .. } => element_size(elem_kind),
+        CompoundFieldLayout::NestedArray { elem_align, .. } => *elem_align,
     }
 }
 
