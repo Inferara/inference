@@ -59,7 +59,7 @@ crate::rule! {
 fn arg_is_struct_like(ctx: &TypedContext, kind: &TypeInfoKind) -> bool {
     match kind {
         TypeInfoKind::Struct(_, _) => true,
-        TypeInfoKind::Custom(name) => ctx.lookup_enum(name).is_none(),
+        TypeInfoKind::Custom(name) => walker::uzumaki_custom_is_struct_like(ctx, name),
         _ => false,
     }
 }

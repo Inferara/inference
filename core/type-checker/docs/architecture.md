@@ -333,6 +333,10 @@ Arrays extend this pattern. When an array literal initializes a variable with an
 
 This ensures that array elements with sub-i32 types are correctly represented in WASM output.
 
+The same propagation applies to uzumaki (`@`) leaves inside array literals. When the declared array element type is known, a `@` element receives that declared type, allowing constructs such as `let a: [i32; 2] = [0, @];` to type-check and reach codegen. Propagation recurses through nested array literals so that every `@` leaf in a multi-dimensional array literal is typed. A struct- or array-typed `@` element is typed by the same mechanism but is subsequently rejected by analysis rule A040 (`UzumakiOnCompoundArrayElement`), which enforces the codegen restriction that only scalar and enum elements may use uzumaki.
+
+Struct literal fields follow an analogous pattern: when a field's declared type is known, a `@` value for that field receives the field's type. A compound-typed field `@` (struct or array) is typed but then rejected by analysis rule A038 (`UzumakiOnCompoundField`).
+
 ## Symbol Table Design
 
 ### Scope Tree Structure

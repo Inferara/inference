@@ -210,6 +210,28 @@ fn struct_has_compound_field(ctx: &TypedContext, s: &StructInfo) -> bool {
     })
 }
 
+/// Classifies the `Custom`-named type carried by an uzumaki (`@`) node as
+/// struct-like (`true`) or enum-like (`false`), for the "needs a named frame
+/// slot" rules (A038/A039/A040).
+///
+/// The `debug_assert!` encodes an invariant those rules rely on: a `@` node
+/// never reaches classification carrying a bare *enum*-named `Custom`. Every
+/// site that types a `@` routes the type through `resolve_custom_type*`, so an
+/// enum canonicalizes to `TypeInfoKind::Enum` first and only struct-like (or
+/// genuinely unresolved) names remain as `Custom`. A future `@` position that
+/// types from a raw, unresolved annotation would trip this. In release builds
+/// the `lookup_enum` result is still returned, so behaviour is unchanged.
+pub(crate) fn uzumaki_custom_is_struct_like(ctx: &TypedContext, name: &str) -> bool {
+    let is_struct_like = ctx.lookup_enum(name).is_none();
+    debug_assert!(
+        is_struct_like,
+        "uzumaki (@) node typed as Custom(`{name}`) that resolves to an enum; enums must \
+         canonicalize to TypeInfoKind::Enum before classification (every @-typing site \
+         resolves through resolve_custom_type*)"
+    );
+    is_struct_like
+}
+
 /// Returns `true` when `expr_id` is a function call that returns a compound
 /// type (array, struct, or custom). Used by multiple rules to detect sret
 /// calling convention restrictions.

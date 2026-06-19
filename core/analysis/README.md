@@ -121,6 +121,16 @@ A036 reuses A035's whole-program call graph (a DAG, since recursion is forbidden
 
 A037 is the static half of array bounds checking. When the index is a constant integer literal, the array length is known at compile time from the array sub-expression's `Array(_, length)` type info, so an out-of-range access is rejected with zero runtime cost in every build profile and compilation mode. A negative literal such as `arr[-1]` lowers to a single `NumberLiteral` whose text keeps the leading `-`, so it is caught here as well. Dynamic (non-literal) indices are out of A037's scope — they are guarded at run time in all Compile-mode builds by `core/wasm-codegen` (see that crate's docs); the two mechanisms together close the bounds-safety hole.
 
+### Uzumaki in unsupported positions (errors)
+
+| ID | Struct | Severity | What it checks |
+|----|--------|----------|----------------|
+| A038 | `UzumakiOnCompoundField` | error | uzumaki (`@`) used as the value of a struct- or array-typed field in a struct literal (e.g. `Outer { inner: @ }`); only scalar and enum fields may use `@` |
+| A039 | `StructUzumakiAsArgument` | error | struct-typed uzumaki (`@`) passed directly as a function argument; assign to a local variable first (struct sibling of A014, which covers array uzumaki) |
+| A040 | `UzumakiOnCompoundArrayElement` | error | uzumaki (`@`) used as a struct- or array-typed element of an array literal (e.g. `[p, @]` where `p` is a struct); only scalar and enum elements may use `@` |
+
+A compound (struct or array) `@` is lowered by writing into a *named* frame slot, which only a `let`/`const` binding supplies, so `@` of such a type is rejected wherever no slot exists. These complement A014 (array `@` as a function argument) and A027/A028 (whole-binding compound `@`). A scalar or enum `@` is unaffected: the type checker threads it its declared field/element type, so it lowers to a single uzumaki opcode. Array-literal arguments are handled separately by A012, so these rules do not extend to that position.
+
 ## Diagnostic Output Format
 
 ```
@@ -218,6 +228,9 @@ Test files are organized by rule group:
 | `rules_a035.rs` | A035 (direct and mutual/indirect recursion) |
 | `rules_a036.rs` | A036 (cumulative stack depth exceeded) |
 | `rules_a037.rs` | A037 (constant array index out of bounds) |
+| `rules_a038.rs` | A038 (uzumaki on compound struct field) |
+| `rules_a039.rs` | A039 (struct uzumaki passed as function argument) |
+| `rules_a040.rs` | A040 (uzumaki as compound element of an array literal) |
 | `walker_tests.rs` | `walk_function_bodies`, `WalkContext` depth tracking |
 
 ## Dependencies
